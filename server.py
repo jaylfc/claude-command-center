@@ -4259,11 +4259,81 @@ def _slugify(text, max_len=40):
     return slug[:max_len].rstrip("-")
 
 
-def spawn_session(prompt, name=None, cwd=None):
+def _create_worktree_for_spawn(source_cwd, slug):
+    """Create `<source-parent>/<source-name>-wt-<slug>` as a git worktree
+    on a fresh `feat/<slug>` branch off `source_cwd`'s current HEAD, and
+    return its absolute path.
+
+    Layout matches the convention already used in this repo's worktrees
+    (e.g. `claude-command-center-wt-desktop-launch`) — sibling-dir style
+    rather than nested under the source so editors / `find` calls don't
+    accidentally recurse into them.
+
+    Returns (path, branch) on success, raises RuntimeError on any failure
+    (not-a-repo, dirty index, branch collision, etc.) so the caller can
+    surface a clean error to the spawn API. Caller is responsible for
+    deciding whether to fall back to no-worktree mode or fail the spawn.
+    """
+    p = Path(source_cwd).expanduser().resolve()
+    if not p.is_dir():
+        raise RuntimeError(f"source cwd does not exist: {p}")
+    # Resolve to the toplevel so worktree creation works whether the
+    # caller pointed at the repo root or a subdir within it.
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(p), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=3, check=True,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        raise RuntimeError(f"source cwd is not a git repo: {e}")
+    toplevel = Path(r.stdout.strip())
+    parent = toplevel.parent
+    base_name = toplevel.name
+    # Pick the first non-existing variant of `<base>-wt-<slug>[-N]`.
+    candidate = parent / f"{base_name}-wt-{slug}"
+    suffix = 2
+    while candidate.exists():
+        candidate = parent / f"{base_name}-wt-{slug}-{suffix}"
+        suffix += 1
+    branch = f"feat/{slug}"
+    # If the branch already exists, append the same numeric suffix the
+    # path got so they stay aligned.
+    branch_check = subprocess.run(
+        ["git", "-C", str(toplevel), "rev-parse", "--verify", branch],
+        capture_output=True, text=True, timeout=3,
+    )
+    if branch_check.returncode == 0:
+        # Branch exists — pick a fresh one matching the path suffix.
+        branch_suffix = 2
+        while True:
+            cand_branch = f"feat/{slug}-{branch_suffix}"
+            check = subprocess.run(
+                ["git", "-C", str(toplevel), "rev-parse", "--verify", cand_branch],
+                capture_output=True, text=True, timeout=3,
+            )
+            if check.returncode != 0:
+                branch = cand_branch
+                break
+            branch_suffix += 1
+    add = subprocess.run(
+        ["git", "-C", str(toplevel), "worktree", "add", str(candidate), "-b", branch],
+        capture_output=True, text=True, timeout=15,
+    )
+    if add.returncode != 0:
+        raise RuntimeError(f"git worktree add failed: {add.stderr.strip() or add.stdout.strip()}")
+    return str(candidate), branch
+
+
+def spawn_session(prompt, name=None, cwd=None, worktree=False):
     """Spawn a headless Claude Code session and return tracking info.
 
     If `cwd` is provided, the spawned subprocess runs there; otherwise it
     inherits CCC's REPO_ROOT (backwards-compatible default).
+
+    If `worktree=True`, create a fresh git worktree off `cwd` (or
+    REPO_ROOT) on a `feat/<slug>` branch and run the spawned session
+    there. The worktree path + branch are returned in the response under
+    `worktree_path` / `worktree_branch` so the UI can show them.
     """
     # Always slugify — name may come from firstSentence(body) and contain
     # filesystem-hostile chars like quotes, colons, slashes.
@@ -4285,6 +4355,16 @@ def spawn_session(prompt, name=None, cwd=None):
     ]
 
     spawn_cwd = cwd if cwd else str(REPO_ROOT)
+    worktree_path = None
+    worktree_branch = None
+    if worktree:
+        try:
+            worktree_path, worktree_branch = _create_worktree_for_spawn(
+                spawn_cwd, session_name,
+            )
+            spawn_cwd = worktree_path
+        except RuntimeError as e:
+            return {"ok": False, "error": f"worktree creation failed: {e}"}
     log_fh = open(log_path, "w")
     fifo_path, child_stdin_fd = _make_stdin_fifo(log_path)
     popen_kwargs = dict(
@@ -4330,7 +4410,11 @@ def spawn_session(prompt, name=None, cwd=None):
         fifo=fifo_path,
     )
 
-    return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
+    resp = {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
+    if worktree_path:
+        resp["worktree_path"] = worktree_path
+        resp["worktree_branch"] = worktree_branch
+    return resp
 
 
 _COLOR_PALETTE = [
@@ -8441,6 +8525,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             name = (payload.get("name") or "").strip() or None
             cwd_raw = payload.get("cwd")
             cwd = cwd_raw.strip() if isinstance(cwd_raw, str) else None
+            worktree_flag = bool(payload.get("worktree"))
             if not prompt:
                 self.send_json({"ok": False, "error": "missing prompt"}, 400)
             elif cwd and not os.path.isabs(cwd):
@@ -8449,7 +8534,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"cwd does not exist or is not a directory: {cwd}"}, 400)
             else:
                 try:
-                    self.send_json(spawn_session(prompt, name=name, cwd=cwd or None))
+                    self.send_json(spawn_session(prompt, name=name, cwd=cwd or None,
+                                                 worktree=worktree_flag))
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)}, 500)
         elif re.match(r"^/api/sessions/spawned/\d+/inject$", path):

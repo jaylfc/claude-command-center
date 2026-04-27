@@ -2985,6 +2985,7 @@
         <button id="kptDescToggle" title="Compact mode — hide the description preview on cards" style="text-align:left;padding:6px 10px;background:transparent;border:none;color:var(--text);font-size:12px;cursor:pointer;border-radius:4px;">Compact</button>
         <button id="kptGitOnlyToggle" title="Show only cards linked to a GitHub issue" style="text-align:left;padding:6px 10px;background:transparent;border:none;color:var(--text);font-size:12px;cursor:pointer;border-radius:4px;">GitHub only</button>
         <label class="kpt-label" title="Spawn via Pkood (background agent runner) instead of headless Claude — see docs" style="display:flex;align-items:center;gap:6px;padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text);"><input type="checkbox" id="kptPkoodToggle" style="margin:0;"> pkood spawn</label>
+        <label class="kpt-label" title="Spawn the new session in a fresh git worktree (`feat/<slug>` branch) so it can't accidentally commit to main" style="display:flex;align-items:center;gap:6px;padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text);"><input type="checkbox" id="kptWorktreeToggle" style="margin:0;"> 🌿 worktree</label>
       </div>
     </div>
     <div id="setupBanner" class="ccc-setup-banner"></div>
@@ -3219,6 +3220,7 @@
       <textarea id="nsmBody" placeholder="What should this session do? (the first sentence becomes the card title — you can rename later or hit ✨ to AI-generate one)"></textarea>
       <div class="nsm-actions">
         <label class="nsm-pkood"><input type="checkbox" id="nsmPkood"> pkood</label>
+        <label class="nsm-pkood" title="Spawn the session in a fresh git worktree (`feat/<slug>` branch) so it can't accidentally commit to main."><input type="checkbox" id="nsmWorktree"> 🌿 worktree</label>
         <span style="flex:1;"></span>
         <button id="nsmCancel" class="nsm-btn">Cancel</button>
         <button id="nsmSubmit" class="nsm-btn nsm-primary">Launch</button>
@@ -10125,6 +10127,8 @@
       let prompt = ($kptNewSession && $kptNewSession.value || '').trim();
       if (!prompt) return;
       const usePkood = ($kptPkoodToggle && $kptPkoodToggle.checked) || prompt.startsWith('pkood:');
+      const $kptWorktreeToggle = document.getElementById('kptWorktreeToggle');
+      const useWorktree = !!($kptWorktreeToggle && $kptWorktreeToggle.checked);
       if (prompt.startsWith('pkood:')) prompt = prompt.slice(6).trim();
       if (!prompt) return;
       // Show the placeholder immediately — don't wait for the spawn POST to
@@ -10137,10 +10141,12 @@
       $kptRunBtn.textContent = 'Spawning...';
       try {
         const endpoint = usePkood ? '/api/pkood/spawn' : '/api/sessions/spawn';
+        // pkood doesn't support the worktree flag — silently drop it for that path.
+        const body = usePkood ? { prompt } : { prompt, worktree: useWorktree };
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ prompt }),
+          body: JSON.stringify(body),
         });
         const data = await res.json();
         if (data.ok) {
@@ -10197,6 +10203,9 @@
     _clearNsmError();
     $nsmBody.value = body || '';
     if ($nsmPkood && $kptPkoodToggle) $nsmPkood.checked = $kptPkoodToggle.checked;
+    const $nsmWorktree = document.getElementById('nsmWorktree');
+    const $kptWorktreeToggle = document.getElementById('kptWorktreeToggle');
+    if ($nsmWorktree && $kptWorktreeToggle) $nsmWorktree.checked = $kptWorktreeToggle.checked;
     $nsm.style.display = 'flex';
     setTimeout(() => { $nsmBody.focus(); }, 30);
   }
@@ -10216,13 +10225,18 @@
     const effectiveSubject = firstSentence(body);
     const prompt = body + SESSION_STATE_INSTRUCTION;
     const usePkood = !!($nsmPkood && $nsmPkood.checked);
+    const $nsmWorktree = document.getElementById('nsmWorktree');
+    const useWorktree = !!($nsmWorktree && $nsmWorktree.checked);
     $nsmSubmit.disabled = true;
     $nsmSubmit.textContent = 'Launching...';
     try {
       const endpoint = usePkood ? '/api/pkood/spawn' : '/api/sessions/spawn';
+      const body = usePkood
+        ? { prompt, name: effectiveSubject }
+        : { prompt, name: effectiveSubject, worktree: useWorktree };
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ prompt, name: effectiveSubject }),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
