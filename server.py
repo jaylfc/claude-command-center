@@ -6898,6 +6898,36 @@ def extract_session_timeline(session_id):
     return {"events": events, "total_turns": turn}
 
 
+# Anthropic API list-price rates ($ per million tokens) by model family.
+# Subscription users (Claude Pro / Max / API console credits) don't pay these
+# rates per turn, but the breakdown is still the cleanest signal of "how
+# expensive is this session" — same units for everyone, comparable across
+# models. UI surfaces this as "API list-price equivalent".
+#
+# Sources: anthropic.com/pricing as of 2026-04. If rates change, edit here;
+# the model match is substring-based so claude-opus-4-7 / -4-7[1m] / future
+# minor bumps fall through to the same family rate.
+_MODEL_RATES = [
+    # (substring_match, input_per_mtok, cache_write, cache_read, output_per_mtok)
+    ("opus-4",   15.00, 18.75,  1.50, 75.00),
+    ("sonnet-4",  3.00,  3.75,  0.30, 15.00),
+    ("haiku-4",   1.00,  1.25,  0.10,  5.00),
+    # Older families kept for archival sessions.
+    ("opus-3",   15.00, 18.75,  1.50, 75.00),
+    ("sonnet-3",  3.00,  3.75,  0.30, 15.00),
+    ("haiku-3",  0.25,  0.30,  0.03,  1.25),
+]
+_FALLBACK_RATES = (3.00, 3.75, 0.30, 15.00)  # Sonnet — sane middle ground.
+
+
+def _rates_for_model(model):
+    m = (model or "").lower()
+    for substr, *rates in _MODEL_RATES:
+        if substr in m:
+            return rates
+    return list(_FALLBACK_RATES)
+
+
 def extract_session_usage(session_id):
     """Walk a session's JSONL transcript and return token-usage stats.
 
@@ -6908,14 +6938,22 @@ def extract_session_usage(session_id):
     turns is the closest the session got to the model's context limit.
 
     Returns: {latest_input_tokens, peak_input_tokens, total_output_tokens,
-              model, context_limit}
+              total_input_tokens, total_cache_creation_tokens,
+              total_cache_read_tokens, model, context_limit, cost_usd,
+              cost_breakdown_usd}.
     """
     empty = {
         "latest_input_tokens": 0,
         "peak_input_tokens": 0,
         "total_output_tokens": 0,
+        "total_input_tokens": 0,
+        "total_cache_creation_tokens": 0,
+        "total_cache_read_tokens": 0,
         "model": "",
         "context_limit": 0,
+        "cost_usd": 0.0,
+        "cost_breakdown_usd": {"input": 0.0, "cache_creation": 0.0,
+                               "cache_read": 0.0, "output": 0.0},
     }
     if not PROJECTS_ROOT.is_dir():
         return empty
@@ -6932,6 +6970,9 @@ def extract_session_usage(session_id):
 
     latest = 0
     peak = 0
+    total_in = 0
+    total_cw = 0
+    total_cr = 0
     total_out = 0
     model = ""
     try:
@@ -6954,16 +6995,23 @@ def extract_session_usage(session_id):
                 u = msg.get("usage") or {}
                 if not isinstance(u, dict):
                     continue
-                inp = (u.get("input_tokens") or 0) \
-                    + (u.get("cache_creation_input_tokens") or 0) \
-                    + (u.get("cache_read_input_tokens") or 0)
-                out = u.get("output_tokens") or 0
-                if inp:
-                    latest = inp
-                    if inp > peak:
-                        peak = inp
-                if isinstance(out, int):
-                    total_out += out
+                ti = u.get("input_tokens") or 0
+                tcw = u.get("cache_creation_input_tokens") or 0
+                tcr = u.get("cache_read_input_tokens") or 0
+                tout = u.get("output_tokens") or 0
+                window = ti + tcw + tcr
+                if window:
+                    latest = window
+                    if window > peak:
+                        peak = window
+                if isinstance(ti, int):
+                    total_in += ti
+                if isinstance(tcw, int):
+                    total_cw += tcw
+                if isinstance(tcr, int):
+                    total_cr += tcr
+                if isinstance(tout, int):
+                    total_out += tout
     except OSError:
         return empty
 
@@ -6977,12 +7025,30 @@ def extract_session_usage(session_id):
         limit = 1_000_000
     else:
         limit = 200_000
+
+    rate_in, rate_cw, rate_cr, rate_out = _rates_for_model(model)
+    cost_in = total_in * rate_in / 1_000_000
+    cost_cw = total_cw * rate_cw / 1_000_000
+    cost_cr = total_cr * rate_cr / 1_000_000
+    cost_out = total_out * rate_out / 1_000_000
+    cost_total = cost_in + cost_cw + cost_cr + cost_out
+
     return {
         "latest_input_tokens": latest,
         "peak_input_tokens": peak,
         "total_output_tokens": total_out,
+        "total_input_tokens": total_in,
+        "total_cache_creation_tokens": total_cw,
+        "total_cache_read_tokens": total_cr,
         "model": model,
         "context_limit": limit,
+        "cost_usd": round(cost_total, 4),
+        "cost_breakdown_usd": {
+            "input": round(cost_in, 4),
+            "cache_creation": round(cost_cw, 4),
+            "cache_read": round(cost_cr, 4),
+            "output": round(cost_out, 4),
+        },
     }
 
 
