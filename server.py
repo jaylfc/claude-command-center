@@ -47,6 +47,15 @@ _CUSTOM_REPOS_FILE = Path.home() / ".claude" / "command-center" / "custom-repos.
 # read by load_known_repos so the dropdown/modal can surface them at the top.
 _RECENT_REPOS_FILE = Path.home() / ".claude" / "command-center" / "recent-repos.txt"
 _RECENT_REPOS_CAP = 10
+# Stable scratch cwd for short-lived background `claude -p` calls (title
+# summarizers, morning braindump, etc.). Without this, those calls
+# inherit the server's REPO_ROOT and Claude Code writes their throwaway
+# session JSONLs into the user's project conversation store, polluting
+# /api/conversations and inflating disk usage on every ✨ Titles click.
+# Pinning cwd here makes the slug land in
+# ~/.claude/projects/-Users-…-claude-command-center-scratch/ — never
+# scanned by find_conversations() and easy to gc on demand.
+_SCRATCH_DIR = Path.home() / ".claude" / "command-center" / "scratch"
 
 
 def _load_custom_repos():
@@ -1409,8 +1418,122 @@ NETWORK_CONFIG_FILE = COMMAND_CENTER_STATE_DIR / "network.json"
 # {pid, session_id, cwd, spawned_at, name, log, command_summary}.
 SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
 
-# {path: {mtime, custom_title, last_prompt, agent_name}}
+# {path: {mtime, custom_title, last_prompt, agent_name, ...}}
+# Persistent across restarts via _CONV_META_CACHE_FILE — without it, every
+# repo switch on a project with hundreds of large JSONLs (BYM+Finie has
+# 1.8 GB of conversation logs) re-walks every file and the API stalls
+# for a minute or more. The cache is mtime-keyed so admin writes
+# (custom-title, /rename) correctly invalidate the entry; bump
+# _CONV_META_SCHEMA_VERSION when the extracted shape changes so old
+# entries are dropped on load.
 _conv_meta_cache = {}
+_conv_meta_cache_dirty = False
+_conv_meta_cache_lock = threading.Lock()
+_CONV_META_SCHEMA_VERSION = 1
+_CONV_META_CACHE_FILE = (
+    Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
+)
+
+
+def _load_conv_meta_cache():
+    """Best-effort load of _conv_meta_cache from disk on startup.
+
+    Drops the entire payload (and re-extracts on demand) when the schema
+    version doesn't match — small one-time cost in exchange for forward
+    compatibility on shape changes.
+    """
+    if not _CONV_META_CACHE_FILE.is_file():
+        return
+    try:
+        with _CONV_META_CACHE_FILE.open("r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    if data.get("schema_version") != _CONV_META_SCHEMA_VERSION:
+        return
+    entries = data.get("entries")
+    if not isinstance(entries, dict):
+        return
+    keep = {
+        k: v for k, v in entries.items()
+        if isinstance(v, dict) and "mtime" in v
+    }
+    with _conv_meta_cache_lock:
+        _conv_meta_cache.update(keep)
+
+
+def _gc_scratch_jsonls(max_age_days=7):
+    """Delete throwaway JSONLs older than max_age_days from our scratch
+    project dir. Called once at server startup so the scratch dir
+    self-empties without any background thread or cron — the next
+    `./run.sh` or upgrade is the trigger.
+
+    Only operates on `~/.claude/projects/<slug>/` where <slug> is derived
+    from `_SCRATCH_DIR`; never touches any user-repo project dir.
+    """
+    try:
+        cutoff_days = int(os.environ.get("CCC_SCRATCH_GC_DAYS", str(max_age_days)))
+    except ValueError:
+        cutoff_days = max_age_days
+    if cutoff_days <= 0:
+        return
+    cutoff = time.time() - cutoff_days * 86400
+    scratch_slug = _encode_project_slug(_SCRATCH_DIR)
+    scratch_proj = Path.home() / ".claude" / "projects" / scratch_slug
+    if not scratch_proj.is_dir():
+        return
+    deleted = 0
+    bytes_freed = 0
+    for p in scratch_proj.glob("*.jsonl"):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if st.st_mtime > cutoff:
+            continue
+        try:
+            p.unlink()
+            deleted += 1
+            bytes_freed += st.st_size
+        except OSError as e:
+            print(f"  [scratch-gc] could not delete {p.name}: {e}")
+    if deleted:
+        print(
+            f"  [scratch-gc] deleted {deleted} throwaway JSONL(s), "
+            f"freed {bytes_freed/1024:.0f} KB (older than {cutoff_days}d)"
+        )
+
+
+def _save_conv_meta_cache():
+    """Atomic write of _conv_meta_cache to disk if dirty since last save.
+
+    Called at the end of /api/conversations so saves are amortized over
+    user actions, never blocking the response (already-built rows have
+    been sent by then in the streaming-friendly write path; for the
+    current send_json path, the extra <50 ms write is fine).
+    """
+    global _conv_meta_cache_dirty
+    with _conv_meta_cache_lock:
+        if not _conv_meta_cache_dirty:
+            return
+        snapshot = {
+            "schema_version": _CONV_META_SCHEMA_VERSION,
+            "entries": dict(_conv_meta_cache),
+        }
+        _conv_meta_cache_dirty = False
+    try:
+        _CONV_META_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CONV_META_CACHE_FILE.with_suffix(".json.tmp")
+        with tmp.open("w") as f:
+            json.dump(snapshot, f)
+        tmp.replace(_CONV_META_CACHE_FILE)
+    except OSError as e:
+        # Restore the dirty flag so we'll retry on the next call.
+        with _conv_meta_cache_lock:
+            _conv_meta_cache_dirty = True
+        print(f"  [conv-meta-cache] save failed: {e}")
 
 
 _META_MARKERS = (
@@ -1466,11 +1589,22 @@ def _extract_tail_meta(path):
         # Issue number detected from Bash/commit content — covers sessions where the
         # issue wasn't in the spawn prompt (e.g. Claude ran `gh issue create` mid-session).
         "tail_issue_number": None,
+        # PR number detected from `gh pr create` output — sidebar surfaces this on
+        # worktree rows in place of the generic committed/pushed chip.
+        "tail_pr_number": None,
+        # Did the session ever issue `cd <path>` or `git -C <path>` from Bash?
+        # If False, the session never relocated and `_infer_effective_repo`
+        # has nothing to find — caller can skip the JSONL re-walk + git
+        # subprocesses for this row.
+        "has_external_cd": False,
     }
     # Regexes compiled once per call; order matters — earlier = higher confidence.
     _gh_issue_cmd_re = re.compile(r'gh\s+issue\s+(?:view|edit|close|comment|reopen|create)\s+(?:.*?)(?<!\d)(\d{1,6})(?!\d)')
     _closes_re = re.compile(r'(?i)\bClos(?:es|e|ed|ing)\s+#(\d{1,6})\b')
     _gh_url_re = re.compile(r'github\.com/[^/\s]+/[^/\s]+/issues/(\d{1,6})')
+    _gh_pr_create_re = re.compile(r'\bgh\s+pr\s+create\b')
+    _gh_pr_url_re = re.compile(r'github\.com/[^/\s]+/[^/\s]+/pull/(\d{1,7})')
+    _pending_pr_ids = set()
     _pos = 0
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1545,20 +1679,62 @@ def _extract_tail_meta(path):
                             if "git push" in cmd:
                                 meta["has_push"] = True
                                 meta["last_push_pos"] = _pos
+                            # Drift indicator: any `cd <path>` or `git -C <path>`
+                            # means the session may have moved across repos.
+                            # Used by find_conversations() to skip the
+                            # _infer_effective_repo walk when there's nothing
+                            # to find.
+                            if not meta["has_external_cd"] and (
+                                "cd " in cmd or "git -C " in cmd
+                            ):
+                                meta["has_external_cd"] = True
                             # Detect issue number from high-confidence signals
                             mi = (_gh_issue_cmd_re.search(cmd)
                                   or _closes_re.search(cmd)
                                   or _gh_url_re.search(cmd))
                             if mi:
                                 meta["tail_issue_number"] = mi.group(1)
+                            # Track gh-pr-create tool_use_ids; the matching
+                            # tool_result will carry the PR URL we want.
+                            if _gh_pr_create_re.search(cmd):
+                                tu_id = block.get("id")
+                                if tu_id:
+                                    _pending_pr_ids.add(tu_id)
                     # The last assistant message's tool_use is "pending" until
                     # a tool_result or user message clears it
                     if last_tool_name:
                         meta["pending_tool"] = last_tool_name
                         meta["pending_file"] = last_tool_file
+                # Tool results land as a user-role event; scan for PR URLs
+                # only when we're matching a `gh pr create` we already saw.
+                elif t == "user" and _pending_pr_ids:
+                    msg_content = ev.get("message", {}).get("content")
+                    if isinstance(msg_content, list):
+                        for sub in msg_content:
+                            if not isinstance(sub, dict) or sub.get("type") != "tool_result":
+                                continue
+                            tu_id = sub.get("tool_use_id", "")
+                            if not tu_id or tu_id not in _pending_pr_ids:
+                                continue
+                            _pending_pr_ids.discard(tu_id)
+                            rc = sub.get("content")
+                            text = ""
+                            if isinstance(rc, str):
+                                text = rc
+                            elif isinstance(rc, list):
+                                text = "\n".join(
+                                    b.get("text", "") for b in rc
+                                    if isinstance(b, dict) and b.get("type") == "text"
+                                )
+                            mp = _gh_pr_url_re.search(text)
+                            if mp:
+                                meta["tail_pr_number"] = int(mp.group(1))
     except OSError:
         pass
-    _conv_meta_cache[str(path)] = meta
+    global _conv_meta_cache_dirty
+    with _conv_meta_cache_lock:
+        _conv_meta_cache[str(path)] = meta
+        _conv_meta_cache_dirty = True
     return meta
 
 
@@ -2133,6 +2309,7 @@ def summarize_issue_title(issue_number):
         proc = subprocess.run(
             ["claude", "-p", "--model", "claude-haiku-4-5-20251001", instruction],
             capture_output=True, text=True, timeout=45,
+            cwd=str(_SCRATCH_DIR),  # keep throwaway JSONLs out of REPO_ROOT
         )
     except FileNotFoundError:
         result["error"] = "claude CLI not in PATH"
@@ -2184,6 +2361,7 @@ def summarize_session_title(session_id):
             capture_output=True,
             text=True,
             timeout=45,
+            cwd=str(_SCRATCH_DIR),  # keep throwaway JSONLs out of REPO_ROOT
         )
     except FileNotFoundError:
         result["error"] = "claude CLI not in PATH"
@@ -3590,14 +3768,50 @@ def _extract_images_from_content(content):
     return out
 
 
+# Concurrency guard for find_conversations(). The browser polls
+# /api/conversations every 10 s (static/index.html:10540). On a cold
+# repo switch with hundreds of sessions, the first call can take >2 min
+# while subsequent polls pile up — each running the full
+# _infer_effective_repo work in parallel against an empty cache. Past
+# this threshold late entrants skip the inference (rows still render
+# with the launch branch, just no drift detection on this pass).
+_FIND_CONVS_LOCK = threading.Lock()
+_FIND_CONVS_INFLIGHT = 0
+_FIND_CONVS_INFLIGHT_MAX = 3
+
+
 def find_conversations():
     """Return list of conversation metadata dicts, newest first."""
+    global _FIND_CONVS_INFLIGHT
     conversations = []
+    # Concurrency guard: count this call into _FIND_CONVS_INFLIGHT and
+    # skip the heavy effective-repo inference if we're piling up.
+    with _FIND_CONVS_LOCK:
+        _FIND_CONVS_INFLIGHT += 1
+        _inflight_now = _FIND_CONVS_INFLIGHT
+    _skip_inference = _inflight_now > _FIND_CONVS_INFLIGHT_MAX
+    _n_eff_skipped_concurrency = 0
+    _n_eff_skipped_no_drift = 0
+
+    def _dec_inflight():
+        global _FIND_CONVS_INFLIGHT
+        with _FIND_CONVS_LOCK:
+            _FIND_CONVS_INFLIGHT -= 1
+
+    # Aggregate timers — gated on env var so prod stays silent.
+    _PROFILE = os.environ.get("CCC_PROFILE_CONVS") == "1"
+    _t_start = time.perf_counter() if _PROFILE else 0
+    _t_cwd = 0.0; _n_cwd = 0
+    _t_tail = 0.0; _n_tail = 0
+    _t_top = 0.0; _n_top = 0; _n_top_misses = 0
+    _t_eff = 0.0; _n_eff = 0; _n_eff_misses = 0
+    _t_head = 0.0; _n_head = 0
     # Scan every project dir whose slug encodes back to REPO_ROOT — both
     # the modern claude-code 2.x slug AND the legacy '/'-only slug, so
     # we don't drop historic sessions when claude-code's encoder changes.
     project_dirs = _candidate_conversation_dirs(REPO_ROOT)
     if not project_dirs:
+        _dec_inflight()
         return conversations
     name_overrides = _load_session_name_overrides()
     archived_set = set(_load_archived_conversations())
@@ -3621,6 +3835,11 @@ def find_conversations():
     # first one wins; project_dirs are ordered modern-first.
     seen_jsonl = set()
     jsonl_files = []
+    # Shared across the per-row loop below so identical cwd ancestors
+    # collapse to one `git rev-parse --show-toplevel` instead of one per
+    # session — for repos with hundreds of sessions this is the
+    # difference between a sub-second and a 17 s response.
+    git_top_cache = {}
     for project_dir in project_dirs:
         for f in project_dir.iterdir():
             if not f.name.endswith(".jsonl") or not f.is_file():
@@ -3642,6 +3861,7 @@ def find_conversations():
         git_branch = None
         first_message = None
 
+        _t0 = time.perf_counter() if _PROFILE else 0
         try:
             with open(f, "r") as fh:
                 for i, line in enumerate(fh):
@@ -3677,9 +3897,14 @@ def find_conversations():
 
                     if ev_type == "assistant" and not session_id:
                         session_id = ev.get("sessionId", "")
-
         except (OSError, UnicodeDecodeError):
+            if _PROFILE:
+                _t_head += time.perf_counter() - _t0
+                _n_head += 1
             continue
+        if _PROFILE:
+            _t_head += time.perf_counter() - _t0
+            _n_head += 1
 
         # Drop throwaway title-summarizer sessions before spending any more work
         # on them (tail scan, cwd lookup, etc.). first_message peek above already
@@ -3689,8 +3914,16 @@ def find_conversations():
 
         conv_id = f.name[:-6]  # remove .jsonl
         sid = session_id or conv_id
-        cwd = find_session_cwd(sid)
-        tail_meta = _extract_tail_meta(f)
+        if _PROFILE:
+            _t0 = time.perf_counter()
+            cwd = find_session_cwd(sid)
+            _t_cwd += time.perf_counter() - _t0; _n_cwd += 1
+            _t0 = time.perf_counter()
+            tail_meta = _extract_tail_meta(f)
+            _t_tail += time.perf_counter() - _t0; _n_tail += 1
+        else:
+            cwd = find_session_cwd(sid)
+            tail_meta = _extract_tail_meta(f)
         override = name_overrides.get(sid) or name_overrides.get(conv_id)
         # Display value priority: side-car override > jsonl > None.
         # The sidecar is set ONLY by CCC's pencil rename — it's a
@@ -3719,8 +3952,46 @@ def find_conversations():
         eff_branch = None
         eff_kind = None
         try:
-            cwd_top = _git_toplevel_for_path(cwd, {}) if cwd else None
-            eff = _infer_effective_repo(sid, literal_cwd=cwd, exclude_top=cwd_top)
+            if _PROFILE:
+                _t0 = time.perf_counter()
+                _miss_before = (str(Path(cwd).expanduser()) if cwd else None) not in git_top_cache if cwd else False
+                cwd_top = _git_toplevel_for_path(cwd, git_top_cache) if cwd else None
+                _t_top += time.perf_counter() - _t0
+                _n_top += 1
+                if _miss_before:
+                    _n_top_misses += 1
+            else:
+                cwd_top = _git_toplevel_for_path(cwd, git_top_cache) if cwd else None
+            # Two pre-skips before paying for _infer_effective_repo:
+            # (1) concurrency guard — too many polls in flight, defer the
+            #     expensive walk; the next poll will pick it up once the
+            #     pile-up drains.
+            # (2) no-drift hint — the session never issued `cd <path>` or
+            #     `git -C <path>` AND its cwd already resolves to the
+            #     active REPO_ROOT, so there is nothing for inference to
+            #     find. Set in _extract_tail_meta during its existing walk.
+            _eff_module_hit = any(k[0] == sid for k in _EFFECTIVE_REPO_CACHE)
+            _no_drift_possible = (
+                not tail_meta.get("has_external_cd")
+                and cwd_top
+                and cwd_top == str(REPO_ROOT)
+            )
+            if _skip_inference and not _eff_module_hit:
+                _n_eff_skipped_concurrency += 1
+                eff = None
+            elif _no_drift_possible and not _eff_module_hit:
+                _n_eff_skipped_no_drift += 1
+                eff = None
+            else:
+                if _PROFILE:
+                    _t0 = time.perf_counter()
+                    _miss_eff = not _eff_module_hit
+                eff = _infer_effective_repo(sid, literal_cwd=cwd, exclude_top=cwd_top)
+                if _PROFILE:
+                    _t_eff += time.perf_counter() - _t0
+                    _n_eff += 1
+                    if _miss_eff:
+                        _n_eff_misses += 1
             if eff:
                 eff_branch = eff.get("branch")
                 eff_kind = eff.get("kind")
@@ -3779,6 +4050,7 @@ def find_conversations():
             "pending_file": tail_meta.get("pending_file"),
             "last_assistant_text": tail_meta.get("last_assistant_text"),
             "tail_issue_number": tail_meta.get("tail_issue_number"),
+            "tail_pr_number": tail_meta.get("tail_pr_number"),
             "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
             "archived": sid in archived_set,
             "verified": sid in verified_set,
@@ -3812,6 +4084,23 @@ def find_conversations():
             if c["session_id"] not in seen:
                 ordered.append(c)
         conversations = ordered
+    if _PROFILE:
+        _t_total = time.perf_counter() - _t_start
+        print(
+            f"  [profile] find_conversations rows={len(conversations)} "
+            f"inflight={_inflight_now} "
+            f"total={_t_total:.2f}s "
+            f"head={_t_head:.2f}s/{_n_head} "
+            f"cwd={_t_cwd:.2f}s/{_n_cwd} "
+            f"tail={_t_tail:.2f}s/{_n_tail} "
+            f"top={_t_top:.2f}s/{_n_top} (misses={_n_top_misses}) "
+            f"eff={_t_eff:.2f}s/{_n_eff} (misses≈{_n_eff_misses}) "
+            f"eff_skip_conc={_n_eff_skipped_concurrency} "
+            f"eff_skip_drift={_n_eff_skipped_no_drift} "
+            f"git_top_cache_size={len(git_top_cache)}",
+            flush=True,
+        )
+    _dec_inflight()
     return conversations
 
 
@@ -7305,6 +7594,7 @@ def morning_braindump(text):
         r = subprocess.run(
             ["claude", "-p", "--model", "haiku"],
             input=prompt, capture_output=True, text=True, timeout=60,
+            cwd=str(_SCRATCH_DIR),  # keep throwaway JSONLs out of REPO_ROOT
         )
     except (subprocess.SubprocessError, OSError) as e:
         return {"ok": False, "error": f"claude -p failed: {e}"}
@@ -7750,6 +8040,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not include_morning:
                 morning_sids = _morning_session_ids()
                 convs = [c for c in convs if c.get("session_id") not in morning_sids]
+            # Activity filter: hide rows whose last meaningful event (i.e.
+            # last user/assistant/result, NOT admin writes like custom-title)
+            # is older than CCC_MAX_CONV_AGE_DAYS — or `last_interacted` if
+            # the user touched the row from the UI more recently. Bypass
+            # with ?include_old=1 (sidebar will eventually wire a toggle).
+            include_old = qs.get("include_old", ["0"])[0] in ("1", "true")
+            if not include_old:
+                try:
+                    _max_age_days = int(os.environ.get("CCC_MAX_CONV_AGE_DAYS", "30"))
+                except ValueError:
+                    _max_age_days = 30
+                if _max_age_days > 0:
+                    _cutoff = time.time() - _max_age_days * 86400
+                    convs = [
+                        c for c in convs
+                        if (c.get("last_interacted") or c.get("modified") or 0) >= _cutoff
+                    ]
+            # Persist newly-extracted metadata so the next cold start
+            # doesn't re-walk every JSONL. Atomic; only writes when dirty.
+            _save_conv_meta_cache()
             self.send_json(convs)
         elif path == "/api/morning/sessions":
             # Morning-spawned sessions may live in ANY project slug under
@@ -9793,6 +10103,15 @@ def main():
     ensure_hooks_installed()
     install_orchestration_skill()
     _reattach_spawned_orphans()
+    _load_conv_meta_cache()
+    try:
+        _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Best-effort — if we can't make the dir, the `claude -p` callers
+        # below will still work; their throwaways will just land in the
+        # parent dir's slug, same as before this fix.
+        pass
+    _gc_scratch_jsonls()
     # SECURITY: bind to 127.0.0.1 by default. The whole trust model is
     # "implicit because it's local"; binding to all interfaces (the old
     # `("", PORT)`) exposed every endpoint — including subprocess-spawning
