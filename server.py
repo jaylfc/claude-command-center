@@ -23,6 +23,7 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4716,6 +4717,10 @@ def spawn_session(prompt, name=None, cwd=None, worktree=False):
         command_summary=prompt[:200],
         fifo=fifo_path,
     )
+    # Cwd determines the ~/.claude/projects/ bucket the new session
+    # logs to, which is how the kanban groups it by repo. Print it so
+    # mis-routed sessions are debuggable from the server log.
+    print(f"  [spawn] PID {proc.pid} ({session_name}) in cwd {spawn_cwd}")
 
     resp = {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
     if worktree_path:
@@ -8955,18 +8960,48 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             prompt = (payload.get("prompt") or "").strip()
             name = (payload.get("name") or "").strip() or None
             cwd_raw = payload.get("cwd")
-            cwd = cwd_raw.strip() if isinstance(cwd_raw, str) else None
+            cwd_input = cwd_raw.strip() if isinstance(cwd_raw, str) else ""
+            cwd_resolved = None
+            cwd_error = None
+            if cwd_input:
+                # Spawned `claude -p` logs sessions to ~/.claude/projects/
+                # keyed off the cwd at process startup. Validate carefully
+                # so an empty/typo'd cwd doesn't silently route the new
+                # session into the CCC repo's bucket.
+                try:
+                    expanded = os.path.expanduser(cwd_input)
+                    candidate = Path(expanded).resolve()
+                except (OSError, RuntimeError) as e:
+                    cwd_error = f"could not resolve path ({e})"
+                else:
+                    home = Path.home().resolve()
+                    try:
+                        st = os.stat(candidate)
+                    except OSError as e:
+                        cwd_error = f"path does not exist ({e.strerror or e})"
+                    else:
+                        if not stat.S_ISDIR(st.st_mode):
+                            cwd_error = f"not a directory: {candidate}"
+                        else:
+                            try:
+                                candidate.relative_to(home)
+                            except ValueError:
+                                cwd_error = f"path is outside $HOME ({home}): {candidate}"
+                            else:
+                                cwd_resolved = candidate
             worktree_flag = bool(payload.get("worktree"))
             if not prompt:
                 self.send_json({"ok": False, "error": "missing prompt"}, 400)
-            elif cwd and not os.path.isabs(cwd):
-                self.send_json({"ok": False, "error": f"cwd must be an absolute path: {cwd}"}, 400)
-            elif cwd and not os.path.isdir(cwd):
-                self.send_json({"ok": False, "error": f"cwd does not exist or is not a directory: {cwd}"}, 400)
+            elif cwd_error:
+                self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
             else:
                 try:
-                    self.send_json(spawn_session(prompt, name=name, cwd=cwd or None,
-                                                 worktree=worktree_flag))
+                    self.send_json(spawn_session(
+                        prompt,
+                        name=name,
+                        cwd=str(cwd_resolved) if cwd_resolved else None,
+                        worktree=worktree_flag,
+                    ))
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)}, 500)
         elif re.match(r"^/api/sessions/spawned/\d+/inject$", path):
