@@ -11156,6 +11156,11 @@
     if (typeof stopPkoodTailPoller === 'function') stopPkoodTailPoller();
     currentConversation = '__new__';
     setCurrentSession(null, null, null, false, null);
+    // Drop the previous session's workspace/usage data so the input-context
+    // strip (WORKTREE pill, ctx/peak token pill) doesn't linger above the
+    // empty "Start a new session" prompt.
+    if (typeof fetchSessionWorkspace === 'function') fetchSessionWorkspace(null);
+    if (typeof fetchSessionUsage === 'function') fetchSessionUsage(null);
     if ($convList) $convList.querySelectorAll('.conv-item.active').forEach(el => el.classList.remove('active'));
     if ($kanbanBoard) $kanbanBoard.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
     if ($kanbanBoardSplit) $kanbanBoardSplit.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
