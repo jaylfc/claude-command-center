@@ -7325,10 +7325,10 @@
           + liveToolHtml
           + '<span class="conv-meta-inline">'
           +   '<span>' + formatSize(c.size) + '</span>'
-          +   (branch ? '<span class="sep">&middot;</span>' + branch : '')
           +   (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
           + '</span>'
           + signals
+          + branch
           + '<button class="conv-archive-btn" data-role="archive" title="' + (c.archived ? 'Unarchive' : 'Archive') + '">' + (c.archived ? '&#8617;' : '&#128229;') + '</button>'
         + '</div>'
         + ask
