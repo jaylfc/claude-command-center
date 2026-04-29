@@ -12,7 +12,7 @@ Usage:
     CCC_WATCH_REPO=~/dev/foo ./run.sh
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 import ast
 import base64
@@ -1429,7 +1429,7 @@ SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 1
+_CONV_META_SCHEMA_VERSION = 2
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -1592,6 +1592,11 @@ def _extract_tail_meta(path):
         # PR number detected from `gh pr create` output — sidebar surfaces this on
         # worktree rows in place of the generic committed/pushed chip.
         "tail_pr_number": None,
+        # Full PR URL (https://github.com/<owner>/<repo>/pull/<n>). Captured so
+        # the merge button can pass it to `gh pr merge` directly — `gh` resolves
+        # the repo from the URL, which avoids cross-repo lookups when the
+        # session's cwd has drifted to a different repo than where the PR lives.
+        "tail_pr_url": None,
         # Did the session ever issue `cd <path>` or `git -C <path>` from Bash?
         # If False, the session never relocated and `_infer_effective_repo`
         # has nothing to find — caller can skip the JSONL re-walk + git
@@ -1603,7 +1608,7 @@ def _extract_tail_meta(path):
     _closes_re = re.compile(r'(?i)\bClos(?:es|e|ed|ing)\s+#(\d{1,6})\b')
     _gh_url_re = re.compile(r'github\.com/[^/\s]+/[^/\s]+/issues/(\d{1,6})')
     _gh_pr_create_re = re.compile(r'\bgh\s+pr\s+create\b')
-    _gh_pr_url_re = re.compile(r'github\.com/[^/\s]+/[^/\s]+/pull/(\d{1,7})')
+    _gh_pr_url_re = re.compile(r'github\.com/([^/\s]+/[^/\s]+)/pull/(\d{1,7})')
     _pending_pr_ids = set()
     _pos = 0
     try:
@@ -1728,7 +1733,11 @@ def _extract_tail_meta(path):
                                 )
                             mp = _gh_pr_url_re.search(text)
                             if mp:
-                                meta["tail_pr_number"] = int(mp.group(1))
+                                meta["tail_pr_number"] = int(mp.group(2))
+                                meta["tail_pr_url"] = (
+                                    "https://github.com/" + mp.group(1)
+                                    + "/pull/" + mp.group(2)
+                                )
     except OSError:
         pass
     global _conv_meta_cache_dirty
@@ -4051,6 +4060,7 @@ def find_conversations():
             "last_assistant_text": tail_meta.get("last_assistant_text"),
             "tail_issue_number": tail_meta.get("tail_issue_number"),
             "tail_pr_number": tail_meta.get("tail_pr_number"),
+            "tail_pr_url": tail_meta.get("tail_pr_url"),
             "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
             "archived": sid in archived_set,
             "verified": sid in verified_set,
@@ -5222,6 +5232,28 @@ def list_spawned_sessions():
             # Registry hygiene is best-effort; never break the API response.
             pass
     return result
+
+
+def _inject_text_into_session(session_id, text):
+    """Route `text` to a session using the same fall-through as /api/inject-input:
+    AppleScript keystroke when there's a TTY, FIFO write to a live spawn,
+    else `claude --resume` headless. Returns a dict with at least
+    {"ok": bool, "via": <route>}.
+    """
+    if not session_id or not text:
+        return {"ok": False, "error": "missing session_id or text"}
+    cwd = find_session_cwd(session_id)
+    status = session_live_status(session_id, cwd)
+    tty = status.get("tty")
+    term_app = status.get("terminal_app")
+    has_tty = bool(tty) and tty != "??"
+    if not status.get("live") or not has_tty:
+        spawn = _find_live_spawn_entry_for_session(session_id)
+        if spawn is not None:
+            ok = _write_stream_json_user_message(spawn, text)
+            return {"ok": ok, "pid": spawn["pid"], "via": "spawn-fifo"}
+        return resume_session_headless(session_id, text)
+    return inject_input_via_keystroke(tty, term_app or "Terminal", text)
 
 
 def ask_session_and_wait(session_id, text, timeout_ms=30000):
@@ -9183,11 +9215,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             sid = payload.get("session_id") or conv_id
             branch = (payload.get("branch") or "").strip()
             pr_number = payload.get("pr_number")
-            # Prefer the recorded PR number when we have one; fall back to the
-            # branch name (gh resolves the PR by head branch). Without either,
-            # there is nothing to act on.
+            pr_url = (payload.get("pr_url") or "").strip()
+            # Prefer the full PR URL — `gh pr merge` resolves the repo from the
+            # URL itself, which is the only safe option when the session's cwd
+            # has drifted to a different repo than where the PR was opened
+            # (otherwise gh looks up the bare number in the wrong remote and
+            # GitHub returns "Could not resolve to a PullRequest"). Fall back
+            # to the bare number, then to the branch name.
             target = None
-            if pr_number is not None:
+            if pr_url and pr_url.startswith("https://github.com/") and "/pull/" in pr_url:
+                target = pr_url
+            if not target and pr_number is not None:
                 try:
                     target = str(int(pr_number))
                 except (TypeError, ValueError):
@@ -9195,9 +9233,39 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not target and branch:
                 target = branch
             if not target:
-                self.send_json({"ok": False, "error": "no PR number or branch"}, 400)
+                self.send_json({"ok": False, "error": "no PR url, number, or branch"}, 400)
                 return
-            cwd = find_session_cwd(sid) or str(REPO_ROOT)
+
+            # Prefer asking the session itself when it's alive — the session
+            # carries the original spawn instructions ("do not merge until X"),
+            # the test-plan invariants, and the local checkout context, and
+            # naturally handles post-merge worktree/branch cleanup. Direct
+            # `gh pr merge` is the fallback for closed/dormant sessions where
+            # there's no one to ask.
+            session_cwd = find_session_cwd(sid)
+            live = session_live_status(sid, session_cwd).get("live") if sid else False
+            if live:
+                pr_label = ("PR #" + str(pr_number)) if pr_number else (target or "this PR")
+                prompt = (
+                    "User clicked the sidebar Merge button for " + pr_label + ".\n"
+                    "PR: " + (pr_url or target) + "\n\n"
+                    "Please squash-merge it if appropriate. If you decide to merge, "
+                    "also clean up the worktree (remove the worktree dir and delete the "
+                    "local branch). If there are open concerns — CI not green, test plan "
+                    "items unchecked, or a prior 'do not merge' instruction in this "
+                    "session — surface them and wait for confirmation."
+                )
+                inject_result = _inject_text_into_session(sid, prompt)
+                self.send_json({
+                    "ok": bool(inject_result.get("ok")),
+                    "via": "session",
+                    "session_id": sid,
+                    "target": target,
+                    "inject": inject_result,
+                })
+                return
+
+            cwd = session_cwd or str(REPO_ROOT)
             try:
                 # Intentionally no --delete-branch: when the head branch is
                 # checked out in a worktree (the common case here), gh tries
@@ -9212,6 +9280,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 if out.returncode == 0:
                     self.send_json({
                         "ok": True,
+                        "via": "gh",
                         "target": target,
                         "stdout": (out.stdout or "").strip()[:500],
                     })
@@ -9219,11 +9288,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     err = ((out.stderr or "").strip() or (out.stdout or "").strip())
                     self.send_json({
                         "ok": False,
+                        "via": "gh",
                         "target": target,
                         "error": err[:500] or "gh pr merge failed",
                     })
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-                self.send_json({"ok": False, "error": str(e)}, 500)
+                self.send_json({"ok": False, "via": "gh", "error": str(e)}, 500)
         elif re.match(r"^/api/conversations/[a-f0-9-]+/verify$", path) or re.match(r"^/api/conversations/issue-\d+/verify$", path) or re.match(r"^/api/conversations/pkood-[^/]+/verify$", path):
             conv_id = path.split("/")[-2]
             length = int(self.headers.get("Content-Length", "0"))
@@ -9388,36 +9458,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 # card, which is the whole signal we want — independent of
                 # whether the keystroke injection itself ends up succeeding.
                 _record_interaction(sid)
-                cwd = find_session_cwd(sid)
-                status = session_live_status(sid, cwd)
-                tty = status.get("tty")
-                term_app = status.get("terminal_app")
-                # `??` is a sentinel for "process is alive but we couldn't
-                # pin down a tty" — typical of headless agents that never
-                # had a terminal. Treat it as no-tty so we route to FIFO/
-                # resume injection instead of AppleScripting into a tab
-                # that doesn't exist.
-                has_tty = bool(tty) and tty != "??"
-                if not status.get("live") or not has_tty:
-                    # Prefer an existing live spawn (FIFO-equipped, no
-                    # process-spawn cost) over `claude --resume`. Falls
-                    # through to resume_session_headless when there's no
-                    # matching spawn — same behavior as before.
-                    spawn = _find_live_spawn_entry_for_session(sid)
-                    if spawn is not None:
-                        ok = _write_stream_json_user_message(spawn, text)
-                        self.send_json({
-                            "ok": ok,
-                            "pid": spawn["pid"],
-                            "via": "spawn-fifo",
-                        })
-                    else:
-                        self.send_json(resume_session_headless(sid, text))
-                else:
-                    result = inject_input_via_keystroke(
-                        tty, term_app or "Terminal", text
-                    )
-                    self.send_json(result)
+                self.send_json(_inject_text_into_session(sid, text))
         elif path == "/api/ask":
             # Synchronous "inject and wait for the next assistant turn".
             # Used by the ccc-orchestration skill so a sibling Claude
