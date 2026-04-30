@@ -52,6 +52,9 @@ venv/
 # Repo only ships compressed/optimized derivatives in docs/images/
 /_assets/
 
+# nanobanana MCP generated images — local experiments, not source.
+/nanobanana-output/
+
 # Don't accidentally commit large videos anywhere in the tree
 *.mp4
 *.mov
