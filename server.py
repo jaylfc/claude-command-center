@@ -3057,6 +3057,141 @@ def inject_input_via_keystroke(tty, terminal_app, text):
     return {"ok": True, "tty": tty}
 
 
+def interrupt_input_via_keystroke(tty, terminal_app):
+    """Focus the terminal tab for `tty`, then send Esc (key code 53) via System Events.
+
+    Mirrors `inject_input_via_keystroke` but delivers an interrupt instead of
+    text — Claude Code's TUI treats Esc as cancel-the-current-stream when a
+    response is in flight, and as clear-input-buffer when one isn't. Same focus
+    + restore-prev-app dance so the user's browser doesn't stay buried.
+    """
+    tty_short = tty.replace("/dev/", "")
+    tty_full = "/dev/" + tty_short
+
+    if terminal_app == "iTerm2":
+        script = f'''
+        set prevApp to ""
+        try
+          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+        end try
+        tell application "iTerm2"
+          set found to false
+          set winCount to count of windows
+          repeat with i from 1 to winCount
+            try
+              set w to window i
+              repeat with j from 1 to (count of tabs of w)
+                try
+                  set t to tab j of w
+                  repeat with s in sessions of t
+                    try
+                      if tty of s is "{tty_full}" then
+                        select w
+                        tell w to select t
+                        select s
+                        set found to true
+                        exit repeat
+                      end if
+                    end try
+                  end repeat
+                  if found then exit repeat
+                end try
+              end repeat
+              if found then exit repeat
+            end try
+          end repeat
+          if not found then return "notfound"
+          activate
+        end tell
+        delay 0.15
+        tell application "System Events"
+          key code 53
+        end tell
+        delay 0.08
+        try
+          if prevApp is not "" and prevApp is not "iTerm2" then
+            tell application prevApp to activate
+          end if
+        end try
+        return "ok"
+        '''
+    else:
+        script = f'''
+        set prevApp to ""
+        try
+          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+        end try
+        tell application "Terminal"
+          set foundWin to missing value
+          set foundTab to missing value
+          set winCount to count of windows
+          repeat with i from 1 to winCount
+            try
+              set w to window i
+              repeat with j from 1 to (count of tabs of w)
+                try
+                  set t to tab j of w
+                  if tty of t is "{tty_full}" then
+                    set foundWin to w
+                    set foundTab to t
+                    exit repeat
+                  end if
+                end try
+              end repeat
+              if foundTab is not missing value then exit repeat
+            end try
+          end repeat
+          if foundTab is missing value then return "notfound"
+          set selected of foundTab to true
+          try
+            set index of foundWin to 1
+          end try
+          activate
+          delay 0.25
+          try
+            set index of foundWin to 1
+          end try
+          set selected of foundTab to true
+        end tell
+        delay 0.1
+        tell application "System Events"
+          key code 53
+        end tell
+        delay 0.08
+        try
+          if prevApp is not "" and prevApp is not "Terminal" then
+            tell application prevApp to activate
+          end if
+        end try
+        return "ok"
+        '''
+
+    def _run():
+        try:
+            return subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            return e
+
+    out = _run()
+    if isinstance(out, Exception):
+        return {"ok": False, "error": str(out)}
+    result_str = (out.stdout or "").strip()
+    if result_str == "notfound":
+        time.sleep(0.2)
+        out = _run()
+        if isinstance(out, Exception):
+            return {"ok": False, "error": str(out)}
+        result_str = (out.stdout or "").strip()
+    if out.returncode != 0:
+        return {"ok": False, "error": (out.stderr or "").strip() or "AppleScript failed"}
+    if result_str == "notfound":
+        return {"ok": False, "error": f"No {terminal_app} tab found for {tty_short} — tab may be hidden, on another Space, or behind a fullscreen app"}
+    return {"ok": True, "tty": tty}
+
+
 def focus_terminal_by_tty(tty, terminal_app):
     """Bring the terminal window/tab backing `tty` to the front.
 
@@ -5466,6 +5601,45 @@ def _inject_text_into_session(session_id, text):
             return {"ok": ok, "pid": spawn["pid"], "via": "spawn-fifo"}
         return resume_session_headless(session_id, text)
     return inject_input_via_keystroke(tty, term_app or "Terminal", text)
+
+
+def _interrupt_session(session_id):
+    """Send an interrupt to a session using the same fall-through as
+    `_inject_text_into_session`:
+
+      * Live TTY → AppleScript Esc keystroke (cancels the in-flight stream
+        when Claude is mid-response, clears the input buffer otherwise).
+      * Live CCC-spawned headless session (no TTY) → SIGINT to the spawned
+        pid. NOTE: this terminates the headless `claude -p` subprocess —
+        you cannot resume mid-conversation, the spawn is over.
+      * Dormant session with no live spawn → no-op error; nothing is running
+        to interrupt.
+    """
+    if not session_id:
+        return {"ok": False, "error": "missing session_id"}
+    cwd = find_session_cwd(session_id)
+    status = session_live_status(session_id, cwd)
+    tty = status.get("tty")
+    term_app = status.get("terminal_app")
+    has_tty = bool(tty) and tty != "??"
+    if status.get("live") and has_tty:
+        result = interrupt_input_via_keystroke(tty, term_app or "Terminal")
+        result["via"] = "tty-esc"
+        return result
+    spawn = _find_live_spawn_entry_for_session(session_id)
+    if spawn is not None:
+        pid = spawn["pid"]
+        try:
+            os.kill(pid, signal.SIGINT)
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            return {"ok": False, "via": "spawn-sigint", "pid": pid, "error": str(e)}
+        return {
+            "ok": True,
+            "via": "spawn-sigint",
+            "pid": pid,
+            "note": "headless spawn terminated — start a new session to continue",
+        }
+    return {"ok": False, "error": "session is not live — nothing to interrupt"}
 
 
 def ask_session_and_wait(session_id, text, timeout_ms=30000):
@@ -10102,6 +10276,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 # whether the keystroke injection itself ends up succeeding.
                 _record_interaction(sid)
                 self.send_json(_inject_text_into_session(sid, text))
+        elif path == "/api/inject-esc":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            sid = payload.get("session_id", "")
+            if not sid:
+                self.send_json({"ok": False, "error": "missing session_id"})
+            else:
+                _record_interaction(sid)
+                self.send_json(_interrupt_session(sid))
         elif path == "/api/ask":
             # Synchronous "inject and wait for the next assistant turn".
             # Used by the ccc-orchestration skill so a sibling Claude

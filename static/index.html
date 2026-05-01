@@ -1457,6 +1457,20 @@
   .conv-input-bar .send-btn:hover { background: #79bbff; }
   .conv-input-bar .send-btn:active { transform: scale(0.93); }
   .conv-input-bar .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .conv-input-bar .esc-btn {
+    height: 36px; padding: 0 10px; flex-shrink: 0;
+    border-radius: 8px; border: 1px solid var(--border); cursor: pointer;
+    background: transparent; color: var(--text-muted);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+    text-transform: uppercase; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
+  }
+  .conv-input-bar .esc-btn:hover { background: var(--bg); color: var(--text); border-color: var(--accent); }
+  .conv-input-bar .esc-btn:active { transform: scale(0.93); }
+  .conv-input-bar .esc-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .conv-input-bar .esc-btn.sent { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
+  .conv-input-bar .esc-btn.failed { color: #f85149; border-color: #f85149; }
   .conv-input-bar .tty-label {
     font-size: 11px; color: var(--text-muted); opacity: 0.6;
     white-space: nowrap;
@@ -3269,6 +3283,7 @@
     </div>
     <div class="conv-input-bar" id="convInputBar">
       <input type="text" id="convInput" placeholder="Send to terminal..." autocomplete="off">
+      <button class="esc-btn" id="convEscBtn" title="Send Esc to terminal — cancels in-flight response (or kills a headless spawn)">Esc</button>
       <button class="send-btn" id="convSendBtn" title="Send to terminal">&gt;</button>
       <span class="tty-label" id="convTtyLabel"></span>
     </div>
@@ -4339,6 +4354,7 @@
   const $convInputBar = document.getElementById('convInputBar');
   const $convInput = document.getElementById('convInput');
   const $convSendBtn = document.getElementById('convSendBtn');
+  const $convEscBtn = document.getElementById('convEscBtn');
   const $convTtyLabel = document.getElementById('convTtyLabel');
 
   function updateInputBar() {
@@ -4378,6 +4394,13 @@
       } else {
         $convTtyLabel.textContent = 'dormant';
         $convInput.placeholder = 'Resume and send…';
+      }
+      // Esc only makes sense when there's something live to interrupt — and
+      // we don't support pkood interrupts. Hide it everywhere else so the
+      // button doesn't tease an action that will just error.
+      if ($convEscBtn) {
+        const canEsc = hasSession && !isPkood && !isNewSession && !isBacklogIssue && !!liveStatus.live;
+        $convEscBtn.style.display = canEsc ? '' : 'none';
       }
     } else {
       $convInputBar.classList.remove('visible');
@@ -4462,6 +4485,44 @@
     $convInput.focus();
   }
 
+  async function sendEscToTerminal() {
+    if (!currentSession.id) return;
+    if (currentSession.source === 'pkood') return;
+    if (!$convEscBtn) return;
+    $convEscBtn.disabled = true;
+    $convEscBtn.classList.remove('sent', 'failed');
+    const orig = $convEscBtn.textContent;
+    try {
+      const res = await fetch('/api/inject-esc', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ session_id: currentSession.id }),
+      });
+      let data = {};
+      try { data = await res.json(); } catch (_) {}
+      if (res.ok && data.ok) {
+        $convEscBtn.classList.add('sent');
+        $convEscBtn.textContent = data.via === 'spawn-sigint' ? 'Killed' : 'Esc ✓';
+        if (data.note) showOpToast(data.note, 'info');
+      } else {
+        $convEscBtn.classList.add('failed');
+        $convEscBtn.textContent = 'Esc ✗';
+        showOpToast('Interrupt failed: ' + (data.error || ('HTTP ' + res.status)), 'error');
+      }
+    } catch (err) {
+      $convEscBtn.classList.add('failed');
+      $convEscBtn.textContent = 'Esc ✗';
+      showOpToast('Interrupt failed: ' + (err && err.message || 'network error'), 'error');
+    }
+    setTimeout(() => {
+      if (!$convEscBtn) return;
+      $convEscBtn.classList.remove('sent', 'failed');
+      $convEscBtn.textContent = orig;
+      $convEscBtn.disabled = false;
+    }, 1200);
+  }
+
+  if ($convEscBtn) $convEscBtn.addEventListener('click', sendEscToTerminal);
   if ($convSendBtn) $convSendBtn.addEventListener('click', sendToTerminal);
   if ($convInput) $convInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); sendToTerminal(); }
@@ -7821,11 +7882,45 @@
               showOpToast('Asked session to merge ' + target + ' — see chat');
               selectConversation(convId);
             } else {
-              showOpToast('Merged ' + target);
+              if (data.archived && c) {
+                c.archived = true;
+                setOptimisticOverride(c.session_id || sessionId, { archived: true });
+              }
+              showOpToast('Merged ' + target + ' → archived');
               if (typeof loadConversationList === 'function') loadConversationList();
             }
           } else {
-            showOpToast('Merge failed: ' + (data.error || (data.inject && data.inject.error) || 'unknown'), 'error');
+            const errMsg = data.error || (data.inject && data.inject.error) || 'unknown';
+            // Conflict-recovery path: server's /merge-pr returns the
+            // "merge conflicts" string for the GraphQL conflict case.
+            // Offer to auto-rebase + force-push + retry. Force-push is
+            // gated by an explicit confirm so the user opts in each time.
+            const isConflict = /merge conflicts/i.test(errMsg);
+            if (isConflict && confirm(
+              target + ' has merge conflicts.\n\n' +
+              'Auto-rebase against the PR base and retry?\n' +
+              'This force-pushes the branch with --force-with-lease.'
+            )) {
+              try {
+                const r2 = await ccPostJson('/api/conversations/' + convId + '/rebase-merge',
+                  { session_id: sessionId, branch: branchName, pr_number: prNumber, pr_url: prUrl });
+                if (r2.ok) {
+                  if (r2.archived && c) {
+                    c.archived = true;
+                    setOptimisticOverride(c.session_id || sessionId, { archived: true });
+                  }
+                  showOpToast('Rebased onto ' + (r2.base || 'base') + ' + merged ' + target + ' → archived');
+                  if (typeof loadConversationList === 'function') loadConversationList();
+                } else {
+                  const stepLabel = r2.step ? ' [' + r2.step + ']' : '';
+                  showOpToast('Auto-rebase failed' + stepLabel + ': ' + (r2.error || 'unknown'), 'error');
+                }
+              } catch (err) {
+                showOpToast('Auto-rebase failed (' + err.message + ')', 'error');
+              }
+            } else {
+              showOpToast('Merge failed: ' + errMsg, 'error');
+            }
           }
         } catch (err) {
           showOpToast('Merge failed (' + err.message + ')', 'error');
