@@ -8938,16 +8938,30 @@
     st.rafPending = false;
     const items = _dynAskItems();
     if (!items.length) return;
-    // Only switch to "Earlier ask" once the whole bubble has scrolled
-    // behind the sticky — i.e. its BOTTOM has cleared stickyBottom.
-    // Comparing item.top would fire as soon as the top edge slid under
-    // the sticky, so the same message ended up rendered twice (once in
-    // the sticky, once still visible in the viewport just below).
-    const stickyBottom = st.sticky.getBoundingClientRect().bottom;
+    // Use the original-ask sub-block's bottom as a stable threshold rather
+    // than the full sticky bottom. When earlier-ask appears the sticky grows,
+    // and naively measuring sticky.bottom cascades: pinning one bubble pushes
+    // the next bubble behind the now-taller sticky, which pins it too, so the
+    // user's just-typed message vanishes.
+    const ref = st.sticky.querySelector('.csh-ask-original') || st.sticky;
+    const threshold = ref.getBoundingClientRect().bottom;
+    // The currently-pinned item is display:none and reports bottom=0, which
+    // would falsely satisfy `bottom <= threshold` forever — so once the user
+    // scrolled past a message it could never be un-pinned. Briefly un-pin
+    // it so its bounding rect reflects its real layout position, then either
+    // re-pin (still scrolled past) or let _dynAskApply tear it down.
+    let prevPinned = null;
+    if (st.currentIdx > 0 && items[st.currentIdx]) {
+      prevPinned = items[st.currentIdx];
+      prevPinned.classList.remove('is-pinned-in-sticky');
+    }
     let idx = 0;
     for (let i = 0; i < items.length; i++) {
-      if (items[i].getBoundingClientRect().bottom <= stickyBottom) idx = i;
+      if (items[i].getBoundingClientRect().bottom <= threshold) idx = i;
       else break;
+    }
+    if (prevPinned && idx === st.currentIdx) {
+      prevPinned.classList.add('is-pinned-in-sticky');
     }
     _dynAskApply(idx, items);
   }
