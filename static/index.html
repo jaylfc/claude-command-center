@@ -4348,6 +4348,11 @@
     const isConvTab = activeTab === 'sessions';
     const hasSession = !!currentSession.id;
     const isNewSession = currentConversation === '__new__';
+    // Backlog GH issue: viewing an issue card in the right pane. Submitting
+    // the input bar spawns a session equivalent to clicking "Edit & start"
+    // on the kanban card, with the typed text appended to the standard
+    // issue-context preamble.
+    const isBacklogIssue = (currentConversation || '').startsWith('backlog-issue-');
     // Show the bar for any selected session — /api/inject-input routes to
     // live-TTY keystroke injection when the session is alive and falls back
     // to headless `claude --resume` when dormant, so the user can always
@@ -4355,9 +4360,13 @@
     // the user with Resume/Launch buttons and no way to just send a message.
     // Also show in "new session" mode where the input doubles as the
     // prompt for spawning a fresh agent.
-    if (isConvTab && (hasSession || isNewSession)) {
+    if (isConvTab && (hasSession || isNewSession || isBacklogIssue)) {
       $convInputBar.classList.add('visible');
-      if (isNewSession) {
+      if (isBacklogIssue) {
+        const n = currentConversation.replace('backlog-issue-', '');
+        $convTtyLabel.textContent = '#' + n;
+        $convInput.placeholder = 'Add edit instructions; submit to start session for issue #' + n + '…';
+      } else if (isNewSession) {
         $convTtyLabel.textContent = 'new';
         $convInput.placeholder = 'Type a prompt to start a new session…';
       } else if (isPkood) {
@@ -4378,6 +4387,13 @@
   async function sendToTerminal() {
     const text = ($convInput && $convInput.value || '').trim();
     if (!text) return;
+    // Backlog GH issue: typed text appended to the standard issue preamble,
+    // then spawn a session — same outcome as clicking "Edit & start" on the
+    // GH card and hitting Launch in the modal.
+    if ((currentConversation || '').startsWith('backlog-issue-')) {
+      await spawnFromBacklogIssue(text);
+      return;
+    }
     // New-session mode: input doubles as the prompt for a fresh spawn.
     if (currentConversation === '__new__') {
       await spawnFromInlineInput(text);
@@ -8206,6 +8222,10 @@
     const $view = getConvView();
     stopConvStream();
     currentConversation = 'backlog-issue-' + issueNum;
+    // Drop any prior session so the bottom input bar routes to "spawn for
+    // this issue" rather than injecting into the previously-viewed session.
+    setCurrentSession(null, null, null, false, null);
+    updateInputBar();
     $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Loading issue #' + issueNum + '...</div>';
     try {
       const res = await fetch('/api/issues/' + issueNum + '/details');
@@ -11769,6 +11789,60 @@
     updateInputBar();
     if (typeof mobileShowForCurrentMode === 'function') mobileShowForCurrentMode();
     setTimeout(() => { if ($convInput) { $convInput.value = ''; $convInput.focus(); } }, 30);
+  }
+
+  // Spawn a session from the bottom input bar while viewing a backlog GH
+  // issue. Mirrors the kanban "Edit & start" flow: builds the same standard
+  // preamble ("Fix issue #N — TITLE\n\nRun `gh issue view N` …") and
+  // appends whatever the user typed as their edit instructions.
+  async function spawnFromBacklogIssue(userText) {
+    const issueNum = (currentConversation || '').replace('backlog-issue-', '');
+    if (!issueNum) return;
+    const conv = conversationsData.find(x => x.id === 'backlog-issue-' + issueNum) || {};
+    const title = conv.display_name || conv.first_message || '';
+    const cleanTitle = (title || '').replace(/^#\d+:\s*/, '').replace(/\[[^\]]*\]\s*/g, '').trim();
+    const preamble = 'Fix issue #' + issueNum + ' — ' + cleanTitle
+      + '\n\nRun `gh issue view ' + issueNum + '` for the full body (title may be truncated).';
+    const body = preamble + '\n\n' + userText;
+    const subject = 'issue-' + issueNum;
+    const prompt = body + SESSION_STATE_INSTRUCTION;
+    if ($convSendBtn) $convSendBtn.disabled = true;
+    const flashRed = () => {
+      if (!$convInput) return;
+      $convInput.style.borderColor = 'var(--red)';
+      setTimeout(() => { $convInput.style.borderColor = ''; }, 1500);
+    };
+    try {
+      const res = await fetch('/api/sessions/spawn', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ prompt, name: subject }),
+      });
+      const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
+      if (data.ok) {
+        insertPendingSpawnCard(data.pid, subject, false);
+        if ($convInput) $convInput.value = '';
+        // Mirror kanban-start-btn: tell GitHub the issue is being worked on.
+        fetch('/api/issues/' + issueNum + '/mark-in-progress', { method: 'POST' }).catch(() => {});
+        const $view = getConvView();
+        if ($view) {
+          $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
+            + '<div style="font-size:15px;color:var(--text);">Spawning session for issue #' + escapeHtml(String(issueNum)) + '…</div>'
+            + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">It will appear in the sidebar in a moment — click it to follow along.</div>'
+            + '</div>';
+        }
+        setTimeout(refreshConversationList, 600);
+        setTimeout(refreshConversationList, 1500);
+        setTimeout(refreshConversationList, 3000);
+      } else {
+        flashRed();
+        showOpToast('Spawn failed: ' + (data.error || 'HTTP ' + res.status), 'error');
+      }
+    } catch (err) {
+      flashRed();
+      showOpToast('Spawn failed: ' + (err && err.message || 'network'), 'error');
+    }
+    if ($convSendBtn) $convSendBtn.disabled = false;
+    if ($convInput) $convInput.focus();
   }
 
   async function spawnFromInlineInput(body) {

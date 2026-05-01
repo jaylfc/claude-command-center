@@ -9658,6 +9658,47 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # there's no one to ask.
             session_cwd = find_session_cwd(sid)
             live = session_live_status(sid, session_cwd).get("live") if sid else False
+
+            # Short-circuit when the PR is already MERGED on GitHub. Without
+            # this, clicking Merge for an already-merged PR injects a useless
+            # prompt into the live session ("please merge this") which the
+            # agent correctly reports as a no-op — but the conversation never
+            # gets archived, so the row stays in the sidebar forever and the
+            # user has to keep clicking. Mirror the user mental model:
+            # merged → done → archive. Idempotent: re-clicking is a no-op
+            # archive (sid is already in archived_set).
+            try:
+                state_cwd = session_cwd or str(REPO_ROOT)
+                state_out = subprocess.run(
+                    ["gh", "pr", "view", target, "--json", "state"],
+                    capture_output=True, text=True, timeout=10, cwd=state_cwd,
+                )
+                if state_out.returncode == 0 and state_out.stdout.strip():
+                    state_data = json.loads(state_out.stdout)
+                    pr_state = (state_data.get("state") or "").upper()
+                    if pr_state == "MERGED":
+                        archived_now = False
+                        archived_set = _load_archived_conversations()
+                        if sid and sid not in archived_set:
+                            archived_set.append(sid)
+                            _save_archived_conversations(archived_set)
+                            archived_now = True
+                        _bust_issue_state_cache()
+                        self.send_json({
+                            "ok": True,
+                            "via": "already-merged",
+                            "target": target,
+                            "archived": True,
+                            "archived_now": archived_now,
+                        })
+                        return
+            except (subprocess.SubprocessError, OSError, ValueError, json.JSONDecodeError):
+                # Best-effort precheck — if `gh pr view` fails (no network,
+                # gh not installed, malformed JSON), fall through to the
+                # existing live-session / dormant-merge paths rather than
+                # blocking the merge action.
+                pass
+
             if live:
                 pr_label = ("PR #" + str(pr_number)) if pr_number else (target or "this PR")
                 prompt = (
@@ -9692,22 +9733,210 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     capture_output=True, text=True, timeout=60, cwd=cwd,
                 )
                 if out.returncode == 0:
+                    # Auto-archive the conv now that the PR is merged.
+                    # Without this, the row stays in "Ready to merge" with
+                    # the same PR chip and the merge button stays clickable,
+                    # so re-clicking gets a confusing second "merged" toast
+                    # (gh is idempotent on already-merged PRs). Mirrors the
+                    # user mental model: merged → done.
+                    archived_set = _load_archived_conversations()
+                    if sid and sid not in archived_set:
+                        archived_set.append(sid)
+                        _save_archived_conversations(archived_set)
+                    # PR merges typically close the linked issue (via
+                    # "Closes #N" in the body); refresh the GH issues
+                    # section so it reflects that on next poll.
+                    _bust_issue_state_cache()
                     self.send_json({
                         "ok": True,
                         "via": "gh",
                         "target": target,
                         "stdout": (out.stdout or "").strip()[:500],
+                        "archived": True,
                     })
                 else:
                     err = ((out.stderr or "").strip() or (out.stdout or "").strip())
+                    err_msg = err[:500] or "gh pr merge failed"
+                    # Translate gh's raw GraphQL error into a one-liner that
+                    # tells the user what to do next. Without this the toast
+                    # reads "GraphQL: Pull Request has merge conflicts
+                    # (mergePullRequest)" — accurate but offers no path
+                    # forward and looks like an internal bug.
+                    el = err.lower()
+                    if "merge conflict" in el or "not mergeable" in el:
+                        err_msg = ("PR has merge conflicts — resolve locally "
+                                   "(rebase/merge main, push), then retry")
                     self.send_json({
                         "ok": False,
                         "via": "gh",
                         "target": target,
-                        "error": err[:500] or "gh pr merge failed",
+                        "error": err_msg,
+                        "stderr": err[:500],
                     })
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
                 self.send_json({"ok": False, "via": "gh", "error": str(e)}, 500)
+        elif re.match(r"^/api/conversations/[a-f0-9-]+/rebase-merge$", path):
+            # Recovery path for "PR has merge conflicts": rebase the head
+            # branch against the PR's base, force-with-lease push, retry the
+            # squash-merge. Force-push consent is the caller's responsibility
+            # (UI surfaces a confirm dialog before calling this).
+            conv_id = path.split("/")[-2]
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            sid = payload.get("session_id") or conv_id
+            branch = (payload.get("branch") or "").strip()
+            pr_number = payload.get("pr_number")
+            pr_url = (payload.get("pr_url") or "").strip()
+            target = None
+            if pr_url and pr_url.startswith("https://github.com/") and "/pull/" in pr_url:
+                target = pr_url
+            if not target and pr_number is not None:
+                try:
+                    target = str(int(pr_number))
+                except (TypeError, ValueError):
+                    target = None
+            if not target and branch:
+                target = branch
+            if not target:
+                self.send_json({"ok": False, "error": "no PR url, number, or branch"}, 400)
+                return
+            if not branch:
+                self.send_json({"ok": False, "error": (
+                    "branch name required to find the worktree to rebase"
+                )}, 400)
+                return
+
+            # Find the worktree currently on this branch. Prefer the
+            # session's cwd when it's still on the head branch; otherwise
+            # scan REPO_ROOT's worktrees by branch name.
+            session_cwd = find_session_cwd(sid)
+            work_path = None
+            if session_cwd and os.path.isdir(session_cwd):
+                try:
+                    rh = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True, text=True, timeout=5, cwd=session_cwd,
+                    )
+                    if rh.returncode == 0 and rh.stdout.strip() == branch:
+                        work_path = session_cwd
+                except (subprocess.SubprocessError, FileNotFoundError):
+                    pass
+            if not work_path:
+                for wt in _list_worktrees(str(REPO_ROOT)):
+                    if wt.get("branch") == branch:
+                        work_path = wt.get("path")
+                        break
+            if not work_path or not os.path.isdir(work_path):
+                self.send_json({"ok": False, "error": (
+                    "no worktree on branch '" + branch + "' — check the "
+                    "branch out locally before retrying"
+                )})
+                return
+
+            # Refuse if the worktree has uncommitted changes — auto-rebasing
+            # over them would either fail or silently bury work.
+            try:
+                rs = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    capture_output=True, text=True, timeout=10, cwd=work_path,
+                )
+                if (rs.stdout or "").strip():
+                    self.send_json({"ok": False, "step": "precheck", "error": (
+                        "worktree has uncommitted changes — commit or stash "
+                        "them first, then retry"
+                    )})
+                    return
+            except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
+                self.send_json({"ok": False, "step": "precheck", "error": str(e)}, 500)
+                return
+
+            # Resolve the PR's base ref so we rebase against the right
+            # branch (usually main, but some repos use master/develop).
+            base = "main"
+            try:
+                rb = subprocess.run(
+                    ["gh", "pr", "view", target, "--json", "baseRefName"],
+                    capture_output=True, text=True, timeout=15, cwd=work_path,
+                )
+                if rb.returncode == 0:
+                    try:
+                        d = json.loads(rb.stdout or "{}")
+                        if d.get("baseRefName"):
+                            base = d["baseRefName"]
+                    except json.JSONDecodeError:
+                        pass
+            except (subprocess.SubprocessError, FileNotFoundError):
+                pass
+
+            def _step(args, timeout=60):
+                try:
+                    return subprocess.run(
+                        args, capture_output=True, text=True,
+                        timeout=timeout, cwd=work_path,
+                    )
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    return None
+
+            r = _step(["git", "fetch", "origin", base])
+            if r is None or r.returncode != 0:
+                msg = ((r.stderr or r.stdout) if r else "fetch failed").strip()[:300]
+                self.send_json({"ok": False, "step": "fetch", "error": (
+                    "git fetch origin " + base + " failed: " + msg
+                )})
+                return
+
+            r = _step(["git", "rebase", "origin/" + base])
+            if r is None or r.returncode != 0:
+                # Conflict during rebase — abort to leave the worktree
+                # in a clean state, then surface a manual-resolution error.
+                try:
+                    subprocess.run(
+                        ["git", "rebase", "--abort"],
+                        capture_output=True, timeout=10, cwd=work_path,
+                    )
+                except (subprocess.SubprocessError, FileNotFoundError):
+                    pass
+                msg = ((r.stderr or r.stdout) if r else "rebase failed").strip()[:300]
+                self.send_json({"ok": False, "step": "rebase", "error": (
+                    "rebase against origin/" + base + " has conflicts that "
+                    "need manual resolution: " + msg
+                )})
+                return
+
+            r = _step(["git", "push", "--force-with-lease"])
+            if r is None or r.returncode != 0:
+                msg = ((r.stderr or r.stdout) if r else "push failed").strip()[:300]
+                self.send_json({"ok": False, "step": "push", "error": (
+                    "git push --force-with-lease failed: " + msg
+                )})
+                return
+
+            r = _step(["gh", "pr", "merge", target, "--squash"])
+            if r is None or r.returncode != 0:
+                msg = ((r.stderr or r.stdout) if r else "merge failed").strip()[:300]
+                self.send_json({"ok": False, "step": "merge", "error": (
+                    "rebase succeeded but gh pr merge still failed: " + msg
+                )})
+                return
+
+            # Success — same archive + cache-bust as the direct merge path.
+            archived_set = _load_archived_conversations()
+            if sid and sid not in archived_set:
+                archived_set.append(sid)
+                _save_archived_conversations(archived_set)
+            _bust_issue_state_cache()
+            self.send_json({
+                "ok": True,
+                "via": "gh-rebase",
+                "target": target,
+                "base": base,
+                "stdout": (r.stdout or "").strip()[:500],
+                "archived": True,
+            })
         elif re.match(r"^/api/conversations/[a-f0-9-]+/verify$", path) or re.match(r"^/api/conversations/issue-\d+/verify$", path) or re.match(r"^/api/conversations/pkood-[^/]+/verify$", path):
             conv_id = path.split("/")[-2]
             length = int(self.headers.get("Content-Length", "0"))
