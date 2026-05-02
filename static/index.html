@@ -3272,7 +3272,7 @@
     .kanban-panel-toolbar .kpt-new-session,
     .kanban-panel-toolbar #kptRunBtn,
     .kanban-panel-toolbar #kptRecentBtn,
-    .kanban-panel-toolbar #kptEngineSelect,
+    .kanban-panel-toolbar #kptToolbarEngineSelect,
     .kanban-panel-toolbar #kptGitOnlyToggle,
     .kanban-panel-toolbar #kptDescToggle,
     .kanban-panel-toolbar .kpt-label,
@@ -3869,13 +3869,6 @@
         <button id="kptRecentBtn" title="Show only sessions/issues touched in the last 10 hours" style="text-align:left;padding:6px 10px;background:transparent;border:none;color:var(--text);font-size:12px;cursor:pointer;border-radius:4px;">Last 10h</button>
         <button id="kptDescToggle" title="Compact mode — hide the description preview on cards" style="text-align:left;padding:6px 10px;background:transparent;border:none;color:var(--text);font-size:12px;cursor:pointer;border-radius:4px;">Compact</button>
         <button id="kptGitOnlyToggle" title="Show only cards linked to a GitHub issue" style="text-align:left;padding:6px 10px;background:transparent;border:none;color:var(--text);font-size:12px;cursor:pointer;border-radius:4px;">GitHub only</button>
-        <label class="kpt-label" title="Pick which engine spawns the next session — Claude (default) or OpenAI Codex" style="display:flex;align-items:center;gap:6px;padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text);">
-          Engine
-          <select id="kptEngineSelect" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px;">
-            <option value="claude">claude</option>
-            <option value="codex">codex</option>
-          </select>
-        </label>
         <label class="kpt-label" title="Spawn the new session in a fresh git worktree (`feat/<slug>` branch) so it can't accidentally commit to main" style="display:flex;align-items:center;gap:6px;padding:6px 10px;font-size:12px;cursor:pointer;color:var(--text);"><input type="checkbox" id="kptWorktreeToggle" style="margin:0;"> 🌿 worktree</label>
       </div>
     </div>
@@ -4011,6 +4004,14 @@
         </div>
         <div class="conv-input-bar" id="convInputBar">
           <input type="text" id="convInput" placeholder="Send to terminal..." autocomplete="off">
+          <!-- Engine picker for new-session mode. Occupies the same slot as
+               the Esc button (mutually exclusive — Esc only appears for live
+               sessions, this only for `__new__`). updateInputBar() toggles
+               visibility. -->
+          <select id="convInputEngineSelect" class="engine-select" title="Engine that spawns this new session — claude or codex" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+            <option value="claude">claude</option>
+            <option value="codex">codex</option>
+          </select>
           <button class="esc-btn" id="convEscBtn" title="Send Esc to terminal — cancels in-flight response (or kills a headless spawn)">Esc</button>
           <button class="send-btn" id="convSendBtn" title="Send to terminal">&gt;</button>
           <span class="tty-label" id="convTtyLabel"></span>
@@ -4026,6 +4027,10 @@
         <input type="text" class="kpt-search" id="kptSearch" placeholder="Search sessions...">
         <button id="kptRefreshBtn" title="Refresh data" aria-label="Refresh data">&#8634;</button>
         <input type="text" class="kpt-new-session" id="kptNewSession" placeholder="New session prompt...">
+        <select id="kptToolbarEngineSelect" title="Engine that spawns the new session — claude or codex" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+          <option value="claude">claude</option>
+          <option value="codex">codex</option>
+        </select>
         <button id="kptRunBtn" title="Run new session" aria-label="Run new session">Run</button>
         <button id="kptListViewBtn" title="Switch to list view" aria-label="Switch to list view">&#9783;</button>
         <span class="kpt-deploy" id="kptDeployStatus" title="Vercel deploy status" style="margin-left:auto;font-size:11px;display:flex;align-items:center;gap:4px;color:var(--text-muted);white-space:nowrap;"></span>
@@ -5167,6 +5172,13 @@
       if ($convEscBtn) {
         const canEsc = hasSession && !isPkood && !isNewSession && !isBacklogIssue && !!liveStatus.live;
         $convEscBtn.style.display = canEsc ? '' : 'none';
+      }
+      // Engine selector occupies the same slot as Esc but only matters
+      // when the input is about to spawn a fresh session. Backlog-issue
+      // mode also spawns, but its `/api/sessions/spawn` flow is
+      // engine-fixed (claude) — don't show a misleading toggle there.
+      if ($convInputEngineSelect) {
+        $convInputEngineSelect.style.display = isNewSession ? '' : 'none';
       }
     } else {
       $convInputBar.classList.remove('visible');
@@ -13439,18 +13451,34 @@
   const $kptSearch = document.getElementById('kptSearch');
   const $kptRefreshBtn = document.getElementById('kptRefreshBtn');
   const $kptRecentBtn = document.getElementById('kptRecentBtn');
-  const $kptEngineSelect = document.getElementById('kptEngineSelect');
-  // Restore last-used engine from localStorage so the user's choice
-  // persists across reloads. Defaults to 'claude' on first launch.
-  if ($kptEngineSelect) {
+  // Spawn-engine state. Source of truth = localStorage. Three DOM nodes
+  // mirror it: the inline bottom-bar selector (new-session mode only),
+  // the Kanban toolbar selector, and the new-session modal selector.
+  // setSpawnEngine() persists + propagates to all three; getSpawnEngine()
+  // is the canonical read used by every spawn handler.
+  const $convInputEngineSelect = document.getElementById('convInputEngineSelect');
+  const $kptToolbarEngineSelect = document.getElementById('kptToolbarEngineSelect');
+  function getSpawnEngine() {
     try {
-      const saved = localStorage.getItem('ccc.spawnEngine');
-      if (saved === 'claude' || saved === 'codex') $kptEngineSelect.value = saved;
+      const v = localStorage.getItem('ccc.spawnEngine');
+      if (v === 'claude' || v === 'codex') return v;
     } catch (_) {}
-    $kptEngineSelect.addEventListener('change', () => {
-      try { localStorage.setItem('ccc.spawnEngine', $kptEngineSelect.value); } catch (_) {}
-    });
+    return 'claude';
   }
+  function setSpawnEngine(v) {
+    if (v !== 'claude' && v !== 'codex') return;
+    try { localStorage.setItem('ccc.spawnEngine', v); } catch (_) {}
+    // $nsmEngineSelect is declared further down in this script; by the
+    // time any user interaction calls setSpawnEngine() it will exist.
+    [$convInputEngineSelect, $kptToolbarEngineSelect,
+     (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)]
+      .forEach(s => { if (s && s.value !== v) s.value = v; });
+  }
+  [$convInputEngineSelect, $kptToolbarEngineSelect].forEach(sel => {
+    if (!sel) return;
+    sel.value = getSpawnEngine();
+    sel.addEventListener('change', () => setSpawnEngine(sel.value));
+  });
   // Probe Codex availability so a user with no Codex install sees the
   // option greyed out instead of getting a 503 mid-spawn. Polled on
   // window focus too — handles "I just installed it; refresh the UI"
@@ -13459,10 +13487,11 @@
     try {
       const r = await fetch('/api/sessions/spawn-codex/availability');
       const d = await r.json();
-      const codexOpt = $kptEngineSelect && $kptEngineSelect.querySelector('option[value="codex"]');
-      const nsmCodexOpt = (typeof $nsmEngineSelect !== 'undefined') && $nsmEngineSelect && $nsmEngineSelect.querySelector('option[value="codex"]');
       const reason = d.available ? '' : (d.reason || 'Codex CLI not found');
-      [codexOpt, nsmCodexOpt].forEach(opt => {
+      const selectors = [$convInputEngineSelect, $kptToolbarEngineSelect,
+        (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)];
+      selectors.forEach(sel => {
+        const opt = sel && sel.querySelector('option[value="codex"]');
         if (!opt) return;
         opt.disabled = !d.available;
         opt.title = reason;
@@ -13470,10 +13499,7 @@
       });
       // If the user had codex selected but it's no longer available,
       // fall back to claude so the next spawn doesn't 503.
-      if (!d.available && $kptEngineSelect && $kptEngineSelect.value === 'codex') {
-        $kptEngineSelect.value = 'claude';
-        try { localStorage.setItem('ccc.spawnEngine', 'claude'); } catch (_) {}
-      }
+      if (!d.available && getSpawnEngine() === 'codex') setSpawnEngine('claude');
     } catch (_) {
       // Probe is best-effort; a network blip shouldn't disable the dropdown.
     }
@@ -13670,9 +13696,7 @@
       let prompt = ($kptNewSession && $kptNewSession.value || '').trim();
       if (!prompt) return;
       const isPkoodPrefix = prompt.startsWith('pkood:');
-      const engine = isPkoodPrefix
-        ? 'pkood'
-        : (($kptEngineSelect && $kptEngineSelect.value) || 'claude');
+      const engine = isPkoodPrefix ? 'pkood' : getSpawnEngine();
       const $kptWorktreeToggle = document.getElementById('kptWorktreeToggle');
       const useWorktree = !!($kptWorktreeToggle && $kptWorktreeToggle.checked);
       if (isPkoodPrefix) prompt = prompt.slice(6).trim();
@@ -13764,16 +13788,18 @@
   const $nsmCancel = document.getElementById('nsmCancel');
   const $nsmBackdrop = document.getElementById('nsmBackdrop');
   const $nsmEngineSelect = document.getElementById('nsmEngineSelect');
+  // Modal selector participates in the same shared-state sync as the
+  // inline ones — change it here and the inline selectors update too.
+  if ($nsmEngineSelect) {
+    $nsmEngineSelect.addEventListener('change', () => setSpawnEngine($nsmEngineSelect.value));
+  }
   function openNewSessionModal(body = '') {
     if (!$nsm) return;
     _clearNsmError();
     $nsmBody.value = body || '';
-    // Sync from the toolbar selector so the modal opens on the same
-    // engine the user just picked. Falls back to 'claude' if the
-    // toolbar element is missing (defensive — both should always exist).
-    if ($nsmEngineSelect && $kptEngineSelect) {
-      $nsmEngineSelect.value = $kptEngineSelect.value || 'claude';
-    }
+    // Sync from shared state so the modal opens on the same engine the
+    // user just picked from any other selector.
+    if ($nsmEngineSelect) $nsmEngineSelect.value = getSpawnEngine();
     const $nsmWorktree = document.getElementById('nsmWorktree');
     const $kptWorktreeToggle = document.getElementById('kptWorktreeToggle');
     if ($nsmWorktree && $kptWorktreeToggle) $nsmWorktree.checked = $kptWorktreeToggle.checked;
@@ -14648,7 +14674,7 @@
     if ($kanbanBoardSplit) $kanbanBoardSplit.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
     const $view = getConvView();
     if ($view) {
-      const engineLabel = ($kptEngineSelect && $kptEngineSelect.value === 'codex') ? 'Codex' : 'Claude';
+      const engineLabel = getSpawnEngine() === 'codex' ? 'Codex' : 'Claude';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
         + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.</div>'
@@ -14721,7 +14747,7 @@
     }
     const subject = firstSentence(body);
     const prompt = body + SESSION_STATE_INSTRUCTION;
-    const engine = ($kptEngineSelect && $kptEngineSelect.value) || 'claude';
+    const engine = getSpawnEngine();
     if ($convSendBtn) $convSendBtn.disabled = true;
     const flashRed = () => {
       if (!$convInput) return;
