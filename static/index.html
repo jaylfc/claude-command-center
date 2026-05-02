@@ -8222,6 +8222,13 @@
               c.archived = data.archived;
               setOptimisticOverride(c.session_id, { archived: c.archived });
             }
+            // Patch archiveData (Round 5 / #13) so the next archive
+            // re-render reflects the new archived state — same reason
+            // as the rename patch above.
+            if (typeof archiveData !== 'undefined' && Array.isArray(archiveData)) {
+              const ac = archiveData.find(x => x.session_id === sessionId);
+              if (ac) ac.archived = data.archived;
+            }
             renderSidebar(filterConversations($convSearch.value));
             if (data.archived && nextSelectId) {
               selectConversation(nextSelectId);
@@ -8630,6 +8637,18 @@
             // User just renamed from the command center → always teal regardless of
             // storage path (jsonl write-through vs. side-car fallback).
             c.name_overridden = !!newName;
+          }
+          // Also patch archiveData so the next archive re-render (periodic
+          // poll or filter input) doesn't clobber the rename by rebuilding
+          // shaped rows from the stale archive cache. Without this, the
+          // user sees the rename appear briefly, then snap back to the
+          // first-message title on the next 10s tick.
+          if (typeof archiveData !== 'undefined' && Array.isArray(archiveData)) {
+            const ac = archiveData.find(x => x.session_id === item.dataset.sessionId);
+            if (ac) {
+              ac.display_name = newName || null;
+              ac.name_overridden = !!newName;
+            }
           }
           // Brief toast on the item title
           const toast = document.createElement('div');
@@ -11078,6 +11097,17 @@
         has_push: !!c.has_push,
         has_edit: !!c.has_edit,
         tail_pr_number: c.tail_pr_number || null,
+        // Sidecar overlay (Round 3) — only meaningful for live rows.
+        // The renderer reads these directly to draw the live tool pill
+        // ("▶ Editing foo.ts"), sending pulse, and needs-approval signal.
+        sidecar_status: c.sidecar_status || null,
+        sidecar_tool: c.sidecar_tool || null,
+        sidecar_file: c.sidecar_file || null,
+        sidecar_ts: c.sidecar_ts || 0,
+        sidecar_in_flight: !!c.sidecar_in_flight,
+        sidecar_has_writes: !!c.sidecar_has_writes,
+        needs_approval: !!c.needs_approval,
+        needs_approval_message: c.needs_approval_message || '',
         source: 'interactive',
         session_cwd: c.session_cwd || c.folder_path,
         session_cwd_exists: !folderOrphan,

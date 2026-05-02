@@ -574,6 +574,33 @@ def find_all_conversations(limit_per_folder=None):
             )
             is_live = _archive_session_is_live(session_id)
 
+            # Sidecar overlay (Round 3): for live sessions, merge in the
+            # sidecar's snapshot of "what is the agent doing right now"
+            # — tool name, file, in-flight flag, needs-approval marker.
+            # Cheap (one or two file reads per live session) and unlocks
+            # the live-tool pill / sending pulse / needs-approval signal
+            # on archive rows for free, since the existing renderer reads
+            # these exact fields.
+            sidecar_fields = {
+                "sidecar_status": None,
+                "sidecar_has_writes": False,
+                "sidecar_tool": None,
+                "sidecar_file": None,
+                "sidecar_ts": 0,
+                "sidecar_in_flight": False,
+                "needs_approval": False,
+                "needs_approval_message": "",
+            }
+            if is_live:
+                _entry = {"session_id": session_id, "is_live": True}
+                try:
+                    _add_sidecar_fields(_entry)
+                    for k in sidecar_fields:
+                        if k in _entry:
+                            sidecar_fields[k] = _entry[k]
+                except Exception:
+                    pass
+
             out.append({
                 "session_id": session_id,
                 "jsonl_path": str(f),
@@ -596,6 +623,9 @@ def find_all_conversations(limit_per_folder=None):
                 "has_edit": (pills or {}).get("has_edit", False),
                 "tail_pr_number": pr_number,
                 "is_live": is_live,
+                # Sidecar overlay — only meaningful when is_live; cold
+                # rows get safe defaults that suppress the live pill.
+                **sidecar_fields,
             })
 
     out.sort(key=lambda r: r["mtime"], reverse=True)
