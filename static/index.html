@@ -2592,6 +2592,47 @@
     opacity: 0.55;
     font-style: italic;
   }
+  /* Folder group header + divider used by the In Progress section in
+   * multi-repo mode: cards from the last 24h are grouped under a small
+   * folder chip header so "what's hot in chuck right now" reads as a
+   * cluster. Older cards drop below a divider and resume the flat chrono
+   * list with gap separators. */
+  .conv-folder-group-header {
+    --chip-hue: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px 4px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .conv-folder-group-chip {
+    flex-shrink: 0;
+    padding: 2px 9px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: hsla(var(--chip-hue), 60%, 50%, 0.18);
+    color: hsl(var(--chip-hue), 55%, 65%);
+    border: 1px solid hsla(var(--chip-hue), 55%, 50%, 0.35);
+    max-width: 180px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conv-folder-group-chip.is-orphan { opacity: 0.55; font-style: italic; }
+  .conv-folder-group-count {
+    color: var(--text-muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .conv-folder-group-divider {
+    padding: 12px 12px 4px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-top: 1px solid var(--border);
+    margin-top: 6px;
+  }
   .archive-empty-state {
     padding: 24px 16px;
     text-align: center;
@@ -7812,7 +7853,14 @@
     };
     // Active list keeps the date-gap separators so morning/evening
     // boundaries stay visible while scanning.
-    const _activeRowsHtml = _sessionConvs.map((c, i, arr) => {
+    //
+    // In multi-repo (archive) mode — detected by the presence of a
+    // folder_label_chip on cards — the most-recent 24h get grouped by
+    // folder so you can scan "what's hot in chuck right now" without
+    // hopping repos. Older cards continue as a flat chrono list with
+    // gap separators (the existing single-repo behavior).
+    const _shouldGroupByFolder = _sessionConvs.some(c => c.folder_label_chip);
+    const _flatRowsWithSeparators = (cards) => cards.map((c, i, arr) => {
       let separator = '';
       if (i > 0) {
         const newer = (arr[i - 1] && arr[i - 1].modified) || 0;
@@ -7827,6 +7875,48 @@
       }
       return separator + _renderRow(c);
     }).join('');
+
+    let _activeRowsHtml;
+    if (_shouldGroupByFolder) {
+      const _nowSec = Date.now() / 1000;
+      const _24hAgo = _nowSec - 24 * 3600;
+      const _recent = [];
+      const _older = [];
+      for (const c of _sessionConvs) {
+        if ((c.modified || 0) >= _24hAgo) _recent.push(c);
+        else _older.push(c);
+      }
+      // Group recent cards by folder; preserve folder order by the most
+      // recent card in each group (freshest folder appears first).
+      const _byFolder = new Map();
+      for (const c of _recent) {
+        const key = c.folder_label_chip || c.folder_path || '(unknown)';
+        if (!_byFolder.has(key)) _byFolder.set(key, []);
+        _byFolder.get(key).push(c);
+      }
+      const _folderEntries = Array.from(_byFolder.entries()).sort((a, b) => {
+        const aMax = a[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        const bMax = b[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        return bMax - aMax;
+      });
+      const _groupHtml = _folderEntries.map(([folder, cards]) => {
+        const hue = (cards[0].folder_chip_hue | 0);
+        const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
+        return '<div class="conv-folder-group-header" style="--chip-hue:' + hue + ';">'
+          + '<span class="conv-folder-group-chip' + orphan + '">' + escapeHtml(folder) + '</span>'
+          + '<span class="conv-folder-group-count">' + cards.length + '</span>'
+          + '</div>'
+          + cards.map(_renderRow).join('');
+      }).join('');
+      let _olderHtml = '';
+      if (_older.length) {
+        _olderHtml = '<div class="conv-folder-group-divider">Older than 24 h</div>'
+          + _flatRowsWithSeparators(_older);
+      }
+      _activeRowsHtml = _groupHtml + _olderHtml;
+    } else {
+      _activeRowsHtml = _flatRowsWithSeparators(_sessionConvs);
+    }
     // In progress section: every row that's not a backlog card or archived.
     // Mirrors the kanban "In progress" column (key: 'working' under the
     // hood — relabel only) so the two surfaces use the same vocabulary.
@@ -10766,9 +10856,16 @@
   // ── All-repos archive mode ──────────────────────────────────────────────
   // Read-only browse of every conversation across every folder under
   // ~/.claude/projects/. Toggled by #convAllReposToggle in the sidebar
-  // header; while on, replaces the sidebar list with archive rows. v1
-  // click is a no-op — activation flow comes later.
-  let archiveMode = false;
+  // header; while on, replaces the sidebar list with archive rows.
+  // Default is ON — most users want the cross-folder view first; opt out
+  // sticks via localStorage.
+  const _ARCHIVE_MODE_KEY = 'ccc-archive-mode';
+  let archiveMode = (() => {
+    try {
+      const v = localStorage.getItem(_ARCHIVE_MODE_KEY);
+      return v === null ? true : v === '1';
+    } catch (_) { return true; }
+  })();
   let archiveData = [];
 
   async function loadArchiveAll() {
@@ -10871,6 +10968,7 @@
 
   async function setArchiveMode(on) {
     archiveMode = !!on;
+    try { localStorage.setItem(_ARCHIVE_MODE_KEY, archiveMode ? '1' : '0'); } catch (_) {}
     const $btn = document.getElementById('convAllReposToggle');
     if ($btn) $btn.classList.toggle('is-active', archiveMode);
     const $list = document.getElementById('convList');
@@ -10899,6 +10997,8 @@
     const $btn = document.getElementById('convAllReposToggle');
     if ($btn) {
       $btn.addEventListener('click', () => setArchiveMode(!archiveMode));
+      // Reflect initial active state before the boot kick fires below.
+      $btn.classList.toggle('is-active', archiveMode);
     }
     const $search = document.getElementById('convSearch');
     if ($search) {
@@ -10908,6 +11008,12 @@
       $search.addEventListener('input', () => {
         if (archiveMode) renderArchiveList($search.value);
       });
+    }
+    // Boot kick: if archive is the saved/default mode, load it after the DOM
+    // settles so we don't race with the initial loadConversationList.
+    if (archiveMode) {
+      // Defer a tick so other initializers (peer registry, repo list) finish.
+      setTimeout(() => { setArchiveMode(true); }, 0);
     }
   })();
 
