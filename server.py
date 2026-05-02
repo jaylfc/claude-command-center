@@ -37,8 +37,14 @@ from pathlib import Path
 
 # The repository the command center is watching. Resolution priority:
 #   1. CCC_WATCH_REPO env var (explicit override; never persisted)
-#   2. ~/.claude/command-center/last-repo.txt (last picker selection)
-#   3. cwd (first-run default)
+#   2. cwd (server is bound to where it was started)
+# Multi-repo design (see docs/superpowers/specs/2026-04-30-multirepo-design.md):
+# `last-repo.txt` is no longer consulted on startup — each server is fixed to
+# its own repo. The file is still written/read by switch_repo_root() for the
+# legacy picker UI, but doesn't influence which repo a fresh server binds to.
+# Without this change, `cd /other/repo && python3 server.py` silently picked
+# up the previous active repo from last-repo.txt instead of cwd, defeating
+# the multi-server-per-repo workflow.
 # Can also be switched at runtime via switch_repo_root() — caches that depend on
 # REPO_ROOT (backlog, issue titles/state) get invalidated automatically.
 _LAST_REPO_FILE = Path.home() / ".claude" / "command-center" / "last-repo.txt"
@@ -184,22 +190,11 @@ def _native_pick_folder(prompt_text="Pick a repo folder for Claude Command Cente
     return {"ok": False, "error": stderr or f"osascript exited {r.returncode}"}
 
 
-def _load_persisted_repo():
-    """Read the persisted last-repo path written by switch_repo_root.
-    Returns a Path or None if missing/unreadable/no-longer-exists."""
-    try:
-        p = Path(_LAST_REPO_FILE.read_text().strip()).expanduser().resolve()
-        return p if p.is_dir() else None
-    except (OSError, ValueError):
-        return None
-
-
 _env_watch = os.environ.get("CCC_WATCH_REPO")
 if _env_watch:
     REPO_ROOT = Path(_env_watch).resolve()
 else:
-    persisted = _load_persisted_repo()
-    REPO_ROOT = persisted if persisted else Path.cwd().resolve()
+    REPO_ROOT = Path.cwd().resolve()
 LOG_DIR = REPO_ROOT / ".claude" / "logs"
 
 def _encode_project_slug(path):
