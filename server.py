@@ -1239,6 +1239,7 @@ def switch_repo_root(new_path):
     new_root = Path(new_path).expanduser().resolve()
     if not new_root.is_dir():
         raise ValueError(f"not a directory: {new_root}")
+    old_root = REPO_ROOT
     REPO_ROOT = new_root
     LOG_DIR = REPO_ROOT / ".claude" / "logs"
     _cc_project_slug = _encode_project_slug(REPO_ROOT)
@@ -1252,7 +1253,9 @@ def switch_repo_root(new_path):
     _issue_state_cache_ts = 0
     # Persist so the next server start defaults to this repo. Best-effort —
     # if we can't write the state file (full disk, permissions), the switch
-    # still works for this session; just doesn't survive a restart.
+    # still works for this session; just doesn't survive a restart. Note:
+    # multi-repo no longer reads last-repo.txt at startup, but the legacy
+    # picker modal still consults it, and the file is cheap to keep current.
     try:
         _LAST_REPO_FILE.parent.mkdir(parents=True, exist_ok=True)
         _LAST_REPO_FILE.write_text(str(REPO_ROOT) + "\n")
@@ -1260,6 +1263,15 @@ def switch_repo_root(new_path):
         print(f"  [repo-switch] Could not persist last-repo: {e}")
     # Record this switch in the recent list so the picker modal can surface it.
     _record_recent_repo(str(REPO_ROOT))
+    # Re-register in the multi-repo peer registry. Without this, the entry
+    # we wrote at startup still claims the old repo_path and the dropdown
+    # on a reload (or any peer's poll) would show stale state. Best-effort.
+    try:
+        if old_root != REPO_ROOT:
+            _unregister_self(old_root)
+        _register_self(REPO_ROOT, PORT, BIND_HOST)
+    except Exception as e:
+        print(f"  [repo-switch] Could not update registry: {e}")
     return REPO_ROOT
 # Tool's own assets live next to this file.
 CCC_ROOT = Path(__file__).resolve().parent
@@ -1287,6 +1299,10 @@ MORNING_ENABLED = (
 )
 
 PORT = int(os.environ.get("PORT", 8090))
+# Set in main() after _resolve_runtime_network. Module-level so functions
+# called at runtime (e.g. switch_repo_root → _register_self) can reach it
+# without threading the value through every call site.
+BIND_HOST = "127.0.0.1"
 # Optional title-prefix noise stripper. Comma-separated prefixes.
 # Empty by default; set `CCC_TITLE_STRIP=ACME,FOO` to strip `[ACME ...]` and `[FOO ...]` from titles.
 TITLE_STRIP_PREFIXES = [p for p in os.environ.get("CCC_TITLE_STRIP", "").split(",") if p]
@@ -11084,40 +11100,46 @@ def _registry_locked_rmw(transform_fn):
 
 
 def _register_self(repo_path, port, bind_host):
-    """Insert (or replace) this server's entry in the registry. Silent on
+    """Insert (or replace) this process's entry in the registry. Dedup is by
+    pid — each running process owns one entry. Same process re-registering
+    (e.g. after switch_repo_root) replaces its own row; different processes
+    never collide, even if they happen to share a repo_path. Silent on
     I/O error — registry is a discovery convenience, not load-bearing."""
     repo_str = str(repo_path)
+    self_pid = os.getpid()
     payload = {
         "repo_path": repo_str,
         "label": Path(repo_str).name,
         "port": int(port),
         "bind_host": bind_host,
-        "pid": os.getpid(),
+        "pid": self_pid,
         "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "version": __version__,
     }
 
     def replace(entries):
-        out = [e for e in entries if not (isinstance(e, dict) and e.get("repo_path") == repo_str)]
+        out = [e for e in entries if not (isinstance(e, dict) and e.get("pid") == self_pid)]
         out.append(payload)
         return out
 
     try:
         _registry_locked_rmw(replace)
-        print(f"  [registry] {REGISTRY_FILE} -> {repo_str} (pid {payload['pid']}, port {payload['port']})")
+        print(f"  [registry] {REGISTRY_FILE} -> {repo_str} (pid {self_pid}, port {payload['port']})")
     except OSError as e:
         print(f"  [registry] could not register ({e})")
 
 
-def _unregister_self(repo_path):
-    """Remove this server's entry from the registry by repo_path. Idempotent;
-    silent on I/O error so it's safe to call from signal handlers."""
+def _unregister_self(repo_path=None):
+    """Remove this process's entry from the registry. Keyed by current pid,
+    not repo_path — switch_repo_root passes the old repo_path for context
+    only. Idempotent; silent on I/O error so it's safe to call from signal
+    handlers."""
     if not REGISTRY_FILE.exists():
         return
-    repo_str = str(repo_path)
+    self_pid = os.getpid()
 
     def remove(entries):
-        return [e for e in entries if not (isinstance(e, dict) and e.get("repo_path") == repo_str)]
+        return [e for e in entries if not (isinstance(e, dict) and e.get("pid") == self_pid)]
 
     try:
         _registry_locked_rmw(remove)
@@ -11220,8 +11242,9 @@ def main():
     # `_resolve_runtime_network`.
     bind_host, resolved_origins, network_info = _resolve_runtime_network(PORT)
     ALLOWED_ORIGINS[:] = resolved_origins  # in-place: _check_same_origin reads the global list
-    global RUNTIME_NETWORK_INFO
+    global RUNTIME_NETWORK_INFO, BIND_HOST
     RUNTIME_NETWORK_INFO = network_info
+    BIND_HOST = bind_host
     server = ThreadedHTTPServer((bind_host, PORT), CommandCenterHandler)
     if bind_host not in ("127.0.0.1", "localhost", "::1"):
         print(f"⚠️  WARNING: binding to {bind_host} — server is reachable from the network.")
