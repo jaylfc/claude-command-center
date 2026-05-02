@@ -4769,15 +4769,33 @@ def find_all_sessions():
 
 
 def _resolve_conversation_path(conversation_id):
-    """Return the JSONL path for a session, looking through every slug
-    variant for the current REPO_ROOT. Falls back to the canonical
-    CONVERSATIONS_DIR path so error messages still point somewhere sensible
-    when the file genuinely doesn't exist."""
+    """Return the JSONL path for a session.
+
+    Resolution order:
+      1. Slugs under the current REPO_ROOT (modern + legacy encoders).
+      2. Global walk of ~/.claude/projects/*/ — needed for the multi-repo
+         archive view, where the user clicks a conversation from a folder
+         that isn't the active server's REPO_ROOT.
+      3. Canonical CONVERSATIONS_DIR path, so 404 messages still point
+         somewhere sensible when the file genuinely doesn't exist.
+    """
+    name = conversation_id + ".jsonl"
     for d in _conversation_dirs():
-        cand = d / (conversation_id + ".jsonl")
+        cand = d / name
         if cand.is_file():
             return cand
-    return CONVERSATIONS_DIR / (conversation_id + ".jsonl")
+    projects_root = Path.home() / ".claude" / "projects"
+    if projects_root.is_dir():
+        try:
+            for project_dir in projects_root.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                cand = project_dir / name
+                if cand.is_file():
+                    return cand
+        except OSError:
+            pass
+    return CONVERSATIONS_DIR / name
 
 
 def parse_conversation(conversation_id, after_line=0):
