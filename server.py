@@ -67,6 +67,46 @@ _RECENT_REPOS_CAP = 10
 # scanned by find_conversations() and easy to gc on demand.
 _SCRATCH_DIR = Path.home() / ".claude" / "command-center" / "scratch"
 
+# Files-from-conversation: extension whitelist driving both the
+# /api/conversations/<id>/files extractor and the /api/reveal-file
+# opener's allow-list. Closed set by design — adding `.app` / `.sh` /
+# `.command` here would re-introduce the macOS-`open`-as-RCE risk that
+# /api/open's path sandbox prevents (see SECURITY.md). Keep this list
+# tight; the opener has no path-prefix clamp because this clamp does
+# the work.
+FILE_CATEGORIES = {
+    "images":        {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
+                      ".heic", ".bmp", ".tiff"},
+    "videos":        {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v"},
+    "pdfs":          {".pdf"},
+    "docs":          {".docx", ".doc", ".odt", ".rtf", ".pages",
+                      ".xlsx", ".xls", ".csv", ".ods", ".numbers"},
+    "presentations": {".pptx", ".ppt", ".key", ".odp"},
+    "markdown":      {".md", ".mdx"},
+    "html":          {".html", ".htm"},
+}
+FILE_EXT_TO_CATEGORY = {
+    ext: cat for cat, exts in FILE_CATEGORIES.items() for ext in exts
+}
+
+
+def _categorize_file_target(target):
+    """Return the category name for `target` (a path or URL), or None
+    if its extension is not in the whitelist. Case-insensitive on the
+    extension. URLs lose any query string / fragment before the lookup
+    so `foo.pdf?token=…` still classifies as `pdfs`."""
+    if not target:
+        return None
+    s = target
+    # Strip URL query / fragment so foo.pdf?x=1 → foo.pdf
+    for sep in ("?", "#"):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    # os.path.splitext handles trailing-dot / no-dot cleanly.
+    _, ext = os.path.splitext(s)
+    return FILE_EXT_TO_CATEGORY.get(ext.lower())
+
+
 _SESSION_LOAD_STATUS_LOCK = threading.Lock()
 _SESSION_LOAD_STATUS = {
     "active": False,
@@ -5556,6 +5596,168 @@ def parse_conversation(conversation_id, after_line=0):
     return {"events": events, "last_line": line_num}
 
 
+# Regex for files-from-conversation extraction. Two patterns: HTTP(S)
+# URLs, and absolute Unix paths anchored to whitespace/quote/paren so
+# we don't pull tokens out of the middle of code identifiers.
+_FFC_URL_RE = re.compile(r"https?://[^\s<>\"'`)\]]+")
+_FFC_PATH_RE = re.compile(r"(?:^|(?<=[\s\"'`(\[]))(/[^\s\"'`<>)\]]+)")
+_FFC_PATH_TRAIL_PUNCT = ".,;:!?)]}>'\""
+_FFC_MAX_ENTRIES = 500
+
+
+def _ffc_clean_match(s, is_url):
+    """Strip trailing punctuation that the regex pulled in. URLs lose
+    `).,;` etc. Paths the same. Returns the cleaned string or '' if
+    cleaning leaves nothing useful."""
+    if not s:
+        return ""
+    while s and s[-1] in _FFC_PATH_TRAIL_PUNCT:
+        s = s[:-1]
+    return s
+
+
+def _ffc_iter_targets(text):
+    """Yield (target, kind) for every URL/path mention in `text`.
+    Does NOT filter by extension — caller (the extractor) does that."""
+    if not isinstance(text, str) or not text:
+        return
+    for m in _FFC_URL_RE.finditer(text):
+        cleaned = _ffc_clean_match(m.group(0), is_url=True)
+        if cleaned:
+            yield (cleaned, "url")
+    for m in _FFC_PATH_RE.finditer(text):
+        cleaned = _ffc_clean_match(m.group(1), is_url=False)
+        if cleaned:
+            yield (cleaned, "path")
+
+
+def _ffc_flatten_strings(value):
+    """Walk a tool_use input dict yielding every nested string. Used
+    to scan entire `Bash{command: …}` / `Edit{old_string: …}` payloads,
+    not just the surface fields, so a path buried in a long bash
+    command is still caught."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _ffc_flatten_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _ffc_flatten_strings(v)
+
+
+def _extract_files_from_conversation(conversation_id):
+    """Walk the JSONL once and return a grouped, de-duped, capped
+    payload of file-like artifacts mentioned anywhere in the
+    conversation — tool_use inputs, assistant/user text, tool_results.
+    Categorization is by extension whitelist (FILE_CATEGORIES);
+    everything else (code, scripts, unknown extensions) is dropped.
+    Returns {"count": int, "truncated": bool, "groups": {cat: [row…]}}.
+
+    Cheap to call: single linear pass, no I/O beyond the JSONL read.
+    """
+    filepath = _resolve_conversation_path(conversation_id)
+    seen = {}  # target -> {label, target, kind, category, first_line}
+    line_num = 0
+    truncated = False
+
+    def consider(target, kind, line):
+        nonlocal truncated
+        if not target or target in seen:
+            return
+        category = _categorize_file_target(target)
+        if not category:
+            return
+        if len(seen) >= _FFC_MAX_ENTRIES:
+            truncated = True
+            return
+        # Label: basename for paths, URL last-path-segment (or host) for URLs.
+        if kind == "url":
+            try:
+                parsed = urllib.parse.urlsplit(target)
+                tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                label = tail or parsed.netloc or target
+            except ValueError:
+                label = target
+        else:
+            label = os.path.basename(target) or target
+        seen[target] = {
+            "label": label,
+            "target": target,
+            "kind": kind,
+            "category": category,
+            "first_line": line,
+        }
+
+    try:
+        with open(filepath, "r") as f:
+            for line in f:
+                line_num += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                msg = ev.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    for target, kind in _ffc_iter_targets(content):
+                        consider(target, kind, line_num)
+                    continue
+                if not isinstance(content, list):
+                    continue
+
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "text":
+                        for target, kind in _ffc_iter_targets(block.get("text", "")):
+                            consider(target, kind, line_num)
+                    elif btype == "tool_use":
+                        # Direct fields first (so file_path with an exotic
+                        # character the path-regex misses still lands).
+                        inp = block.get("input")
+                        if isinstance(inp, dict):
+                            for fld in ("file_path", "notebook_path", "path"):
+                                v = inp.get(fld)
+                                if isinstance(v, str) and v.startswith("/"):
+                                    consider(v, "path", line_num)
+                        # Then deep scan every nested string.
+                        for s in _ffc_flatten_strings(inp):
+                            for target, kind in _ffc_iter_targets(s):
+                                consider(target, kind, line_num)
+                    elif btype == "tool_result":
+                        rc = block.get("content")
+                        texts = []
+                        if isinstance(rc, str):
+                            texts.append(rc)
+                        elif isinstance(rc, list):
+                            for sub in rc:
+                                if isinstance(sub, dict) and sub.get("type") == "text":
+                                    texts.append(sub.get("text", ""))
+                        for t in texts:
+                            for target, kind in _ffc_iter_targets(t):
+                                consider(target, kind, line_num)
+    except FileNotFoundError:
+        return {"count": 0, "truncated": False, "groups": {}}
+
+    # Group + sort by first_line ascending within each category.
+    groups = {}
+    for row in seen.values():
+        cat = row.pop("category")
+        groups.setdefault(cat, []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda r: r["first_line"])
+
+    return {"count": len(seen), "truncated": truncated, "groups": groups}
+
+
 def _parse_conversation_event(ev, line_num):
     """Parse a single conversation JSONL event."""
     ev_type = ev.get("type", "")
@@ -9844,6 +10046,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             status["needs_approval"] = bool(notif)
             status["needs_approval_message"] = notif.get("message", "") if notif else ""
             self.send_json(status)
+        elif re.match(r"^/api/conversations/[a-f0-9-]+/files$", path):
+            conv_id = path.split("/")[-2]
+            payload = _extract_files_from_conversation(conv_id)
+            self.send_json(payload)
         elif re.match(r"^/api/conversations/[a-f0-9-]+/stream$", path):
             conv_id = path.split("/")[-2]
             qs = urllib.parse.parse_qs(parsed.query)
@@ -10633,6 +10839,41 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_json({"ok": True, "path": fpath, "name": fname, "bytes": len(raw)})
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/reveal-file":
+            # SECURITY: macOS `open` will execute apps and scripts. Unlike
+            # /api/open (which clamps targets to REPO_ROOT/LOG_DIR), we
+            # accept any path — but only if its extension is in
+            # FILE_EXT_TO_CATEGORY. The whitelist excludes .app, .sh,
+            # .command, .py, etc., so subprocess.Popen(["open", path])
+            # cannot trigger code execution. Adding executable types to
+            # FILE_CATEGORIES would re-introduce the RCE risk.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            target = (payload.get("path") or "").strip()
+            if not target:
+                self.send_json({"ok": False, "error": "missing path"}, 400)
+            elif not os.path.isabs(target):
+                self.send_json({"ok": False, "error": "path must be absolute"}, 400)
+            else:
+                ext = os.path.splitext(target)[1].lower()
+                if ext not in FILE_EXT_TO_CATEGORY:
+                    self.send_json(
+                        {"ok": False, "error": "extension not allowed", "ext": ext},
+                        403,
+                    )
+                elif not os.path.exists(target):
+                    self.send_json({"ok": False, "error": "not found", "path": target}, 404)
+                else:
+                    try:
+                        subprocess.Popen(["open", target])
+                        print(f"[reveal-file] {target}", file=sys.stderr)
+                        self.send_json({"ok": True, "path": target})
+                    except Exception as e:
+                        self.send_json({"ok": False, "error": str(e)}, 500)
         elif path == "/api/open":
             # SECURITY: macOS `open` will execute scripts/apps. We MUST clamp
             # the target to a known-safe sandbox or this is RCE-as-a-feature.

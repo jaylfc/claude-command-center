@@ -2025,6 +2025,94 @@
   .nsm-primary:hover { opacity: 0.9; background: var(--accent); }
   .nsm-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* --- Files-from-conversation (pill + modal) ----------------------- */
+  /* Pill lives in .conv-sticky-header; only rendered when count > 0. */
+  .ffc-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; margin-left: 8px;
+    border: 1px solid var(--border, #30363d);
+    border-radius: 999px;
+    background: var(--surface-2, #161b22);
+    color: var(--text, #c9d1d9);
+    font-size: 11px; font-weight: 500; cursor: pointer;
+    line-height: 1.4;
+  }
+  .ffc-pill:hover { border-color: var(--accent, #58a6ff); color: var(--accent, #58a6ff); }
+  .ffc-pill[hidden] { display: none !important; }
+  .ffc-pill-count { opacity: 0.7; }
+
+  /* Modal — modeled on .nsm- pattern. */
+  .ffc-overlay {
+    position: fixed; inset: 0; z-index: 9999;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ffc-overlay[hidden] { display: none !important; }
+  .ffc-backdrop {
+    position: absolute; inset: 0;
+    background: rgba(0,0,0,0.65);
+    -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px);
+  }
+  .ffc-dialog {
+    position: relative;
+    background: var(--surface, #0d1117);
+    border: 1px solid var(--border, #30363d);
+    border-radius: 8px;
+    width: min(640px, 92vw);
+    max-height: 80vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+  }
+  .ffc-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border, #30363d);
+  }
+  .ffc-title { font-size: 14px; font-weight: 600; color: var(--text, #c9d1d9); }
+  .ffc-close {
+    background: none; border: none; cursor: pointer;
+    color: var(--text-muted, #8b949e); font-size: 18px; line-height: 1;
+    padding: 4px 8px; border-radius: 4px;
+  }
+  .ffc-close:hover { background: var(--surface-2, #161b22); color: var(--text, #c9d1d9); }
+  .ffc-body {
+    overflow-y: auto; padding: 8px 16px 16px;
+  }
+  .ffc-section { margin-top: 12px; }
+  .ffc-section:first-child { margin-top: 0; }
+  .ffc-section-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-muted, #8b949e); margin-bottom: 6px;
+  }
+  .ffc-row {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 8px 10px; border-radius: 6px;
+    cursor: pointer;
+  }
+  .ffc-row:hover { background: var(--surface-2, #161b22); }
+  .ffc-row-label {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--text, #c9d1d9); font-size: 13px;
+  }
+  .ffc-row-icon { width: 18px; text-align: center; }
+  .ffc-row-target {
+    color: var(--text-muted, #8b949e); font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    word-break: break-all;
+    cursor: copy;
+  }
+  .ffc-row-target:hover { color: var(--text, #c9d1d9); }
+  .ffc-row-toast {
+    color: #f85149; font-size: 11px; margin-top: 2px;
+  }
+  .ffc-footer {
+    padding: 8px 16px;
+    border-top: 1px solid var(--border, #30363d);
+    color: var(--text-muted, #8b949e); font-size: 11px;
+  }
+  .ffc-empty {
+    color: var(--text-muted, #8b949e); padding: 16px; text-align: center;
+  }
+
   /* ── Repo picker modal ─────────────────────────────────────────────
      Opened when the user selects "Pick a repo…" from the dropdown.
      Shares the nsm-* overlay pattern for visual consistency. */
@@ -3807,6 +3895,18 @@
         <span><span class="cmdk-hint">↵</span> open</span>
         <span><span class="cmdk-hint">Esc</span> close</span>
       </div>
+    </div>
+  </div>
+
+  <div id="ffcOverlay" class="ffc-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ffcTitle">
+    <div class="ffc-backdrop" id="ffcBackdrop"></div>
+    <div class="ffc-dialog">
+      <div class="ffc-header">
+        <div class="ffc-title" id="ffcTitle">Files in this conversation</div>
+        <button type="button" class="ffc-close" id="ffcClose" aria-label="Close">×</button>
+      </div>
+      <div class="ffc-body" id="ffcBody"></div>
+      <div class="ffc-footer" id="ffcFooter" hidden></div>
     </div>
   </div>
 
@@ -9462,6 +9562,10 @@
       try {
         const data = JSON.parse(ev.data);
         if (data.events && data.events.length > 0) {
+          // Invalidate the FFC cache so new file references picked up during
+          // this streaming turn are reflected in the pill count on the next
+          // ffcRefreshForCurrent() call (triggered by renderConversationEvents).
+          ffcInvalidate(currentConversation);
           renderConversationEvents(data.events);
           convLastLine = data.last_line;
         }
@@ -9499,6 +9603,225 @@
     const p2 = (n) => (n < 10 ? '0' + n : '' + n);
     const p3 = (n) => (n < 10 ? '00' + n : n < 100 ? '0' + n : '' + n);
     return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()) + '.' + p3(d.getMilliseconds());
+  }
+
+  // ----------------------------------------------------------------
+  // Files-from-conversation: per-conversation cache + pill rendering.
+  // The pill lives in .conv-sticky-header and only renders when the
+  // count is > 0. Click → openFfcModal (Task 8).
+  // ----------------------------------------------------------------
+  const _ffcCache = new Map(); // conversation_id -> {count, truncated, groups}
+
+  async function ffcFetch(convId) {
+    if (!convId || convId === '__new__' || convId.startsWith('backlog-') || convId.startsWith('pkood-') || convId.startsWith('issue-')) {
+      return null;
+    }
+    if (_ffcCache.has(convId)) {
+      return _ffcCache.get(convId);
+    }
+    try {
+      const r = await fetch('/api/conversations/' + encodeURIComponent(convId) + '/files');
+      if (!r.ok) {
+        _ffcCache.set(convId, {count: 0, truncated: false, groups: {}});
+        return _ffcCache.get(convId);
+      }
+      const data = await r.json();
+      _ffcCache.set(convId, data);
+      return data;
+    } catch (e) {
+      // Network / parse failure — silent. Pill just stays hidden.
+      _ffcCache.set(convId, {count: 0, truncated: false, groups: {}});
+      return _ffcCache.get(convId);
+    }
+  }
+
+  function ffcInvalidate(convId) {
+    if (convId) _ffcCache.delete(convId);
+  }
+
+  function ffcEnsurePill(stickyEl, data) {
+    if (!stickyEl) return;
+    let pill = stickyEl.querySelector('.ffc-pill');
+    const hasFiles = data && data.count > 0;
+    if (!hasFiles) {
+      if (pill) pill.hidden = true;
+      return;
+    }
+    if (!pill) {
+      pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'ffc-pill';
+      pill.title = 'Files mentioned in this conversation';
+      pill.innerHTML = '📎 Files <span class="ffc-pill-count"></span>';
+      pill.addEventListener('click', () => {
+        const cur = currentConversation;
+        const cached = cur ? _ffcCache.get(cur) : null;
+        if (cached && typeof openFfcModal === 'function') openFfcModal(cached);
+      });
+      // Append to the sticky header. CSS sets margin-left so it sits
+      // next to whatever was already there.
+      stickyEl.appendChild(pill);
+    }
+    pill.hidden = false;
+    pill.querySelector('.ffc-pill-count').textContent = '(' + data.count + ')';
+  }
+
+  async function ffcRefreshForCurrent() {
+    const cur = currentConversation;
+    if (!cur) return;
+    const data = await ffcFetch(cur);
+    // The conversation may have switched while we were fetching. Bail
+    // if so — the new conversation's renderer will trigger its own.
+    if (currentConversation !== cur) return;
+    const sticky = document.querySelector('.conversations-view .conv-sticky-header');
+    ffcEnsurePill(sticky, data);
+  }
+
+  const FFC_CATEGORY_ORDER = [
+    {key: 'images',        label: 'Images',        icon: '📷'},
+    {key: 'pdfs',          label: 'PDFs',          icon: '📕'},
+    {key: 'docs',          label: 'Docs',          icon: '📄'},
+    {key: 'presentations', label: 'Presentations', icon: '📊'},
+    {key: 'videos',        label: 'Videos',        icon: '🎬'},
+    {key: 'markdown',      label: 'Markdown',      icon: '📝'},
+    {key: 'html',          label: 'HTML',          icon: '🌐'},
+  ];
+
+  function ffcEscapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  function ffcRenderRow(row, icon) {
+    const div = document.createElement('div');
+    div.className = 'ffc-row';
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'ffc-row-label';
+    labelEl.innerHTML = '<span class="ffc-row-icon">' + icon + '</span>' +
+                       '<span>' + ffcEscapeHtml(row.label) + '</span>';
+    if (row.kind === 'url') {
+      const a = document.createElement('a');
+      a.href = row.target;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.color = 'inherit';
+      a.style.textDecoration = 'none';
+      a.appendChild(labelEl);
+      div.appendChild(a);
+    } else {
+      div.appendChild(labelEl);
+      div.addEventListener('click', async (e) => {
+        if (e.target.classList.contains('ffc-row-target')) return; // don't double-trigger on path-copy
+        try {
+          const r = await fetch('/api/reveal-file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path: row.target}),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({error: 'open failed'}));
+            ffcShowRowToast(div, j.error || ('HTTP ' + r.status));
+          }
+        } catch (err) {
+          ffcShowRowToast(div, 'network error');
+        }
+      });
+    }
+
+    const tgt = document.createElement('div');
+    tgt.className = 'ffc-row-target';
+    tgt.textContent = row.target;
+    tgt.title = 'Click to copy';
+    tgt.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(row.target).then(() => {
+        const orig = tgt.textContent;
+        tgt.textContent = 'copied';
+        setTimeout(() => { tgt.textContent = orig; }, 900);
+      }).catch(() => {});
+    });
+    div.appendChild(tgt);
+
+    return div;
+  }
+
+  function ffcShowRowToast(rowEl, msg) {
+    let toast = rowEl.querySelector('.ffc-row-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'ffc-row-toast';
+      rowEl.appendChild(toast);
+    }
+    toast.textContent = msg;
+    setTimeout(() => {
+      if (toast.parentNode === rowEl) rowEl.removeChild(toast);
+    }, 3000);
+  }
+
+  function openFfcModal(data) {
+    const overlay = document.getElementById('ffcOverlay');
+    const body    = document.getElementById('ffcBody');
+    const footer  = document.getElementById('ffcFooter');
+    if (!overlay || !body || !footer) return;
+    body.innerHTML = '';
+
+    if (!data || !data.count) {
+      const empty = document.createElement('div');
+      empty.className = 'ffc-empty';
+      empty.textContent = 'No files mentioned in this conversation.';
+      body.appendChild(empty);
+    } else {
+      for (const cat of FFC_CATEGORY_ORDER) {
+        const rows = (data.groups || {})[cat.key];
+        if (!rows || !rows.length) continue;
+        const section = document.createElement('div');
+        section.className = 'ffc-section';
+        const title = document.createElement('div');
+        title.className = 'ffc-section-title';
+        title.textContent = cat.label + ' (' + rows.length + ')';
+        section.appendChild(title);
+        for (const row of rows) {
+          section.appendChild(ffcRenderRow(row, cat.icon));
+        }
+        body.appendChild(section);
+      }
+    }
+
+    if (data && data.truncated) {
+      footer.hidden = false;
+      footer.textContent = 'Showing first 500 — conversation contains more.';
+    } else {
+      footer.hidden = true;
+      footer.textContent = '';
+    }
+
+    overlay.hidden = false;
+    document.addEventListener('keydown', _ffcEscHandler);
+  }
+
+  function closeFfcModal() {
+    const overlay = document.getElementById('ffcOverlay');
+    if (overlay) overlay.hidden = true;
+    document.removeEventListener('keydown', _ffcEscHandler);
+  }
+
+  function _ffcEscHandler(e) {
+    if (e.key === 'Escape') closeFfcModal();
+  }
+
+  // Wire close handlers — defensive against DOMContentLoaded already fired.
+  function _ffcWireCloseHandlers() {
+    const backdrop = document.getElementById('ffcBackdrop');
+    const close    = document.getElementById('ffcClose');
+    if (backdrop) backdrop.addEventListener('click', closeFfcModal);
+    if (close)    close.addEventListener('click', closeFfcModal);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _ffcWireCloseHandlers);
+  } else {
+    _ffcWireCloseHandlers();
   }
 
   // Parse a JSONL event's ISO timestamp ("ts" field, set server-side from
@@ -10967,6 +11290,10 @@
         $view.appendChild(_optimistic);
       }
     }
+    // Files-from-conversation pill: the sticky header may have just
+    // been created (above) or may already exist. Fire-and-forget; the
+    // pill stays hidden if the conversation has no qualifying files.
+    ffcRefreshForCurrent();
   }
 
   function filterConversations(q) {
