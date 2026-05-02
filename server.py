@@ -16,6 +16,7 @@ __version__ = "0.3.0"
 
 import ast
 import base64
+import fcntl
 import http.server
 import json
 import os
@@ -36,8 +37,14 @@ from pathlib import Path
 
 # The repository the command center is watching. Resolution priority:
 #   1. CCC_WATCH_REPO env var (explicit override; never persisted)
-#   2. ~/.claude/command-center/last-repo.txt (last picker selection)
-#   3. cwd (first-run default)
+#   2. cwd (server is bound to where it was started)
+# Multi-repo design (see docs/superpowers/specs/2026-04-30-multirepo-design.md):
+# `last-repo.txt` is no longer consulted on startup — each server is fixed to
+# its own repo. The file is still written/read by switch_repo_root() for the
+# legacy picker UI, but doesn't influence which repo a fresh server binds to.
+# Without this change, `cd /other/repo && python3 server.py` silently picked
+# up the previous active repo from last-repo.txt instead of cwd, defeating
+# the multi-server-per-repo workflow.
 # Can also be switched at runtime via switch_repo_root() — caches that depend on
 # REPO_ROOT (backlog, issue titles/state) get invalidated automatically.
 _LAST_REPO_FILE = Path.home() / ".claude" / "command-center" / "last-repo.txt"
@@ -183,22 +190,11 @@ def _native_pick_folder(prompt_text="Pick a repo folder for Claude Command Cente
     return {"ok": False, "error": stderr or f"osascript exited {r.returncode}"}
 
 
-def _load_persisted_repo():
-    """Read the persisted last-repo path written by switch_repo_root.
-    Returns a Path or None if missing/unreadable/no-longer-exists."""
-    try:
-        p = Path(_LAST_REPO_FILE.read_text().strip()).expanduser().resolve()
-        return p if p.is_dir() else None
-    except (OSError, ValueError):
-        return None
-
-
 _env_watch = os.environ.get("CCC_WATCH_REPO")
 if _env_watch:
     REPO_ROOT = Path(_env_watch).resolve()
 else:
-    persisted = _load_persisted_repo()
-    REPO_ROOT = persisted if persisted else Path.cwd().resolve()
+    REPO_ROOT = Path.cwd().resolve()
 LOG_DIR = REPO_ROOT / ".claude" / "logs"
 
 def _encode_project_slug(path):
@@ -260,6 +256,416 @@ CONVERSATIONS_DIR = Path.home() / ".claude" / "projects" / _cc_project_slug
 # merge with origin/main introduced _candidate_conversation_dirs.
 def _conversation_dirs():
     return _candidate_conversation_dirs(REPO_ROOT)
+
+
+# In-memory cache for archive-view git pill computation. Keyed by
+# session_id, valued by {mtime, pills, pr_number, computed_at}. The
+# cache is invalidated when the JSONL's mtime advances (a new event
+# was appended) — which is the only thing that can change git state
+# from CCC's perspective. Cold sessions stay cached forever for the
+# server's lifetime; rebuilds from scratch on restart. Bounded by
+# session count (~thousands max), so unbounded growth isn't a real
+# concern in practice.
+_ARCHIVE_PILLS_CACHE = {}
+_ARCHIVE_PILLS_LOCK = threading.Lock()
+# 3 days — only sessions modified within this window get a fresh git
+# computation on the cold scan. Older sessions return null pills and
+# render with no state chip; the user can manually refresh if they
+# need fresh state for an old row.
+_ARCHIVE_PILLS_RECENT_WINDOW = 3 * 86400
+
+
+def _archive_compute_session_pills(cwd):
+    """Run git ops in `cwd` and return {worktree_dirty, has_commit,
+    has_push, has_edit}. Returns None on any failure (missing dir,
+    non-repo, git error, timeout) — caller treats None as "no pill."""
+    try:
+        if not cwd or not Path(cwd).is_dir():
+            return None
+    except (OSError, ValueError):
+        return None
+    # uncommitted: working tree has any change.
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if r.returncode != 0:
+            return None
+        worktree_dirty = bool(r.stdout.strip())
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    # local commits not on any remote — this captures both "ahead of
+    # tracked upstream" and "branch with no upstream at all" cases.
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "rev-list", "--count", "HEAD", "--not", "--remotes"],
+            capture_output=True, text=True, timeout=2,
+        )
+        ahead = int((r.stdout.strip() or "0")) if r.returncode == 0 else 0
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        ahead = 0
+    has_commit = ahead > 0
+    # has_push is intentionally always False for archive entries: once a
+    # session pushes, the local commits no longer count as ahead-of-remote,
+    # and from the cwd we can't distinguish "this session pushed" from
+    # "this session did nothing." The renderer's pill chain falls through
+    # to PR#, "committed," or "uncommitted" instead — those are the
+    # actionable states.
+    # has_edit is True so the "no edits" pill never renders for archive
+    # rows: every session that left a JSONL on disk did *something*; the
+    # pill's purpose is to flag fresh sessions that haven't acted yet,
+    # which doesn't apply to historical archive data.
+    return {
+        "worktree_dirty": worktree_dirty,
+        "has_commit": has_commit,
+        "has_push": False,
+        "has_edit": True,
+    }
+
+
+def _archive_extract_pr_number(jsonl_path):
+    """Walk the JSONL for `gh pr create` tool_result events; return the
+    first PR number found, or None. Cheap: streams the file linewise and
+    bails on the first hit. Expected at most a handful of pr-create
+    events per session."""
+    pr_re = re.compile(r"github\.com/[^/]+/[^/]+/pull/(\d+)")
+    try:
+        with open(jsonl_path, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                # Cheap pre-filter: skip lines without "pull/".
+                if "pull/" not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # Tool result events carry the gh output text. Search the
+                # whole event JSON serialized as text — robust to whichever
+                # field carries the URL.
+                m = pr_re.search(line)
+                if m:
+                    try:
+                        return int(m.group(1))
+                    except ValueError:
+                        continue
+    except (OSError, UnicodeDecodeError):
+        pass
+    return None
+
+
+def _archive_session_is_live(session_id):
+    """A session is "live" if any sidecar marker exists for it. Sidecars
+    are written by Claude Code's hooks and removed when sessions end, so
+    their presence is the canonical "agent is doing something" signal."""
+    if not session_id or not SIDECAR_STATE_DIR.is_dir():
+        return False
+    try:
+        for suffix in (".json", "_writes", "_in_flight.json", "_needs_approval.json"):
+            if (SIDECAR_STATE_DIR / f"{session_id}{suffix}").exists():
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _archive_pills_for(session_id, jsonl_path, jsonl_mtime, session_cwd, mtime_now):
+    """Cached pills + PR number for an archive entry. Skips git ops for
+    sessions older than _ARCHIVE_PILLS_RECENT_WINDOW (PR# is still
+    extracted, since it's cheap and never changes once set)."""
+    with _ARCHIVE_PILLS_LOCK:
+        cached = _ARCHIVE_PILLS_CACHE.get(session_id)
+        if cached and cached.get("mtime") == jsonl_mtime:
+            return cached.get("pills"), cached.get("pr_number")
+
+    is_recent = (mtime_now - jsonl_mtime) < _ARCHIVE_PILLS_RECENT_WINDOW
+    pills = _archive_compute_session_pills(session_cwd) if (is_recent and session_cwd) else None
+    pr_number = _archive_extract_pr_number(jsonl_path)
+
+    with _ARCHIVE_PILLS_LOCK:
+        _ARCHIVE_PILLS_CACHE[session_id] = {
+            "mtime": jsonl_mtime,
+            "pills": pills,
+            "pr_number": pr_number,
+            "computed_at": time.time(),
+        }
+    return pills, pr_number
+
+
+def _decode_project_slug(slug):
+    """Best-effort reverse of _encode_project_slug. The encoding is lossy
+    (every non-alphanumeric becomes `-`), so a single slug can map to many
+    candidate paths; we pick the first one that exists on disk by walking
+    from `/` and absorbing as many consecutive `-`-separated parts into
+    each path component as needed to find an existing dir.
+
+    Returns a Path (existing) or None when no candidate resolves. Used by
+    find_all_conversations to give a clean folder label for slugs whose
+    repo has hyphens in the name (e.g. `my-finance-app`).
+    """
+    if not slug.startswith("-"):
+        return None
+    parts = slug[1:].split("-")
+
+    def search(prefix, remaining):
+        if not remaining:
+            return prefix if prefix.is_dir() else None
+        for k in range(1, len(remaining) + 1):
+            name = "-".join(remaining[:k])
+            candidate = prefix / name
+            if candidate.is_dir():
+                result = search(candidate, remaining[k:])
+                if result is not None:
+                    return result
+        return None
+
+    try:
+        return search(Path("/"), parts)
+    except (OSError, ValueError):
+        return None
+
+
+def find_all_conversations(limit_per_folder=None):
+    """Walk ~/.claude/projects/ for every subdir and return a flat list of
+    conversation metadata across every folder you've ever Claude-Code'd in.
+
+    Powers the multi-repo conversation archive: read-only browse of every
+    JSONL on disk, regardless of whether a CCC server is currently running
+    for that folder. Slow on cold scan (proportional to total JSONL count),
+    so callers should expect ~seconds latency the first time. No caching
+    layer in v1 — add later if it bites.
+
+    Each entry:
+        {session_id, jsonl_path, slug, folder_label, folder_path,
+         mtime, size, first_message, git_branch}
+
+    Folder resolution: known-repo paths from recent + custom files give a
+    real label; unknown slugs fall back to a best-effort decode (replace
+    `-` with `/` and verify) or just the raw slug.
+    """
+    projects_root = Path.home() / ".claude" / "projects"
+    if not projects_root.is_dir():
+        return []
+
+    # Build slug → repo_path map for label resolution.
+    known_by_slug = {}
+    try:
+        for repo in (_load_recent_repos() + _load_custom_repos()):
+            try:
+                known_by_slug[_encode_project_slug(repo)] = repo
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Global state files keyed by session_id alone — same source of truth
+    # the active-repo session list reads. Merging them in here lets the
+    # archive view show user renames and route archived sessions into the
+    # Archived bucket without a server-per-repo.
+    try:
+        name_overrides = _load_session_name_overrides()
+    except Exception:
+        name_overrides = {}
+    try:
+        archived_set = set(_load_archived_conversations())
+    except Exception:
+        archived_set = set()
+
+    out = []
+    seen_session_ids = set()
+    _now = time.time()
+
+    for project_dir in projects_root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        slug = project_dir.name
+
+        repo_path = known_by_slug.get(slug)
+        if repo_path:
+            folder_label = Path(repo_path).name
+            folder_path = repo_path
+        else:
+            decoded = _decode_project_slug(slug)
+            if decoded:
+                folder_label = decoded.name or slug
+                folder_path = str(decoded)
+            else:
+                folder_label = slug
+                folder_path = slug
+
+        try:
+            jsonls = []
+            for f in project_dir.iterdir():
+                if f.is_file() and f.name.endswith(".jsonl"):
+                    try:
+                        jsonls.append((f, f.stat()))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+        jsonls.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
+        if limit_per_folder:
+            jsonls = jsonls[:limit_per_folder]
+
+        for f, stat in jsonls:
+            session_id = f.stem
+            if session_id in seen_session_ids:
+                continue
+            seen_session_ids.add(session_id)
+
+            first_message = None
+            timestamp = None
+            git_branch = None
+            session_cwd = None
+            try:
+                with open(f, "r") as fh:
+                    for i, line in enumerate(fh):
+                        if i >= 20:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not first_message and ev.get("type") == "user":
+                            msg = (ev.get("message") or {}).get("content")
+                            if isinstance(msg, str):
+                                first_message = msg.strip()[:200]
+                            elif isinstance(msg, list):
+                                for part in msg:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        first_message = (part.get("text") or "").strip()[:200]
+                                        break
+                        if not git_branch:
+                            git_branch = ev.get("gitBranch") or ev.get("git_branch")
+                        if not timestamp:
+                            timestamp = ev.get("timestamp")
+                        if not session_cwd:
+                            session_cwd = ev.get("cwd")
+                        if first_message and git_branch and timestamp and session_cwd:
+                            break
+            except (OSError, UnicodeDecodeError):
+                pass
+
+            # Tool-call inference — match what extract_session_workspace
+            # does for active sessions. The JSONL's first-event cwd /
+            # gitBranch reflect where the session was *launched*, but the
+            # user often `cd`s into a worktree partway through, so the
+            # branch chip would show "main" even when Claude has been
+            # editing in `feat/foo` for hours. _infer_effective_repo walks
+            # the session's tool-call paths and finds the dominant git
+            # repo; it's mtime-cached internally so the cost amortizes.
+            effective_cwd = session_cwd or folder_path or ""
+            effective_branch = git_branch
+            effective_kind = None
+            try:
+                # Pass the already-stat'd mtime so the function can hit
+                # its cache without re-walking PROJECTS_ROOT for every
+                # session (otherwise 936 × 68 = ~63k stat calls per batch).
+                eff = _infer_effective_repo(
+                    session_id,
+                    literal_cwd=session_cwd or folder_path,
+                    jsonl_mtime=stat.st_mtime,
+                )
+            except Exception:
+                eff = None
+            if eff and eff.get("top"):
+                effective_cwd = eff["top"]
+                if eff.get("branch"):
+                    effective_branch = eff["branch"]
+                effective_kind = eff.get("kind")  # 'worktree' / 'clone' / 'other'
+
+            # Worktree detection: prefer the inferred kind when available;
+            # fall back to path-shape heuristics on the resolved cwd. Path
+            # heuristics catch worktrees the user picked manually that
+            # don't match `_infer_effective_repo`'s "dominant repo" rule.
+            cwd_is_worktree = (
+                effective_kind == "worktree"
+                or "/.worktrees/" in effective_cwd
+                or "/.claude/worktrees/" in effective_cwd
+                or "-wt-" in Path(effective_cwd).name
+            )
+
+            display_name = name_overrides.get(session_id) or None
+
+            # Pills + PR# (mtime-cached). Last 3 days only for git ops;
+            # PR# is always cheap-extracted from JSONL. Run pills against
+            # the inferred effective cwd so the uncommitted/committed
+            # state matches what Claude has actually been editing — same
+            # reason we override branch + worktree-detection above.
+            pills, pr_number = _archive_pills_for(
+                session_id, f, stat.st_mtime,
+                effective_cwd, _now,
+            )
+            is_live = _archive_session_is_live(session_id)
+
+            # Sidecar overlay (Round 3): for live sessions, merge in the
+            # sidecar's snapshot of "what is the agent doing right now"
+            # — tool name, file, in-flight flag, needs-approval marker.
+            # Cheap (one or two file reads per live session) and unlocks
+            # the live-tool pill / sending pulse / needs-approval signal
+            # on archive rows for free, since the existing renderer reads
+            # these exact fields.
+            sidecar_fields = {
+                "sidecar_status": None,
+                "sidecar_has_writes": False,
+                "sidecar_tool": None,
+                "sidecar_file": None,
+                "sidecar_ts": 0,
+                "sidecar_in_flight": False,
+                "needs_approval": False,
+                "needs_approval_message": "",
+            }
+            if is_live:
+                _entry = {"session_id": session_id, "is_live": True}
+                try:
+                    _add_sidecar_fields(_entry)
+                    for k in sidecar_fields:
+                        if k in _entry:
+                            sidecar_fields[k] = _entry[k]
+                except Exception:
+                    pass
+
+            out.append({
+                "session_id": session_id,
+                "jsonl_path": str(f),
+                "slug": slug,
+                "folder_label": folder_label,
+                "folder_path": folder_path,
+                # Surface the inferred effective cwd / branch — these are
+                # what the renderer's branch chip + worktree leaf read,
+                # and they reflect where Claude actually edited (after
+                # any `cd` into a worktree), not the launch values.
+                "session_cwd": effective_cwd,
+                "session_cwd_is_worktree": cwd_is_worktree,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "first_message": first_message,
+                "git_branch": effective_branch,
+                "display_name": display_name,
+                "name_overridden": bool(display_name),
+                "archived": session_id in archived_set,
+                # Round 2: state pills + PR# + live flag.
+                "worktree_dirty": (pills or {}).get("worktree_dirty", False),
+                "has_commit": (pills or {}).get("has_commit", False),
+                "has_push": (pills or {}).get("has_push", False),
+                "has_edit": (pills or {}).get("has_edit", False),
+                "tail_pr_number": pr_number,
+                "is_live": is_live,
+                # Sidecar overlay — only meaningful when is_live; cold
+                # rows get safe defaults that suppress the live pill.
+                **sidecar_fields,
+            })
+
+    out.sort(key=lambda r: r["mtime"], reverse=True)
+    return out
+
 
 def load_known_repos():
     """Auto-detect projects for the picker by scanning $HOME.
@@ -1243,6 +1649,7 @@ def switch_repo_root(new_path):
     new_root = Path(new_path).expanduser().resolve()
     if not new_root.is_dir():
         raise ValueError(f"not a directory: {new_root}")
+    old_root = REPO_ROOT
     REPO_ROOT = new_root
     LOG_DIR = REPO_ROOT / ".claude" / "logs"
     _cc_project_slug = _encode_project_slug(REPO_ROOT)
@@ -1256,7 +1663,9 @@ def switch_repo_root(new_path):
     _issue_state_cache_ts = 0
     # Persist so the next server start defaults to this repo. Best-effort —
     # if we can't write the state file (full disk, permissions), the switch
-    # still works for this session; just doesn't survive a restart.
+    # still works for this session; just doesn't survive a restart. Note:
+    # multi-repo no longer reads last-repo.txt at startup, but the legacy
+    # picker modal still consults it, and the file is cheap to keep current.
     try:
         _LAST_REPO_FILE.parent.mkdir(parents=True, exist_ok=True)
         _LAST_REPO_FILE.write_text(str(REPO_ROOT) + "\n")
@@ -1264,6 +1673,15 @@ def switch_repo_root(new_path):
         print(f"  [repo-switch] Could not persist last-repo: {e}")
     # Record this switch in the recent list so the picker modal can surface it.
     _record_recent_repo(str(REPO_ROOT))
+    # Re-register in the multi-repo peer registry. Without this, the entry
+    # we wrote at startup still claims the old repo_path and the dropdown
+    # on a reload (or any peer's poll) would show stale state. Best-effort.
+    try:
+        if old_root != REPO_ROOT:
+            _unregister_self(old_root)
+        _register_self(REPO_ROOT, PORT, BIND_HOST)
+    except Exception as e:
+        print(f"  [repo-switch] Could not update registry: {e}")
     return REPO_ROOT
 # Tool's own assets live next to this file.
 CCC_ROOT = Path(__file__).resolve().parent
@@ -1291,6 +1709,10 @@ MORNING_ENABLED = (
 )
 
 PORT = int(os.environ.get("PORT", 8090))
+# Set in main() after _resolve_runtime_network. Module-level so functions
+# called at runtime (e.g. switch_repo_root → _register_self) can reach it
+# without threading the value through every call site.
+BIND_HOST = "127.0.0.1"
 # Optional title-prefix noise stripper. Comma-separated prefixes.
 # Empty by default; set `CCC_TITLE_STRIP=ACME,FOO` to strip `[ACME ...]` and `[FOO ...]` from titles.
 TITLE_STRIP_PREFIXES = [p for p in os.environ.get("CCC_TITLE_STRIP", "").split(",") if p]
@@ -4599,15 +5021,33 @@ def find_all_sessions():
 
 
 def _resolve_conversation_path(conversation_id):
-    """Return the JSONL path for a session, looking through every slug
-    variant for the current REPO_ROOT. Falls back to the canonical
-    CONVERSATIONS_DIR path so error messages still point somewhere sensible
-    when the file genuinely doesn't exist."""
+    """Return the JSONL path for a session.
+
+    Resolution order:
+      1. Slugs under the current REPO_ROOT (modern + legacy encoders).
+      2. Global walk of ~/.claude/projects/*/ — needed for the multi-repo
+         archive view, where the user clicks a conversation from a folder
+         that isn't the active server's REPO_ROOT.
+      3. Canonical CONVERSATIONS_DIR path, so 404 messages still point
+         somewhere sensible when the file genuinely doesn't exist.
+    """
+    name = conversation_id + ".jsonl"
     for d in _conversation_dirs():
-        cand = d / (conversation_id + ".jsonl")
+        cand = d / name
         if cand.is_file():
             return cand
-    return CONVERSATIONS_DIR / (conversation_id + ".jsonl")
+    projects_root = Path.home() / ".claude" / "projects"
+    if projects_root.is_dir():
+        try:
+            for project_dir in projects_root.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                cand = project_dir / name
+                if cand.is_file():
+                    return cand
+        except OSError:
+            pass
+    return CONVERSATIONS_DIR / name
 
 
 def parse_conversation(conversation_id, after_line=0):
@@ -7191,7 +7631,7 @@ def _remap_stale_path(path, literal_cwd, cd_targets):
 _EFFECTIVE_REPO_CACHE = {}
 
 
-def _infer_effective_repo(session_id, literal_cwd=None, exclude_top=None):
+def _infer_effective_repo(session_id, literal_cwd=None, exclude_top=None, jsonl_mtime=None):
     """From a session's tool-call file paths, find the dominant git repo.
 
     Returns dict with keys: top, count, total, branch, kind, ahead, behind
@@ -7204,22 +7644,27 @@ def _infer_effective_repo(session_id, literal_cwd=None, exclude_top=None):
 
     `exclude_top` lets callers say "I already know cwd resolves to repo X,
     only surface inference if a *different* repo dominates."
+
+    `jsonl_mtime` lets callers (e.g. find_all_conversations) pass the
+    mtime they already stat'd, skipping the PROJECTS_ROOT walk that
+    otherwise dominates cache-hit cost for batch users.
     """
     # Cache key: jsonl mtime makes the entry self-invalidate when new
     # tool calls land. literal_cwd / exclude_top affect the result so
     # they're part of the key.
-    jsonl_mtime = 0.0
-    if PROJECTS_ROOT.is_dir():
-        for pd in PROJECTS_ROOT.iterdir():
-            if not pd.is_dir():
-                continue
-            cand = pd / f"{session_id}.jsonl"
-            if cand.is_file():
-                try:
-                    jsonl_mtime = cand.stat().st_mtime
-                except OSError:
-                    jsonl_mtime = 0.0
-                break
+    if jsonl_mtime is None:
+        jsonl_mtime = 0.0
+        if PROJECTS_ROOT.is_dir():
+            for pd in PROJECTS_ROOT.iterdir():
+                if not pd.is_dir():
+                    continue
+                cand = pd / f"{session_id}.jsonl"
+                if cand.is_file():
+                    try:
+                        jsonl_mtime = cand.stat().st_mtime
+                    except OSError:
+                        jsonl_mtime = 0.0
+                    break
     cache_key = (session_id, jsonl_mtime, literal_cwd, exclude_top)
     if cache_key in _EFFECTIVE_REPO_CACHE:
         return _EFFECTIVE_REPO_CACHE[cache_key]
@@ -8919,6 +9364,32 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "repos": repos,
                 "recent": _load_recent_repos(),
             })
+        elif path == "/api/registry":
+            # Multi-repo peer discovery: list every CCC server live on this
+            # machine. Stale entries (pid no longer alive) are pruned on read.
+            # The UI polls this to know which peers to fetch per-repo data
+            # from. Read-only; loopback trust applies.
+            self.send_json({"peers": _read_registry_pruned()})
+        elif path == "/api/conversations/all":
+            # Server-agnostic conversation archive: every JSONL across every
+            # folder under ~/.claude/projects/, tagged with folder + reverse
+            # chrono. Read-only browse, no peer registry consulted. The UI's
+            # "All repos" mode renders from this. Slow on cold scan; the
+            # caller is expected to show a loading state.
+            convs = find_all_conversations()
+            self.send_json({"conversations": convs, "count": len(convs)})
+        elif path == "/api/identity":
+            # This server's own identity card. Used by peers (and the UI on
+            # peers' behalf) to verify a registry entry's port still belongs
+            # to the expected repo, since registry entries can grow stale
+            # between writes and reads.
+            self.send_json({
+                "repo_path": str(REPO_ROOT),
+                "label": REPO_ROOT.name,
+                "port": PORT,
+                "pid": os.getpid(),
+                "version": __version__,
+            })
         elif re.match(r"^/api/morning/goals/[A-Za-z0-9_-]+$", path):
             slug = path.rsplit("/", 1)[-1]
             detail = morning.get_goal_detail(slug)
@@ -8937,7 +9408,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         check the Origin header. Browsers always set Origin on cross-origin
         requests but may omit it on same-origin (varies). We allow:
           - missing Origin (curl, same-origin form posts in some browsers)
-          - Origin matching localhost / 127.0.0.1 / ::1 on our PORT
+          - Origin matching localhost / 127.0.0.1 / ::1 on ANY port. The
+            multi-repo design (see docs/superpowers/specs/2026-04-30-
+            multirepo-design.md) runs sibling CCC servers on different
+            loopback ports and the browser UI on one needs to fetch from
+            the others. A malicious external site can't set a loopback
+            Origin header (browsers set it from the page's actual URL),
+            so the loopback wildcard doesn't widen the threat model — the
+            trust boundary is already "anything that can reach loopback".
           - Origin in the CCC_ALLOWED_ORIGIN env var (for trusted-network
             access via Tailscale / VPN — exact match against the env value)
         Anything else gets 403. Returns True if request is allowed.
@@ -8945,12 +9423,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         origin = (self.headers.get("Origin") or "").strip()
         if not origin:
             return True  # no Origin = curl / programmatic / same-origin form
-        for host in ("localhost", "127.0.0.1", "[::1]"):
-            for scheme in ("http", "https"):
-                if origin == f"{scheme}://{host}:{PORT}":
-                    return True
-                if origin == f"{scheme}://{host}":  # default port edge case
-                    return True
+        # Any port on loopback is OK — siblings serve other repos on their
+        # own ports and the UI fetches across them. `\[::1\]` because IPv6
+        # literals carry brackets in URL form.
+        if re.match(r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$", origin):
+            return True
         if origin in ALLOWED_ORIGINS:
             return True
         self.send_json({"error": "cross-origin POST rejected", "origin": origin}, 403)
@@ -10995,6 +11472,143 @@ def ensure_hooks_installed():
             tmp_path.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Multi-repo peer registry
+#
+# Each running CCC server writes itself into ~/.claude/command-center/registry.json
+# on startup and removes itself on graceful shutdown. Stale entries (pid no
+# longer alive) are pruned by readers, so a force-killed server self-heals on
+# the next read. The registry is the source of truth for "which CCC servers
+# are live"; the UI uses it to discover peers and aggregate cross-repo data
+# in the browser. Concurrent writes from sibling servers are serialized via
+# fcntl.flock on the registry file itself.
+# ---------------------------------------------------------------------------
+
+REGISTRY_FILE = COMMAND_CENTER_STATE_DIR / "registry.json"
+
+
+def _is_pid_alive(pid):
+    """Return True if `pid` is a live process. Sends signal 0 (no-op) and
+    treats any OSError as 'not alive'."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _prune_registry_entries(entries):
+    """Drop entries whose pid is not alive. Pure function — no I/O."""
+    return [e for e in entries if isinstance(e, dict) and _is_pid_alive(e.get("pid"))]
+
+
+def _registry_locked_rmw(transform_fn):
+    """Read-modify-write on REGISTRY_FILE under fcntl.flock. Calls
+    `transform_fn(entries) -> entries` with the parsed list. Best-effort on
+    the lock — silent on platforms without flock so the call still functions
+    (with reduced safety against concurrent writers)."""
+    REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # mode "a+": create if missing, no truncate. seek(0) to read.
+    with open(REGISTRY_FILE, "a+") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except (OSError, ValueError):
+            pass
+        try:
+            f.seek(0)
+            raw = f.read() or "[]"
+            try:
+                entries = json.loads(raw)
+                if not isinstance(entries, list):
+                    entries = []
+            except json.JSONDecodeError:
+                entries = []
+            entries = transform_fn(entries)
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(entries, indent=2) + "\n")
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except (OSError, ValueError):
+                pass
+
+
+def _register_self(repo_path, port, bind_host):
+    """Insert (or replace) this process's entry in the registry. Dedup is by
+    pid — each running process owns one entry. Same process re-registering
+    (e.g. after switch_repo_root) replaces its own row; different processes
+    never collide, even if they happen to share a repo_path. Silent on
+    I/O error — registry is a discovery convenience, not load-bearing."""
+    repo_str = str(repo_path)
+    self_pid = os.getpid()
+    payload = {
+        "repo_path": repo_str,
+        "label": Path(repo_str).name,
+        "port": int(port),
+        "bind_host": bind_host,
+        "pid": self_pid,
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "version": __version__,
+    }
+
+    def replace(entries):
+        out = [e for e in entries if not (isinstance(e, dict) and e.get("pid") == self_pid)]
+        out.append(payload)
+        return out
+
+    try:
+        _registry_locked_rmw(replace)
+        print(f"  [registry] {REGISTRY_FILE} -> {repo_str} (pid {self_pid}, port {payload['port']})")
+    except OSError as e:
+        print(f"  [registry] could not register ({e})")
+
+
+def _unregister_self(repo_path=None):
+    """Remove this process's entry from the registry. Keyed by current pid,
+    not repo_path — switch_repo_root passes the old repo_path for context
+    only. Idempotent; silent on I/O error so it's safe to call from signal
+    handlers."""
+    if not REGISTRY_FILE.exists():
+        return
+    self_pid = os.getpid()
+
+    def remove(entries):
+        return [e for e in entries if not (isinstance(e, dict) and e.get("pid") == self_pid)]
+
+    try:
+        _registry_locked_rmw(remove)
+    except OSError:
+        pass
+
+
+def _read_registry_pruned():
+    """Return the registry contents with stale entries removed. Performs a
+    write-back of the pruned list so the file converges to truth on every
+    read — no separate reaper needed. Returns [] on any I/O error."""
+    if not REGISTRY_FILE.exists():
+        return []
+
+    pruned = []
+
+    def prune(entries):
+        nonlocal pruned
+        pruned = _prune_registry_entries(entries)
+        return pruned
+
+    try:
+        _registry_locked_rmw(prune)
+    except OSError:
+        return []
+    return pruned
+
+
 def write_port_file(bind_host):
     """Persist the listening URL to ~/.claude/command-center/port.txt so the
     ccc-orchestration skill (and any other scripted caller) can find this
@@ -11069,8 +11683,9 @@ def main():
     # `_resolve_runtime_network`.
     bind_host, resolved_origins, network_info = _resolve_runtime_network(PORT)
     ALLOWED_ORIGINS[:] = resolved_origins  # in-place: _check_same_origin reads the global list
-    global RUNTIME_NETWORK_INFO
+    global RUNTIME_NETWORK_INFO, BIND_HOST
     RUNTIME_NETWORK_INFO = network_info
+    BIND_HOST = bind_host
     server = ThreadedHTTPServer((bind_host, PORT), CommandCenterHandler)
     if bind_host not in ("127.0.0.1", "localhost", "::1"):
         print(f"⚠️  WARNING: binding to {bind_host} — server is reachable from the network.")
@@ -11081,6 +11696,17 @@ def main():
     if network_info["trust_tailnet"] and not network_info["tailnet"]["available"]:
         print("   trust_tailnet is on but `tailscale` CLI is not on PATH — install it or unset to silence.")
     write_port_file(bind_host)
+    _register_self(REPO_ROOT, PORT, bind_host)
+    # SIGTERM (systemd / `kill <pid>`) needs explicit cleanup; SIGINT (Ctrl+C)
+    # raises KeyboardInterrupt below and is handled there. Both paths remove
+    # this server's registry entry so peers don't see a stale ghost.
+    def _on_sigterm(signum, frame):
+        try:
+            _unregister_self(REPO_ROOT)
+        except Exception:
+            pass
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _on_sigterm)
     display_host = "localhost" if bind_host in ("127.0.0.1", "::1") else bind_host
     print(f"Claude Command Center running at http://{display_host}:{PORT}")
     print(f"  Log dir:       {LOG_DIR}")
@@ -11094,6 +11720,10 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.")
+        try:
+            _unregister_self(REPO_ROOT)
+        except Exception:
+            pass
         server.server_close()
 
 

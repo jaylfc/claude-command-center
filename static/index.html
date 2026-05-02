@@ -573,21 +573,7 @@
   }
   .conv-sticky-header .user-msg {
     font-size: 14px; color: var(--text); line-height: 1.4;
-    /* Hard cap at ~25% of viewport with internal scroll. Sibling-spawn
-     * prompts can be 50+ lines of preamble; without a cap they push the
-     * actual conversation off-screen. The cap composes with the existing
-     * 3.6em "collapsed" preview via :not(.is-resized) below. */
-    max-height: 25vh; overflow-y: auto;
     flex: 1 1 auto; min-height: 0;
-  }
-  /* Preview-mode (default, sticky NOT user-resized): keep the tight 3.6em
-   * peek so the conversation events below stay visible. User drags the
-   * resize handle → .is-resized → cap reverts to 25vh with scroll. */
-  .conv-sticky-header:not(.is-resized) .user-msg {
-    max-height: 3.6em; overflow: hidden;
-  }
-  .conv-sticky-header.is-resized .user-msg {
-    max-height: 25vh; overflow-y: auto;
   }
   .conv-sticky-header .label { color: var(--green); font-weight: 600; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
   .conv-sticky-header__resize-handle {
@@ -613,10 +599,11 @@
   .conv-sticky-header__resize-handle.is-dragging {
     background: rgba(88,166,255,0.08);
   }
-  /* Collapse/expand chevron — small tab anchored at the bottom-center
-     of the sticky header. Click toggles `.is-collapsed`, which hides the
-     content rows and shrinks the box to a thin strip. State persists in
-     localStorage so the user's pick survives page reloads. */
+  /* Expand chevron — small tab anchored at the bottom-center of the
+     sticky header. Click toggles `.is-expanded`, which grows the panel
+     from its default 170px to half the viewport height for a closer
+     read of the asks + activity. State is ephemeral (per-conversation,
+     resets on conv switch). */
   .conv-sticky-header__collapse {
     position: absolute; left: 50%; transform: translateX(-50%);
     bottom: -10px;
@@ -638,21 +625,10 @@
     background: #141b25;
   }
   .conv-sticky-header__collapse-icon { display: inline-block; line-height: 1; }
-  .conv-sticky-header.is-collapsed { padding-top: 6px; padding-bottom: 6px; }
-  .conv-sticky-header.is-collapsed .csh-row,
-  .conv-sticky-header.is-collapsed .tools-toggle,
-  .conv-sticky-header.is-collapsed .conv-sticky-header__resize-handle {
-    display: none;
-  }
-  .conv-sticky-header.is-collapsed::before {
-    content: 'header collapsed — click ▾ to expand';
-    display: block;
-    text-align: center;
-    font-size: 10px;
-    color: var(--text-muted);
-    opacity: 0.6;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+  /* When expanded, the unified panel grows to half the viewport height.
+     The fixed-height rule in `.csh-row` is overridden here. */
+  .conv-sticky-header.is-expanded .csh-row {
+    height: 50vh;
   }
   .conversations-view .event { margin-bottom: 12px; padding: 10px 14px; border-radius: 6px; border-left: 3px solid transparent; }
   /* Assistant rows — Claude-Desktop-style clean prose. No background fill,
@@ -714,52 +690,74 @@
   .conversations-view .tool-call-group:not(.collapsed) .tool-call-group-header .tcg-arrow { transform: rotate(90deg); }
   .conversations-view .tool-call-group.collapsed .tool-call-group-body { display: none; }
   .conversations-view .tool-call-group-body { padding: 4px 12px 10px; border-top: 1px solid var(--border); }
-  /* Sticky-header two-column layout — Ask | Activity. Each column gets
-     its own subtle panel background so the header reads as "metadata"
-     vs. the conversation prose below. */
+  /* Sticky-header unified panel — Ask | Activity inside a single bordered
+     box. Fixed height; each column scrolls independently if its content
+     overflows. Saves the inner padding/border that two side-by-side
+     panels used to spend. */
   .conv-sticky-header .csh-row {
-    display: flex; gap: 12px; align-items: stretch;
-    flex: 1 1 auto; min-height: 0;
-  }
-  .conv-sticky-header .csh-col {
+    display: flex; gap: 0; align-items: stretch;
+    flex: 0 0 auto;
+    height: 170px;
     background: #161c25;
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 8px 12px;
+    overflow: hidden;
     box-sizing: border-box;
   }
-  .conv-sticky-header .csh-col-ask {
-    flex: 5 1 0; min-width: 0;
-    display: flex; flex-direction: column; gap: 8px;
-    overflow-y: auto;
+  .conv-sticky-header .csh-col {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 8px 12px;
+    box-sizing: border-box;
+    min-height: 0;
   }
-  /* Earlier-ask sub-block — appears under the original when scrolled past
-     a later user message. The two share .user-msg styling but each has
-     its own labelled box so it's obvious which message the user is
-     looking at right now. */
+  .conv-sticky-header .csh-col-ask {
+    flex: 5 1 0; min-width: 0; min-height: 0;
+    display: flex; flex-direction: column; gap: 0;
+    overflow: hidden;
+    border-right: 1px solid var(--border);
+  }
+  /* Both ask sub-blocks are permanent slots — original on top, earlier
+     on bottom. Each takes half the column height and scrolls internally
+     if its body overflows; labels stay pinned at the top of each slot. */
+  .conv-sticky-header .csh-ask-original,
+  .conv-sticky-header .csh-ask-earlier {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex; flex-direction: column;
+  }
+  .conv-sticky-header .csh-ask-original > .label,
+  .conv-sticky-header .csh-ask-earlier > .label { flex: 0 0 auto; }
+  .conv-sticky-header .csh-ask-original > .user-msg,
+  .conv-sticky-header .csh-ask-earlier > .user-msg {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  }
+  /* Earlier-ask sub-block — separator + orange label so it reads as a
+     distinct slot from the original. */
   .conv-sticky-header .csh-ask-earlier {
     border-top: 1px dashed var(--border);
     padding-top: 6px;
-    margin-top: 2px;
+    margin-top: 6px;
   }
   .conv-sticky-header .csh-ask-earlier .label { color: var(--orange); }
+  .conv-sticky-header .earlier-empty {
+    color: var(--text-muted);
+    opacity: 0.45;
+    font-size: 12px;
+  }
   .conv-sticky-header .csh-col-activity {
     flex: 5 1 0; min-width: 0; min-height: 0;
     display: flex; flex-direction: column;
-    padding: 0;  /* let session-timeline supply its own padding */
-    border: none; background: transparent;
+    padding: 8px 12px;
+    overflow-y: auto;
   }
   /* Original ask: first sentence at default size, rest small + grey,
-     always wraps (no horizontal scroll). Capped at ~25vh with internal
-     scroll — sibling-spawn prompts are 50+ lines and would otherwise
-     push the conversation events off-screen. */
+     always wraps (no horizontal scroll). The .csh-col-ask column is the
+     scroll container now (fixed-height panel above), so the user-msg
+     itself grows freely. */
   .conv-sticky-header .csh-col-ask .user-msg {
     white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
-    max-height: 25vh; overflow-y: auto;
-  }
-  .conv-sticky-header.is-resized .csh-col-ask .user-msg {
-    /* User-resized via the drag handle — honor their pick (none = let it
-     * grow to the height stamped on the sticky header itself). */
     max-height: none; overflow: visible;
   }
   .conv-sticky-header .csh-col-ask .ask-first,
@@ -828,6 +826,26 @@
     padding: 2px 7px; border-radius: 3px; font-weight: 600;
     color: var(--text-muted); background: rgba(139,148,158,0.06);
     cursor: help;
+  }
+  /* Model badge — shown next to the context/cost pills so you can tell
+   * which model produced the latest turn. The 1M sub-pill lights up
+   * when a turn provably exceeded 200k tokens (only possible on the 1M
+   * beta variant, since the model name doesn't carry the variant). */
+  .conv-input-context .wp-model-pill {
+    padding: 2px 7px; border-radius: 3px; font-weight: 600;
+    color: var(--text-muted); background: rgba(88,166,255,0.10);
+    cursor: help;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
+    font-size: 10px;
+  }
+  .conv-input-context .wp-model-1m {
+    margin-left: 4px;
+    padding: 0 4px;
+    border-radius: 2px;
+    background: var(--accent, #58a6ff);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
   }
   .conv-input-context .wp-ahead { color: var(--green); }
   .conv-input-context .wp-behind { color: var(--orange); }
@@ -1037,8 +1055,32 @@
     opacity: 0.8;
     transition: opacity 0.4s ease-out;
   }
-  /* Diagnostic: render-time stamps so we can compare stdout-stream vs JSONL-tail
-     arrival order on screen. Temporary — remove once we hide the tail rows. */
+  /* Live dot — sits to the left of the per-row timestamp on .conv-item
+   * rows whose session is currently live (sidecar marker exists). Distinct
+   * from the live-tool pill in the title row; this just signals "this row
+   * is being actively polled, its state can change in real time" so the
+   * user knows where the freshness comes from. */
+  .conv-live-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent, #58a6ff);
+    box-shadow: 0 0 0 0 rgba(88,166,255,0.55);
+    margin-right: 4px;
+    flex-shrink: 0;
+    vertical-align: middle;
+    animation: ccc-live-dot-pulse 2.4s ease-out infinite;
+  }
+  @keyframes ccc-live-dot-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(88,166,255,0.55); }
+    70%  { box-shadow: 0 0 0 6px rgba(88,166,255,0); }
+    100% { box-shadow: 0 0 0 0 rgba(88,166,255,0); }
+  }
+
+  /* Per-event timestamps prefixed to each conversation row. Sourced from
+     the JSONL event's own `ts` (when the message was actually written),
+     not the render time. `[S …]` marks events that arrived first via the
+     stdout stream; `[J …]` marks events read back from the JSONL tail. */
   .stream-block-text[data-render-ts]::before,
   .stream-block-tool[data-render-ts]::before,
   .stream-block-thinking[data-render-ts]::before {
@@ -1053,11 +1095,6 @@
     font-size: 10px; color: var(--text-muted); opacity: 0.75;
     margin-right: 6px; display: inline-block;
   }
-  /* Tool-only events get fused into a collapsed .tool-call-group, which hides
-     the per-event stamps. Surface the latest tool's arrival on the visible
-     group header so we can still see when tail tools landed. attr() in
-     content only reads the pseudo's own element, so the data attribute has
-     to live on .tool-call-group-header itself, not on the parent group. */
   .tool-call-group-header[data-render-ts]::before {
     content: '[J ' attr(data-render-ts) ']';
     font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
@@ -1073,10 +1110,14 @@
     margin-top: 0;
     flex: 1 1 auto; min-height: 0;
     display: flex; flex-direction: column;
-    overflow: hidden;
+    overflow: visible;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
   }
   .conv-sticky-header .csh-col-activity .session-timeline .stl-body {
-    overflow-y: auto; min-height: 0; flex: 1 1 auto;
+    min-height: 0; flex: 1 1 auto;
   }
   /* Session-activity timeline — chronological commit / push / PR strip
      in the right column of the sticky header. */
@@ -2494,6 +2535,183 @@
      race. (Without morning, topbar starts at left:0.) */
   body.has-side-nav .ccc-topbar { left: 52px; }
 
+  /* ── Multi-repo rail — left-edge icon column ──────────────────────────
+   * Persistent vertical strip with one circular icon per known repo.
+   * Running peers first (clicking navigates to that server's port);
+   * known-not-running repos below a divider (clicking switches this
+   * server's REPO_ROOT — the one-off peek flow). Active server gets the
+   * accent fill. The topbar dropdown still works alongside this; the
+   * rail is the primary fast-switch affordance. */
+  .ccc-repo-rail {
+    position: fixed; top: 0; left: 0; bottom: 0;
+    width: 48px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    align-items: center;
+    padding: 8px 0; gap: 6px;
+    z-index: 99;  /* topbar is 100 — rail tucks under so the topbar
+                     spans full width above it (with our left: 48px shift) */
+    overflow-y: auto;
+    box-sizing: border-box;
+  }
+  body.has-repo-rail { padding-left: 48px; }
+  body.has-repo-rail .ccc-topbar { left: 48px; }
+  body.has-repo-rail.has-side-nav .ccc-topbar { left: 100px; }  /* both sidenavs */
+  .ccc-repo-rail .rail-btn {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-muted);
+    font-size: 12px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    text-transform: uppercase;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: background 0.1s ease, transform 0.1s ease, opacity 0.1s ease;
+    position: relative;
+  }
+  .ccc-repo-rail .rail-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+    transform: scale(1.06);
+  }
+  .ccc-repo-rail .rail-btn.is-active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    cursor: default;
+  }
+  .ccc-repo-rail .rail-btn.is-active:hover {
+    background: var(--accent); color: #fff;
+    transform: none;
+  }
+  .ccc-repo-rail .rail-btn.is-switchable {
+    opacity: 0.55;
+    border-style: dashed;
+  }
+  .ccc-repo-rail .rail-btn.is-switchable:hover { opacity: 1; }
+  .ccc-repo-rail .rail-divider {
+    width: 24px; height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+    flex-shrink: 0;
+  }
+
+  /* "All repos" toggle button active state. */
+  .conv-allrepos-toggle.is-active {
+    background: var(--accent) !important;
+    color: #fff !important;
+    border-color: var(--accent) !important;
+  }
+
+  /* Folder chip rendered inside .conv-title-row for archive entries (and
+   * later for any row that wants to surface its source folder). The hue is
+   * set inline via --chip-hue from a stable hash of the folder label, so
+   * the same folder always gets the same color. Translucent fill so it
+   * reads on both light and dark themes. */
+  .conv-folder-chip {
+    --chip-hue: 0;
+    flex-shrink: 0;
+    padding: 1px 7px;
+    border-radius: 9px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1.4;
+    background: hsla(var(--chip-hue), 60%, 50%, 0.18);
+    color: hsl(var(--chip-hue), 55%, 65%);
+    border: 1px solid hsla(var(--chip-hue), 55%, 50%, 0.35);
+    max-width: 130px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conv-folder-chip.is-orphan {
+    opacity: 0.55;
+    font-style: italic;
+  }
+  /* Folder group header + divider used by the In Progress section in
+   * multi-repo mode: cards from the last 24h are grouped under a small
+   * folder chip header so "what's hot in chuck right now" reads as a
+   * cluster. Older cards drop below a divider and resume the flat chrono
+   * list with gap separators. */
+  .conv-folder-group-header {
+    --chip-hue: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px 4px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .conv-folder-group-chip {
+    flex-shrink: 0;
+    padding: 2px 9px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: hsla(var(--chip-hue), 60%, 50%, 0.18);
+    color: hsl(var(--chip-hue), 55%, 65%);
+    border: 1px solid hsla(var(--chip-hue), 55%, 50%, 0.35);
+    max-width: 180px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .conv-folder-group-chip.is-orphan { opacity: 0.55; font-style: italic; }
+  .conv-folder-group-count {
+    color: var(--text-muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .conv-folder-group-divider {
+    padding: 12px 12px 4px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-top: 1px solid var(--border);
+    margin-top: 6px;
+  }
+  /* In Progress section's by-project / by-time toggle. Lives inside the
+   * section header next to the count, only shown when there are folder
+   * chips (i.e. multi-repo mode). Each opt is a span (not a button) to
+   * avoid nested-button HTML; clicks are stopPropagation'd so they don't
+   * collapse the section. */
+  .conv-grouping-toggle {
+    display: inline-flex;
+    margin-left: auto;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    line-height: 1.4;
+  }
+  .conv-grouping-toggle .grouping-opt {
+    padding: 1px 7px;
+    font-size: 10px;
+    color: var(--text-muted);
+    cursor: pointer;
+    user-select: none;
+  }
+  .conv-grouping-toggle .grouping-opt:hover:not(.is-active) {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .conv-grouping-toggle .grouping-opt.is-active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .archive-empty-state {
+    padding: 24px 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
   /* ── Full-page loading overlay ──────────────────────────────────────────
    * Shown on initial load and during repo-switch. Covers everything so the
    * user sees a clear "we're working" signal instead of staring at an empty
@@ -2874,9 +3092,8 @@
       right: 4px !important;
     }
 
-    /* Give the "Original ask" sticky header more room to breathe */
-    .conv-sticky-header .user-msg { max-height: 9em !important; }
-    .conv-sticky-header.is-resized .user-msg { max-height: none !important; overflow: auto !important; }
+    /* The unified sticky panel handles its own scroll per column —
+       no per-message cap needed on mobile. */
 
     /* Floating reload button — bottom-right to avoid overlap with conv-panel X.
        (Safe-area padding keeps it above the home indicator.) */
@@ -3146,6 +3363,13 @@
     })();
   </script>
 
+  <!-- Multi-repo rail — vertical icon strip on the left edge. Populated by
+       renderRepoSidebar() from /api/registry + /api/repo/list. Empty in
+       single-repo deployments; the body.has-repo-rail class is toggled
+       by the renderer so the layout doesn't waste 48px when there's
+       nothing to show. -->
+  <aside id="ccRepoSidebar" class="ccc-repo-rail" role="navigation" aria-label="Repos"></aside>
+
   <!-- Layout-agnostic top bar — visible in BOTH list and kanban-split modes
        so the most-important controls (which repo we're watching + the
        setup banner) never disappear when the user toggles views. -->
@@ -3190,6 +3414,7 @@
         <a class="sh-btn sh-btn-deploy" id="sidebarDeployPill" target="_blank" rel="noopener" title="Vercel deploy — loading…" aria-label="Vercel deploy status"><span class="deploy-dot" id="deployDot"></span><span class="deploy-label" id="deployStateLabel">Vercel</span></a>
         <button class="conv-compact-toggle sh-btn" id="convCompactToggle" title="Compact rows — keep each card to a single line" aria-label="Toggle compact rows"><span aria-hidden="true">&#8801;</span></button>
         <button class="conv-kanban-toggle sh-btn" id="convKanbanToggle" title="Toggle Kanban board view" aria-label="Toggle Kanban board view"><span aria-hidden="true">&#9783;</span> Board</button>
+        <button class="conv-allrepos-toggle sh-btn" id="convAllReposToggle" title="All repos — browse conversations from every folder you've ever Claude-Code'd in. Read-only; no servers spawned." aria-label="Toggle all-repos archive">&#128194; All repos</button>
         <button class="conv-archive-toggle sh-btn" id="convArchiveToggle" title="Show archived">&#128230;</button>
         <button class="conv-sort-btn sh-btn" id="convSortBtn" title="Sort by latest response (ignores custom order)">&#8693;</button>
         <button class="conv-sort-btn sh-btn" id="convAlphaSortBtn" title="Sort alphabetically by title">A&#8595;</button>
@@ -5801,6 +6026,19 @@
   let _renameInProgress = false;
   function renderSidebar(convs) {
     if (_renameInProgress) return;
+    // Archive-mode guard: while "All repos" is on, the sidebar renders the
+    // cross-folder archive instead of the active repo's session list. Skip
+    // both kanban and list dispatch to keep the archive view from being
+    // clobbered by periodic refreshes. Toggle off to return.
+    if (typeof archiveMode !== 'undefined' && archiveMode) {
+      const $kanbanBoard = document.getElementById('kanbanBoard');
+      const $convList = document.getElementById('convList');
+      if ($kanbanBoard) $kanbanBoard.style.display = 'none';
+      if ($convList) $convList.style.display = '';
+      const $search = document.getElementById('convSearch');
+      try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
+      return;
+    }
     // Preserve scroll across ALL re-renders (board + per-column + list)
     const scrolls = {};
     document.querySelectorAll('.kanban-board, .kanban-board-split, #convList').forEach(el => {
@@ -7529,7 +7767,10 @@
       } else if (c.display_name && cleanFirst) {
         askHtml = '<div class="conv-last">' + escapeHtml(cleanFirst.slice(0, 100)) + '</div>';
       }
-      const ask = askHtml;
+      // _hideAskHtml is set by the archive renderer (#6) — subtitle is
+      // redundant with the title in cross-folder mode and the user has
+      // explicitly opted not to see it. Single-repo rows don't set it.
+      const ask = c._hideAskHtml ? '' : askHtml;
       // Branch pill: shows where this session's edits actually land.
       //   1. effective_branch (tool-call inference) wins when present.
       //   2. else session_cwd_is_worktree → c.branch in worktree style.
@@ -7645,12 +7886,6 @@
         ? '<button class="conv-merge-btn" data-role="merge" title="' + escapeHtml(_mergeTitle) + '">&#128256;</button>'
         : '';
 
-      // GH Issues / TODO / parking rows live in the GH Issues section and
-      // need two extra affordances vs. session rows: a "Start" pill that
-      // mirrors the kanban-start-btn (spawn a session for this issue), and
-      // a relabelled archive button — for backlog rows "archive" actually
-      // closes the GH issue "not planned", so the verb on the button
-      // matches the action.
       const isBacklogRow = c.source === 'backlog';
       let startBtn = '';
       let archiveBtn;
@@ -7663,10 +7898,28 @@
         archiveBtn = '<button class="conv-archive-btn" data-role="archive" title="' + (c.archived ? 'Unarchive' : 'Archive') + '">' + (c.archived ? '&#8617;' : '&#128229;') + '</button>';
       }
 
+      // Suppressed (_suppressFolderChip) when the row sits under a folder
+      // group header that already labels the folder — chip would be noise.
+      const folderChipHtml = (c.folder_label_chip && !c._suppressFolderChip)
+        ? '<span class="conv-folder-chip' + (c.folder_chip_orphan ? ' is-orphan' : '')
+            + '" style="--chip-hue:' + (c.folder_chip_hue | 0) + ';"'
+            + ' title="' + escapeHtml(c.folder_path || c.session_cwd || '') + '">'
+            + escapeHtml(c.folder_label_chip) + '</span>'
+        : '';
+
+      // Live dot — sits to the left of the timestamp when this session
+      // is actively being polled (sidecar marker exists). Helps the user
+      // see at a glance which rows can change in real time.
+      const liveDotHtml = c.is_live
+        ? '<span class="conv-live-dot" title="Live — actively polled"></span>'
+        : '';
+
       return '<div class="conv-item' + active + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
+          + liveDotHtml
           + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
+          + folderChipHtml
           + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to rename">' + escapeHtml(title) + '</div>'
           + liveToolHtml
           + '<span class="conv-meta-inline">'
@@ -7684,7 +7937,25 @@
     };
     // Active list keeps the date-gap separators so morning/evening
     // boundaries stay visible while scanning.
-    const _activeRowsHtml = _sessionConvs.map((c, i, arr) => {
+    //
+    // In multi-repo (archive) mode — detected by the presence of a
+    // folder_label_chip on cards — the most-recent 24h get grouped by
+    // folder so you can scan "what's hot in chuck right now" without
+    // hopping repos. Older cards continue as a flat chrono list with
+    // gap separators (the existing single-repo behavior).
+    const _hasFolderChips = _sessionConvs.some(c => c.folder_label_chip);
+    // User-controlled grouping preference for the In Progress section.
+    // 'project' (default): group last-24h by folder. 'time': flat chrono
+    // list with gap separators. Only meaningful when there are folder
+    // chips (i.e. multi-repo / archive mode); the In Progress header's
+    // by-project / by-time toggle (only shown when _hasFolderChips) writes
+    // this key.
+    const _ipGrouping = (() => {
+      try { return localStorage.getItem('ccc-inprogress-grouping') || 'project'; }
+      catch (_) { return 'project'; }
+    })();
+    const _shouldGroupByFolder = _hasFolderChips && _ipGrouping === 'project';
+    const _flatRowsWithSeparators = (cards) => cards.map((c, i, arr) => {
       let separator = '';
       if (i > 0) {
         const newer = (arr[i - 1] && arr[i - 1].modified) || 0;
@@ -7699,6 +7970,50 @@
       }
       return separator + _renderRow(c);
     }).join('');
+
+    let _activeRowsHtml;
+    if (_shouldGroupByFolder) {
+      const _nowSec = Date.now() / 1000;
+      const _24hAgo = _nowSec - 24 * 3600;
+      const _recent = [];
+      const _older = [];
+      for (const c of _sessionConvs) {
+        if ((c.modified || 0) >= _24hAgo) _recent.push(c);
+        else _older.push(c);
+      }
+      // Group recent cards by folder; preserve folder order by the most
+      // recent card in each group (freshest folder appears first).
+      const _byFolder = new Map();
+      for (const c of _recent) {
+        const key = c.folder_label_chip || c.folder_path || '(unknown)';
+        if (!_byFolder.has(key)) _byFolder.set(key, []);
+        _byFolder.get(key).push(c);
+      }
+      const _folderEntries = Array.from(_byFolder.entries()).sort((a, b) => {
+        const aMax = a[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        const bMax = b[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        return bMax - aMax;
+      });
+      const _groupHtml = _folderEntries.map(([folder, cards]) => {
+        const hue = (cards[0].folder_chip_hue | 0);
+        const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
+        // Suppress per-row chip — the group header already labels the folder.
+        for (const c of cards) c._suppressFolderChip = true;
+        return '<div class="conv-folder-group-header" style="--chip-hue:' + hue + ';">'
+          + '<span class="conv-folder-group-chip' + orphan + '">' + escapeHtml(folder) + '</span>'
+          + '<span class="conv-folder-group-count">' + cards.length + '</span>'
+          + '</div>'
+          + cards.map(_renderRow).join('');
+      }).join('');
+      let _olderHtml = '';
+      if (_older.length) {
+        _olderHtml = '<div class="conv-folder-group-divider">Older than 24 h</div>'
+          + _flatRowsWithSeparators(_older);
+      }
+      _activeRowsHtml = _groupHtml + _olderHtml;
+    } else {
+      _activeRowsHtml = _flatRowsWithSeparators(_sessionConvs);
+    }
     // In progress section: every row that's not a backlog card or archived.
     // Mirrors the kanban "In progress" column (key: 'working' under the
     // hood — relabel only) so the two surfaces use the same vocabulary.
@@ -7708,12 +8023,23 @@
     if (_sessionConvs.length > 0) {
       const _ipCollapsed = localStorage.getItem('ccc-inprogress-collapsed') === '1';
       const _ipArrow = _ipCollapsed ? '▸' : '▾';
+      // by-project / by-time toggle, only when there are folder chips
+      // (otherwise grouping is meaningless). Inline spans so the click
+      // doesn't bubble to the section's collapse button (handler does
+      // ev.stopPropagation when wired below).
+      const _ipGroupingToggle = _hasFolderChips
+        ? '<span class="conv-grouping-toggle" data-role="grouping-toggle">'
+            + '<span class="grouping-opt' + (_ipGrouping === 'project' ? ' is-active' : '') + '" data-grouping="project">by project</span>'
+            + '<span class="grouping-opt' + (_ipGrouping === 'time' ? ' is-active' : '') + '" data-grouping="time">by time</span>'
+          + '</span>'
+        : '';
       _inProgressHtml =
         '<div class="conv-inprogress-section' + (_ipCollapsed ? ' collapsed' : '') + '" data-role="inprogress-section">'
         + '<button type="button" class="conv-inprogress-header" data-role="inprogress-toggle" aria-expanded="' + (!_ipCollapsed) + '">'
         +   '<span class="conv-inprogress-arrow">' + _ipArrow + '</span>'
         +   '<span class="conv-inprogress-label">In progress</span>'
         +   '<span class="conv-inprogress-count">' + _sessionConvs.length + '</span>'
+        +   _ipGroupingToggle
         + '</button>'
         + '<div class="conv-inprogress-list">' + _activeRowsHtml + '</div>'
         + '</div>';
@@ -7825,6 +8151,9 @@
     const $inProgressToggle = $convList.querySelector('[data-role="inprogress-toggle"]');
     if ($inProgressToggle) {
       $inProgressToggle.addEventListener('click', (ev) => {
+        // The grouping toggle (project / time) lives inside this header
+        // button — its own listener stops propagation, but be defensive.
+        if (ev.target.closest('[data-role="grouping-toggle"]')) return;
         ev.stopPropagation();
         const section = $inProgressToggle.closest('[data-role="inprogress-section"]');
         if (!section) return;
@@ -7833,6 +8162,27 @@
         const arrowEl = $inProgressToggle.querySelector('.conv-inprogress-arrow');
         if (arrowEl) arrowEl.textContent = wasCollapsed ? '▸' : '▾';
         $inProgressToggle.setAttribute('aria-expanded', String(!wasCollapsed));
+      });
+    }
+    // Grouping toggle (by project / by time). Triggers a re-render via the
+    // same path the data came from: archive mode → renderArchiveList,
+    // single-repo mode → loadConversationList. (In single-repo mode the
+    // toggle isn't rendered anyway since folder chips are absent, but be
+    // safe.)
+    const $groupingToggle = $convList.querySelector('[data-role="grouping-toggle"]');
+    if ($groupingToggle) {
+      $groupingToggle.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const opt = ev.target.closest('[data-grouping]');
+        if (!opt) return;
+        const value = opt.getAttribute('data-grouping');
+        try { localStorage.setItem('ccc-inprogress-grouping', value); } catch (_) {}
+        if (typeof archiveMode !== 'undefined' && archiveMode) {
+          const $search = document.getElementById('convSearch');
+          renderArchiveList($search ? $search.value : '');
+        } else if (typeof loadConversationList === 'function') {
+          loadConversationList();
+        }
       });
     }
     $convList.querySelectorAll('.conv-item').forEach(el => {
@@ -7891,6 +8241,13 @@
             if (c) {
               c.archived = data.archived;
               setOptimisticOverride(c.session_id, { archived: c.archived });
+            }
+            // Patch archiveData (Round 5 / #13) so the next archive
+            // re-render reflects the new archived state — same reason
+            // as the rename patch above.
+            if (typeof archiveData !== 'undefined' && Array.isArray(archiveData)) {
+              const ac = archiveData.find(x => x.session_id === sessionId);
+              if (ac) ac.archived = data.archived;
             }
             renderSidebar(filterConversations($convSearch.value));
             if (data.archived && nextSelectId) {
@@ -8300,6 +8657,18 @@
             // User just renamed from the command center → always teal regardless of
             // storage path (jsonl write-through vs. side-car fallback).
             c.name_overridden = !!newName;
+          }
+          // Also patch archiveData so the next archive re-render (periodic
+          // poll or filter input) doesn't clobber the rename by rebuilding
+          // shaped rows from the stale archive cache. Without this, the
+          // user sees the rename appear briefly, then snap back to the
+          // first-message title on the next 10s tick.
+          if (typeof archiveData !== 'undefined' && Array.isArray(archiveData)) {
+            const ac = archiveData.find(x => x.session_id === item.dataset.sessionId);
+            if (ac) {
+              ac.display_name = newName || null;
+              ac.name_overridden = !!newName;
+            }
           }
           // Brief toast on the item title
           const toast = document.createElement('div');
@@ -8814,6 +9183,20 @@
     return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()) + '.' + p3(d.getMilliseconds());
   }
 
+  // Parse a JSONL event's ISO timestamp ("ts" field, set server-side from
+  // the original event's `timestamp`) into the same HH:MM:SS.mmm format
+  // nowStamp() produces, but in the user's local timezone. Falls back to
+  // null when the input is missing or unparseable so callers can decide
+  // whether to use nowStamp() or hide the prefix entirely.
+  function eventStamp(isoTs) {
+    if (!isoTs) return null;
+    const d = new Date(isoTs);
+    if (isNaN(d.getTime())) return null;
+    const p2 = (n) => (n < 10 ? '0' + n : '' + n);
+    const p3 = (n) => (n < 10 ? '00' + n : n < 100 ? '0' + n : '' + n);
+    return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()) + '.' + p3(d.getMilliseconds());
+  }
+
   function setLiveBadgeVisible(visible) {
     const a = document.getElementById('liveBadgeConv');
     const b = document.getElementById('cpLiveBadge');
@@ -9032,6 +9415,17 @@
       }
       renderConversationEvents(data.events);
       convLastLine = data.last_line;
+      // Re-fetch session usage whenever new events landed. Usage rollups
+      // arrive sporadically (in some session paths only the final
+      // assistant event of each turn carries the `usage` block — many
+      // delta events in between have none), so the initial selection-
+      // time fetch can come back empty and the user sees no context %
+      // until they reselect. Tying this to event arrival means the pill
+      // updates as soon as the next turn lands.
+      if (data.events && data.events.length > 0) {
+        const sid = (conversationsData.find(x => x.id === id) || {}).session_id || id;
+        fetchSessionUsage(sid);
+      }
     } catch (err) {
       if (convLastLine === 0) {
         $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load conversation: ' + escapeHtml(err.message) + '</div>';
@@ -9113,11 +9507,12 @@
       items[st.currentIdx].classList.remove('is-pinned-in-sticky');
     }
     if (idx <= 0) {
-      // No earlier ask in play — collapse the second block. The original
-      // sub-block is static HTML, so we never touch it.
+      // No earlier ask scrolled past — keep the slot rendered (the user
+      // wants a permanent place for the latest ask) but blank its body.
+      // The label stays so the slot reads as "reserved for the latest
+      // ask once you scroll past one."
       st.currentIdx = 0;
-      if (st.earlierBox) st.earlierBox.style.display = 'none';
-      if (st.earlierFirst) st.earlierFirst.textContent = '';
+      if (st.earlierFirst) st.earlierFirst.innerHTML = '<span class="earlier-empty">—</span>';
       return;
     }
     const item = items[idx];
@@ -9138,7 +9533,6 @@
     st.currentIdx = idx;
     item.classList.add('is-pinned-in-sticky');
     if (st.earlierFirst) st.earlierFirst.innerHTML = linkifyPastedImages(escapeHtml(text));
-    if (st.earlierBox) st.earlierBox.style.display = '';
   }
   function _dynAskUpdate() {
     const st = _dynamicAskState;
@@ -9516,7 +9910,12 @@
     if (uSlot) uSlot.innerHTML = '';
     if (!sid) return;
     try {
-      const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/usage');
+      // cache-buster: usage rollups land sporadically in the JSONL, so the
+      // first fetch after selection often returns latest=0 and the browser
+      // would happily serve that zero response on every subsequent call.
+      // Forcing a fresh request each time is fine — the server-side
+      // computation is fast and uses no cache.
+      const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/usage?_t=' + Date.now(), { cache: 'no-store' });
       const data = await res.json();
       if (_usageSessionId !== sid) return;
       _usageData = data;
@@ -9579,10 +9978,25 @@
         + 'list-price equivalent if metered against the API directly.';
       costPill = ' <span class="wp-cost-pill" title="' + escapeHtml(costTip) + '">' + fmt(cost) + '</span>';
     }
+    // Model pill — shown when we know the model. Strips the "claude-"
+    // prefix so it reads as `opus-4-7` / `sonnet-4-6`. Adds a `1M` suffix
+    // when the session is provably on the 1M-context variant (any turn
+    // exceeded 200k tokens — only possible on the 1M variant). The 1M
+    // beta is delivered via the anthropic-beta header, not the model
+    // name in the JSONL, so peak > 200k is the only honest signal.
+    let modelPill = '';
+    if (u.model) {
+      const isOneM = (peak > 200000) || u.model.toLowerCase().includes('[1m]');
+      const shortModel = u.model.replace(/^claude-/, '').replace(/\[1m\]/i, '').trim();
+      const modelTip = u.model + (isOneM ? '\n(1M context window — anthropic-beta: context-1m)' : '');
+      modelPill = ' <span class="wp-model-pill" title="' + escapeHtml(modelTip) + '">'
+        + escapeHtml(shortModel) + (isOneM ? ' <span class="wp-model-1m">1M</span>' : '')
+        + '</span>';
+    }
     uSlot.innerHTML = '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
       + 'ctx ' + _formatTokens(latest) + ' / ' + _formatTokens(limit)
       + ' <span class="wp-usage-pct">(' + pct + '%)</span>'
-      + '</span>' + peakNote + costPill;
+      + '</span>' + peakNote + costPill + modelPill;
     slot.classList.add('visible');
     const pill = uSlot.querySelector('.wp-usage-clickable');
     if (pill) {
@@ -9669,6 +10083,11 @@
     }
     html += '</div>';
     slot.innerHTML = html;
+    // Pin the activity column to its bottom — newest events live at the
+    // tail of the list; if it overflows the fixed-height panel we want
+    // the user looking at the most recent commit/push/PR, not whatever
+    // happened on turn 1.
+    if (col) col.scrollTop = col.scrollHeight;
   }
 
   // Produce a human-readable summary for a single tool-only assistant event,
@@ -9719,7 +10138,10 @@
     for (const ev of events) {
       const div = document.createElement('div');
       div.className = 'event ' + ev.type;
-      div.dataset.renderTs = nowStamp();
+      // Use the event's own JSONL timestamp (when it was actually written)
+      // rather than render time; fall back to render time only when the
+      // event has no ts (synthetic / very old logs).
+      div.dataset.renderTs = eventStamp(ev.ts) || nowStamp();
       // Tag assistant rows with the source message_id so the streaming
       // bubble can detect "JSONL already won" and hand off cleanly.
       if (ev.type === 'assistant' && ev.message_id) {
@@ -9768,8 +10190,10 @@
           // overlay in this sticky header; it's now a real button in
           // convToolbar (see #announceBtnConv) so it stays in reach
           // without having to scroll up.
-          const stickyCollapsed = localStorage.getItem('cshCollapsed') === '1';
-          if (stickyCollapsed) sticky.classList.add('is-collapsed');
+          // Always start in the default (170px) state when entering a
+          // conversation. The chevron toggles to `.is-expanded` (50vh)
+          // and back; that state is ephemeral, scoped to this sticky DOM
+          // node, and resets every time the user switches conversations.
           sticky.innerHTML = resolveBtn + issueBtn
             + '<button class="tools-toggle" data-tools-toggle' + (hidden ? ' class="active"' : '') + ' title="Toggle tool-call visibility">'
             + (hidden ? 'Show tools' : 'Hide tools') + '</button>'
@@ -9787,7 +10211,7 @@
                       return h;
                     })()
             +     '</div>'
-            +     '<div class="csh-ask-earlier" style="display:none;" data-earlier-block>'
+            +     '<div class="csh-ask-earlier" data-earlier-block>'
             +       '<div class="label">Earlier ask</div>'
             +       '<div class="user-msg"><span class="earlier-first" data-earlier-first></span></div>'
             +     '</div>'
@@ -9797,23 +10221,23 @@
             +   '</div>'
             + '</div>'
             + '<button type="button" class="conv-sticky-header__collapse" data-csh-collapse '
-            +   'title="Collapse/expand the sticky header" aria-label="Collapse sticky header">'
-            +   '<span class="conv-sticky-header__collapse-icon">'
-            +     (stickyCollapsed ? '▾' : '▴')
-            +   '</span>'
+            +   'title="Expand to half-screen / shrink back" aria-label="Toggle expanded sticky panel">'
+            +   '<span class="conv-sticky-header__collapse-icon">▴</span>'
             + '</button>';
           $view.insertBefore(sticky, $view.firstChild);
-          // Wire the chevron toggle. State persists across reloads via
-          // localStorage so the user's preference sticks for every conv.
+          // Wire the chevron toggle. Two states:
+          //   default (170px) → click → expanded (50vh)
+          //   expanded (50vh) → click → default (170px)
+          // State is ephemeral; switching conversations rebuilds the
+          // sticky in the default state.
           const collapseBtn = sticky.querySelector('[data-csh-collapse]');
           if (collapseBtn) {
             collapseBtn.addEventListener('click', (e) => {
               e.stopPropagation();
-              const nowCollapsed = !sticky.classList.contains('is-collapsed');
-              sticky.classList.toggle('is-collapsed', nowCollapsed);
-              localStorage.setItem('cshCollapsed', nowCollapsed ? '1' : '0');
+              const nowExpanded = !sticky.classList.contains('is-expanded');
+              sticky.classList.toggle('is-expanded', nowExpanded);
               const icon = collapseBtn.querySelector('.conv-sticky-header__collapse-icon');
-              if (icon) icon.textContent = nowCollapsed ? '▾' : '▴';
+              if (icon) icon.textContent = nowExpanded ? '▾' : '▴';
             });
           }
           // Sticky auto-sizes to its current message — no resize handle, no
@@ -9968,20 +10392,22 @@
           if (last && !last.querySelector('.tool-result-output')) {
             const out = document.createElement('pre');
             out.className = 'tool-result-output' + (ev.is_error ? ' is-error' : '');
-            // Diagnostic: stamp the actual moment the JSON output landed in
-            // the DOM. Surfaced as a bracketed prefix because the parent
-            // .event.tool_result row is display:none and a CSS ::before
-            // would never render.
-            out.dataset.renderTs = nowStamp();
-            out.textContent = '[J ' + out.dataset.renderTs + ']  ' + text;
+            // Stamp this output with the tool_result event's own ts (when
+            // the result actually landed in the JSONL), not render time.
+            // The parent .event.tool_result row is display:none, so the
+            // CSS ::before never renders — we bake the prefix into the
+            // <pre>'s text content instead.
+            const _toolTs = eventStamp(ev.ts) || nowStamp();
+            out.dataset.renderTs = _toolTs;
+            out.textContent = '[J ' + _toolTs + ']  ' + text;
             // Bump the group's header stamp too so it reflects the most
             // recent activity (tool_use OR tool_result), not just tool_use.
             // CSS ::before reads attr() from its own element, so the header
             // node needs the attribute set, not just the parent group.
             if (_currentToolGroup) {
-              _currentToolGroup.dataset.renderTs = out.dataset.renderTs;
+              _currentToolGroup.dataset.renderTs = _toolTs;
               const $h = _currentToolGroup.querySelector('.tool-call-group-header');
-              if ($h) $h.dataset.renderTs = out.dataset.renderTs;
+              if ($h) $h.dataset.renderTs = _toolTs;
             }
             last.appendChild(out);
           }
@@ -9997,7 +10423,7 @@
           // No open group, or another event closed it — start a new one.
           const grp = document.createElement('div');
           grp.className = 'tool-call-group collapsed';
-          const _grpTs = nowStamp();
+          const _grpTs = eventStamp(ev.ts) || nowStamp();
           grp.dataset.renderTs = _grpTs;
           grp.innerHTML =
               '<div class="tool-call-group-header" data-render-ts="' + _grpTs + '">'
@@ -10011,9 +10437,10 @@
           _currentToolCount = 0;
         }
         _currentToolGroup.querySelector('.tool-call-group-body').appendChild(div);
-        // Diagnostic: bump both stamps to the latest tool's arrival. The
-        // header's own data-render-ts is what the CSS ::before reads.
-        const _ts = nowStamp();
+        // Bump both stamps to this tool's own ts so the visible group
+        // header reflects when the latest tool actually ran. The header's
+        // own data-render-ts is what the CSS ::before reads.
+        const _ts = eventStamp(ev.ts) || nowStamp();
         _currentToolGroup.dataset.renderTs = _ts;
         _currentToolGroup.querySelector('.tool-call-group-header').dataset.renderTs = _ts;
         _currentToolCount += 1;
@@ -10463,6 +10890,370 @@
   const PICKER_SENTINEL = '__pick__';
   const $sbRepoPicker = document.getElementById('sbRepoPicker');
 
+  // ── Multi-repo: peer registry ────────────────────────────────────────────
+  // The dropdown is driven by /api/registry — one entry per live CCC server
+  // on this machine. Selecting a peer navigates to that server's URL; each
+  // CCC serves its own page and shows the same peer list, so the dropdown
+  // follows you across servers. /api/repo/switch is no longer used by the
+  // picker; legacy single-repo flows (modal, custom-repos.txt browser) still
+  // call loadRepoList() below.
+  let peerState = { peers: [], identity: null };
+
+  async function loadPeerRegistry() {
+    let peers = [];
+    let identity = null;
+    try {
+      const [r1, r2] = await Promise.all([
+        fetch('/api/registry'),
+        fetch('/api/identity'),
+      ]);
+      if (r1.ok) {
+        const d1 = await r1.json();
+        peers = Array.isArray(d1.peers) ? d1.peers : [];
+      }
+      if (r2.ok) identity = await r2.json();
+    } catch (_) { /* best-effort — picker is decorative on failure */ }
+    peerState = { peers, identity };
+    return peerState;
+  }
+
+  function isCurrentPeer(peer) {
+    if (!peer || !peerState.identity) return false;
+    return peer.port === peerState.identity.port &&
+           peer.repo_path === peerState.identity.repo_path;
+  }
+
+  // Sentinel prefix marks "switch this server's repo" options (not-running
+  // known repos). Distinguishing them from peer-navigation URLs lets the
+  // change handler route to the right code path.
+  const SWITCH_PREFIX = 'switch::';
+
+  function renderPeerPickerSelect() {
+    if (!$sbRepoPicker) return;
+    const { peers } = peerState;
+    $sbRepoPicker.innerHTML = '';
+
+    const here = window.location;
+    const peerPaths = new Set(peers.map(p => p.repo_path));
+
+    // Section 1: live peers. Selecting navigates to that server's port.
+    if (peers.length) {
+      const grpRunning = document.createElement('optgroup');
+      grpRunning.label = 'Running';
+      for (const peer of peers) {
+        const opt = document.createElement('option');
+        opt.value = `${here.protocol}//${here.hostname}:${peer.port}/`;
+        const isHere = isCurrentPeer(peer);
+        const suffix = isHere ? ' (this server)' : ` (:${peer.port})`;
+        opt.textContent = (peer.label || peer.repo_path) + suffix;
+        opt.title = peer.repo_path;
+        if (isHere) opt.selected = true;
+        grpRunning.appendChild(opt);
+      }
+      $sbRepoPicker.appendChild(grpRunning);
+    }
+
+    // Section 2: known repos that aren't currently peers. Selecting one
+    // POSTs /api/repo/switch on THIS server — the one-off "peek" flow.
+    // Drawn from /api/repo/list (loadRepoList populates repoListState).
+    const knownRepos = (repoListState && repoListState.repos) ? repoListState.repos : [];
+    const switchable = knownRepos.filter(r => !peerPaths.has(r.path));
+    if (switchable.length) {
+      const grpSwitch = document.createElement('optgroup');
+      grpSwitch.label = 'Switch this server to…';
+      for (const repo of switchable) {
+        const opt = document.createElement('option');
+        opt.value = SWITCH_PREFIX + repo.path;
+        opt.textContent = repo.label || repo.path;
+        opt.title = repo.path + '\n(switches this server\'s repo; no new process)';
+        grpSwitch.appendChild(opt);
+      }
+      $sbRepoPicker.appendChild(grpSwitch);
+    }
+
+    if (!peers.length && !switchable.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'No repos found';
+      opt.disabled = true;
+      opt.selected = true;
+      $sbRepoPicker.appendChild(opt);
+    }
+
+    $sbRepoPicker.dataset.prev = $sbRepoPicker.value;
+  }
+
+  // ── Repo sidebar (vertical icon rail) ──────────────────────────────────
+  // Same data as the dropdown (peers + switchable repos), different
+  // presentation: persistent left strip with one circle per repo, click to
+  // navigate (peer) or switch this server (legacy). Hidden when nothing to
+  // show by toggling body.has-repo-rail; rail itself is always in the DOM.
+  function _railInitial(label, path) {
+    const src = String(label || path || '?').replace(/[^A-Za-z0-9]+/g, ' ').trim();
+    return src.charAt(0).toUpperCase() || '?';
+  }
+
+  function renderRepoSidebar() {
+    const $rail = document.getElementById('ccRepoSidebar');
+    if (!$rail) return;
+    const here = window.location;
+    const peers = (peerState && peerState.peers) || [];
+    const peerPaths = new Set(peers.map(p => p.repo_path));
+    const knownRepos = (repoListState && repoListState.repos) ? repoListState.repos : [];
+    const switchable = knownRepos.filter(r => !peerPaths.has(r.path));
+
+    $rail.innerHTML = '';
+
+    // Section 1: live peers.
+    for (const peer of peers) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const isHere = isCurrentPeer(peer);
+      btn.className = 'rail-btn' + (isHere ? ' is-active' : '');
+      btn.textContent = _railInitial(peer.label, peer.repo_path);
+      btn.title = `${peer.label || peer.repo_path}\n${peer.repo_path}\nport :${peer.port}` +
+                  (isHere ? '\n(this server)' : '');
+      btn.dataset.path = peer.repo_path;
+      if (isHere) {
+        btn.setAttribute('aria-current', 'true');
+      } else {
+        const url = `${here.protocol}//${here.hostname}:${peer.port}/`;
+        btn.addEventListener('click', () => {
+          // Same overlay/treatment as the dropdown's navigate path.
+          const $overlay = document.getElementById('cccLoadingOverlay');
+          if ($overlay) {
+            $overlay.classList.remove('fade-out', 'gone');
+            const $label = document.getElementById('cccLoadingLabel');
+            if ($label) {
+              $label.innerHTML =
+                '<strong>Loading ' + String(peer.label || peer.repo_path).replace(/[<>&]/g, '') + '</strong>' +
+                '<div class="ccc-loading-detail">Switching to that server\'s page.</div>';
+            }
+          }
+          window.location.href = url;
+        });
+      }
+      $rail.appendChild(btn);
+    }
+
+    // Divider (only if both sections will have icons).
+    if (peers.length && switchable.length) {
+      const div = document.createElement('div');
+      div.className = 'rail-divider';
+      $rail.appendChild(div);
+    }
+
+    // Section 2: switchable known repos. Click → /api/repo/switch on this
+    // server (legacy one-off flow).
+    for (const repo of switchable) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'rail-btn is-switchable';
+      btn.textContent = _railInitial(repo.label, repo.path);
+      btn.title = `${repo.label || repo.path}\n${repo.path}\n(not running — click switches this server's repo)`;
+      btn.dataset.path = repo.path;
+      btn.addEventListener('click', () => {
+        switchToRepo(repo.path, repo.label || repo.path);
+      });
+      $rail.appendChild(btn);
+    }
+
+    // Toggle layout class only when there's something to show.
+    document.body.classList.toggle('has-repo-rail', peers.length + switchable.length > 0);
+  }
+
+  // ── All-repos archive mode ──────────────────────────────────────────────
+  // Read-only browse of every conversation across every folder under
+  // ~/.claude/projects/. Toggled by #convAllReposToggle in the sidebar
+  // header; while on, replaces the sidebar list with archive rows.
+  // Default is ON — most users want the cross-folder view first; opt out
+  // sticks via localStorage.
+  const _ARCHIVE_MODE_KEY = 'ccc-archive-mode';
+  let archiveMode = (() => {
+    try {
+      const v = localStorage.getItem(_ARCHIVE_MODE_KEY);
+      return v === null ? true : v === '1';
+    } catch (_) { return true; }
+  })();
+  let archiveData = [];
+
+  async function loadArchiveAll() {
+    try {
+      const r = await fetch('/api/conversations/all');
+      if (!r.ok) return [];
+      const d = await r.json();
+      return Array.isArray(d.conversations) ? d.conversations : [];
+    } catch (_) { return []; }
+  }
+
+  // Stable hue 0..359 from a string. Used to color folder chips so the
+  // same folder always gets the same color across renders.
+  function _hashHue(s) {
+    let h = 0;
+    const str = String(s || '');
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) - h) + str.charCodeAt(i);
+      h |= 0;
+    }
+    return Math.abs(h) % 360;
+  }
+
+  function renderArchiveList(filter) {
+    const $list = document.getElementById('convList');
+    if (!$list) return;
+    const q = (filter || '').trim().toLowerCase();
+    const rows = q ? archiveData.filter(c =>
+      ((c.first_message || '') + ' ' + (c.folder_label || '') + ' ' + (c.git_branch || ''))
+        .toLowerCase().includes(q)
+    ) : archiveData;
+
+    if (!archiveData.length) {
+      $list.innerHTML = '<div class="archive-empty-state">No conversations on disk.</div>';
+      return;
+    }
+    if (!rows.length) {
+      $list.innerHTML = '<div class="archive-empty-state">No conversations match your filter.</div>';
+      return;
+    }
+
+    // Shape archive entries to look like /api/sessions entries so the
+    // existing renderConversationList renders them with the regular row
+    // template — same font, time format, dividers, hover, click hooks.
+    // Cold archive defaults (is_live: false, no sidecar) keep the live-
+    // pill code paths quiet; when a peer server is later running for one
+    // of these folders, supercharging the row with live data is just a
+    // matter of merging the peer's session record into this shape.
+    const shaped = rows.map(c => {
+      const folderOrphan = (c.folder_path === c.slug);
+      return {
+        id: c.session_id,
+        session_id: c.session_id,
+        first_message: c.first_message,
+        // #1 rename overrides + #9 archived set come from server-side
+        // global state files (session-names.json / archived-conversations.json).
+        display_name: c.display_name || '',
+        name_overridden: !!c.name_overridden,
+        last_assistant_text: '',
+        modified: c.mtime,
+        last_interacted: c.mtime,
+        size: c.size || 0,
+        // Round 2: live flag + state pills, all derived server-side
+        // from sidecar / git status / JSONL events with mtime-based
+        // caching. Powers the blue live dot + uncommitted/committed/
+        // pushed/no-edits chips + PR #N + Ready-to-merge bucket.
+        is_live: !!c.is_live,
+        archived: !!c.archived,
+        worktree_dirty: !!c.worktree_dirty,
+        has_commit: !!c.has_commit,
+        has_push: !!c.has_push,
+        has_edit: !!c.has_edit,
+        tail_pr_number: c.tail_pr_number || null,
+        // Sidecar overlay (Round 3) — only meaningful for live rows.
+        // The renderer reads these directly to draw the live tool pill
+        // ("▶ Editing foo.ts"), sending pulse, and needs-approval signal.
+        sidecar_status: c.sidecar_status || null,
+        sidecar_tool: c.sidecar_tool || null,
+        sidecar_file: c.sidecar_file || null,
+        sidecar_ts: c.sidecar_ts || 0,
+        sidecar_in_flight: !!c.sidecar_in_flight,
+        sidecar_has_writes: !!c.sidecar_has_writes,
+        needs_approval: !!c.needs_approval,
+        needs_approval_message: c.needs_approval_message || '',
+        source: 'interactive',
+        session_cwd: c.session_cwd || c.folder_path,
+        session_cwd_exists: !folderOrphan,
+        // #4 worktree leaf — the renderer reads session_cwd_is_worktree.
+        session_cwd_is_worktree: !!c.session_cwd_is_worktree,
+        branch: c.git_branch || '',
+        // #6 — hide the subtitle (last-assistant / first-message preview)
+        // in archive mode. The user doesn't read it cross-folder; redundant
+        // with the title and just doubles row height.
+        _hideAskHtml: true,
+        // Folder chip — special fields read by _renderRow.
+        folder_label_chip: c.folder_label,
+        folder_chip_hue: _hashHue(c.folder_label || c.slug),
+        folder_chip_orphan: folderOrphan,
+        folder_path: c.folder_path,
+      };
+    });
+
+    // Make sure the list is visible (kanban is hidden in setArchiveMode).
+    const $kanban = document.getElementById('kanbanBoard');
+    if ($kanban) $kanban.style.display = 'none';
+    $list.style.display = '';
+
+    // The click-to-currentSession bridge uses sessionIdByConv et al., which
+    // are normally populated inside loadConversationList() — a path archive
+    // mode bypasses. Without this, clicking an archive row passes undefined
+    // to setCurrentSession, currentSession.id stays null, and the input bar
+    // hides because hasSession is false. Populate the maps here so the
+    // existing right-pane code path works for archive entries.
+    for (const c of shaped) {
+      if (c.session_id) sessionIdByConv[c.id] = c.session_id;
+      if (c.session_cwd) sessionCwdByConv[c.id] = c.session_cwd;
+      sessionCwdExistsByConv[c.id] = !!c.session_cwd_exists;
+      sessionSourceByConv[c.id] = c.source || 'interactive';
+    }
+    // Also keep conversationsData in sync so downstream code (selection
+    // restore, etc.) sees a non-empty list while in archive mode. This
+    // gets reset on toggle-off via loadConversationList().
+    conversationsData = shaped;
+
+    renderConversationList(shaped);
+  }
+
+  async function setArchiveMode(on) {
+    archiveMode = !!on;
+    try { localStorage.setItem(_ARCHIVE_MODE_KEY, archiveMode ? '1' : '0'); } catch (_) {}
+    const $btn = document.getElementById('convAllReposToggle');
+    if ($btn) $btn.classList.toggle('is-active', archiveMode);
+    const $list = document.getElementById('convList');
+    const $kanban = document.getElementById('kanbanBoard');
+
+    if (archiveMode) {
+      // Hide kanban if it was visible; the archive renders into the same
+      // #convList slot. We don't toggle the existing convKanbanToggle's
+      // state — that's user-owned. Just visually hide the board so the
+      // archive list takes the full sidebar.
+      if ($kanban) $kanban.style.display = 'none';
+      if ($list) {
+        $list.style.display = '';
+        $list.innerHTML = '<div class="archive-empty-state">Loading archive…</div>';
+      }
+      archiveData = await loadArchiveAll();
+      // The user may have toggled off while loading — guard before render.
+      if (archiveMode) renderArchiveList(document.getElementById('convSearch')?.value || '');
+    } else {
+      // Restore: re-trigger the normal session-list load.
+      try { await loadConversationList(); } catch (_) {}
+    }
+  }
+
+  (function wireArchiveToggle() {
+    const $btn = document.getElementById('convAllReposToggle');
+    if ($btn) {
+      $btn.addEventListener('click', () => setArchiveMode(!archiveMode));
+      // Reflect initial active state before the boot kick fires below.
+      $btn.classList.toggle('is-active', archiveMode);
+    }
+    const $search = document.getElementById('convSearch');
+    if ($search) {
+      // Piggyback on existing search input — when in archive mode we
+      // re-render with the filter; when not, leave the existing list-
+      // filter logic alone (which is wired elsewhere via its own listener).
+      $search.addEventListener('input', () => {
+        if (archiveMode) renderArchiveList($search.value);
+      });
+    }
+    // Boot kick: if archive is the saved/default mode, load it after the DOM
+    // settles so we don't race with the initial loadConversationList.
+    if (archiveMode) {
+      // Defer a tick so other initializers (peer registry, repo list) finish.
+      setTimeout(() => { setArchiveMode(true); }, 0);
+    }
+  })();
+
+  // ── Legacy repo-list (used by the modal + custom-repos browser) ─────────
   // Shared state so the modal can reuse what the dropdown already fetched
   // and the dropdown can refresh itself after an add-via-modal.
   let repoListState = { repos: [], current: '', recent: [] };
@@ -10553,23 +11344,76 @@
   }
 
   if ($sbRepoPicker) {
+    // Initial: load both the peer registry (running CCC servers) and the
+    // legacy repo list (all known repos, including not-running ones for the
+    // "switch this server to…" group). Render once both are in.
     (async () => {
       try {
-        await loadRepoList();
-        renderPickerSelect();
+        await Promise.all([loadPeerRegistry(), loadRepoList()]);
+        renderPeerPickerSelect();
+        renderRepoSidebar();
       } catch (e) { /* picker is best-effort — failure shouldn't break the page */ }
     })();
 
+    // Poll the registry every 10s so a sibling server starting after page
+    // load shows up without a manual refresh. Pause when the tab is hidden.
+    // The repo list is comparatively static — we only refresh it on visibility
+    // change, not on every 10s tick.
+    let _peerPollId = null;
+    const _peerStartPoll = () => {
+      if (_peerPollId) return;
+      _peerPollId = setInterval(async () => {
+        await loadPeerRegistry();
+        renderPeerPickerSelect();
+        renderRepoSidebar();
+      }, 10000);
+    };
+    const _peerStopPoll = () => {
+      if (!_peerPollId) return;
+      clearInterval(_peerPollId);
+      _peerPollId = null;
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        Promise.all([loadPeerRegistry(), loadRepoList()]).then(() => {
+          renderPeerPickerSelect();
+          renderRepoSidebar();
+        });
+        _peerStartPoll();
+      } else {
+        _peerStopPoll();
+      }
+    });
+    if (document.visibilityState === 'visible') _peerStartPoll();
+
     $sbRepoPicker.addEventListener('change', () => {
       const target = $sbRepoPicker.value;
-      if (target === PICKER_SENTINEL) {
-        // Don't actually switch — reset to prev and open the modal.
-        $sbRepoPicker.value = $sbRepoPicker.dataset.prev || repoListState.current;
-        openRepoPickerModal();
+      if (!target) return;
+      // SWITCH_PREFIX: legacy "switch this server's REPO_ROOT" path. Used
+      // when the user picks a known-but-not-running repo from the dropdown
+      // (the one-off peek flow).
+      if (target.startsWith(SWITCH_PREFIX)) {
+        const repoPath = target.slice(SWITCH_PREFIX.length);
+        const targetLabel = $sbRepoPicker.options[$sbRepoPicker.selectedIndex]?.textContent || repoPath;
+        switchToRepo(repoPath, targetLabel);
         return;
       }
-      const targetLabel = $sbRepoPicker.options[$sbRepoPicker.selectedIndex]?.textContent || target;
-      switchToRepo(target, targetLabel);
+      // Otherwise: navigation URL to a peer's port. Same-origin = no-op.
+      const here = window.location;
+      const sameOriginUrl = `${here.protocol}//${here.host}/`;
+      if (target === sameOriginUrl) return;
+      const $overlay = document.getElementById('cccLoadingOverlay');
+      if ($overlay) {
+        $overlay.classList.remove('fade-out', 'gone');
+        const $label = document.getElementById('cccLoadingLabel');
+        if ($label) {
+          const lbl = $sbRepoPicker.options[$sbRepoPicker.selectedIndex]?.textContent || target;
+          $label.innerHTML =
+            '<strong>Loading ' + String(lbl).replace(/[<>&]/g, '') + '</strong>' +
+            '<div class="ccc-loading-detail">Switching to that server\'s page.</div>';
+        }
+      }
+      window.location.href = target;
     });
 
     // Stash the current value so we can restore on failure.
