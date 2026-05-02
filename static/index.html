@@ -8863,7 +8863,7 @@
           });
         } catch (_) { /* swallow — UI refresh below will surface failure */ }
         if (typeof archiveMode !== 'undefined' && archiveMode) {
-          archiveData = await loadArchiveAll();
+          await refreshArchiveData();
           renderArchiveList(document.getElementById('convSearch')?.value || '');
         } else if (typeof loadConversationList === 'function') {
           loadConversationList();
@@ -8903,7 +8903,7 @@
           });
         } catch (_) { /* swallow */ }
         if (typeof archiveMode !== 'undefined' && archiveMode) {
-          archiveData = await loadArchiveAll();
+          await refreshArchiveData();
           renderArchiveList(document.getElementById('convSearch')?.value || '');
         } else if (typeof loadConversationList === 'function') {
           loadConversationList();
@@ -9148,7 +9148,7 @@
               body: JSON.stringify({ session_id: sid, path: dstCard.folder_path }),
             });
           } catch (_) { /* swallow */ }
-          archiveData = await loadArchiveAll();
+          await refreshArchiveData();
           renderArchiveList(document.getElementById('convSearch')?.value || '');
           return;
         }
@@ -12882,6 +12882,7 @@
     } catch (_) { return true; }
   })();
   let archiveData = [];
+  let archiveLoaded = false;
 
   async function loadArchiveAll() {
     try {
@@ -12890,6 +12891,11 @@
       const d = await r.json();
       return Array.isArray(d.conversations) ? d.conversations : [];
     } catch (_) { return []; }
+  }
+  async function refreshArchiveData() {
+    archiveData = await loadArchiveAll();
+    archiveLoaded = true;
+    return archiveData;
   }
 
   // Stable hue 0..359 from a string. Used to color folder chips so the
@@ -12913,6 +12919,10 @@
         .toLowerCase().includes(q)
     ) : archiveData;
 
+    if (!archiveLoaded && !archiveData.length) {
+      $list.innerHTML = '<div class="archive-empty-state">Loading archive&hellip;</div>';
+      return;
+    }
     if (!archiveData.length) {
       $list.innerHTML = '<div class="archive-empty-state">No conversations on disk.</div>';
       return;
@@ -13039,7 +13049,7 @@
         $list.style.display = '';
         $list.innerHTML = '<div class="archive-empty-state">Loading archive…</div>';
       }
-      archiveData = await loadArchiveAll();
+      await refreshArchiveData();
       // The user may have toggled off while loading — guard before render.
       if (archiveMode) renderArchiveList(document.getElementById('convSearch')?.value || '');
     } else {
@@ -14066,7 +14076,7 @@
     // server-side; only changed JSONLs get re-scanned.
     if (typeof archiveMode !== 'undefined' && archiveMode) {
       try {
-        archiveData = await loadArchiveAll();
+        await refreshArchiveData();
         const $search = document.getElementById('convSearch');
         renderArchiveList($search ? $search.value : '');
       } catch (_) { /* best-effort */ }
