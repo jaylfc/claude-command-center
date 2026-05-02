@@ -2560,6 +2560,65 @@
     flex-shrink: 0;
   }
 
+  /* ── All-repos archive view ───────────────────────────────────────────
+   * Replaces the sidebar conversation list when toggled on. Each row is
+   * one conversation across every folder under ~/.claude/projects/, sorted
+   * reverse-chrono. Read-only in v1 — click does nothing yet. */
+  .conv-allrepos-toggle.is-active {
+    background: var(--accent) !important;
+    color: #fff !important;
+    border-color: var(--accent) !important;
+  }
+  .archive-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    cursor: default;
+    min-height: 32px;
+    box-sizing: border-box;
+  }
+  .archive-row:hover { background: var(--surface-2); }
+  .archive-folder-chip {
+    flex-shrink: 0;
+    padding: 1px 7px;
+    background: var(--surface-2);
+    color: var(--text-muted);
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: lowercase;
+    max-width: 140px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .archive-folder-chip.is-orphan {
+    /* slug couldn't be resolved to an existing dir — visually muted */
+    opacity: 0.55;
+    font-style: italic;
+  }
+  .archive-title {
+    flex: 1; min-width: 0;
+    color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .archive-title.is-empty {
+    color: var(--text-muted); font-style: italic;
+  }
+  .archive-time {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .archive-empty-state {
+    padding: 24px 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
   /* ── Full-page loading overlay ──────────────────────────────────────────
    * Shown on initial load and during repo-switch. Covers everything so the
    * user sees a clear "we're working" signal instead of staring at an empty
@@ -3263,6 +3322,7 @@
         <a class="sh-btn sh-btn-deploy" id="sidebarDeployPill" target="_blank" rel="noopener" title="Vercel deploy — loading…" aria-label="Vercel deploy status"><span class="deploy-dot" id="deployDot"></span><span class="deploy-label" id="deployStateLabel">Vercel</span></a>
         <button class="conv-compact-toggle sh-btn" id="convCompactToggle" title="Compact rows — keep each card to a single line" aria-label="Toggle compact rows"><span aria-hidden="true">&#8801;</span></button>
         <button class="conv-kanban-toggle sh-btn" id="convKanbanToggle" title="Toggle Kanban board view" aria-label="Toggle Kanban board view"><span aria-hidden="true">&#9783;</span> Board</button>
+        <button class="conv-allrepos-toggle sh-btn" id="convAllReposToggle" title="All repos — browse conversations from every folder you've ever Claude-Code'd in. Read-only; no servers spawned." aria-label="Toggle all-repos archive">&#128194; All repos</button>
         <button class="conv-archive-toggle sh-btn" id="convArchiveToggle" title="Show archived">&#128230;</button>
         <button class="conv-sort-btn sh-btn" id="convSortBtn" title="Sort by latest response (ignores custom order)">&#8693;</button>
         <button class="conv-sort-btn sh-btn" id="convAlphaSortBtn" title="Sort alphabetically by title">A&#8595;</button>
@@ -10707,6 +10767,125 @@
     // Toggle layout class only when there's something to show.
     document.body.classList.toggle('has-repo-rail', peers.length + switchable.length > 0);
   }
+
+  // ── All-repos archive mode ──────────────────────────────────────────────
+  // Read-only browse of every conversation across every folder under
+  // ~/.claude/projects/. Toggled by #convAllReposToggle in the sidebar
+  // header; while on, replaces the sidebar list with archive rows. v1
+  // click is a no-op — activation flow comes later.
+  let archiveMode = false;
+  let archiveData = [];
+
+  async function loadArchiveAll() {
+    try {
+      const r = await fetch('/api/conversations/all');
+      if (!r.ok) return [];
+      const d = await r.json();
+      return Array.isArray(d.conversations) ? d.conversations : [];
+    } catch (_) { return []; }
+  }
+
+  function _archiveFormatTime(epochSec) {
+    if (!epochSec) return '';
+    const d = new Date(epochSec * 1000);
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    if (sameDay) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return d.toLocaleDateString([], sameYear
+      ? { month: 'short', day: 'numeric' }
+      : { month: 'short', day: 'numeric', year: '2-digit' });
+  }
+
+  function _archiveEscape(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function renderArchiveList(filter) {
+    const $list = document.getElementById('convList');
+    if (!$list) return;
+    const q = (filter || '').trim().toLowerCase();
+    const rows = q ? archiveData.filter(c =>
+      ((c.first_message || '') + ' ' + (c.folder_label || '') + ' ' + (c.git_branch || ''))
+        .toLowerCase().includes(q)
+    ) : archiveData;
+
+    if (!rows.length) {
+      $list.innerHTML = '<div class="archive-empty-state">' +
+        (archiveData.length ? 'No conversations match your filter.' : 'No conversations on disk.') +
+        '</div>';
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const c of rows) {
+      const row = document.createElement('div');
+      row.className = 'archive-row';
+      row.dataset.sessionId = c.session_id;
+      row.dataset.folderPath = c.folder_path || c.slug;
+      // Folder chip is muted/italic when the slug couldn't be resolved to
+      // an existing directory — signals "this folder is gone or never
+      // resolved" so the user knows the label is approximate.
+      const chipOrphan = (c.folder_path === c.slug) ? ' is-orphan' : '';
+      const titleEmpty = c.first_message ? '' : ' is-empty';
+      row.innerHTML =
+        '<div class="archive-folder-chip' + chipOrphan + '" title="' +
+          _archiveEscape(c.folder_path || c.slug) + '">' +
+          _archiveEscape(c.folder_label || c.slug) +
+        '</div>' +
+        '<div class="archive-title' + titleEmpty + '" title="' +
+          _archiveEscape(c.first_message || '(no first message)') + '">' +
+          _archiveEscape(c.first_message || '(no first message)') +
+        '</div>' +
+        '<div class="archive-time">' + _archiveEscape(_archiveFormatTime(c.mtime)) + '</div>';
+      frag.appendChild(row);
+    }
+    $list.innerHTML = '';
+    $list.appendChild(frag);
+  }
+
+  async function setArchiveMode(on) {
+    archiveMode = !!on;
+    const $btn = document.getElementById('convAllReposToggle');
+    if ($btn) $btn.classList.toggle('is-active', archiveMode);
+    const $list = document.getElementById('convList');
+    const $kanban = document.getElementById('kanbanBoard');
+
+    if (archiveMode) {
+      // Hide kanban if it was visible; the archive renders into the same
+      // #convList slot. We don't toggle the existing convKanbanToggle's
+      // state — that's user-owned. Just visually hide the board so the
+      // archive list takes the full sidebar.
+      if ($kanban) $kanban.style.display = 'none';
+      if ($list) {
+        $list.style.display = '';
+        $list.innerHTML = '<div class="archive-empty-state">Loading archive…</div>';
+      }
+      archiveData = await loadArchiveAll();
+      // The user may have toggled off while loading — guard before render.
+      if (archiveMode) renderArchiveList(document.getElementById('convSearch')?.value || '');
+    } else {
+      // Restore: re-trigger the normal session-list load.
+      try { await loadConversationList(); } catch (_) {}
+    }
+  }
+
+  (function wireArchiveToggle() {
+    const $btn = document.getElementById('convAllReposToggle');
+    if ($btn) {
+      $btn.addEventListener('click', () => setArchiveMode(!archiveMode));
+    }
+    const $search = document.getElementById('convSearch');
+    if ($search) {
+      // Piggyback on existing search input — when in archive mode we
+      // re-render with the filter; when not, leave the existing list-
+      // filter logic alone (which is wired elsewhere via its own listener).
+      $search.addEventListener('input', () => {
+        if (archiveMode) renderArchiveList($search.value);
+      });
+    }
+  })();
 
   // ── Legacy repo-list (used by the modal + custom-repos browser) ─────────
   // Shared state so the modal can reuse what the dropdown already fetched
