@@ -2189,6 +2189,93 @@ def _load_conv_meta_cache():
         _conv_meta_cache.update(keep)
 
 
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _session_scan_cutoff_ts(include_old):
+    if include_old:
+        return 0
+    max_age_days = _env_int("CCC_MAX_CONV_AGE_DAYS", 30)
+    if max_age_days <= 0:
+        return 0
+    return time.time() - (max_age_days * 86400)
+
+
+def _session_scan_file_limit(include_old):
+    if include_old:
+        return 0
+    return max(0, _env_int("CCC_INITIAL_SESSION_SCAN_LIMIT", 180))
+
+
+def _filter_conversation_jsonls(
+    jsonl_files,
+    *,
+    include_old=False,
+    always_include_sids=None,
+    last_interactions=None,
+    cutoff_ts=None,
+    max_files=None,
+):
+    """Return JSONL paths to scan for the first sessions response.
+
+    The board needs live/recent sessions immediately, not every historical
+    transcript. Old rows remain available through ?include_old=1.
+    """
+    files = list(jsonl_files)
+    total = len(files)
+    if include_old:
+        return files, {"total": total, "skipped_old": 0, "limited": False}
+
+    if cutoff_ts is None:
+        cutoff_ts = _session_scan_cutoff_ts(False)
+    if max_files is None:
+        max_files = _session_scan_file_limit(False)
+    always_include_sids = set(always_include_sids or [])
+    last_interactions = last_interactions or {}
+
+    required = []
+    optional = []
+    skipped_old = 0
+    for f in files:
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        sid = f.name[:-6] if f.name.endswith(".jsonl") else f.stem
+        interacted = last_interactions.get(sid) or 0
+        freshness = max(st.st_mtime, interacted)
+        keep_always = sid in always_include_sids
+        is_recent = cutoff_ts <= 0 or freshness >= cutoff_ts
+        if not keep_always and not is_recent:
+            skipped_old += 1
+            continue
+        row = (freshness, f)
+        if keep_always:
+            required.append(row)
+        else:
+            optional.append(row)
+
+    required.sort(key=lambda x: x[0], reverse=True)
+    optional.sort(key=lambda x: x[0], reverse=True)
+
+    limited = False
+    if max_files > 0 and len(required) + len(optional) > max_files:
+        remaining = max(0, max_files - len(required))
+        optional = optional[:remaining]
+        limited = True
+
+    selected = [f for _, f in required + optional]
+    return selected, {
+        "total": total,
+        "skipped_old": skipped_old,
+        "limited": limited,
+    }
+
+
 def _gc_scratch_jsonls(max_age_days=7):
     """Delete throwaway JSONLs older than max_age_days from our scratch
     project dir. Called once at server startup so the scratch dir
@@ -4772,7 +4859,7 @@ _FIND_CONVS_INFLIGHT = 0
 _FIND_CONVS_INFLIGHT_MAX = 3
 
 
-def find_conversations(progress=None):
+def find_conversations(progress=None, include_old=True, live_sids=None):
     """Return list of conversation metadata dicts, newest first."""
     global _FIND_CONVS_INFLIGHT
     conversations = []
@@ -4827,6 +4914,9 @@ def find_conversations(progress=None):
     archived_set = set(_load_archived_conversations())
     verified_set = set(_load_verified_conversations())
     last_interactions = _load_last_interactions()
+    if live_sids is None and not include_old:
+        live_sids = set(_load_session_registry().keys())
+    live_sids = set(live_sids or [])
     # Skip sessions created by our own `claude -p` title-summarizer calls.
     # The summarizer prompts start with these exact prefixes (see
     # summarize_session_title / the GitHub-issue title summarizer). Without
@@ -4858,20 +4948,6 @@ def find_conversations(progress=None):
                 continue
             seen_jsonl.add(f.name)
             jsonl_files.append(f)
-    if progress:
-        progress(
-            "repo",
-            state="done",
-            detail=f"{len(project_dirs)} transcript folder(s) for {REPO_ROOT.name}.",
-        )
-        progress(
-            "transcripts",
-            state="running",
-            count=0,
-            total=len(jsonl_files),
-            detail=f"Found {len(jsonl_files)} JSONL transcript file(s).",
-        )
-
     # Inject JSONLs for sessions pinned to this repo from other slug
     # dirs — so the single-repo list shows them as if launched here.
     if pinned_in_sids:
@@ -4888,6 +4964,36 @@ def find_conversations(progress=None):
                             jsonl_files.append(cand)
             except OSError:
                 pass
+
+    scan_required_sids = live_sids | pinned_in_sids
+    jsonl_total_before_filter = len(jsonl_files)
+    jsonl_files, scan_filter = _filter_conversation_jsonls(
+        jsonl_files,
+        include_old=include_old,
+        always_include_sids=scan_required_sids,
+        last_interactions=last_interactions,
+    )
+    if progress:
+        progress(
+            "repo",
+            state="done",
+            detail=f"{len(project_dirs)} transcript folder(s) for {REPO_ROOT.name}.",
+        )
+        detail = f"Found {jsonl_total_before_filter} JSONL transcript file(s)."
+        if not include_old and len(jsonl_files) != jsonl_total_before_filter:
+            skipped = scan_filter.get("skipped_old", 0)
+            note = f" ({skipped} older file(s) deferred)" if skipped else ""
+            detail = (
+                f"Scanning {len(jsonl_files)} of {jsonl_total_before_filter} "
+                f"JSONL transcript file(s).{note}"
+            )
+        progress(
+            "transcripts",
+            state="running",
+            count=0,
+            total=len(jsonl_files),
+            detail=detail,
+        )
 
     total_jsonl = len(jsonl_files)
     for idx, f in enumerate(jsonl_files, start=1):
@@ -4916,6 +5022,7 @@ def find_conversations(progress=None):
         timestamp = None
         git_branch = None
         first_message = None
+        head_cwd = None
 
         _t0 = time.perf_counter() if _PROFILE else 0
         try:
@@ -4932,6 +5039,8 @@ def find_conversations(progress=None):
                         continue
 
                     ev_type = ev.get("type", "")
+                    if not head_cwd:
+                        head_cwd = ev.get("cwd")
 
                     if ev_type in ("file-history-snapshot", "progress", "system"):
                         continue
@@ -4972,13 +5081,17 @@ def find_conversations(progress=None):
         sid = session_id or conv_id
         if _PROFILE:
             _t0 = time.perf_counter()
-            cwd = find_session_cwd(sid)
+            cwd = head_cwd or find_session_cwd(sid)
+            if head_cwd:
+                _session_cwd_cache[sid] = head_cwd
             _t_cwd += time.perf_counter() - _t0; _n_cwd += 1
             _t0 = time.perf_counter()
             tail_meta = _extract_tail_meta(f)
             _t_tail += time.perf_counter() - _t0; _n_tail += 1
         else:
-            cwd = find_session_cwd(sid)
+            cwd = head_cwd or find_session_cwd(sid)
+            if head_cwd:
+                _session_cwd_cache[sid] = head_cwd
             tail_meta = _extract_tail_meta(f)
         override = name_overrides.get(sid) or name_overrides.get(conv_id)
         # Display value priority: side-car override > jsonl > None.
@@ -5309,7 +5422,7 @@ def _add_sidecar_fields(entry):
     entry["needs_approval_message"] = notif.get("message", "") if notif else ""
 
 
-def find_all_sessions(progress=None):
+def find_all_sessions(progress=None, include_old=True):
     """Return a unified list of sessions: interactive conversations + pkood
     agents + ~/.claude/tasks backlog cards.
 
@@ -5318,10 +5431,16 @@ def find_all_sessions(progress=None):
     """
     global _SESSION_ISSUES_CACHE
     _SESSION_ISSUES_CACHE = _load_session_issues()
+    registry = _load_session_registry()
+    live_sids = set(registry.keys())
     # Get conversations and tag them
     if progress:
         progress("sessions", state="running", count=0, detail="Reading interactive sessions.")
-    conversations = find_conversations(progress=progress)
+    conversations = find_conversations(
+        progress=progress,
+        include_old=include_old,
+        live_sids=live_sids,
+    )
     if progress:
         progress(
             "sessions",
@@ -5329,9 +5448,6 @@ def find_all_sessions(progress=None):
             count=len(conversations),
             detail=f"{len(conversations)} interactive session(s); checking live registry.",
         )
-    # Load session registry to mark which sessions have a running process
-    registry = _load_session_registry()
-    live_sids = set(registry.keys())
     spawned_pids = {s["pid"] for s in _spawned_sessions if s["proc"].poll() is None}
     spawned_engine_by_pid = {s["pid"]: s.get("engine", "claude") for s in _spawned_sessions}
     for c in conversations:
@@ -10198,13 +10314,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/loading-status":
             self.send_json(_session_load_snapshot())
         elif path == "/api/sessions":
+            qs = urllib.parse.parse_qs(parsed.query)
+            include_old = qs.get("include_old", ["0"])[0] in ("1", "true")
             _session_load_begin()
             try:
-                rows = find_all_sessions(progress=_session_load_set_step)
+                rows = find_all_sessions(
+                    progress=_session_load_set_step,
+                    include_old=include_old,
+                )
                 _session_load_complete(rows)
             except Exception as exc:
                 _session_load_fail(exc)
                 raise
+            _save_conv_meta_cache()
             self.send_json(rows)
         elif path == "/api/conversations":
             convs = find_conversations() or []
@@ -12540,7 +12662,8 @@ def _warm_cache():
     """Pre-warm the conversation metadata cache in a background thread."""
     try:
         t0 = time.time()
-        find_all_sessions()
+        find_all_sessions(include_old=False)
+        _save_conv_meta_cache()
         print(f"  Cache warmed in {time.time() - t0:.1f}s ({len(_conv_meta_cache)} files)")
     except Exception as e:
         print(f"  Cache warm failed: {e}")

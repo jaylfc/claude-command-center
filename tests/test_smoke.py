@@ -10,6 +10,7 @@ import pathlib
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -226,6 +227,43 @@ class TestServerImports(unittest.TestCase):
         import server
         src = pathlib.Path(server.__file__).read_text()
         self.assertIn("/api/conversations/[a-f0-9-]+/files", src)
+
+    def test_session_initial_scan_keeps_recent_and_live_rows(self):
+        """Initial /api/sessions scans should avoid cold history while keeping
+        live sessions even when their transcript mtime is old."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            files = []
+            for name, age in (
+                ("old-cold", 20_000),
+                ("old-live", 20_000),
+                ("recent-newest", 10),
+                ("recent-older", 20),
+            ):
+                p = root / f"{name}.jsonl"
+                p.write_text("{}\n")
+                os.utime(p, (now - age, now - age))
+                files.append(p)
+
+            selected, meta = server._filter_conversation_jsonls(
+                files,
+                include_old=False,
+                always_include_sids={"old-live"},
+                cutoff_ts=now - 1000,
+                max_files=2,
+            )
+
+        stems = [p.stem for p in selected]
+        self.assertEqual(len(stems), 2)
+        self.assertIn("old-live", stems)
+        self.assertIn("recent-newest", stems)
+        self.assertNotIn("old-cold", stems)
+        self.assertTrue(meta["limited"])
 
 
 class TestHealthcheck(unittest.TestCase):
