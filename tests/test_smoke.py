@@ -201,6 +201,21 @@ class TestServerImports(unittest.TestCase):
                 server._spawned_sessions.extend(orig_sessions)
 
 
+    def test_reveal_file_route_registered(self):
+        """Smoke check: POST /api/reveal-file branch present in do_POST."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        src = pathlib.Path(server.__file__).read_text()
+        self.assertIn('"/api/reveal-file"', src)
+        # Defense-in-depth: extension clamp must be referenced near the
+        # endpoint. Cheap signal that the security control wasn't dropped.
+        idx = src.find('"/api/reveal-file"')
+        self.assertGreater(idx, 0)
+        nearby = src[idx:idx + 2000]
+        self.assertIn("FILE_EXT_TO_CATEGORY", nearby,
+                      "extension clamp missing near /api/reveal-file route")
+
     def test_files_endpoint_route_registered(self):
         """Smoke check: GET /api/conversations/<id>/files dispatcher
         branch must be present in the do_GET source. Route registration

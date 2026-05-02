@@ -9605,6 +9605,41 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_json({"ok": True, "path": fpath, "name": fname, "bytes": len(raw)})
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/reveal-file":
+            # SECURITY: macOS `open` will execute apps and scripts. Unlike
+            # /api/open (which clamps targets to REPO_ROOT/LOG_DIR), we
+            # accept any path — but only if its extension is in
+            # FILE_EXT_TO_CATEGORY. The whitelist excludes .app, .sh,
+            # .command, .py, etc., so subprocess.Popen(["open", path])
+            # cannot trigger code execution. Adding executable types to
+            # FILE_CATEGORIES would re-introduce the RCE risk.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            target = (payload.get("path") or "").strip()
+            if not target:
+                self.send_json({"ok": False, "error": "missing path"}, 400)
+            elif not os.path.isabs(target):
+                self.send_json({"ok": False, "error": "path must be absolute"}, 400)
+            else:
+                ext = os.path.splitext(target)[1].lower()
+                if ext not in FILE_EXT_TO_CATEGORY:
+                    self.send_json(
+                        {"ok": False, "error": "extension not allowed", "ext": ext},
+                        403,
+                    )
+                elif not os.path.exists(target):
+                    self.send_json({"ok": False, "error": "not found", "path": target}, 404)
+                else:
+                    try:
+                        subprocess.Popen(["open", target])
+                        print(f"[reveal-file] {target}", file=sys.stderr)
+                        self.send_json({"ok": True, "path": target})
+                    except Exception as e:
+                        self.send_json({"ok": False, "error": str(e)}, 500)
         elif path == "/api/open":
             # SECURITY: macOS `open` will execute scripts/apps. We MUST clamp
             # the target to a known-safe sandbox or this is RCE-as-a-feature.
