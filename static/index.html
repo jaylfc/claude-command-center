@@ -8459,7 +8459,7 @@
       //      launched in shared clone but editing a sibling worktree).
       //      Outranks PR / pushed / committed because it means there are
       //      changes that haven't landed yet.
-      //   3. PR #N (worktree rows only \u2014 more actionable than "pushed").
+      //   3. PR #N (recorded PRs; more actionable than "pushed").
       //   4. pushed.
       //   5. committed (local commits not yet pushed).
       //   6. no edits (Claude has touched nothing this session).
@@ -12946,6 +12946,8 @@
         has_push: !!c.has_push,
         has_edit: !!c.has_edit,
         tail_pr_number: c.tail_pr_number || null,
+        tail_pr_url: c.tail_pr_url || null,
+        pr_state: c.pr_state || null,
         // Sidecar overlay (Round 3) — only meaningful for live rows.
         // The renderer reads these directly to draw the live tool pill
         // ("▶ Editing foo.ts"), sending pulse, and needs-approval signal.

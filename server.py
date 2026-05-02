@@ -512,6 +512,7 @@ def _conversation_dirs():
 # status per cwd, which couldn't distinguish per-session history
 # (every session in the same clone got the same answer) and missed
 # has_push entirely.
+_ARCHIVE_PILLS_RECENT_WINDOW = 3 * 86400
 
 # PR state cache for the sidebar's "Ready to merge" bucket. Without this,
 # every session that ever ran `gh pr create` sticks in "Ready to merge"
