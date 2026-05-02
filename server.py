@@ -8956,7 +8956,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         check the Origin header. Browsers always set Origin on cross-origin
         requests but may omit it on same-origin (varies). We allow:
           - missing Origin (curl, same-origin form posts in some browsers)
-          - Origin matching localhost / 127.0.0.1 / ::1 on our PORT
+          - Origin matching localhost / 127.0.0.1 / ::1 on ANY port. The
+            multi-repo design (see docs/superpowers/specs/2026-04-30-
+            multirepo-design.md) runs sibling CCC servers on different
+            loopback ports and the browser UI on one needs to fetch from
+            the others. A malicious external site can't set a loopback
+            Origin header (browsers set it from the page's actual URL),
+            so the loopback wildcard doesn't widen the threat model — the
+            trust boundary is already "anything that can reach loopback".
           - Origin in the CCC_ALLOWED_ORIGIN env var (for trusted-network
             access via Tailscale / VPN — exact match against the env value)
         Anything else gets 403. Returns True if request is allowed.
@@ -8964,12 +8971,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         origin = (self.headers.get("Origin") or "").strip()
         if not origin:
             return True  # no Origin = curl / programmatic / same-origin form
-        for host in ("localhost", "127.0.0.1", "[::1]"):
-            for scheme in ("http", "https"):
-                if origin == f"{scheme}://{host}:{PORT}":
-                    return True
-                if origin == f"{scheme}://{host}":  # default port edge case
-                    return True
+        # Any port on loopback is OK — siblings serve other repos on their
+        # own ports and the UI fetches across them. `\[::1\]` because IPv6
+        # literals carry brackets in URL form.
+        if re.match(r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$", origin):
+            return True
         if origin in ALLOWED_ORIGINS:
             return True
         self.send_json({"error": "cross-origin POST rejected", "origin": origin}, 403)
