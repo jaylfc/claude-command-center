@@ -3385,6 +3385,7 @@
     </button>
     <button id="kptSummarizeAllBtn" class="topbar-btn" title="Use Claude haiku to generate concise titles for every card whose name hasn't been touched. Runs in the background, ~3 cards in parallel." aria-label="Summarize titles for all unnamed cards">&#10024; Titles</button>
     <button id="kptWorktreesBtn" class="topbar-btn" title="Show all worktrees of this repo, with an indicator for those that have uncommitted changes." aria-label="Show worktrees">&#127807; Worktrees</button>
+    <button id="termToggleBtn" class="topbar-btn" title="Open the in-UI terminal panel — run quick shell commands (git status, npm test, ./script.sh) without leaving the page. One-shot per command, no interactive TTY (no vim/top)." aria-label="Toggle terminal panel">&#9000; Terminal</button>
     <!-- View menu — collapses three rarely-changed toggles (Last 10h /
          Compact / GitHub only) into one disclosure popover. -->
     <div class="kpt-view-menu-wrap" style="position:relative;">
@@ -13153,6 +13154,449 @@
   loadConversationList();
   pollVercelDeploy();
   setInterval(pollVercelDeploy, 15000);
+})();
+</script>
+
+<!-- ── In-UI terminal panel ──────────────────────────────────────────────
+     A small one-shot terminal: type a command, hit Enter, output streams
+     in via SSE. `cd` is parsed server-side so the prompt's cwd survives
+     between commands. Cancel kills the whole process group. Not a real
+     PTY — no vim / top / interactive prompts. -->
+<style>
+  #termPanel {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
+    height: 280px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    display: none;
+    flex-direction: column;
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.35);
+    font-family: ui-monospace, "SF Mono", "Menlo", "Monaco", "Roboto Mono", monospace;
+    font-size: 12px;
+  }
+  body.has-side-nav #termPanel { left: 52px; }
+  #termPanel.open { display: flex; }
+  #termPanel .term-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px;
+    background: var(--surface-2, #1c2128);
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+  }
+  #termPanel .term-title {
+    font-weight: 600; color: var(--text); font-size: 11px;
+    letter-spacing: 0.3px;
+  }
+  #termPanel .term-cwd {
+    color: var(--text-muted); font-size: 11px; opacity: 0.85;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1;
+  }
+  #termPanel .term-cwd b { color: var(--accent); font-weight: 600; }
+  #termPanel .term-resize {
+    cursor: ns-resize; height: 4px; width: 100%;
+    position: absolute; top: -2px; left: 0;
+    background: transparent;
+  }
+  #termPanel .term-resize:hover { background: var(--accent); opacity: 0.4; }
+  #termPanel .term-actions { display: flex; gap: 4px; }
+  #termPanel .term-actions button {
+    padding: 2px 8px; font-size: 11px; border-radius: 4px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    cursor: pointer;
+  }
+  #termPanel .term-actions button:hover { background: var(--surface-2); }
+  #termPanel .term-actions button.danger { color: #f85149; border-color: rgba(248,81,73,0.4); }
+  #termPanel .term-actions button[disabled] { opacity: 0.4; cursor: not-allowed; }
+  #termPanel .term-log {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 8px 10px;
+    background: var(--bg);
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.45;
+  }
+  #termPanel .term-log .term-cmd { color: var(--accent); font-weight: 600; }
+  #termPanel .term-log .term-err { color: #f85149; }
+  #termPanel .term-log .term-exit { color: var(--text-muted); opacity: 0.75; font-style: italic; }
+  #termPanel .term-input-row {
+    display: flex; align-items: center;
+    padding: 6px 10px;
+    background: var(--surface-2, #1c2128);
+    border-top: 1px solid var(--border);
+    gap: 8px;
+  }
+  #termPanel .term-prompt {
+    color: var(--accent); font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 30ch;
+  }
+  #termPanel .term-prompt::after { content: ' $'; color: var(--text-muted); }
+  #termPanel .term-input {
+    flex: 1; min-width: 0;
+    background: transparent; border: none; outline: none;
+    color: var(--text); font-family: inherit; font-size: 12px;
+  }
+  #termPanel .term-input:disabled { opacity: 0.5; }
+  #termPanel .term-busy {
+    width: 10px; height: 10px;
+    border: 2px solid rgba(88,166,255,0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: ccc-spin 0.7s linear infinite;
+    display: none;
+  }
+  #termPanel.busy .term-busy { display: inline-block; }
+  /* ANSI SGR colors — minimal palette. */
+  #termPanel .ansi-30 { color: #6e7681; } #termPanel .ansi-31 { color: #f85149; }
+  #termPanel .ansi-32 { color: #56d364; } #termPanel .ansi-33 { color: #d29922; }
+  #termPanel .ansi-34 { color: #58a6ff; } #termPanel .ansi-35 { color: #bc8cff; }
+  #termPanel .ansi-36 { color: #76e3ea; } #termPanel .ansi-37 { color: #c9d1d9; }
+  #termPanel .ansi-90 { color: #484f58; } #termPanel .ansi-91 { color: #ff7b72; }
+  #termPanel .ansi-92 { color: #7ee787; } #termPanel .ansi-93 { color: #d2a8ff; }
+  #termPanel .ansi-94 { color: #79c0ff; } #termPanel .ansi-95 { color: #d2a8ff; }
+  #termPanel .ansi-96 { color: #a5d6ff; } #termPanel .ansi-97 { color: #f0f6fc; }
+  #termPanel .ansi-bold { font-weight: 700; }
+</style>
+
+<div id="termPanel" role="region" aria-label="Terminal panel">
+  <div class="term-resize" id="termResize" title="Drag to resize"></div>
+  <div class="term-header">
+    <span class="term-title">Terminal</span>
+    <span class="term-cwd" id="termCwdLabel" title="Current working directory (relative to repo root)">…</span>
+    <span class="term-busy" id="termBusy" aria-hidden="true"></span>
+    <div class="term-actions">
+      <button id="termCancelBtn" class="danger" disabled title="Cancel the running command (kills the process group)">Cancel</button>
+      <button id="termClearBtn" title="Clear the output log">Clear</button>
+      <button id="termCloseBtn" title="Hide the terminal panel">&times;</button>
+    </div>
+  </div>
+  <div class="term-log" id="termLog" tabindex="0"></div>
+  <div class="term-input-row">
+    <span class="term-prompt" id="termPrompt">repo</span>
+    <input type="text" class="term-input" id="termInput" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="run a command (no vim/top — use --yes for interactive scripts)">
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  const $panel = document.getElementById('termPanel');
+  const $toggle = document.getElementById('termToggleBtn');
+  const $closeBtn = document.getElementById('termCloseBtn');
+  const $cancelBtn = document.getElementById('termCancelBtn');
+  const $clearBtn = document.getElementById('termClearBtn');
+  const $log = document.getElementById('termLog');
+  const $input = document.getElementById('termInput');
+  const $prompt = document.getElementById('termPrompt');
+  const $cwdLabel = document.getElementById('termCwdLabel');
+  const $resize = document.getElementById('termResize');
+  if (!$panel || !$toggle || !$input) return;
+
+  const HISTORY_KEY = 'ccc.term.history';
+  const PANEL_OPEN_KEY = 'ccc.term.open';
+  const PANEL_HEIGHT_KEY = 'ccc.term.height';
+  const MAX_LOG_LINES = 5000;
+  const MAX_HISTORY = 50;
+
+  let history = [];
+  try { history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch (_) {}
+  if (!Array.isArray(history)) history = [];
+  let histIdx = history.length;          // pointer for up/down recall
+  let pendingDraft = '';                  // what the user was typing before recall
+
+  let evtSource = null;                   // active EventSource, if any
+  let abortCtrl = null;                   // for fetch-based POST + body stream
+  let running = false;
+
+  function setRunning(on) {
+    running = on;
+    $panel.classList.toggle('busy', on);
+    $cancelBtn.disabled = !on;
+    $input.disabled = on;
+    if (!on) requestAnimationFrame(() => $input.focus());
+  }
+
+  function persistOpen(open) {
+    try { localStorage.setItem(PANEL_OPEN_KEY, open ? '1' : '0'); } catch (_) {}
+  }
+
+  function openPanel() {
+    $panel.classList.add('open');
+    $toggle.classList.add('active');
+    persistOpen(true);
+    refreshCwd();
+    setTimeout(() => $input.focus(), 0);
+  }
+  function closePanel() {
+    $panel.classList.remove('open');
+    $toggle.classList.remove('active');
+    persistOpen(false);
+    if (running) cancelRunning();
+  }
+  $toggle.addEventListener('click', () => {
+    if ($panel.classList.contains('open')) closePanel(); else openPanel();
+  });
+  $closeBtn.addEventListener('click', closePanel);
+  $clearBtn.addEventListener('click', () => { $log.innerHTML = ''; });
+
+  // Restore panel state.
+  try {
+    if (localStorage.getItem(PANEL_OPEN_KEY) === '1') openPanel();
+    const h = parseInt(localStorage.getItem(PANEL_HEIGHT_KEY) || '0', 10);
+    if (h >= 120 && h <= 700) $panel.style.height = h + 'px';
+  } catch (_) {}
+
+  // Resize handle (drag the top edge).
+  let dragStartY = 0, dragStartH = 0;
+  $resize.addEventListener('mousedown', (e) => {
+    dragStartY = e.clientY;
+    dragStartH = $panel.getBoundingClientRect().height;
+    document.body.style.userSelect = 'none';
+    const onMove = (m) => {
+      const dy = dragStartY - m.clientY;
+      const next = Math.max(120, Math.min(700, dragStartH + dy));
+      $panel.style.height = next + 'px';
+    };
+    const onUp = () => {
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      try {
+        const h = Math.round($panel.getBoundingClientRect().height);
+        localStorage.setItem(PANEL_HEIGHT_KEY, String(h));
+      } catch (_) {}
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  function setCwdDisplay(cwd, rel) {
+    const shown = rel ? rel : '.';
+    $cwdLabel.innerHTML = 'cwd: <b></b>';
+    $cwdLabel.querySelector('b').textContent = shown;
+    $cwdLabel.title = cwd || shown;
+    // Prompt: last path segment, or 'repo' if at root.
+    let label = shown.split('/').filter(Boolean).pop() || 'repo';
+    if (label.length > 24) label = '…' + label.slice(-23);
+    $prompt.textContent = label;
+  }
+
+  async function refreshCwd() {
+    try {
+      const r = await fetch('/api/term/cwd');
+      if (!r.ok) return;
+      const j = await r.json();
+      setCwdDisplay(j.cwd, j.rel);
+    } catch (_) {}
+  }
+  refreshCwd();
+
+  // Tiny ANSI SGR parser — handles \x1b[<n>;<m>m. Strips other escape
+  // sequences (cursor moves, etc.) so they don't render as literal junk.
+  // Returns an array of { text, classes } segments.
+  function parseAnsi(input) {
+    const segs = [];
+    const re = /\x1b\[([0-9;]*)m|\x1b\[[0-9;?]*[A-Za-z]/g;
+    let last = 0, classes = [];
+    let m;
+    const flush = (end) => {
+      if (end > last) segs.push({ text: input.slice(last, end), classes: classes.slice() });
+    };
+    while ((m = re.exec(input)) !== null) {
+      flush(m.index);
+      last = re.lastIndex;
+      if (m[1] === undefined) continue; // non-SGR escape — drop
+      const codes = m[1].split(';').filter(s => s !== '').map(Number);
+      if (codes.length === 0) { classes = []; continue; }
+      for (const c of codes) {
+        if (c === 0) classes = [];
+        else if (c === 1) { if (!classes.includes('ansi-bold')) classes.push('ansi-bold'); }
+        else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) {
+          classes = classes.filter(x => !/^ansi-\d+$/.test(x));
+          classes.push('ansi-' + c);
+        }
+      }
+    }
+    flush(input.length);
+    return segs;
+  }
+
+  function appendOutput(text, kind) {
+    // Strip carriage returns that would otherwise render as artifacts.
+    text = text.replace(/\r(?!\n)/g, '');
+    const wrap = document.createElement('span');
+    if (kind) wrap.className = 'term-' + kind;
+    if (kind === 'cmd' || kind === 'exit' || kind === 'err') {
+      wrap.textContent = text;
+    } else {
+      for (const seg of parseAnsi(text)) {
+        if (seg.classes.length === 0) {
+          wrap.appendChild(document.createTextNode(seg.text));
+        } else {
+          const span = document.createElement('span');
+          span.className = seg.classes.join(' ');
+          span.textContent = seg.text;
+          wrap.appendChild(span);
+        }
+      }
+    }
+    $log.appendChild(wrap);
+    // Trim if log grew too large.
+    if ($log.childNodes.length > MAX_LOG_LINES) {
+      while ($log.childNodes.length > MAX_LOG_LINES) {
+        $log.removeChild($log.firstChild);
+      }
+    }
+    // Auto-scroll if the user is near the bottom.
+    const nearBottom = ($log.scrollHeight - $log.scrollTop - $log.clientHeight) < 80;
+    if (nearBottom) $log.scrollTop = $log.scrollHeight;
+  }
+
+  function pushHistory(cmd) {
+    if (!cmd) return;
+    if (history[history.length - 1] === cmd) return;
+    history.push(cmd);
+    while (history.length > MAX_HISTORY) history.shift();
+    histIdx = history.length;
+    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch (_) {}
+  }
+
+  async function runCommand(cmd) {
+    if (!cmd.trim()) return;
+    if (running) return;  // ignore Enter while running (per design)
+    appendOutput((($prompt.textContent || 'repo')) + ' $ ' + cmd + '\n', 'cmd');
+    pushHistory(cmd);
+    setRunning(true);
+
+    abortCtrl = new AbortController();
+    let resp;
+    try {
+      resp = await fetch('/api/term/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd }),
+        signal: abortCtrl.signal,
+      });
+    } catch (e) {
+      appendOutput('[connection failed: ' + (e && e.message || e) + ']\n', 'err');
+      setRunning(false);
+      return;
+    }
+    if (resp.status === 409) {
+      appendOutput('[server says another command is running]\n', 'err');
+      setRunning(false);
+      return;
+    }
+    if (!resp.ok || !resp.body) {
+      appendOutput('[server error ' + resp.status + ']\n', 'err');
+      setRunning(false);
+      return;
+    }
+
+    // Parse the SSE stream by hand — EventSource doesn't support POST.
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+    let currentEvent = '';
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        // Events end with \n\n.
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          let evName = 'message', dataLines = [];
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('event: ')) evName = line.slice(7).trim();
+            else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+          }
+          const dataStr = dataLines.join('\n');
+          let payload = null;
+          if (dataStr) { try { payload = JSON.parse(dataStr); } catch (_) {} }
+          handleSseEvent(evName, payload);
+        }
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') {
+        appendOutput('[stream error: ' + (e && e.message || e) + ']\n', 'err');
+      }
+    } finally {
+      setRunning(false);
+      abortCtrl = null;
+    }
+  }
+
+  function handleSseEvent(name, payload) {
+    if (!payload) return;
+    if (name === 'data' && typeof payload.chunk === 'string') {
+      appendOutput(payload.chunk, null);
+    } else if (name === 'error' && payload.message) {
+      appendOutput('[' + payload.message + ']\n', 'err');
+    } else if (name === 'exit') {
+      const code = payload.code;
+      if (typeof code === 'number' && code !== 0) {
+        appendOutput('[exit ' + code + ']\n', 'exit');
+      }
+      if (typeof payload.cwd === 'string') {
+        setCwdDisplay(payload.cwd, payload.rel || '');
+      }
+    }
+  }
+
+  async function cancelRunning() {
+    if (!running) return;
+    try {
+      await fetch('/api/term/cancel', { method: 'POST' });
+    } catch (_) {}
+    appendOutput('^C\n', 'exit');
+    if (abortCtrl) { try { abortCtrl.abort(); } catch (_) {} }
+  }
+  $cancelBtn.addEventListener('click', cancelRunning);
+
+  $input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const cmd = $input.value;
+      $input.value = '';
+      pendingDraft = '';
+      runCommand(cmd);
+    } else if (e.key === 'ArrowUp') {
+      if (!history.length) return;
+      e.preventDefault();
+      if (histIdx === history.length) pendingDraft = $input.value;
+      histIdx = Math.max(0, histIdx - 1);
+      $input.value = history[histIdx] || '';
+      requestAnimationFrame(() => {
+        $input.setSelectionRange($input.value.length, $input.value.length);
+      });
+    } else if (e.key === 'ArrowDown') {
+      if (histIdx === history.length) return;
+      e.preventDefault();
+      histIdx = Math.min(history.length, histIdx + 1);
+      $input.value = histIdx === history.length ? pendingDraft : history[histIdx];
+    } else if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
+      // Let real copy through if there's a selection in the log; otherwise
+      // treat ctrl-c as cancel.
+      if (window.getSelection && String(window.getSelection())) return;
+      if (running) { e.preventDefault(); cancelRunning(); }
+    } else if (e.key === 'Escape') {
+      // Close panel on Escape (when input is empty).
+      if (!$input.value) { e.preventDefault(); closePanel(); }
+    }
+  });
+
+  // Global hotkey: Ctrl/Cmd+` to toggle panel.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '`' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if ($panel.classList.contains('open')) closePanel(); else openPanel();
+    }
+  });
 })();
 </script>
 </body>

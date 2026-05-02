@@ -22,6 +22,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -8907,6 +8908,157 @@ def morning_launch(goal_slug, strategy_id, custom_message=None):
 
 
 # ---------------------------------------------------------------------------
+# In-UI terminal — one-shot subprocess runner with cwd tracking.
+#
+# SECURITY: this is the most powerful endpoint in CCC. /api/term/run executes
+# arbitrary shell as the user with no permission prompt — strictly more
+# capable than /api/inject-input (which goes through Claude). It is gated
+# only by _check_same_origin. Do NOT enable network bind without a trusted
+# network. See docs/superpowers/specs/2026-05-01-in-ui-terminal-design.md
+# and SECURITY.md.
+# ---------------------------------------------------------------------------
+
+_TERM_STATE = {
+    "cwd": None,        # Path; lazily set to REPO_ROOT on first access
+    "popen": None,      # Currently running subprocess.Popen, or None
+    "pgid": None,       # Process group id of the running subprocess
+}
+_TERM_LOCK = threading.Lock()
+
+
+def _term_cwd():
+    """Current terminal cwd, defaulting to REPO_ROOT."""
+    cwd = _TERM_STATE["cwd"]
+    if cwd is None or not Path(cwd).is_dir():
+        _TERM_STATE["cwd"] = REPO_ROOT
+        cwd = REPO_ROOT
+    return Path(cwd)
+
+
+def _term_rel():
+    """cwd as a path relative to REPO_ROOT, or "" if cwd == REPO_ROOT."""
+    try:
+        rel = str(_term_cwd().relative_to(REPO_ROOT))
+        return "" if rel == "." else rel
+    except ValueError:
+        return ""
+
+
+def _term_resolve_cwd_change(target):
+    """Resolve a `cd <target>` against the current cwd, clamped to REPO_ROOT.
+
+    Returns the new Path, or raises ValueError with a user-facing message.
+    Empty target → REPO_ROOT (we don't honour $HOME because escaping
+    REPO_ROOT defeats the path clamp).
+    """
+    if not target or target == "~":
+        return REPO_ROOT
+    if target == "-":
+        # `cd -` would need a previous-cwd memory; we don't keep one.
+        raise ValueError("cd - is not supported in the in-UI terminal")
+    base = _term_cwd()
+    raw = Path(target)
+    candidate = (raw if raw.is_absolute() else (base / raw)).resolve()
+    try:
+        candidate.relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        raise ValueError(
+            f"refusing to cd outside REPO_ROOT ({REPO_ROOT}): {candidate}"
+        )
+    if not candidate.is_dir():
+        raise ValueError(f"not a directory: {candidate}")
+    return candidate
+
+
+def _term_split_leading_cd(cmd):
+    """If `cmd` begins with `cd <path>` (alone or followed by `&&`),
+    return (target, remainder). Otherwise (None, cmd).
+
+    Recognises:
+      cd foo
+      cd foo && rest
+      cd "foo bar" && rest
+      cd
+    Does NOT recognise `cd` embedded inside a complex line (`for d in
+    *; do cd $d; done`); those run as a normal subprocess.
+    """
+    stripped = cmd.lstrip()
+    if not stripped.startswith("cd"):
+        return None, cmd
+    after = stripped[2:]
+    if after and after[0] not in (" ", "\t", "&", ";"):
+        # `cdwhatever` — not a cd at all.
+        return None, cmd
+    after = after.lstrip()
+    if not after or after.startswith(("&&", ";")):
+        # `cd` with no args (optionally followed by && rest)
+        rest = after
+        if rest.startswith("&&"):
+            rest = rest[2:].lstrip()
+        elif rest.startswith(";"):
+            rest = rest[1:].lstrip()
+        return "", rest
+    # Use shlex to peel the first token off, respecting quotes.
+    try:
+        lex = shlex.shlex(after, posix=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        target = next(lex, None)
+    except ValueError as e:
+        raise ValueError(f"could not parse cd target: {e}")
+    if target is None:
+        return "", ""
+    # Find where the target ends in the original string so we can keep
+    # the remainder verbatim (preserving quoting, &&, etc.).
+    consumed = lex.instream.tell() if hasattr(lex.instream, "tell") else None
+    if consumed is None:
+        # Fallback: re-find the target in the source.
+        idx = after.find(target) + len(target)
+    else:
+        idx = consumed
+    rest = after[idx:].lstrip()
+    if rest.startswith("&&"):
+        rest = rest[2:].lstrip()
+    elif rest.startswith(";"):
+        rest = rest[1:].lstrip()
+    elif rest:
+        # `cd foo bar` — extra args we don't understand. Treat as not a
+        # leading cd; let bash error on it.
+        return None, cmd
+    return target, rest
+
+
+def _term_kill_running():
+    """Kill the currently running terminal subprocess, if any. Returns True
+    if something was killed. Caller must hold _TERM_LOCK or accept races."""
+    popen = _TERM_STATE.get("popen")
+    pgid = _TERM_STATE.get("pgid")
+    if not popen or popen.poll() is not None:
+        return False
+    try:
+        if pgid:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            popen.terminate()
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+    # Give it 2s to wind down; then SIGKILL the group.
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if popen.poll() is not None:
+            return True
+        time.sleep(0.05)
+    try:
+        if pgid:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            popen.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    return True
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 
@@ -8949,6 +9101,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(compute_attention_items(include_all=include_all))
         elif path == "/api/config":
             self.send_json(get_app_config())
+        elif path == "/api/term/cwd":
+            cwd = _term_cwd()
+            try:
+                rel = str(cwd.relative_to(REPO_ROOT))
+            except ValueError:
+                rel = ""
+            self.send_json({
+                "cwd": str(cwd),
+                "repo_root": str(REPO_ROOT),
+                "rel": rel if rel != "." else "",
+                "running": (
+                    _TERM_STATE.get("popen") is not None
+                    and _TERM_STATE["popen"].poll() is None
+                ),
+            })
         elif path == "/api/issues":
             self.send_json(list_issues())
         elif path == "/api/vercel-deploy":
@@ -10836,6 +11003,22 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 payload = {}
             sid = payload.get("session_id", "")
             self.send_json(open_session_in_claude_desktop(sid))
+        elif path == "/api/term/run":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            cmd = (payload.get("cmd") or "").strip()
+            if not cmd:
+                self.send_json({"error": "missing cmd"}, 400)
+                return
+            self._term_run_stream(cmd)
+        elif path == "/api/term/cancel":
+            with _TERM_LOCK:
+                killed = _term_kill_running()
+            self.send_json({"ok": killed})
         else:
             self.send_json({"error": "Not found"}, 404)
 
@@ -10922,6 +11105,140 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 time.sleep(0.25)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+
+    def _term_send_event(self, event, payload):
+        """Write one SSE event to the wire. Returns False on broken pipe."""
+        try:
+            blob = json.dumps(payload, ensure_ascii=False)
+            self.wfile.write(f"event: {event}\ndata: {blob}\n\n".encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    def _term_run_stream(self, cmd):
+        """SSE: parse a leading `cd` if present, otherwise spawn `bash -c
+        <rest>` in the current cwd and stream its merged stdout/stderr.
+
+        One in-flight command at a time per server (single _TERM_STATE);
+        a second concurrent /api/term/run gets a synthetic error event.
+        Cancellation is via POST /api/term/cancel which kills the process
+        group.
+        """
+        # Parse leading `cd` chains. After this loop, `cmd` holds whatever
+        # remains to run as a subprocess (possibly empty if it was all cd).
+        try:
+            while True:
+                target, rest = _term_split_leading_cd(cmd)
+                if target is None:
+                    break
+                new_cwd = _term_resolve_cwd_change(target)
+                _TERM_STATE["cwd"] = new_cwd
+                cmd = rest
+                if not cmd:
+                    break
+        except ValueError as e:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self._term_send_event("error", {"message": str(e)})
+            self._term_send_event("exit", {
+                "code": -1,
+                "cwd": str(_term_cwd()),
+                "rel": _term_rel(),
+            })
+            return
+
+        # Reject if a previous command is still running.
+        with _TERM_LOCK:
+            prev = _TERM_STATE.get("popen")
+            if prev is not None and prev.poll() is None:
+                self.send_response(409)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                try:
+                    self.wfile.write(json.dumps({"error": "already running"}).encode())
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                return
+
+        # Open the SSE response.
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        # Pure-cd command (e.g. "cd morning"): no subprocess, just emit
+        # the new cwd and exit.
+        if not cmd.strip():
+            self._term_send_event("exit", {
+                "code": 0,
+                "cwd": str(_term_cwd()),
+                "rel": _term_rel(),
+            })
+            return
+
+        cwd = _term_cwd()
+        try:
+            popen = subprocess.Popen(
+                ["bash", "-c", cmd],
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                # Default buffering gives a BufferedReader whose .read1()
+                # returns whatever's available without waiting for a full
+                # buffer. bufsize=0 returns a raw FileIO with no .read1().
+            )
+        except (OSError, ValueError) as e:
+            self._term_send_event("error", {"message": f"spawn failed: {e}"})
+            self._term_send_event("exit", {
+                "code": -1,
+                "cwd": str(cwd),
+                "rel": _term_rel(),
+            })
+            return
+
+        with _TERM_LOCK:
+            _TERM_STATE["popen"] = popen
+            try:
+                _TERM_STATE["pgid"] = os.getpgid(popen.pid)
+            except OSError:
+                _TERM_STATE["pgid"] = None
+
+        try:
+            # read1() returns whatever's available without waiting for a
+            # full buffer — gives us streaming feel without manual
+            # select/poll plumbing.
+            while True:
+                chunk = popen.stdout.read1(4096)
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", errors="replace")
+                if not self._term_send_event("data", {"chunk": text}):
+                    # Client gone; kill the subprocess so it doesn't
+                    # keep running headless forever.
+                    with _TERM_LOCK:
+                        _term_kill_running()
+                    return
+            popen.wait()
+            self._term_send_event("exit", {
+                "code": popen.returncode,
+                "cwd": str(_term_cwd()),
+                "rel": _term_rel(),
+            })
+        finally:
+            with _TERM_LOCK:
+                if _TERM_STATE.get("popen") is popen:
+                    _TERM_STATE["popen"] = None
+                    _TERM_STATE["pgid"] = None
+            try:
+                popen.stdout.close()
+            except OSError:
+                pass
 
     def _stream_conversation(self, conversation_id, after_line):
         """SSE endpoint for real-time conversation tailing."""
