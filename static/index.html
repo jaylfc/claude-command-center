@@ -5934,6 +5934,19 @@
   let _renameInProgress = false;
   function renderSidebar(convs) {
     if (_renameInProgress) return;
+    // Archive-mode guard: while "All repos" is on, the sidebar renders the
+    // cross-folder archive instead of the active repo's session list. Skip
+    // both kanban and list dispatch to keep the archive view from being
+    // clobbered by periodic refreshes. Toggle off to return.
+    if (typeof archiveMode !== 'undefined' && archiveMode) {
+      const $kanbanBoard = document.getElementById('kanbanBoard');
+      const $convList = document.getElementById('convList');
+      if ($kanbanBoard) $kanbanBoard.style.display = 'none';
+      if ($convList) $convList.style.display = '';
+      const $search = document.getElementById('convSearch');
+      try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
+      return;
+    }
     // Preserve scroll across ALL re-renders (board + per-column + list)
     const scrolls = {};
     document.querySelectorAll('.kanban-board, .kanban-board-split, #convList').forEach(el => {
@@ -7588,6 +7601,17 @@
   }
 
   function renderConversationList(convs) {
+    // Archive-mode guard: when "All repos" is on, the sidebar list is owned
+    // by the archive renderer. Periodic refreshes (auto-poll, post-action
+    // reloads, etc.) still fire loadConversationList → renderConversationList,
+    // and without this guard they'd clobber the archive view back to the
+    // single-repo session list. Re-render archive with current filter and
+    // return; conversationsData stays fresh for when archive toggles off.
+    if (typeof archiveMode !== 'undefined' && archiveMode) {
+      const $search = document.getElementById('convSearch');
+      try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
+      return;
+    }
     if (!convs.length) {
       $convList.innerHTML =
         '<div class="empty-state first-run" style="height:auto;padding:28px 20px;font-size:13px;flex-direction:column;gap:10px;align-items:flex-start;color:var(--text-muted);">'
