@@ -7717,7 +7717,10 @@
       } else if (c.display_name && cleanFirst) {
         askHtml = '<div class="conv-last">' + escapeHtml(cleanFirst.slice(0, 100)) + '</div>';
       }
-      const ask = askHtml;
+      // _hideAskHtml is set by the archive renderer (#6) — subtitle is
+      // redundant with the title in cross-folder mode and the user has
+      // explicitly opted not to see it. Single-repo rows don't set it.
+      const ask = c._hideAskHtml ? '' : askHtml;
       // Branch pill: shows where this session's edits actually land.
       //   1. effective_branch (tool-call inference) wins when present.
       //   2. else session_cwd_is_worktree → c.branch in worktree style.
@@ -11011,19 +11014,26 @@
         id: c.session_id,
         session_id: c.session_id,
         first_message: c.first_message,
-        display_name: '',
-        name_overridden: false,
+        // #1 rename overrides + #9 archived set come from server-side
+        // global state files (session-names.json / archived-conversations.json).
+        display_name: c.display_name || '',
+        name_overridden: !!c.name_overridden,
         last_assistant_text: '',
         modified: c.mtime,
         last_interacted: c.mtime,
         size: c.size || 0,
         is_live: false,
-        archived: false,
+        archived: !!c.archived,
         source: 'interactive',
-        session_cwd: c.folder_path,
+        session_cwd: c.session_cwd || c.folder_path,
         session_cwd_exists: !folderOrphan,
-        session_cwd_is_worktree: false,
+        // #4 worktree leaf — the renderer reads session_cwd_is_worktree.
+        session_cwd_is_worktree: !!c.session_cwd_is_worktree,
         branch: c.git_branch || '',
+        // #6 — hide the subtitle (last-assistant / first-message preview)
+        // in archive mode. The user doesn't read it cross-folder; redundant
+        // with the title and just doubles row height.
+        _hideAskHtml: true,
         // Folder chip — special fields read by _renderRow.
         folder_label_chip: c.folder_label,
         folder_chip_hue: _hashHue(c.folder_label || c.slug),

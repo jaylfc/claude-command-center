@@ -324,6 +324,19 @@ def find_all_conversations(limit_per_folder=None):
     except Exception:
         pass
 
+    # Global state files keyed by session_id alone — same source of truth
+    # the active-repo session list reads. Merging them in here lets the
+    # archive view show user renames and route archived sessions into the
+    # Archived bucket without a server-per-repo.
+    try:
+        name_overrides = _load_session_name_overrides()
+    except Exception:
+        name_overrides = {}
+    try:
+        archived_set = set(_load_archived_conversations())
+    except Exception:
+        archived_set = set()
+
     out = []
     seen_session_ids = set()
 
@@ -369,6 +382,7 @@ def find_all_conversations(limit_per_folder=None):
             first_message = None
             timestamp = None
             git_branch = None
+            session_cwd = None
             try:
                 with open(f, "r") as fh:
                     for i, line in enumerate(fh):
@@ -394,10 +408,25 @@ def find_all_conversations(limit_per_folder=None):
                             git_branch = ev.get("gitBranch") or ev.get("git_branch")
                         if not timestamp:
                             timestamp = ev.get("timestamp")
-                        if first_message and git_branch and timestamp:
+                        if not session_cwd:
+                            session_cwd = ev.get("cwd")
+                        if first_message and git_branch and timestamp and session_cwd:
                             break
             except (OSError, UnicodeDecodeError):
                 pass
+
+            # Worktree detection: session_cwd lives inside .worktrees/ or
+            # .claude/worktrees/, or its basename matches the sibling-
+            # worktree convention (`<repo>-wt-*`). Folds back to folder_path
+            # when the JSONL didn't capture a cwd in its first 20 lines.
+            cwd_for_check = session_cwd or folder_path or ""
+            cwd_is_worktree = (
+                "/.worktrees/" in cwd_for_check
+                or "/.claude/worktrees/" in cwd_for_check
+                or "-wt-" in Path(cwd_for_check).name
+            )
+
+            display_name = name_overrides.get(session_id) or None
 
             out.append({
                 "session_id": session_id,
@@ -405,10 +434,15 @@ def find_all_conversations(limit_per_folder=None):
                 "slug": slug,
                 "folder_label": folder_label,
                 "folder_path": folder_path,
+                "session_cwd": session_cwd or folder_path,
+                "session_cwd_is_worktree": cwd_is_worktree,
                 "mtime": stat.st_mtime,
                 "size": stat.st_size,
                 "first_message": first_message,
                 "git_branch": git_branch,
+                "display_name": display_name,
+                "name_overridden": bool(display_name),
+                "archived": session_id in archived_set,
             })
 
     out.sort(key=lambda r: r["mtime"], reverse=True)
