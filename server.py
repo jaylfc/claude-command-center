@@ -11141,8 +11141,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            # `close` (not keep-alive) so the browser sees EOF as soon as we
+            # return — this is a one-shot stream, not a long-lived tail.
+            self.send_header("Connection", "close")
             self.end_headers()
+            self.close_connection = True
             self._term_send_event("error", {"message": str(e)})
             self._term_send_event("exit", {
                 "code": -1,
@@ -11164,12 +11167,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     pass
                 return
 
-        # Open the SSE response.
+        # Open the SSE response. `close` (not keep-alive) so the browser
+        # sees EOF as soon as we return — this is a one-shot stream, not
+        # a long-lived tail like /api/conversations/<id>/stream.
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True
 
         # Pure-cd command (e.g. "cd morning"): no subprocess, just emit
         # the new cwd and exit.

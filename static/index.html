@@ -13499,7 +13499,7 @@
     const reader = resp.body.getReader();
     const decoder = new TextDecoder('utf-8');
     let buf = '';
-    let currentEvent = '';
+    let sawExit = false;
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -13518,7 +13518,13 @@
           const dataStr = dataLines.join('\n');
           let payload = null;
           if (dataStr) { try { payload = JSON.parse(dataStr); } catch (_) {} }
-          handleSseEvent(evName, payload);
+          if (handleSseEvent(evName, payload)) sawExit = true;
+        }
+        if (sawExit) {
+          // Server sends `Connection: close`, but don't depend on socket
+          // close timing — once we've seen `exit`, we're done.
+          try { reader.cancel(); } catch (_) {}
+          break;
         }
       }
     } catch (e) {
@@ -13531,13 +13537,19 @@
     }
   }
 
+  // Returns true if this event is a terminal `exit`, signalling the
+  // reader loop to wind up regardless of socket-close timing.
   function handleSseEvent(name, payload) {
-    if (!payload) return;
+    if (!payload) return false;
     if (name === 'data' && typeof payload.chunk === 'string') {
       appendOutput(payload.chunk, null);
-    } else if (name === 'error' && payload.message) {
+      return false;
+    }
+    if (name === 'error' && payload.message) {
       appendOutput('[' + payload.message + ']\n', 'err');
-    } else if (name === 'exit') {
+      return false;
+    }
+    if (name === 'exit') {
       const code = payload.code;
       if (typeof code === 'number' && code !== 0) {
         appendOutput('[exit ' + code + ']\n', 'exit');
@@ -13545,7 +13557,9 @@
       if (typeof payload.cwd === 'string') {
         setCwdDisplay(payload.cwd, payload.rel || '');
       }
+      return true;
     }
+    return false;
   }
 
   async function cancelRunning() {
