@@ -827,6 +827,26 @@
     color: var(--text-muted); background: rgba(139,148,158,0.06);
     cursor: help;
   }
+  /* Model badge — shown next to the context/cost pills so you can tell
+   * which model produced the latest turn. The 1M sub-pill lights up
+   * when a turn provably exceeded 200k tokens (only possible on the 1M
+   * beta variant, since the model name doesn't carry the variant). */
+  .conv-input-context .wp-model-pill {
+    padding: 2px 7px; border-radius: 3px; font-weight: 600;
+    color: var(--text-muted); background: rgba(88,166,255,0.10);
+    cursor: help;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
+    font-size: 10px;
+  }
+  .conv-input-context .wp-model-1m {
+    margin-left: 4px;
+    padding: 0 4px;
+    border-radius: 2px;
+    background: var(--accent, #58a6ff);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+  }
   .conv-input-context .wp-ahead { color: var(--green); }
   .conv-input-context .wp-behind { color: var(--orange); }
   .conv-input-context .wp-even { color: var(--text-muted); opacity: 0.6; }
@@ -9942,10 +9962,25 @@
         + 'list-price equivalent if metered against the API directly.';
       costPill = ' <span class="wp-cost-pill" title="' + escapeHtml(costTip) + '">' + fmt(cost) + '</span>';
     }
+    // Model pill — shown when we know the model. Strips the "claude-"
+    // prefix so it reads as `opus-4-7` / `sonnet-4-6`. Adds a `1M` suffix
+    // when the session is provably on the 1M-context variant (any turn
+    // exceeded 200k tokens — only possible on the 1M variant). The 1M
+    // beta is delivered via the anthropic-beta header, not the model
+    // name in the JSONL, so peak > 200k is the only honest signal.
+    let modelPill = '';
+    if (u.model) {
+      const isOneM = (peak > 200000) || u.model.toLowerCase().includes('[1m]');
+      const shortModel = u.model.replace(/^claude-/, '').replace(/\[1m\]/i, '').trim();
+      const modelTip = u.model + (isOneM ? '\n(1M context window — anthropic-beta: context-1m)' : '');
+      modelPill = ' <span class="wp-model-pill" title="' + escapeHtml(modelTip) + '">'
+        + escapeHtml(shortModel) + (isOneM ? ' <span class="wp-model-1m">1M</span>' : '')
+        + '</span>';
+    }
     uSlot.innerHTML = '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
       + 'ctx ' + _formatTokens(latest) + ' / ' + _formatTokens(limit)
       + ' <span class="wp-usage-pct">(' + pct + '%)</span>'
-      + '</span>' + peakNote + costPill;
+      + '</span>' + peakNote + costPill + modelPill;
     slot.classList.add('visible');
     const pill = uSlot.querySelector('.wp-usage-clickable');
     if (pill) {
