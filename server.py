@@ -553,24 +553,55 @@ def find_all_conversations(limit_per_folder=None):
             except (OSError, UnicodeDecodeError):
                 pass
 
-            # Worktree detection: session_cwd lives inside .worktrees/ or
-            # .claude/worktrees/, or its basename matches the sibling-
-            # worktree convention (`<repo>-wt-*`). Folds back to folder_path
-            # when the JSONL didn't capture a cwd in its first 20 lines.
-            cwd_for_check = session_cwd or folder_path or ""
+            # Tool-call inference — match what extract_session_workspace
+            # does for active sessions. The JSONL's first-event cwd /
+            # gitBranch reflect where the session was *launched*, but the
+            # user often `cd`s into a worktree partway through, so the
+            # branch chip would show "main" even when Claude has been
+            # editing in `feat/foo` for hours. _infer_effective_repo walks
+            # the session's tool-call paths and finds the dominant git
+            # repo; it's mtime-cached internally so the cost amortizes.
+            effective_cwd = session_cwd or folder_path or ""
+            effective_branch = git_branch
+            effective_kind = None
+            try:
+                # Pass the already-stat'd mtime so the function can hit
+                # its cache without re-walking PROJECTS_ROOT for every
+                # session (otherwise 936 × 68 = ~63k stat calls per batch).
+                eff = _infer_effective_repo(
+                    session_id,
+                    literal_cwd=session_cwd or folder_path,
+                    jsonl_mtime=stat.st_mtime,
+                )
+            except Exception:
+                eff = None
+            if eff and eff.get("top"):
+                effective_cwd = eff["top"]
+                if eff.get("branch"):
+                    effective_branch = eff["branch"]
+                effective_kind = eff.get("kind")  # 'worktree' / 'clone' / 'other'
+
+            # Worktree detection: prefer the inferred kind when available;
+            # fall back to path-shape heuristics on the resolved cwd. Path
+            # heuristics catch worktrees the user picked manually that
+            # don't match `_infer_effective_repo`'s "dominant repo" rule.
             cwd_is_worktree = (
-                "/.worktrees/" in cwd_for_check
-                or "/.claude/worktrees/" in cwd_for_check
-                or "-wt-" in Path(cwd_for_check).name
+                effective_kind == "worktree"
+                or "/.worktrees/" in effective_cwd
+                or "/.claude/worktrees/" in effective_cwd
+                or "-wt-" in Path(effective_cwd).name
             )
 
             display_name = name_overrides.get(session_id) or None
 
             # Pills + PR# (mtime-cached). Last 3 days only for git ops;
-            # PR# is always cheap-extracted from JSONL.
+            # PR# is always cheap-extracted from JSONL. Run pills against
+            # the inferred effective cwd so the uncommitted/committed
+            # state matches what Claude has actually been editing — same
+            # reason we override branch + worktree-detection above.
             pills, pr_number = _archive_pills_for(
                 session_id, f, stat.st_mtime,
-                session_cwd or folder_path, _now,
+                effective_cwd, _now,
             )
             is_live = _archive_session_is_live(session_id)
 
@@ -607,12 +638,16 @@ def find_all_conversations(limit_per_folder=None):
                 "slug": slug,
                 "folder_label": folder_label,
                 "folder_path": folder_path,
-                "session_cwd": session_cwd or folder_path,
+                # Surface the inferred effective cwd / branch — these are
+                # what the renderer's branch chip + worktree leaf read,
+                # and they reflect where Claude actually edited (after
+                # any `cd` into a worktree), not the launch values.
+                "session_cwd": effective_cwd,
                 "session_cwd_is_worktree": cwd_is_worktree,
                 "mtime": stat.st_mtime,
                 "size": stat.st_size,
                 "first_message": first_message,
-                "git_branch": git_branch,
+                "git_branch": effective_branch,
                 "display_name": display_name,
                 "name_overridden": bool(display_name),
                 "archived": session_id in archived_set,
@@ -7596,7 +7631,7 @@ def _remap_stale_path(path, literal_cwd, cd_targets):
 _EFFECTIVE_REPO_CACHE = {}
 
 
-def _infer_effective_repo(session_id, literal_cwd=None, exclude_top=None):
+def _infer_effective_repo(session_id, literal_cwd=None, exclude_top=None, jsonl_mtime=None):
     """From a session's tool-call file paths, find the dominant git repo.
 
     Returns dict with keys: top, count, total, branch, kind, ahead, behind
@@ -7609,22 +7644,27 @@ def _infer_effective_repo(session_id, literal_cwd=None, exclude_top=None):
 
     `exclude_top` lets callers say "I already know cwd resolves to repo X,
     only surface inference if a *different* repo dominates."
+
+    `jsonl_mtime` lets callers (e.g. find_all_conversations) pass the
+    mtime they already stat'd, skipping the PROJECTS_ROOT walk that
+    otherwise dominates cache-hit cost for batch users.
     """
     # Cache key: jsonl mtime makes the entry self-invalidate when new
     # tool calls land. literal_cwd / exclude_top affect the result so
     # they're part of the key.
-    jsonl_mtime = 0.0
-    if PROJECTS_ROOT.is_dir():
-        for pd in PROJECTS_ROOT.iterdir():
-            if not pd.is_dir():
-                continue
-            cand = pd / f"{session_id}.jsonl"
-            if cand.is_file():
-                try:
-                    jsonl_mtime = cand.stat().st_mtime
-                except OSError:
-                    jsonl_mtime = 0.0
-                break
+    if jsonl_mtime is None:
+        jsonl_mtime = 0.0
+        if PROJECTS_ROOT.is_dir():
+            for pd in PROJECTS_ROOT.iterdir():
+                if not pd.is_dir():
+                    continue
+                cand = pd / f"{session_id}.jsonl"
+                if cand.is_file():
+                    try:
+                        jsonl_mtime = cand.stat().st_mtime
+                    except OSError:
+                        jsonl_mtime = 0.0
+                    break
     cache_key = (session_id, jsonl_mtime, literal_cwd, exclude_top)
     if cache_key in _EFFECTIVE_REPO_CACHE:
         return _EFFECTIVE_REPO_CACHE[cache_key]
