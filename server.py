@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -65,6 +66,181 @@ _RECENT_REPOS_CAP = 10
 # ~/.claude/projects/-Users-…-claude-command-center-scratch/ — never
 # scanned by find_conversations() and easy to gc on demand.
 _SCRATCH_DIR = Path.home() / ".claude" / "command-center" / "scratch"
+
+_SESSION_LOAD_STATUS_LOCK = threading.Lock()
+_SESSION_LOAD_STATUS = {
+    "active": False,
+    "title": "Loading sessions",
+    "message": "Waiting for the next scan.",
+    "phase": "idle",
+    "started_at": 0,
+    "updated_at": 0,
+    "steps": {},
+    "order": [],
+}
+
+
+def _session_load_snapshot():
+    """Return the current /api/sessions load progress for the overlay."""
+    with _SESSION_LOAD_STATUS_LOCK:
+        order = list(_SESSION_LOAD_STATUS.get("order") or [])
+        steps_by_key = dict(_SESSION_LOAD_STATUS.get("steps") or {})
+        steps = [dict(steps_by_key[k]) for k in order if k in steps_by_key]
+        return {
+            "active": bool(_SESSION_LOAD_STATUS.get("active")),
+            "title": _SESSION_LOAD_STATUS.get("title") or "Loading sessions",
+            "message": _SESSION_LOAD_STATUS.get("message") or "",
+            "phase": _SESSION_LOAD_STATUS.get("phase") or "idle",
+            "started_at": _SESSION_LOAD_STATUS.get("started_at") or 0,
+            "updated_at": _SESSION_LOAD_STATUS.get("updated_at") or 0,
+            "steps": steps,
+        }
+
+
+def _session_load_begin():
+    now = time.time()
+    steps = {
+        "repo": {
+            "key": "repo",
+            "label": "Repo",
+            "state": "running",
+            "detail": str(REPO_ROOT),
+        },
+        "transcripts": {
+            "key": "transcripts",
+            "label": "Claude transcripts",
+            "state": "pending",
+            "detail": "Counting JSONL files.",
+        },
+        "sessions": {
+            "key": "sessions",
+            "label": "Interactive sessions",
+            "state": "pending",
+            "detail": "Waiting on transcript metadata.",
+        },
+        "agents": {
+            "key": "agents",
+            "label": "Pkood agents",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
+        "github": {
+            "key": "github",
+            "label": "GitHub issues",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
+        "issue_states": {
+            "key": "issue_states",
+            "label": "Issue states",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
+        "todo": {
+            "key": "todo",
+            "label": "TODO.md",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
+        "parking": {
+            "key": "parking",
+            "label": "PARKING_LOT.md",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
+        "native_tasks": {
+            "key": "native_tasks",
+            "label": "Native tasks",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
+        "cards": {
+            "key": "cards",
+            "label": "Cards",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
+    }
+    with _SESSION_LOAD_STATUS_LOCK:
+        _SESSION_LOAD_STATUS.update({
+            "active": True,
+            "title": "Loading sessions",
+            "message": "Scanning sources by element.",
+            "phase": "running",
+            "started_at": now,
+            "updated_at": now,
+            "steps": steps,
+            "order": [
+                "repo", "transcripts", "sessions", "agents", "github",
+                "issue_states", "todo", "parking", "native_tasks", "cards",
+            ],
+        })
+
+
+_LOAD_MISSING = object()
+
+
+def _session_load_set_step(
+    key,
+    *,
+    label=None,
+    state=None,
+    detail=None,
+    count=_LOAD_MISSING,
+    total=_LOAD_MISSING,
+):
+    now = time.time()
+    with _SESSION_LOAD_STATUS_LOCK:
+        steps = _SESSION_LOAD_STATUS.setdefault("steps", {})
+        order = _SESSION_LOAD_STATUS.setdefault("order", [])
+        if key not in steps:
+            steps[key] = {"key": key, "label": label or key, "state": "pending", "detail": ""}
+            order.append(key)
+        step = steps[key]
+        if label is not None:
+            step["label"] = label
+        if state is not None:
+            step["state"] = state
+        if detail is not None:
+            step["detail"] = detail
+        if count is not _LOAD_MISSING:
+            step["count"] = count
+        if total is not _LOAD_MISSING:
+            step["total"] = total
+        _SESSION_LOAD_STATUS["updated_at"] = now
+
+
+def _session_load_complete(rows):
+    total = len(rows or [])
+    interactive = sum(1 for r in (rows or []) if r.get("source") == "interactive")
+    backlog = sum(1 for r in (rows or []) if r.get("source") == "backlog")
+    pkood = sum(1 for r in (rows or []) if r.get("source") == "pkood")
+    _session_load_set_step(
+        "cards",
+        state="done",
+        count=total,
+        detail=f"{total} total cards: {interactive} sessions, {pkood} agents, {backlog} backlog.",
+    )
+    with _SESSION_LOAD_STATUS_LOCK:
+        _SESSION_LOAD_STATUS.update({
+            "active": False,
+            "title": "Sessions loaded",
+            "message": f"{total} cards ready.",
+            "phase": "done",
+            "updated_at": time.time(),
+        })
+
+
+def _session_load_fail(err):
+    _session_load_set_step("cards", state="error", detail=str(err)[:160])
+    with _SESSION_LOAD_STATUS_LOCK:
+        _SESSION_LOAD_STATUS.update({
+            "active": False,
+            "title": "Session load failed",
+            "message": str(err)[:160],
+            "phase": "error",
+            "updated_at": time.time(),
+        })
 
 
 def _load_custom_repos():
@@ -263,11 +439,82 @@ def _conversation_dirs():
 # canonical _extract_tail_meta() (defined later in the file), which is
 # already mtime-cached and is the same source of truth /api/sessions
 # uses. That gives us has_edit / has_commit / has_push from tool-call
-# events, tail_pr_number from `gh pr create`, last_assistant_text,
-# pending_tool, custom_title, last_event_type — all without a second
-# pass. Earlier branches of this code ran git status per cwd, which
-# couldn't distinguish per-session history (every session in the same
-# clone got the same answer) and missed has_push entirely.
+# events, tail_pr_number / tail_pr_url from `gh pr create`,
+# last_assistant_text, pending_tool, custom_title, last_event_type —
+# all without a second pass. Earlier branches of this code ran git
+# status per cwd, which couldn't distinguish per-session history
+# (every session in the same clone got the same answer) and missed
+# has_push entirely.
+
+# PR state cache for the sidebar's "Ready to merge" bucket. Without this,
+# every session that ever ran `gh pr create` sticks in "Ready to merge"
+# forever — even after the PR is merged or closed. We cache the resolved
+# state ("OPEN"/"MERGED"/"CLOSED") per PR URL with a short TTL so the
+# bucket reflects reality without paying gh-network cost on every refresh.
+# Keyed by full PR URL because two sessions can refer to the same PR; the
+# cache is shared across them.
+_PR_STATE_CACHE = {}
+_PR_STATE_LOCK = threading.Lock()
+_PR_STATE_TTL = 300  # 5 minutes — short enough to catch a merge, long
+# enough that the dashboard's ~10s refresh cadence doesn't fan out to gh.
+
+
+def _get_pr_state(pr_url):
+    """Resolve a PR's state via `gh pr view`, with TTL cache.
+
+    Returns one of "OPEN" / "MERGED" / "CLOSED", or None if the lookup
+    failed (gh missing, unauthed, network down, PR not found). Callers
+    treat None as "still ready to merge" — we never hide a real PR
+    because gh hiccupped.
+    """
+    if not pr_url:
+        return None
+    now = time.time()
+    with _PR_STATE_LOCK:
+        cached = _PR_STATE_CACHE.get(pr_url)
+        if cached and (now - cached["at"]) < _PR_STATE_TTL:
+            return cached["state"]
+    state = None
+    try:
+        r = subprocess.run(
+            ["gh", "pr", "view", pr_url, "--json", "state", "-q", ".state"],
+            capture_output=True, text=True, timeout=4,
+        )
+        if r.returncode == 0:
+            s = (r.stdout or "").strip().upper()
+            if s in ("OPEN", "MERGED", "CLOSED"):
+                state = s
+    except (subprocess.SubprocessError, OSError):
+        state = None
+    with _PR_STATE_LOCK:
+        _PR_STATE_CACHE[pr_url] = {"state": state, "at": now}
+    return state
+
+
+def _prime_pr_states(pr_urls):
+    """Resolve PR states for a batch of URLs in parallel, populating the
+    cache so subsequent _get_pr_state() calls hit cache. Used by the
+    list builders to avoid serial gh-fan-out on cold refreshes (worst
+    case: cross-folder mode with dozens of unique PRs). No-op for URLs
+    already in cache and within TTL.
+    """
+    now = time.time()
+    needed = []
+    seen = set()
+    with _PR_STATE_LOCK:
+        for url in pr_urls:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            cached = _PR_STATE_CACHE.get(url)
+            if not cached or (now - cached["at"]) >= _PR_STATE_TTL:
+                needed.append(url)
+    if not needed:
+        return
+    # Bounded pool — gh handles concurrent reads fine, but we don't want
+    # to fork 100 subprocesses if a user has been opening PRs all year.
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_get_pr_state, needed))
 
 
 def _archive_session_is_live(session_id):
@@ -488,10 +735,11 @@ def find_all_conversations(limit_per_folder=None):
             # uses, mtime-cached. Pulls per-session signals from JSONL
             # tool-use events: has_edit (Edit/Write/NotebookEdit), has_commit
             # (`git commit` Bash), has_push (`git push` Bash), tail_pr_number
-            # (`gh pr create` URL). Replaces an earlier home-grown helper
-            # that ran git status against the cwd — that approach gave
-            # every session in the same clone the same answer and missed
-            # has_push entirely.
+            # / tail_pr_url (`gh pr create` URL). Replaces an earlier
+            # home-grown helper that ran git status against the cwd — that
+            # approach gave every session in the same clone the same answer
+            # and missed has_push entirely. tail_pr_url feeds the sidebar's
+            # Ready-to-merge filter via _get_pr_state.
             try:
                 tail_meta = _extract_tail_meta(f) or {}
             except Exception:
@@ -500,6 +748,7 @@ def find_all_conversations(limit_per_folder=None):
             has_commit = bool(tail_meta.get("has_commit"))
             has_push = bool(tail_meta.get("has_push"))
             pr_number = tail_meta.get("tail_pr_number")
+            pr_url = tail_meta.get("tail_pr_url")
             # worktree_dirty is a current-state signal (uncommitted edits
             # right now), not a per-session one. Use the cached probe
             # against the effective worktree, same as /api/sessions does.
@@ -579,6 +828,12 @@ def find_all_conversations(limit_per_folder=None):
                 "has_push": has_push,
                 "has_edit": has_edit,
                 "tail_pr_number": pr_number,
+                "tail_pr_url": pr_url,
+                # Resolved PR state ("OPEN" / "MERGED" / "CLOSED" / None).
+                # Filled in below via a parallel prime pass so we don't
+                # serially fan out to gh on cold-cache refreshes. None
+                # means gh failed and the row stays visible to be safe.
+                "pr_state": None,
                 "is_live": is_live,
                 # Last assistant text — passed through so anyone re-enabling
                 # the subtitle in archive can see it. Currently hidden via
@@ -589,6 +844,14 @@ def find_all_conversations(limit_per_folder=None):
                 **sidecar_fields,
             })
 
+    # Parallel-resolve PR states for every row that recorded a PR URL.
+    # Hits the in-process cache on warm refreshes; bounded thread pool
+    # keeps the cold path under ~half a second even for hundreds of PRs.
+    _prime_pr_states(r.get("tail_pr_url") for r in out)
+    for r in out:
+        url = r.get("tail_pr_url")
+        if url:
+            r["pr_state"] = _get_pr_state(url)
     out.sort(key=lambda r: r["mtime"], reverse=True)
     return out
 
@@ -1778,7 +2041,7 @@ SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 2
+_CONV_META_SCHEMA_VERSION = 3
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -2005,6 +2268,29 @@ def _extract_tail_meta(path):
                     meta["agent_name"] = ev.get("agentName") or meta["agent_name"]
                 elif t == "last-prompt":
                     meta["last_prompt"] = ev.get("lastPrompt") or meta["last_prompt"]
+                elif t == "pr-link":
+                    pr_url = ev.get("prUrl") or ev.get("pr_url") or ""
+                    mp = _gh_pr_url_re.search(pr_url)
+                    if mp:
+                        meta["tail_pr_number"] = int(mp.group(2))
+                        meta["tail_pr_url"] = (
+                            "https://github.com/" + mp.group(1)
+                            + "/pull/" + mp.group(2)
+                        )
+                    else:
+                        pr_number = ev.get("prNumber") or ev.get("pr_number")
+                        repo = ev.get("prRepository") or ev.get("pr_repository") or ""
+                        try:
+                            n = int(pr_number)
+                        except (TypeError, ValueError):
+                            n = None
+                        if n:
+                            meta["tail_pr_number"] = n
+                            if repo and "/" in repo:
+                                meta["tail_pr_url"] = (
+                                    "https://github.com/" + repo.strip("/")
+                                    + "/pull/" + str(n)
+                                )
                 # Session signals from tool calls
                 elif t == "assistant":
                     last_tool_name = None
@@ -4031,12 +4317,22 @@ def _parse_parking_lot_md():
     return items
 
 
-def find_backlog_items():
+def find_backlog_items(progress=None):
     """Return backlog cards from GitHub issues + TODO.md."""
     items = []
 
     # Source 1: GitHub Issues
-    for issue in _fetch_backlog_issues():
+    if progress:
+        progress("github", state="running", detail="Querying open and recently closed issues.")
+    backlog_issues = _fetch_backlog_issues()
+    if progress:
+        progress(
+            "github",
+            state="done",
+            count=len(backlog_issues),
+            detail=f"{len(backlog_issues)} GitHub issue(s) fetched.",
+        )
+    for issue in backlog_issues:
         number = issue.get("number", 0)
         title = issue.get("title", "")
         body = issue.get("body", "") or ""
@@ -4096,7 +4392,15 @@ def find_backlog_items():
         })
 
     # Source 2: TODO.md
-    for i, text in enumerate(_parse_todo_md()):
+    todo_items = _parse_todo_md()
+    if progress:
+        progress(
+            "todo",
+            state="done",
+            count=len(todo_items),
+            detail=f"{len(todo_items)} unchecked TODO item(s).",
+        )
+    for i, text in enumerate(todo_items):
         items.append({
             "id": f"backlog-todo-{i}",
             "session_id": f"backlog-todo-{i}",
@@ -4127,7 +4431,15 @@ def find_backlog_items():
         })
 
     # Source 3: PARKING_LOT.md — richer items (heading + body)
-    for i, it in enumerate(_parse_parking_lot_md()):
+    parking_items = _parse_parking_lot_md()
+    if progress:
+        progress(
+            "parking",
+            state="done",
+            count=len(parking_items),
+            detail=f"{len(parking_items)} parking-lot item(s).",
+        )
+    for i, it in enumerate(parking_items):
         title = it["title"]
         body = it["body"]
         items.append({
@@ -4163,7 +4475,15 @@ def find_backlog_items():
     # Only surfaces sessions that aren't already represented as a live/inactive
     # conversation — that filtering happens at the `/api/sessions` merge step,
     # so here we just emit candidate cards.
-    for nt in _load_native_tasks():
+    native_tasks = _load_native_tasks()
+    if progress:
+        progress(
+            "native_tasks",
+            state="done",
+            count=len(native_tasks),
+            detail=f"{len(native_tasks)} native task session(s).",
+        )
+    for nt in native_tasks:
         # Pad short subjects with the activeForm so the card body has signal.
         body_bits = [nt["title"]]
         if nt.get("description"):
@@ -4315,7 +4635,7 @@ _FIND_CONVS_INFLIGHT = 0
 _FIND_CONVS_INFLIGHT_MAX = 3
 
 
-def find_conversations():
+def find_conversations(progress=None):
     """Return list of conversation metadata dicts, newest first."""
     global _FIND_CONVS_INFLIGHT
     conversations = []
@@ -4346,6 +4666,14 @@ def find_conversations():
     # we don't drop historic sessions when claude-code's encoder changes.
     project_dirs = _candidate_conversation_dirs(REPO_ROOT)
     if not project_dirs:
+        if progress:
+            progress(
+                "transcripts",
+                state="done",
+                count=0,
+                total=0,
+                detail="No Claude Code project folders matched this repo.",
+            )
         _dec_inflight()
         return conversations
     name_overrides = _load_session_name_overrides()
@@ -4383,8 +4711,30 @@ def find_conversations():
                 continue
             seen_jsonl.add(f.name)
             jsonl_files.append(f)
+    if progress:
+        progress(
+            "repo",
+            state="done",
+            detail=f"{len(project_dirs)} transcript folder(s) for {REPO_ROOT.name}.",
+        )
+        progress(
+            "transcripts",
+            state="running",
+            count=0,
+            total=len(jsonl_files),
+            detail=f"Found {len(jsonl_files)} JSONL transcript file(s).",
+        )
 
-    for f in jsonl_files:
+    total_jsonl = len(jsonl_files)
+    for idx, f in enumerate(jsonl_files, start=1):
+        if progress and (idx == 1 or idx == total_jsonl or idx % 10 == 0):
+            progress(
+                "transcripts",
+                state="running",
+                count=idx,
+                total=total_jsonl,
+                detail=f"Reading transcript {idx} of {total_jsonl}.",
+            )
         try:
             stat = f.stat()
         except OSError:
@@ -4597,6 +4947,9 @@ def find_conversations():
             "tail_issue_number": tail_meta.get("tail_issue_number"),
             "tail_pr_number": tail_meta.get("tail_pr_number"),
             "tail_pr_url": tail_meta.get("tail_pr_url"),
+            # Resolved PR state — filled in below via a parallel prime
+            # pass. See find_all_conversations for the broader rationale.
+            "pr_state": None,
             "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
             "archived": sid in archived_set,
             "verified": sid in verified_set,
@@ -4605,6 +4958,37 @@ def find_conversations():
             "last_interacted": last_interactions.get(sid) or last_interactions.get(conv_id),
         })
 
+    if progress:
+        progress(
+            "transcripts",
+            state="done",
+            count=total_jsonl,
+            total=total_jsonl,
+            detail=f"{len(conversations)} session(s) from {total_jsonl} transcript file(s).",
+        )
+        progress(
+            "sessions",
+            state="running",
+            count=len(conversations),
+            detail=f"{len(conversations)} interactive session(s) found; resolving PR state.",
+        )
+
+    # Parallel-resolve PR states for rows with a recorded PR URL — same
+    # dance as find_all_conversations. The cache is shared across both
+    # builders, so cross-folder mode benefits from single-repo warmups
+    # (and vice versa).
+    _prime_pr_states(c.get("tail_pr_url") for c in conversations)
+    for c in conversations:
+        url = c.get("tail_pr_url")
+        if url:
+            c["pr_state"] = _get_pr_state(url)
+    if progress:
+        progress(
+            "sessions",
+            state="done",
+            count=len(conversations),
+            detail=f"{len(conversations)} interactive session card(s) ready.",
+        )
     # Primary sort: most recent activity first. Use whichever is later between
     # the user's last UI interaction and the session's last meaningful event,
     # so a card the user just typed into bubbles up immediately even before
@@ -4750,7 +5134,7 @@ def _add_sidecar_fields(entry):
     entry["needs_approval_message"] = notif.get("message", "") if notif else ""
 
 
-def find_all_sessions():
+def find_all_sessions(progress=None):
     """Return a unified list of sessions: interactive conversations + pkood
     agents + ~/.claude/tasks backlog cards.
 
@@ -4760,7 +5144,16 @@ def find_all_sessions():
     global _SESSION_ISSUES_CACHE
     _SESSION_ISSUES_CACHE = _load_session_issues()
     # Get conversations and tag them
-    conversations = find_conversations()
+    if progress:
+        progress("sessions", state="running", count=0, detail="Reading interactive sessions.")
+    conversations = find_conversations(progress=progress)
+    if progress:
+        progress(
+            "sessions",
+            state="running",
+            count=len(conversations),
+            detail=f"{len(conversations)} interactive session(s); checking live registry.",
+        )
     # Load session registry to mark which sessions have a running process
     registry = _load_session_registry()
     live_sids = set(registry.keys())
@@ -4782,7 +5175,16 @@ def find_all_sessions():
     # pty). We resolve the link in find_pkood_agents() via a cwd+timestamp
     # heuristic; here we absorb the jsonl card's signals into the pkood card
     # and drop the duplicate.
+    if progress:
+        progress("agents", state="running", detail="Checking pkood agents.")
     pkood_agents = find_pkood_agents()
+    if progress:
+        progress(
+            "agents",
+            state="done",
+            count=len(pkood_agents),
+            detail=f"{len(pkood_agents)} pkood agent(s) found.",
+        )
     # Only dedup live pkood agents. Dead ones leave their jsonl visible as
     # a regular interactive card so the user can still `claude --resume` the
     # underlying session — the pkood card alone can't be resumed.
@@ -4861,7 +5263,10 @@ def find_all_sessions():
     # Native-task cards key off session_id, not issue number — collect the
     # set of session_ids already represented so we don't double-up.
     existing_sids = {c.get("session_id") for c in conversations if c.get("session_id")}
-    for item in find_backlog_items():
+    if progress:
+        progress("cards", state="running", count=len(conversations), detail="Merging sessions with backlog cards.")
+    backlog_added = 0
+    for item in find_backlog_items(progress=progress):
         inum = item.get("issue_number", "")
         if inum and inum in active_issue_nums:
             continue  # Active session already covers this issue
@@ -4869,10 +5274,27 @@ def find_all_sessions():
                 and item.get("session_id") in existing_sids):
             continue  # The session is already on the board; don't dup
         conversations.append(item)
+        backlog_added += 1
+    if progress:
+        progress(
+            "cards",
+            state="running",
+            count=len(conversations),
+            detail=f"Added {backlog_added} backlog card(s); enriching issue state.",
+        )
 
     # Sidecar: clean up stale files, then enrich every entry
     _cleanup_stale_sidecars(live_sids)
+    if progress:
+        progress("issue_states", state="running", detail="Loading linked issue states.")
     issue_states = _fetch_issue_states()
+    if progress:
+        progress(
+            "issue_states",
+            state="done",
+            count=len(issue_states),
+            detail=f"{len(issue_states)} linked issue state(s) cached.",
+        )
     desktop_meta = _load_desktop_app_metadata()
     for c in conversations:
         _add_sidecar_fields(c)
@@ -4935,6 +5357,14 @@ def find_all_sessions():
             if c["session_id"] not in seen:
                 ordered.append(c)
         conversations = ordered
+
+    if progress:
+        progress(
+            "cards",
+            state="done",
+            count=len(conversations),
+            detail=f"{len(conversations)} card(s) ready for the board.",
+        )
 
     # Auto-verify: sessions with has_push linked to closed GH issues get verified.
     # Runs inline (cheap — just reads cached issue states + verified list).
@@ -9078,12 +9508,51 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(get_issue_details(num))
         elif path == "/api/sessions/spawned":
             self.send_json(list_spawned_sessions())
+        elif re.match(r"^/api/sessions/spawned/\d+/log$", path):
+            try:
+                pid = int(path.split("/")[-2])
+            except ValueError:
+                self.send_json({"ok": False, "error": "bad pid"}, 400)
+            else:
+                entry = next((s for s in _spawned_sessions if s["pid"] == pid), None)
+                if not entry:
+                    self.send_json({"ok": False, "error": "no spawn entry for pid"}, 404)
+                else:
+                    log_path = entry.get("log")
+                    if not log_path or not os.path.exists(log_path):
+                        self.send_json({"ok": False, "error": "log file missing", "path": log_path}, 404)
+                    else:
+                        try:
+                            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                                text = fh.read()
+                        except OSError as e:
+                            self.send_json({"ok": False, "error": str(e)}, 500)
+                        else:
+                            poll = entry["proc"].poll()
+                            self.send_json({
+                                "ok": True,
+                                "pid": pid,
+                                "engine": entry.get("engine", "claude"),
+                                "log_path": log_path,
+                                "text": text,
+                                "running": poll is None,
+                                "exit_code": poll,
+                            })
         elif path == "/api/sessions/spawn-codex/availability":
             info = _resolve_codex_bin()
             info["model"] = os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
             self.send_json(info)
+        elif path == "/api/loading-status":
+            self.send_json(_session_load_snapshot())
         elif path == "/api/sessions":
-            self.send_json(find_all_sessions())
+            _session_load_begin()
+            try:
+                rows = find_all_sessions(progress=_session_load_set_step)
+                _session_load_complete(rows)
+            except Exception as exc:
+                _session_load_fail(exc)
+                raise
+            self.send_json(rows)
         elif path == "/api/conversations":
             convs = find_conversations() or []
             qs = urllib.parse.parse_qs(parsed.query)
