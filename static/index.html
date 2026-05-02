@@ -10859,6 +10859,14 @@
     }
   }
 
+  function isBenignCodexStderrLine(line) {
+    const text = (line || '').trim();
+    return text === 'Reading additional input from stdin...'
+      || text === 'Reading prompt from stdin...'
+      || /\bWARN codex_core_plugins::manifest: ignoring interface\.defaultPrompt:/.test(text)
+      || /\bERROR codex_core::session: failed to record rollout items: thread [0-9a-f-]+ not found$/.test(text);
+  }
+
   // Build the right-pane HTML for a codex run from /api/sessions/spawned/<pid>/log.
   function renderCodexLogHtml(data) {
     const lines = (data.text || '').split('\n').filter(Boolean);
@@ -10882,7 +10890,7 @@
         }
       } catch (_) {
         // Non-JSON line (codex CLI stderr leaks). Show in a small footer.
-        stderrLines.push(line);
+        if (!isBenignCodexStderrLine(line)) stderrLines.push(line);
       }
     }
     const status = data.running

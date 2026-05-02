@@ -6257,6 +6257,7 @@ def spawn_session_codex(prompt, name=None, cwd=None):
     cmd = [
         bin_path, "exec",
         "--json",
+        "--ephemeral",
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", model,
