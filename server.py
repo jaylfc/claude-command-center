@@ -5840,12 +5840,23 @@ def parse_conversation(conversation_id, after_line=0):
     filepath, parser = _resolve_conversation_reader(conversation_id)
     events = []
     line_num = 0
+    is_codex = parser is _parse_codex_event
+    codex_token_usage = None
 
     try:
         with open(filepath, "r") as f:
             for line in f:
                 line_num += 1
                 if line_num <= after_line:
+                    if is_codex:
+                        try:
+                            ev = json.loads(line.strip())
+                        except json.JSONDecodeError:
+                            ev = None
+                        if ev:
+                            usage = _codex_token_usage_from_event(ev)
+                            if usage:
+                                codex_token_usage = usage
                     continue
                 line = line.strip()
                 if not line:
@@ -5855,7 +5866,14 @@ def parse_conversation(conversation_id, after_line=0):
                 except json.JSONDecodeError:
                     continue
 
-                parsed = parser(ev, line_num)
+                if is_codex:
+                    usage = _codex_token_usage_from_event(ev)
+                    if usage:
+                        codex_token_usage = usage
+                        continue
+                    parsed = parser(ev, line_num, codex_token_usage)
+                else:
+                    parsed = parser(ev, line_num)
                 if parsed:
                     events.append(parsed)
     except FileNotFoundError:
@@ -6816,7 +6834,33 @@ def find_codex_conversations(include_old=True, repo_only=True, progress=None, li
     return out
 
 
-def _parse_codex_event(ev, line_num):
+def _codex_int(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _codex_token_usage_from_event(ev):
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    if payload.get("type") != "token_count":
+        return None
+    info = payload.get("info") or {}
+    if not isinstance(info, dict):
+        return None
+    usage = info.get("last_token_usage") or info.get("total_token_usage") or {}
+    if not isinstance(usage, dict) or not usage:
+        return None
+    return {
+        "input_tokens": _codex_int(usage.get("input_tokens")),
+        "cached_input_tokens": _codex_int(usage.get("cached_input_tokens")),
+        "output_tokens": _codex_int(usage.get("output_tokens")),
+        "reasoning_output_tokens": _codex_int(usage.get("reasoning_output_tokens")),
+        "total_tokens": _codex_int(usage.get("total_tokens")),
+    }
+
+
+def _parse_codex_event(ev, line_num, token_usage=None):
     ev_type = ev.get("type", "")
     payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
     ptype = payload.get("type", "")
@@ -6838,13 +6882,15 @@ def _parse_codex_event(ev, line_num):
                     "blocks": [{"kind": "text", "text": text}],
                 }
         if ptype == "task_complete":
-            return {
+            result = {
                 "line": line_num,
                 "ts": ts,
                 "type": "result",
-                "cost_usd": "?",
                 "duration_ms": payload.get("duration_ms", "?"),
             }
+            if token_usage:
+                result["token_usage"] = token_usage
+            return result
         return None
     if ev_type != "response_item":
         return None
@@ -6880,6 +6926,7 @@ def _parse_codex_conversation(thread_id, after_line=0):
     filepath = _resolve_codex_rollout_path(thread_id)
     events = []
     line_num = 0
+    codex_token_usage = None
     if not filepath:
         return {"events": [], "last_line": 0}
     try:
@@ -6895,7 +6942,11 @@ def _parse_codex_conversation(thread_id, after_line=0):
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                parsed = _parse_codex_event(ev, line_num)
+                usage = _codex_token_usage_from_event(ev)
+                if usage:
+                    codex_token_usage = usage
+                    continue
+                parsed = _parse_codex_event(ev, line_num, codex_token_usage)
                 if parsed:
                     events.append(parsed)
     except FileNotFoundError:
@@ -13565,6 +13616,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         if not filepath.exists():
             self.send_json({"error": "Conversation not found"}, 404)
             return
+        is_codex = parser is _parse_codex_event
+        codex_token_usage = None
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -13588,6 +13641,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         for line in f:
                             line_num_current = line_num + 1
                             if line_num_current <= after_line:
+                                if is_codex:
+                                    try:
+                                        ev = json.loads(line.strip())
+                                    except json.JSONDecodeError:
+                                        ev = None
+                                    if ev:
+                                        usage = _codex_token_usage_from_event(ev)
+                                        if usage:
+                                            codex_token_usage = usage
                                 line_num = line_num_current
                                 continue
                             line_num = line_num_current
@@ -13598,7 +13660,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                                 ev = json.loads(stripped)
                             except json.JSONDecodeError:
                                 continue
-                            parsed = parser(ev, line_num)
+                            if is_codex:
+                                usage = _codex_token_usage_from_event(ev)
+                                if usage:
+                                    codex_token_usage = usage
+                                    continue
+                                parsed = parser(ev, line_num, codex_token_usage)
+                            else:
+                                parsed = parser(ev, line_num)
                             if parsed:
                                 events.append(parsed)
                 except FileNotFoundError:

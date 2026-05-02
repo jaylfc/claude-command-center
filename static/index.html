@@ -12183,12 +12183,33 @@
         if (!hasNonTool) div.classList.add('tool-only');
         div.innerHTML = html;
       } else if (ev.type === 'result') {
-        const cost = typeof ev.cost_usd === 'number' ? '$' + ev.cost_usd.toFixed(4) : ev.cost_usd;
         const dur = typeof ev.duration_ms === 'number' ? (ev.duration_ms / 1000).toFixed(1) + 's' : ev.duration_ms;
+        let statsHtml = '';
+        if (ev.token_usage && typeof ev.token_usage === 'object') {
+          const u = ev.token_usage;
+          const input = Number(u.input_tokens || 0);
+          const cached = Number(u.cached_input_tokens || 0);
+          const output = Number(u.output_tokens || 0);
+          const reasoning = Number(u.reasoning_output_tokens || 0);
+          const total = Number(u.total_tokens || 0);
+          const cachedText = cached ? ' (' + _formatTokens(cached) + ' cached)' : '';
+          const reasoningText = reasoning ? ' (' + _formatTokens(reasoning) + ' reasoning)' : '';
+          const tokenTip = 'Input:           ' + input.toLocaleString() + ' tokens\n'
+            + 'Cached input:    ' + cached.toLocaleString() + ' tokens\n'
+            + 'Output:          ' + output.toLocaleString() + ' tokens\n'
+            + 'Reasoning:       ' + reasoning.toLocaleString() + ' tokens'
+            + (total ? '\nTotal:           ' + total.toLocaleString() + ' tokens' : '');
+          statsHtml += '<span title="' + escapeHtml(tokenTip) + '">Tokens: in ' + escapeHtml(_formatTokens(input) + cachedText)
+            + ' · out ' + escapeHtml(_formatTokens(output) + reasoningText) + '</span>';
+        } else if (ev.cost_usd != null && ev.cost_usd !== '') {
+          const cost = typeof ev.cost_usd === 'number' ? '$' + ev.cost_usd.toFixed(4) : ev.cost_usd;
+          statsHtml += '<span>Cost: ' + escapeHtml(String(cost)) + '</span>';
+        }
+        statsHtml += '<span>Duration: ' + escapeHtml(String(dur)) + '</span>';
         div.innerHTML = '<span class="label">Done</span>'
           + '<span class="line-num">L' + ev.line + '</span>'
           + tsSpan(ev.ts)
-          + '<div class="stats"><span>Cost: ' + escapeHtml(String(cost)) + '</span><span>Duration: ' + escapeHtml(String(dur)) + '</span></div>';
+          + '<div class="stats">' + statsHtml + '</div>';
       } else if (ev.type === 'tool_result') {
         // Inline the result text under the most recent tool_call in the
         // current group. If we can't find one, drop the marker silently —

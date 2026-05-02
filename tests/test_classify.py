@@ -261,6 +261,30 @@ class TestCodexConversationAdapter(unittest.TestCase):
                 },
             },
             {
+                "timestamp": "2026-05-02T00:00:04.500Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 1200,
+                            "cached_input_tokens": 800,
+                            "output_tokens": 45,
+                            "reasoning_output_tokens": 12,
+                            "total_tokens": 1245,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 1200,
+                            "cached_input_tokens": 800,
+                            "output_tokens": 45,
+                            "reasoning_output_tokens": 12,
+                            "total_tokens": 1245,
+                        },
+                        "model_context_window": 258400,
+                    },
+                },
+            },
+            {
                 "timestamp": "2026-05-02T00:00:05.000Z",
                 "type": "event_msg",
                 "payload": {"type": "task_complete", "duration_ms": 1234},
@@ -368,6 +392,12 @@ class TestCodexConversationAdapter(unittest.TestCase):
             for block in ev.get("blocks", []) if block.get("kind") == "text"
         ]
         self.assertTrue(any("Edited the readme" in text for text in assistant_texts))
+        result = next(ev for ev in parsed["events"] if ev["type"] == "result")
+        self.assertNotIn("cost_usd", result)
+        self.assertEqual(result["token_usage"]["input_tokens"], 1200)
+        self.assertEqual(result["token_usage"]["cached_input_tokens"], 800)
+        self.assertEqual(result["token_usage"]["output_tokens"], 45)
+        self.assertEqual(result["token_usage"]["reasoning_output_tokens"], 12)
 
     def test_codex_injection_routes_to_codex_resume(self):
         with mock.patch.object(
