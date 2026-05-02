@@ -257,6 +257,164 @@ CONVERSATIONS_DIR = Path.home() / ".claude" / "projects" / _cc_project_slug
 def _conversation_dirs():
     return _candidate_conversation_dirs(REPO_ROOT)
 
+
+def _decode_project_slug(slug):
+    """Best-effort reverse of _encode_project_slug. The encoding is lossy
+    (every non-alphanumeric becomes `-`), so a single slug can map to many
+    candidate paths; we pick the first one that exists on disk by walking
+    from `/` and absorbing as many consecutive `-`-separated parts into
+    each path component as needed to find an existing dir.
+
+    Returns a Path (existing) or None when no candidate resolves. Used by
+    find_all_conversations to give a clean folder label for slugs whose
+    repo has hyphens in the name (e.g. `my-finance-app`).
+    """
+    if not slug.startswith("-"):
+        return None
+    parts = slug[1:].split("-")
+
+    def search(prefix, remaining):
+        if not remaining:
+            return prefix if prefix.is_dir() else None
+        for k in range(1, len(remaining) + 1):
+            name = "-".join(remaining[:k])
+            candidate = prefix / name
+            if candidate.is_dir():
+                result = search(candidate, remaining[k:])
+                if result is not None:
+                    return result
+        return None
+
+    try:
+        return search(Path("/"), parts)
+    except (OSError, ValueError):
+        return None
+
+
+def find_all_conversations(limit_per_folder=None):
+    """Walk ~/.claude/projects/ for every subdir and return a flat list of
+    conversation metadata across every folder you've ever Claude-Code'd in.
+
+    Powers the multi-repo conversation archive: read-only browse of every
+    JSONL on disk, regardless of whether a CCC server is currently running
+    for that folder. Slow on cold scan (proportional to total JSONL count),
+    so callers should expect ~seconds latency the first time. No caching
+    layer in v1 — add later if it bites.
+
+    Each entry:
+        {session_id, jsonl_path, slug, folder_label, folder_path,
+         mtime, size, first_message, git_branch}
+
+    Folder resolution: known-repo paths from recent + custom files give a
+    real label; unknown slugs fall back to a best-effort decode (replace
+    `-` with `/` and verify) or just the raw slug.
+    """
+    projects_root = Path.home() / ".claude" / "projects"
+    if not projects_root.is_dir():
+        return []
+
+    # Build slug → repo_path map for label resolution.
+    known_by_slug = {}
+    try:
+        for repo in (_load_recent_repos() + _load_custom_repos()):
+            try:
+                known_by_slug[_encode_project_slug(repo)] = repo
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    out = []
+    seen_session_ids = set()
+
+    for project_dir in projects_root.iterdir():
+        if not project_dir.is_dir():
+            continue
+        slug = project_dir.name
+
+        repo_path = known_by_slug.get(slug)
+        if repo_path:
+            folder_label = Path(repo_path).name
+            folder_path = repo_path
+        else:
+            decoded = _decode_project_slug(slug)
+            if decoded:
+                folder_label = decoded.name or slug
+                folder_path = str(decoded)
+            else:
+                folder_label = slug
+                folder_path = slug
+
+        try:
+            jsonls = []
+            for f in project_dir.iterdir():
+                if f.is_file() and f.name.endswith(".jsonl"):
+                    try:
+                        jsonls.append((f, f.stat()))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+        jsonls.sort(key=lambda pair: pair[1].st_mtime, reverse=True)
+        if limit_per_folder:
+            jsonls = jsonls[:limit_per_folder]
+
+        for f, stat in jsonls:
+            session_id = f.stem
+            if session_id in seen_session_ids:
+                continue
+            seen_session_ids.add(session_id)
+
+            first_message = None
+            timestamp = None
+            git_branch = None
+            try:
+                with open(f, "r") as fh:
+                    for i, line in enumerate(fh):
+                        if i >= 20:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not first_message and ev.get("type") == "user":
+                            msg = (ev.get("message") or {}).get("content")
+                            if isinstance(msg, str):
+                                first_message = msg.strip()[:200]
+                            elif isinstance(msg, list):
+                                for part in msg:
+                                    if isinstance(part, dict) and part.get("type") == "text":
+                                        first_message = (part.get("text") or "").strip()[:200]
+                                        break
+                        if not git_branch:
+                            git_branch = ev.get("gitBranch") or ev.get("git_branch")
+                        if not timestamp:
+                            timestamp = ev.get("timestamp")
+                        if first_message and git_branch and timestamp:
+                            break
+            except (OSError, UnicodeDecodeError):
+                pass
+
+            out.append({
+                "session_id": session_id,
+                "jsonl_path": str(f),
+                "slug": slug,
+                "folder_label": folder_label,
+                "folder_path": folder_path,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+                "first_message": first_message,
+                "git_branch": git_branch,
+            })
+
+    out.sort(key=lambda r: r["mtime"], reverse=True)
+    return out
+
+
 def load_known_repos():
     """Auto-detect projects for the picker by scanning $HOME.
 
@@ -8937,6 +9095,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # The UI polls this to know which peers to fetch per-repo data
             # from. Read-only; loopback trust applies.
             self.send_json({"peers": _read_registry_pruned()})
+        elif path == "/api/conversations/all":
+            # Server-agnostic conversation archive: every JSONL across every
+            # folder under ~/.claude/projects/, tagged with folder + reverse
+            # chrono. Read-only browse, no peer registry consulted. The UI's
+            # "All repos" mode renders from this. Slow on cold scan; the
+            # caller is expected to show a loading state.
+            convs = find_all_conversations()
+            self.send_json({"conversations": convs, "count": len(convs)})
         elif path == "/api/identity":
             # This server's own identity card. Used by peers (and the UI on
             # peers' behalf) to verify a registry entry's port still belongs
