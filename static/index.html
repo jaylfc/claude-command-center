@@ -3487,6 +3487,18 @@
     </div>
   </div>
 
+  <div id="ffcOverlay" class="ffc-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ffcTitle">
+    <div class="ffc-backdrop" id="ffcBackdrop"></div>
+    <div class="ffc-dialog">
+      <div class="ffc-header">
+        <div class="ffc-title" id="ffcTitle">Files in this conversation</div>
+        <button type="button" class="ffc-close" id="ffcClose" aria-label="Close">×</button>
+      </div>
+      <div class="ffc-body" id="ffcBody"></div>
+      <div class="ffc-footer" id="ffcFooter" hidden></div>
+    </div>
+  </div>
+
   <div id="newSessionModal" class="nsm-overlay" style="display:none;" role="dialog" aria-modal="true">
     <div class="nsm-backdrop" id="nsmBackdrop"></div>
     <div class="nsm-dialog">
@@ -8957,7 +8969,7 @@
       pill.addEventListener('click', () => {
         const cur = currentConversation;
         const cached = cur ? _ffcCache.get(cur) : null;
-        if (cached) openFfcModal(cached);
+        if (cached && typeof openFfcModal === 'function') openFfcModal(cached);
       });
       // Append to the sticky header. CSS sets margin-left so it sits
       // next to whatever was already there.
@@ -8976,6 +8988,153 @@
     if (currentConversation !== cur) return;
     const sticky = document.querySelector('.conversations-view .conv-sticky-header');
     ffcEnsurePill(sticky, data);
+  }
+
+  const FFC_CATEGORY_ORDER = [
+    {key: 'images',        label: 'Images',        icon: '📷'},
+    {key: 'pdfs',          label: 'PDFs',          icon: '📕'},
+    {key: 'docs',          label: 'Docs',          icon: '📄'},
+    {key: 'presentations', label: 'Presentations', icon: '📊'},
+    {key: 'videos',        label: 'Videos',        icon: '🎬'},
+    {key: 'markdown',      label: 'Markdown',      icon: '📝'},
+    {key: 'html',          label: 'HTML',          icon: '🌐'},
+  ];
+
+  function ffcEscapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  function ffcRenderRow(row, icon) {
+    const div = document.createElement('div');
+    div.className = 'ffc-row';
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'ffc-row-label';
+    labelEl.innerHTML = '<span class="ffc-row-icon">' + icon + '</span>' +
+                       '<span>' + ffcEscapeHtml(row.label) + '</span>';
+    if (row.kind === 'url') {
+      const a = document.createElement('a');
+      a.href = row.target;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.color = 'inherit';
+      a.style.textDecoration = 'none';
+      a.appendChild(labelEl);
+      div.appendChild(a);
+    } else {
+      div.appendChild(labelEl);
+      div.addEventListener('click', async (e) => {
+        if (e.target.classList.contains('ffc-row-target')) return; // don't double-trigger on path-copy
+        try {
+          const r = await fetch('/api/reveal-file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path: row.target}),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({error: 'open failed'}));
+            ffcShowRowToast(div, j.error || ('HTTP ' + r.status));
+          }
+        } catch (err) {
+          ffcShowRowToast(div, 'network error');
+        }
+      });
+    }
+
+    const tgt = document.createElement('div');
+    tgt.className = 'ffc-row-target';
+    tgt.textContent = row.target;
+    tgt.title = 'Click to copy';
+    tgt.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(row.target).then(() => {
+        const orig = tgt.textContent;
+        tgt.textContent = 'copied';
+        setTimeout(() => { tgt.textContent = orig; }, 900);
+      }).catch(() => {});
+    });
+    div.appendChild(tgt);
+
+    return div;
+  }
+
+  function ffcShowRowToast(rowEl, msg) {
+    let toast = rowEl.querySelector('.ffc-row-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'ffc-row-toast';
+      rowEl.appendChild(toast);
+    }
+    toast.textContent = msg;
+    setTimeout(() => {
+      if (toast.parentNode === rowEl) rowEl.removeChild(toast);
+    }, 3000);
+  }
+
+  function openFfcModal(data) {
+    const overlay = document.getElementById('ffcOverlay');
+    const body    = document.getElementById('ffcBody');
+    const footer  = document.getElementById('ffcFooter');
+    if (!overlay || !body) return;
+    body.innerHTML = '';
+
+    if (!data || !data.count) {
+      const empty = document.createElement('div');
+      empty.className = 'ffc-empty';
+      empty.textContent = 'No files mentioned in this conversation.';
+      body.appendChild(empty);
+    } else {
+      for (const cat of FFC_CATEGORY_ORDER) {
+        const rows = (data.groups || {})[cat.key];
+        if (!rows || !rows.length) continue;
+        const section = document.createElement('div');
+        section.className = 'ffc-section';
+        const title = document.createElement('div');
+        title.className = 'ffc-section-title';
+        title.textContent = cat.label + ' (' + rows.length + ')';
+        section.appendChild(title);
+        for (const row of rows) {
+          section.appendChild(ffcRenderRow(row, cat.icon));
+        }
+        body.appendChild(section);
+      }
+    }
+
+    if (data && data.truncated) {
+      footer.hidden = false;
+      footer.textContent = 'Showing first 500 — conversation contains more.';
+    } else {
+      footer.hidden = true;
+      footer.textContent = '';
+    }
+
+    overlay.hidden = false;
+    document.addEventListener('keydown', _ffcEscHandler);
+  }
+
+  function closeFfcModal() {
+    const overlay = document.getElementById('ffcOverlay');
+    if (overlay) overlay.hidden = true;
+    document.removeEventListener('keydown', _ffcEscHandler);
+  }
+
+  function _ffcEscHandler(e) {
+    if (e.key === 'Escape') closeFfcModal();
+  }
+
+  // Wire close handlers — defensive against DOMContentLoaded already fired.
+  function _ffcWireCloseHandlers() {
+    const backdrop = document.getElementById('ffcBackdrop');
+    const close    = document.getElementById('ffcClose');
+    if (backdrop) backdrop.addEventListener('click', closeFfcModal);
+    if (close)    close.addEventListener('click', closeFfcModal);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _ffcWireCloseHandlers);
+  } else {
+    _ffcWireCloseHandlers();
   }
 
   function setLiveBadgeVisible(visible) {
