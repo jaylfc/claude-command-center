@@ -3321,6 +3321,103 @@
   }
   .panel-toggle-btn svg { width: 16px; height: 16px; display: block; }
   .panel-toggle-btn:hover { color: var(--text); }
+
+  /* ── Usage stats overlay ─────────────────────────────────────
+     Triggered from the "Stats" button in the topbar. Reuses the
+     .upd-overlay backdrop pattern but with a wider dialog so the
+     8-card grid + 7×24 heatmap fit comfortably. */
+  .stats-dialog { position: relative; width: min(900px, 94vw);
+    max-height: 90vh; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 20px;
+    display: flex; flex-direction: column; gap: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+  .stats-header { display: flex; align-items: center; gap: 6px; }
+  .stats-tab {
+    padding: 6px 14px; border-radius: 8px; font-size: 13px;
+    border: 1px solid transparent; background: transparent;
+    color: var(--text-muted); cursor: pointer; font-family: inherit;
+  }
+  .stats-tab:hover { color: var(--text); }
+  .stats-tab.active {
+    background: var(--surface-2); color: var(--text);
+    border-color: var(--border);
+  }
+  .stats-range { margin-left: auto; display: flex; gap: 4px; }
+  .stats-range button {
+    padding: 4px 10px; border-radius: 6px; font-size: 12px;
+    background: transparent; border: 1px solid transparent;
+    color: var(--text-muted); cursor: pointer; font-family: inherit;
+  }
+  .stats-range button:hover { color: var(--text); }
+  .stats-range button.active {
+    background: var(--surface-2); border-color: var(--border);
+    color: var(--text);
+  }
+  .stats-close {
+    margin-left: 6px; width: 28px; height: 28px;
+    border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-muted); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 0;
+  }
+  .stats-close:hover { background: var(--surface-2); color: var(--text); }
+
+  .stats-cards {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(4, 1fr);
+  }
+  @media (max-width: 720px) {
+    .stats-cards { grid-template-columns: repeat(2, 1fr); }
+  }
+  .stats-card {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 14px;
+    display: flex; flex-direction: column; gap: 4px;
+    min-height: 64px;
+  }
+  .stats-card .label { font-size: 11px; color: var(--text-muted); }
+  .stats-card .value { font-size: 22px; font-weight: 700; color: var(--text); }
+  .stats-card .value.muted { font-weight: 600; font-size: 16px; }
+
+  .stats-heatmap-wrap { padding: 4px 0; }
+  .stats-heatmap {
+    display: grid; gap: 3px;
+    grid-template-columns: repeat(24, 1fr);
+    grid-auto-rows: 1fr;
+  }
+  .stats-heatmap-cell {
+    aspect-ratio: 1; border-radius: 3px;
+    background: var(--surface-2);
+  }
+  .stats-heatmap-cell.lvl-0 { background: var(--surface-2); opacity: 0.55; }
+  .stats-heatmap-cell.lvl-1 { background: rgba(96, 137, 230, 0.45); }
+  .stats-heatmap-cell.lvl-2 { background: rgba(96, 137, 230, 0.65); }
+  .stats-heatmap-cell.lvl-3 { background: rgba(96, 137, 230, 0.85); }
+  .stats-heatmap-cell.lvl-4 { background: rgba(96, 137, 230, 1.0); }
+
+  .stats-comparison {
+    font-size: 13px; color: var(--text-muted);
+    padding-top: 4px;
+  }
+  .stats-loading { font-size: 13px; color: var(--text-muted); }
+  .stats-models-list {
+    display: flex; flex-direction: column; gap: 8px;
+    padding: 4px 2px;
+  }
+  .stats-models-row {
+    display: grid; grid-template-columns: 140px 1fr 80px;
+    align-items: center; gap: 12px; font-size: 13px;
+  }
+  .stats-models-row .name { color: var(--text); font-weight: 600; }
+  .stats-models-row .bar {
+    height: 8px; border-radius: 4px; background: var(--surface-2);
+    overflow: hidden; position: relative;
+  }
+  .stats-models-row .bar-fill {
+    position: absolute; inset: 0 auto 0 0;
+    background: rgba(96, 137, 230, 0.85);
+  }
+  .stats-models-row .pct { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
 </style>
 <!-- Optional Morning side-nav. Loaded conditionally based on the feature
      flag so installs without the morning plugin don't get a 404 in the
@@ -3552,6 +3649,7 @@
     </button>
     <button id="kptSummarizeAllBtn" class="topbar-btn" title="Use Claude haiku to generate concise titles for every card whose name hasn't been touched. Runs in the background, ~3 cards in parallel." aria-label="Summarize titles for all unnamed cards">&#10024; Titles</button>
     <button id="kptWorktreesBtn" class="topbar-btn" title="Show all worktrees of this repo, with an indicator for those that have uncommitted changes." aria-label="Show worktrees">&#127807; Worktrees</button>
+    <button id="statsBtn" class="topbar-btn" title="Usage stats — sessions, messages, tokens, streaks across every Claude Code transcript on this machine." aria-label="Show usage stats">&#128202; Stats</button>
     <button id="termToggleBtn" class="topbar-btn" title="Open the in-UI terminal panel — run quick shell commands (git status, npm test, ./script.sh) without leaving the page. One-shot per command, no interactive TTY (no vim/top)." aria-label="Toggle terminal panel">&#9000; Terminal</button>
     <!-- View menu — collapses three rarely-changed toggles (Last 10h /
          Compact / GitHub only) into one disclosure popover. -->
@@ -3984,6 +4082,30 @@
       <div class="wt-list" id="worktreesList"></div>
       <div class="upd-actions">
         <button type="button" class="upd-btn" id="worktreesCloseBtn">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Usage stats overlay. Opened from the topbar Stats button.
+       Renders an Overview tab (8 metric cards + day-of-week × hour heatmap)
+       and a Models tab (per-model message share). Data comes from the
+       /api/stats endpoint, which aggregates every transcript under
+       ~/.claude/projects via mtime-cached per-file walks. -->
+  <div id="statsModal" class="upd-overlay" role="dialog" aria-modal="true" aria-labelledby="statsTitle">
+    <div class="upd-backdrop" data-stats-close="1"></div>
+    <div class="stats-dialog" id="statsDialog">
+      <div class="stats-header">
+        <button type="button" class="stats-tab active" data-stats-tab="overview" id="statsTabOverview">Overview</button>
+        <button type="button" class="stats-tab" data-stats-tab="models" id="statsTabModels">Models</button>
+        <div class="stats-range" role="group" aria-label="Date range">
+          <button type="button" data-stats-range="all">All</button>
+          <button type="button" data-stats-range="30d" class="active">30d</button>
+          <button type="button" data-stats-range="7d">7d</button>
+        </div>
+        <button type="button" class="stats-close" id="statsCloseBtn" aria-label="Close stats">&times;</button>
+      </div>
+      <div id="statsBody">
+        <div class="stats-loading">Loading…</div>
       </div>
     </div>
   </div>
@@ -10243,6 +10365,172 @@
   }
   refreshWorktreesBadge();
   setInterval(refreshWorktreesBadge, 60000);
+
+  // ── Usage stats overlay ────────────────────────────────────────────
+  // Loads /api/stats and renders an Overview/Models view in a modal.
+  // Cold first-load can take a few seconds for users with many transcripts;
+  // every subsequent range switch is instant (server caches per-file aggs).
+  (function() {
+    const $modal = document.getElementById('statsModal');
+    const $body = document.getElementById('statsBody');
+    if (!$modal || !$body) return;
+
+    let currentTab = 'overview';
+    let currentRange = '30d';
+    const cache = {};  // range -> stats payload
+
+    function compactNum(n) {
+      if (n == null) return '—';
+      n = Number(n) || 0;
+      if (n < 1000) return String(n);
+      if (n < 10_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+      if (n < 1_000_000) return Math.round(n / 1000) + 'k';
+      if (n < 10_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+      if (n < 1_000_000_000) return Math.round(n / 1_000_000) + 'M';
+      return (n / 1_000_000_000).toFixed(1).replace(/\.0$/, '') + 'B';
+    }
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function renderCards(s) {
+      const cards = [
+        ['Sessions',       compactNum(s.sessions)],
+        ['Messages',       compactNum(s.messages)],
+        ['Total tokens',   compactNum(s.total_tokens)],
+        ['Active days',    compactNum(s.active_days)],
+        ['Current streak', (s.current_streak || 0) + 'd'],
+        ['Longest streak', (s.longest_streak || 0) + 'd'],
+        ['Peak hour',      s.peak_hour || '—'],
+        ['Favorite model', s.favorite_model || '—', true],
+      ];
+      return '<div class="stats-cards">' + cards.map(c => {
+        const valClass = c[2] ? 'value muted' : 'value';
+        return '<div class="stats-card">'
+             + '<div class="label">' + escapeHtml(c[0]) + '</div>'
+             + '<div class="' + valClass + '">' + escapeHtml(c[1]) + '</div>'
+             + '</div>';
+      }).join('') + '</div>';
+    }
+
+    function renderHeatmap(heatmap) {
+      // heatmap[dow][hour] — rows: Mon..Sun, cols: 0..23
+      // Reorder rows so Sun is first (matches GitHub-style heatmaps).
+      const order = [6, 0, 1, 2, 3, 4, 5];  // Sun, Mon, Tue, Wed, Thu, Fri, Sat
+      let max = 0;
+      for (const row of heatmap) for (const v of row) if (v > max) max = v;
+      const html = ['<div class="stats-heatmap-wrap"><div class="stats-heatmap">'];
+      for (const dow of order) {
+        const row = heatmap[dow] || [];
+        for (let h = 0; h < 24; h++) {
+          const v = row[h] || 0;
+          let lvl = 0;
+          if (max > 0 && v > 0) {
+            const r = v / max;
+            if (r >= 0.75) lvl = 4;
+            else if (r >= 0.5) lvl = 3;
+            else if (r >= 0.25) lvl = 2;
+            else lvl = 1;
+          }
+          html.push('<div class="stats-heatmap-cell lvl-' + lvl + '" title="'
+                    + escapeHtml(v + ' messages') + '"></div>');
+        }
+      }
+      html.push('</div></div>');
+      return html.join('');
+    }
+
+    function renderOverview(s) {
+      let html = renderCards(s);
+      html += renderHeatmap(s.heatmap || []);
+      if (s.comparison) {
+        html += '<div class="stats-comparison">' + escapeHtml(s.comparison) + '</div>';
+      }
+      return html;
+    }
+
+    function renderModels(s) {
+      const rows = (s.models || []);
+      if (!rows.length) {
+        return '<div class="stats-loading">No assistant turns in this range yet.</div>';
+      }
+      const total = rows.reduce((a, r) => a + (r.messages || 0), 0) || 1;
+      const max = Math.max.apply(null, rows.map(r => r.messages || 0)) || 1;
+      const html = ['<div class="stats-models-list">'];
+      for (const r of rows) {
+        const pct = ((r.messages / total) * 100).toFixed(1) + '%';
+        const w = ((r.messages / max) * 100).toFixed(1) + '%';
+        html.push(
+          '<div class="stats-models-row">'
+          + '<div class="name">' + escapeHtml(r.label) + '</div>'
+          + '<div class="bar"><div class="bar-fill" style="width:' + w + ';"></div></div>'
+          + '<div class="pct">' + escapeHtml(compactNum(r.messages) + ' · ' + pct) + '</div>'
+          + '</div>'
+        );
+      }
+      html.push('</div>');
+      return html.join('');
+    }
+
+    function render() {
+      const s = cache[currentRange];
+      if (!s) {
+        $body.innerHTML = '<div class="stats-loading">Loading…</div>';
+        return;
+      }
+      $body.innerHTML = currentTab === 'models' ? renderModels(s) : renderOverview(s);
+    }
+
+    async function load(range) {
+      if (cache[range]) { render(); return; }
+      $body.innerHTML = '<div class="stats-loading">Scanning transcripts…</div>';
+      try {
+        const res = await fetch('/api/stats?range=' + encodeURIComponent(range));
+        const data = await res.json();
+        cache[range] = data;
+        if (range === currentRange) render();
+      } catch (e) {
+        $body.innerHTML = '<div class="stats-loading">Failed to load stats.</div>';
+      }
+    }
+
+    function open() {
+      $modal.classList.add('open');
+      load(currentRange);
+    }
+    function close() { $modal.classList.remove('open'); }
+
+    document.getElementById('statsBtn').addEventListener('click', open);
+    document.getElementById('statsCloseBtn').addEventListener('click', close);
+    $modal.addEventListener('click', (e) => {
+      if (e.target && e.target.dataset && e.target.dataset.statsClose) close();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && $modal.classList.contains('open')) close();
+    });
+
+    $modal.querySelectorAll('[data-stats-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentTab = btn.dataset.statsTab;
+        $modal.querySelectorAll('[data-stats-tab]').forEach(b => {
+          b.classList.toggle('active', b === btn);
+        });
+        render();
+      });
+    });
+    $modal.querySelectorAll('[data-stats-range]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentRange = btn.dataset.statsRange;
+        $modal.querySelectorAll('[data-stats-range]').forEach(b => {
+          b.classList.toggle('active', b === btn);
+        });
+        load(currentRange);
+      });
+    });
+  })();
 
   // Token-usage pill — sibling of the workspace info in the same input-
   // context row. Shows latest input tokens out of the model's context

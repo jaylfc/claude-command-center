@@ -12,7 +12,7 @@ Usage:
     CCC_WATCH_REPO=~/dev/foo ./run.sh
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 import ast
 import base64
@@ -34,7 +34,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # The repository the command center is watching. Resolution priority:
@@ -8833,6 +8833,310 @@ def extract_session_usage(session_id):
     }
 
 
+# ---------------------------------------------------------------------------
+# Global usage stats — aggregated across every transcript under PROJECTS_ROOT.
+# Powers the /api/stats endpoint and the "Stats" overlay in the UI.
+#
+# Cold-scanning hundreds of JSONL files on every request is too slow, so we
+# memoise per-file aggregates keyed by (path, mtime, size). Subsequent calls
+# only re-read transcripts that were appended to or replaced.
+# ---------------------------------------------------------------------------
+
+_STATS_FILE_CACHE = {}        # str(path) -> {"mtime", "size", "agg"}
+_STATS_CACHE_LOCK = threading.Lock()
+
+# Token equivalent of "The Lord of the Rings" — ~576k words × ~1.25 tokens/word.
+# Used for the whimsical comparison line at the bottom of the stats overlay.
+# Off by ±20% is fine; the line is for fun, not accuracy.
+_STATS_LOTR_TOKENS = 720_000
+
+# Models that show up in transcripts but aren't real assistant runs we want
+# users to see in the "Favorite model" tile or Models tab.
+_STATS_MODEL_BLOCKLIST = {"<synthetic>"}
+
+
+def _stats_parse_ts(ts_str):
+    """Parse an ISO-8601 timestamp from the JSONL into an aware datetime in
+    the server's local timezone. Returns None on failure."""
+    if not ts_str or not isinstance(ts_str, str):
+        return None
+    try:
+        if ts_str.endswith("Z"):
+            dt = datetime.fromisoformat(ts_str[:-1] + "+00:00")
+        else:
+            dt = datetime.fromisoformat(ts_str)
+    except ValueError:
+        return None
+    return dt.astimezone()
+
+
+def _stats_aggregate_file(path):
+    """Walk a single transcript and return its date-bucketed aggregate.
+
+    Shape:
+      {
+        "session_id": str|None,
+        "by_date": {
+          "YYYY-MM-DD": {
+            "messages": int,            # user + assistant turns (no sidechain)
+            "in_tokens": int,           # input_tokens (no cache)
+            "cache_tokens": int,        # cache_creation + cache_read
+            "out_tokens": int,
+            "hours": {"0".."23": int},  # message count per hour-of-day (local)
+            "models": {model: int},     # assistant turns per model
+          }, ...
+        },
+      }
+    """
+    agg = {"session_id": None, "by_date": {}}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("type")
+                if etype not in ("user", "assistant"):
+                    continue
+                if ev.get("isSidechain"):
+                    continue
+                local = _stats_parse_ts(ev.get("timestamp"))
+                if local is None:
+                    continue
+                if agg["session_id"] is None and ev.get("sessionId"):
+                    agg["session_id"] = ev["sessionId"]
+                date_str = local.strftime("%Y-%m-%d")
+                hour_str = str(local.hour)
+                day = agg["by_date"].setdefault(date_str, {
+                    "messages": 0,
+                    "in_tokens": 0,
+                    "cache_tokens": 0,
+                    "out_tokens": 0,
+                    "hours": {},
+                    "models": {},
+                })
+                day["messages"] += 1
+                day["hours"][hour_str] = day["hours"].get(hour_str, 0) + 1
+                if etype == "assistant":
+                    msg = _safe_parse_message(ev.get("message", {}))
+                    model = msg.get("model")
+                    if model and model not in _STATS_MODEL_BLOCKLIST:
+                        day["models"][model] = day["models"].get(model, 0) + 1
+                    u = msg.get("usage")
+                    if isinstance(u, dict):
+                        in_tok = u.get("input_tokens") or 0
+                        cache_tok = ((u.get("cache_creation_input_tokens") or 0)
+                                     + (u.get("cache_read_input_tokens") or 0))
+                        out_tok = u.get("output_tokens") or 0
+                        if isinstance(in_tok, int):
+                            day["in_tokens"] += in_tok
+                        if isinstance(cache_tok, int):
+                            day["cache_tokens"] += cache_tok
+                        if isinstance(out_tok, int):
+                            day["out_tokens"] += out_tok
+    except OSError:
+        pass
+    return agg
+
+
+def _stats_get_file_agg(path):
+    """Return cached aggregate for `path`, recomputing if mtime/size changed."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = str(path)
+    cached = _STATS_FILE_CACHE.get(key)
+    if cached and cached["mtime"] == st.st_mtime and cached["size"] == st.st_size:
+        return cached["agg"]
+    agg = _stats_aggregate_file(path)
+    _STATS_FILE_CACHE[key] = {"mtime": st.st_mtime, "size": st.st_size, "agg": agg}
+    return agg
+
+
+def _stats_pretty_model(m):
+    """`claude-opus-4-7` → `Opus 4.7`. Best-effort, falls back to the raw id."""
+    if not m:
+        return "Unknown"
+    s = m.lower().replace("[1m]", "").strip()
+    if s.startswith("claude-"):
+        s = s[len("claude-"):]
+    parts = [p for p in s.split("-") if p]
+    if len(parts) >= 3 and parts[1].isdigit() and parts[2].isdigit():
+        return f"{parts[0].capitalize()} {parts[1]}.{parts[2]}"
+    if len(parts) >= 2 and parts[1].isdigit():
+        return f"{parts[0].capitalize()} {parts[1]}"
+    return parts[0].capitalize() if parts else m
+
+
+def _stats_compute_streaks(active_dates, today):
+    """Return (current_streak_days, longest_streak_days) over a date set.
+
+    `current_streak` only counts if the user was active today OR yesterday —
+    a gap of >1 day from today resets it to 0."""
+    if not active_dates:
+        return 0, 0
+    dates = sorted(active_dates)
+    longest = 1
+    run = 1
+    for i in range(1, len(dates)):
+        if (dates[i] - dates[i - 1]).days == 1:
+            run += 1
+            if run > longest:
+                longest = run
+        else:
+            run = 1
+    last = dates[-1]
+    current = 0
+    if last == today or last == today - timedelta(days=1):
+        current = 1
+        for i in range(len(dates) - 2, -1, -1):
+            if (dates[i + 1] - dates[i]).days == 1:
+                current += 1
+            else:
+                break
+    return current, longest
+
+
+def _stats_pick_comparison(total_tokens):
+    """Whimsical line for the bottom of the stats overlay.
+
+    Always compares to The Lord of the Rings (matches the design mock).
+    Hidden when the user hasn't yet exceeded one LotR — saying
+    "you've used 0.3× a LotR" lands flatter than no line at all."""
+    if total_tokens <= 0:
+        return None
+    mult = total_tokens / _STATS_LOTR_TOKENS
+    if mult < 1.5:
+        return None
+    return f"You've used ~{int(round(mult))}× more tokens than The Lord of the Rings."
+
+
+def compute_global_stats(days=None):
+    """Aggregate transcript stats across ~/.claude/projects.
+
+    days=None → "All". days=7 / 30 → last N days inclusive of today (local)."""
+    today = datetime.now().astimezone().date()
+    cutoff = None if days is None else today - timedelta(days=days - 1)
+
+    out = {
+        "range_days": days,
+        "sessions": 0,
+        "messages": 0,
+        "total_tokens": 0,        # input + output (excludes cache replays)
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_tokens": 0,        # cache_creation + cache_read, mostly replays
+        "active_days": 0,
+        "current_streak": 0,
+        "longest_streak": 0,
+        "peak_hour": None,
+        "favorite_model": None,
+        "favorite_model_id": "",
+        "models": [],
+        "heatmap": [[0] * 24 for _ in range(7)],  # rows = Mon..Sun, cols = 0..23
+        "per_date": {},
+        "comparison": None,
+    }
+
+    if not PROJECTS_ROOT.is_dir():
+        return out
+
+    sessions = set()
+    active_dates = set()
+    by_dow_hour = [[0] * 24 for _ in range(7)]
+    hour_totals = [0] * 24
+    by_model = {}
+    per_date = {}
+
+    with _STATS_CACHE_LOCK:
+        for project_dir in PROJECTS_ROOT.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for jsonl in project_dir.iterdir():
+                if not jsonl.name.endswith(".jsonl"):
+                    continue
+                agg = _stats_get_file_agg(jsonl)
+                if not agg:
+                    continue
+                file_in_range = False
+                for date_str, day in agg["by_date"].items():
+                    try:
+                        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        continue
+                    if cutoff and d < cutoff:
+                        continue
+                    if d > today:  # ignore clock-skew futures
+                        continue
+                    file_in_range = True
+                    active_dates.add(d)
+                    out["messages"] += day["messages"]
+                    out["input_tokens"] += day["in_tokens"]
+                    out["output_tokens"] += day["out_tokens"]
+                    out["cache_tokens"] += day.get("cache_tokens", 0)
+                    pd = per_date.setdefault(date_str, {"messages": 0, "tokens": 0})
+                    pd["messages"] += day["messages"]
+                    pd["tokens"] += day["in_tokens"] + day["out_tokens"]
+                    dow = d.weekday()  # 0=Mon..6=Sun
+                    for hour_str, c in day["hours"].items():
+                        try:
+                            h = int(hour_str)
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= h < 24:
+                            by_dow_hour[dow][h] += c
+                            hour_totals[h] += c
+                    for m, c in day["models"].items():
+                        by_model[m] = by_model.get(m, 0) + c
+                if file_in_range and agg.get("session_id"):
+                    sessions.add(agg["session_id"])
+
+    out["sessions"] = len(sessions)
+    out["total_tokens"] = out["input_tokens"] + out["output_tokens"]
+    out["active_days"] = len(active_dates)
+    out["current_streak"], out["longest_streak"] = _stats_compute_streaks(
+        active_dates, today
+    )
+    if any(hour_totals):
+        peak = max(range(24), key=lambda h: hour_totals[h])
+        # Format like the screenshot: "7 PM"
+        if peak == 0:
+            out["peak_hour"] = "12 AM"
+        elif peak < 12:
+            out["peak_hour"] = f"{peak} AM"
+        elif peak == 12:
+            out["peak_hour"] = "12 PM"
+        else:
+            out["peak_hour"] = f"{peak - 12} PM"
+    if by_model:
+        top_id = max(by_model, key=by_model.get)
+        out["favorite_model_id"] = top_id
+        out["favorite_model"] = _stats_pretty_model(top_id)
+        total = sum(by_model.values()) or 1
+        out["models"] = sorted(
+            [
+                {
+                    "id": mid,
+                    "label": _stats_pretty_model(mid),
+                    "messages": c,
+                    "share": round(c / total, 4),
+                }
+                for mid, c in by_model.items()
+            ],
+            key=lambda r: r["messages"],
+            reverse=True,
+        )
+    out["heatmap"] = by_dow_hour
+    out["per_date"] = per_date
+    out["comparison"] = _stats_pick_comparison(out["total_tokens"])
+    return out
+
+
 _MORNING_BRAINDUMP_PROMPT = """You are analyzing the user's morning brain-dump.
 
 For each item in the dump, classify as exactly one of:
@@ -9539,6 +9843,18 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif re.match(r"^/api/issues/\d+/details$", path):
             num = path.split("/")[3]
             self.send_json(get_issue_details(num))
+        elif path == "/api/stats":
+            # Aggregated usage stats across every transcript under
+            # ~/.claude/projects. ?range=7d|30d|all (default 30d).
+            qs = urllib.parse.parse_qs(parsed.query)
+            r = (qs.get("range", ["30d"])[0] or "30d").lower()
+            if r == "7d":
+                days = 7
+            elif r == "all":
+                days = None
+            else:
+                days = 30
+            self.send_json(compute_global_stats(days=days))
         elif path == "/api/sessions/spawned":
             self.send_json(list_spawned_sessions())
         elif re.match(r"^/api/sessions/spawned/\d+/log$", path):
