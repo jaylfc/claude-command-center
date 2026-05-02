@@ -13164,7 +13164,7 @@
      PTY — no vim / top / interactive prompts. -->
 <style>
   #termPanel {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 99;
     height: 280px;
     background: var(--surface);
     border-top: 1px solid var(--border);
@@ -13175,6 +13175,10 @@
     font-size: 12px;
   }
   body.has-side-nav #termPanel { left: 52px; }
+  /* Multirepo PR's left rail is 48px wide at z-index 99; tuck the panel
+     behind it on the left so the rail's repo dots stay clickable. */
+  body.has-repo-rail #termPanel { left: 48px; }
+  body.has-repo-rail.has-side-nav #termPanel { left: 100px; }
   #termPanel.open { display: flex; }
   #termPanel .term-header {
     display: flex; align-items: center; gap: 8px;
@@ -13182,6 +13186,7 @@
     background: var(--surface-2, #1c2128);
     border-bottom: 1px solid var(--border);
     user-select: none;
+    flex-shrink: 0;
   }
   #termPanel .term-title {
     font-weight: 600; color: var(--text); font-size: 11px;
@@ -13226,6 +13231,9 @@
     background: var(--surface-2, #1c2128);
     border-top: 1px solid var(--border);
     gap: 8px;
+    flex-shrink: 0;
+    min-height: 32px;
+    box-sizing: border-box;
   }
   #termPanel .term-prompt {
     color: var(--accent); font-weight: 600;
@@ -13237,6 +13245,7 @@
     flex: 1; min-width: 0;
     background: transparent; border: none; outline: none;
     color: var(--text); font-family: inherit; font-size: 12px;
+    line-height: 18px; padding: 0; margin: 0; height: 18px;
   }
   #termPanel .term-input:disabled { opacity: 0.5; }
   #termPanel .term-busy {
