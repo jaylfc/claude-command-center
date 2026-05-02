@@ -8926,7 +8926,7 @@
   const _ffcCache = new Map(); // conversation_id -> {count, truncated, groups}
 
   async function ffcFetch(convId) {
-    if (!convId || convId === '__new__' || convId.startsWith('backlog-') || convId.startsWith('pkood-')) {
+    if (!convId || convId === '__new__' || convId.startsWith('backlog-') || convId.startsWith('pkood-') || convId.startsWith('issue-')) {
       return null;
     }
     if (_ffcCache.has(convId)) {
