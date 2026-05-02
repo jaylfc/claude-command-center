@@ -1027,8 +1027,10 @@
     opacity: 0.8;
     transition: opacity 0.4s ease-out;
   }
-  /* Diagnostic: render-time stamps so we can compare stdout-stream vs JSONL-tail
-     arrival order on screen. Temporary — remove once we hide the tail rows. */
+  /* Per-event timestamps prefixed to each conversation row. Sourced from
+     the JSONL event's own `ts` (when the message was actually written),
+     not the render time. `[S …]` marks events that arrived first via the
+     stdout stream; `[J …]` marks events read back from the JSONL tail. */
   .stream-block-text[data-render-ts]::before,
   .stream-block-tool[data-render-ts]::before,
   .stream-block-thinking[data-render-ts]::before {
@@ -1043,11 +1045,6 @@
     font-size: 10px; color: var(--text-muted); opacity: 0.75;
     margin-right: 6px; display: inline-block;
   }
-  /* Tool-only events get fused into a collapsed .tool-call-group, which hides
-     the per-event stamps. Surface the latest tool's arrival on the visible
-     group header so we can still see when tail tools landed. attr() in
-     content only reads the pseudo's own element, so the data attribute has
-     to live on .tool-call-group-header itself, not on the parent group. */
   .tool-call-group-header[data-render-ts]::before {
     content: '[J ' attr(data-render-ts) ']';
     font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
@@ -9106,6 +9103,20 @@
     return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()) + '.' + p3(d.getMilliseconds());
   }
 
+  // Parse a JSONL event's ISO timestamp ("ts" field, set server-side from
+  // the original event's `timestamp`) into the same HH:MM:SS.mmm format
+  // nowStamp() produces, but in the user's local timezone. Falls back to
+  // null when the input is missing or unparseable so callers can decide
+  // whether to use nowStamp() or hide the prefix entirely.
+  function eventStamp(isoTs) {
+    if (!isoTs) return null;
+    const d = new Date(isoTs);
+    if (isNaN(d.getTime())) return null;
+    const p2 = (n) => (n < 10 ? '0' + n : '' + n);
+    const p3 = (n) => (n < 10 ? '00' + n : n < 100 ? '0' + n : '' + n);
+    return p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()) + '.' + p3(d.getMilliseconds());
+  }
+
   function setLiveBadgeVisible(visible) {
     const a = document.getElementById('liveBadgeConv');
     const b = document.getElementById('cpLiveBadge');
@@ -10011,7 +10022,10 @@
     for (const ev of events) {
       const div = document.createElement('div');
       div.className = 'event ' + ev.type;
-      div.dataset.renderTs = nowStamp();
+      // Use the event's own JSONL timestamp (when it was actually written)
+      // rather than render time; fall back to render time only when the
+      // event has no ts (synthetic / very old logs).
+      div.dataset.renderTs = eventStamp(ev.ts) || nowStamp();
       // Tag assistant rows with the source message_id so the streaming
       // bubble can detect "JSONL already won" and hand off cleanly.
       if (ev.type === 'assistant' && ev.message_id) {
@@ -10260,20 +10274,22 @@
           if (last && !last.querySelector('.tool-result-output')) {
             const out = document.createElement('pre');
             out.className = 'tool-result-output' + (ev.is_error ? ' is-error' : '');
-            // Diagnostic: stamp the actual moment the JSON output landed in
-            // the DOM. Surfaced as a bracketed prefix because the parent
-            // .event.tool_result row is display:none and a CSS ::before
-            // would never render.
-            out.dataset.renderTs = nowStamp();
-            out.textContent = '[J ' + out.dataset.renderTs + ']  ' + text;
+            // Stamp this output with the tool_result event's own ts (when
+            // the result actually landed in the JSONL), not render time.
+            // The parent .event.tool_result row is display:none, so the
+            // CSS ::before never renders — we bake the prefix into the
+            // <pre>'s text content instead.
+            const _toolTs = eventStamp(ev.ts) || nowStamp();
+            out.dataset.renderTs = _toolTs;
+            out.textContent = '[J ' + _toolTs + ']  ' + text;
             // Bump the group's header stamp too so it reflects the most
             // recent activity (tool_use OR tool_result), not just tool_use.
             // CSS ::before reads attr() from its own element, so the header
             // node needs the attribute set, not just the parent group.
             if (_currentToolGroup) {
-              _currentToolGroup.dataset.renderTs = out.dataset.renderTs;
+              _currentToolGroup.dataset.renderTs = _toolTs;
               const $h = _currentToolGroup.querySelector('.tool-call-group-header');
-              if ($h) $h.dataset.renderTs = out.dataset.renderTs;
+              if ($h) $h.dataset.renderTs = _toolTs;
             }
             last.appendChild(out);
           }
@@ -10289,7 +10305,7 @@
           // No open group, or another event closed it — start a new one.
           const grp = document.createElement('div');
           grp.className = 'tool-call-group collapsed';
-          const _grpTs = nowStamp();
+          const _grpTs = eventStamp(ev.ts) || nowStamp();
           grp.dataset.renderTs = _grpTs;
           grp.innerHTML =
               '<div class="tool-call-group-header" data-render-ts="' + _grpTs + '">'
@@ -10303,9 +10319,10 @@
           _currentToolCount = 0;
         }
         _currentToolGroup.querySelector('.tool-call-group-body').appendChild(div);
-        // Diagnostic: bump both stamps to the latest tool's arrival. The
-        // header's own data-render-ts is what the CSS ::before reads.
-        const _ts = nowStamp();
+        // Bump both stamps to this tool's own ts so the visible group
+        // header reflects when the latest tool actually ran. The header's
+        // own data-render-ts is what the CSS ::before reads.
+        const _ts = eventStamp(ev.ts) || nowStamp();
         _currentToolGroup.dataset.renderTs = _ts;
         _currentToolGroup.querySelector('.tool-call-group-header').dataset.renderTs = _ts;
         _currentToolCount += 1;
