@@ -8660,7 +8660,10 @@ def _kill_session_by_id(session_id):
             data = json.loads(f.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        if data.get("session_id") != session_id:
+        # Claude writes the field as `sessionId` (camelCase). Older or
+        # third-party tooling may use snake_case — accept both so this
+        # function actually matches in practice (it didn't before).
+        if data.get("sessionId") != session_id and data.get("session_id") != session_id:
             continue
         pid = data.get("pid")
         if not pid:
@@ -10418,11 +10421,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 # Archiving retires the session — drop any stale Notification-hook
                 # marker so the dashboard doesn't keep classifying it as Waiting
                 # (which would pin the row to "In progress" and undo the move).
+                kill_result = None
                 if now_archived:
                     try:
                         (SIDECAR_STATE_DIR / f"{sid}_needs_approval.json").unlink()
                     except (OSError, FileNotFoundError):
                         pass
+                    # Free the headless agent. Resume via Jump rebuilds full
+                    # context from the on-disk JSONL — keeping the process
+                    # alive past the user's "done" gesture only accumulates
+                    # MCP children. Backlog rows have no process; pkood is
+                    # uninstalled.
+                    if sid and not sid.startswith("backlog-") and not sid.startswith("pkood-"):
+                        kill_result = _kill_session_by_id(sid)
                 # If this card represents a GitHub issue (id `issue-N`),
                 # also close/reopen the issue on archive/unarchive.
                 issue_match = re.match(r"^issue-(\d+)$", conv_id)
@@ -10441,7 +10452,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         gh_result = {"action": action, "ok": False}
                 if gh_result is not None:
                     _bust_issue_state_cache()
-                self.send_json({"ok": True, "archived": now_archived, "github": gh_result})
+                self.send_json({"ok": True, "archived": now_archived, "github": gh_result, "killed": kill_result})
             except OSError as e:
                 self.send_json({"ok": False, "error": str(e)}, 500)
         elif re.match(r"^/api/conversations/[a-f0-9-]+/merge-pr$", path):
