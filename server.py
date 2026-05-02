@@ -16,6 +16,7 @@ __version__ = "0.3.0"
 
 import ast
 import base64
+import fcntl
 import http.server
 import json
 import os
@@ -8919,6 +8920,24 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "repos": repos,
                 "recent": _load_recent_repos(),
             })
+        elif path == "/api/registry":
+            # Multi-repo peer discovery: list every CCC server live on this
+            # machine. Stale entries (pid no longer alive) are pruned on read.
+            # The UI polls this to know which peers to fetch per-repo data
+            # from. Read-only; loopback trust applies.
+            self.send_json({"peers": _read_registry_pruned()})
+        elif path == "/api/identity":
+            # This server's own identity card. Used by peers (and the UI on
+            # peers' behalf) to verify a registry entry's port still belongs
+            # to the expected repo, since registry entries can grow stale
+            # between writes and reads.
+            self.send_json({
+                "repo_path": str(REPO_ROOT),
+                "label": REPO_ROOT.name,
+                "port": PORT,
+                "pid": os.getpid(),
+                "version": __version__,
+            })
         elif re.match(r"^/api/morning/goals/[A-Za-z0-9_-]+$", path):
             slug = path.rsplit("/", 1)[-1]
             detail = morning.get_goal_detail(slug)
@@ -10995,6 +11014,137 @@ def ensure_hooks_installed():
             tmp_path.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# Multi-repo peer registry
+#
+# Each running CCC server writes itself into ~/.claude/command-center/registry.json
+# on startup and removes itself on graceful shutdown. Stale entries (pid no
+# longer alive) are pruned by readers, so a force-killed server self-heals on
+# the next read. The registry is the source of truth for "which CCC servers
+# are live"; the UI uses it to discover peers and aggregate cross-repo data
+# in the browser. Concurrent writes from sibling servers are serialized via
+# fcntl.flock on the registry file itself.
+# ---------------------------------------------------------------------------
+
+REGISTRY_FILE = COMMAND_CENTER_STATE_DIR / "registry.json"
+
+
+def _is_pid_alive(pid):
+    """Return True if `pid` is a live process. Sends signal 0 (no-op) and
+    treats any OSError as 'not alive'."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _prune_registry_entries(entries):
+    """Drop entries whose pid is not alive. Pure function — no I/O."""
+    return [e for e in entries if isinstance(e, dict) and _is_pid_alive(e.get("pid"))]
+
+
+def _registry_locked_rmw(transform_fn):
+    """Read-modify-write on REGISTRY_FILE under fcntl.flock. Calls
+    `transform_fn(entries) -> entries` with the parsed list. Best-effort on
+    the lock — silent on platforms without flock so the call still functions
+    (with reduced safety against concurrent writers)."""
+    REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # mode "a+": create if missing, no truncate. seek(0) to read.
+    with open(REGISTRY_FILE, "a+") as f:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except (OSError, ValueError):
+            pass
+        try:
+            f.seek(0)
+            raw = f.read() or "[]"
+            try:
+                entries = json.loads(raw)
+                if not isinstance(entries, list):
+                    entries = []
+            except json.JSONDecodeError:
+                entries = []
+            entries = transform_fn(entries)
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(entries, indent=2) + "\n")
+        finally:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            except (OSError, ValueError):
+                pass
+
+
+def _register_self(repo_path, port, bind_host):
+    """Insert (or replace) this server's entry in the registry. Silent on
+    I/O error — registry is a discovery convenience, not load-bearing."""
+    repo_str = str(repo_path)
+    payload = {
+        "repo_path": repo_str,
+        "label": Path(repo_str).name,
+        "port": int(port),
+        "bind_host": bind_host,
+        "pid": os.getpid(),
+        "started_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "version": __version__,
+    }
+
+    def replace(entries):
+        out = [e for e in entries if not (isinstance(e, dict) and e.get("repo_path") == repo_str)]
+        out.append(payload)
+        return out
+
+    try:
+        _registry_locked_rmw(replace)
+        print(f"  [registry] {REGISTRY_FILE} -> {repo_str} (pid {payload['pid']}, port {payload['port']})")
+    except OSError as e:
+        print(f"  [registry] could not register ({e})")
+
+
+def _unregister_self(repo_path):
+    """Remove this server's entry from the registry by repo_path. Idempotent;
+    silent on I/O error so it's safe to call from signal handlers."""
+    if not REGISTRY_FILE.exists():
+        return
+    repo_str = str(repo_path)
+
+    def remove(entries):
+        return [e for e in entries if not (isinstance(e, dict) and e.get("repo_path") == repo_str)]
+
+    try:
+        _registry_locked_rmw(remove)
+    except OSError:
+        pass
+
+
+def _read_registry_pruned():
+    """Return the registry contents with stale entries removed. Performs a
+    write-back of the pruned list so the file converges to truth on every
+    read — no separate reaper needed. Returns [] on any I/O error."""
+    if not REGISTRY_FILE.exists():
+        return []
+
+    pruned = []
+
+    def prune(entries):
+        nonlocal pruned
+        pruned = _prune_registry_entries(entries)
+        return pruned
+
+    try:
+        _registry_locked_rmw(prune)
+    except OSError:
+        return []
+    return pruned
+
+
 def write_port_file(bind_host):
     """Persist the listening URL to ~/.claude/command-center/port.txt so the
     ccc-orchestration skill (and any other scripted caller) can find this
@@ -11081,6 +11231,17 @@ def main():
     if network_info["trust_tailnet"] and not network_info["tailnet"]["available"]:
         print("   trust_tailnet is on but `tailscale` CLI is not on PATH — install it or unset to silence.")
     write_port_file(bind_host)
+    _register_self(REPO_ROOT, PORT, bind_host)
+    # SIGTERM (systemd / `kill <pid>`) needs explicit cleanup; SIGINT (Ctrl+C)
+    # raises KeyboardInterrupt below and is handled there. Both paths remove
+    # this server's registry entry so peers don't see a stale ghost.
+    def _on_sigterm(signum, frame):
+        try:
+            _unregister_self(REPO_ROOT)
+        except Exception:
+            pass
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _on_sigterm)
     display_host = "localhost" if bind_host in ("127.0.0.1", "::1") else bind_host
     print(f"Claude Command Center running at http://{display_host}:{PORT}")
     print(f"  Log dir:       {LOG_DIR}")
@@ -11094,6 +11255,10 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopped.")
+        try:
+            _unregister_self(REPO_ROOT)
+        except Exception:
+            pass
         server.server_close()
 
 
