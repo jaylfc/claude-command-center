@@ -90,18 +90,18 @@ class TestExtractor(unittest.TestCase):
             return [r["target"] for r in groups.get(cat, [])]
 
         self.assertEqual(set(targets("images")),
-                         {"/Users/amir/Desktop/diagram.png"})
+                         {"/Users/testuser/Desktop/diagram.png"})
         self.assertEqual(set(targets("pdfs")),
-                         {"/Users/amir/Apps/foo/notes.pdf",
+                         {"/Users/testuser/Apps/foo/notes.pdf",
                           "https://example.com/spec.pdf"})
         self.assertEqual(set(targets("presentations")),
-                         {"/Users/amir/Downloads/deck.pptx"})
+                         {"/Users/testuser/Downloads/deck.pptx"})
         self.assertEqual(set(targets("videos")),
                          {"https://example.com/video.mp4"})
         self.assertEqual(set(targets("markdown")),
-                         {"/Users/amir/Apps/foo/intro.md"})
+                         {"/Users/testuser/Apps/foo/intro.md"})
         self.assertEqual(set(targets("html")),
-                         {"/Users/amir/Apps/foo/report.html"})
+                         {"/Users/testuser/Apps/foo/report.html"})
 
         # Total == sum across non-empty groups.
         self.assertEqual(result["count"],
@@ -123,11 +123,11 @@ class TestExtractor(unittest.TestCase):
             )
 
     def test_de_duplicates_repeats(self):
-        # `/Users/amir/Apps/foo/intro.md` appears twice in the fixture
+        # `/Users/testuser/Apps/foo/intro.md` appears twice in the fixture
         # (tool_result + Bash command). Must collapse to one row.
         result = self.server._extract_files_from_conversation("ignored")
         md_targets = [r["target"] for r in result["groups"].get("markdown", [])]
-        self.assertEqual(md_targets.count("/Users/amir/Apps/foo/intro.md"), 1)
+        self.assertEqual(md_targets.count("/Users/testuser/Apps/foo/intro.md"), 1)
 
     def test_each_row_has_label_target_kind_first_line(self):
         result = self.server._extract_files_from_conversation("ignored")
