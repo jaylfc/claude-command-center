@@ -2167,7 +2167,7 @@ SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 4
+_CONV_META_SCHEMA_VERSION = 5
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -6511,6 +6511,34 @@ def _codex_command_signals(cmd):
     }
 
 
+_CODEX_SUMMARY_BRANCH_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?Branch:\s*`?([^\r\n`]+?)`?\s*$")
+_CODEX_SUMMARY_WORKTREE_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?Worktree:\s*`?([^\r\n`]+?)`?\s*$")
+
+
+def _extract_codex_summary_signals(text, pr_url_re):
+    """Extract final-summary PR/worktree fields from Codex prose."""
+    out = {}
+    if not isinstance(text, str) or not text:
+        return out
+    mp = pr_url_re.search(text)
+    if mp:
+        out["tail_pr_number"] = int(mp.group(2))
+        out["tail_pr_url"] = (
+            "https://github.com/" + mp.group(1) + "/pull/" + mp.group(2)
+        )
+    mb = _CODEX_SUMMARY_BRANCH_RE.search(text)
+    if mb:
+        branch = mb.group(1).strip().strip("`")
+        if branch:
+            out["tail_branch"] = branch
+    mw = _CODEX_SUMMARY_WORKTREE_RE.search(text)
+    if mw:
+        worktree = mw.group(1).strip().strip("`")
+        if worktree:
+            out["tail_worktree_path"] = worktree
+    return out
+
+
 def _extract_codex_thread_id_from_log(log_path):
     if not log_path:
         return None
@@ -6593,6 +6621,8 @@ def _extract_codex_tail_meta(path):
         "last_push_pos": 0,
         "tail_pr_number": None,
         "tail_pr_url": None,
+        "tail_branch": None,
+        "tail_worktree_path": None,
         "has_external_cd": False,
         "cwd": None,
         "model": None,
@@ -6634,10 +6664,14 @@ def _extract_codex_tail_meta(path):
                         text = (payload.get("message") or "").strip()
                         if text:
                             meta["last_assistant_text"] = text
+                            meta.update(_extract_codex_summary_signals(text, pr_url_re))
                         meta["last_event_type"] = "assistant"
                         if ts_epoch:
                             meta["last_meaningful_ts"] = ts_epoch
                     elif ptype == "task_complete":
+                        text = (payload.get("last_agent_message") or payload.get("message") or "").strip()
+                        if text:
+                            meta.update(_extract_codex_summary_signals(text, pr_url_re))
                         meta["last_event_type"] = "result"
                         meta["pending_tool"] = None
                         meta["pending_file"] = None
@@ -6831,11 +6865,14 @@ def find_codex_conversations(include_old=True, repo_only=True, progress=None, li
             or (first_message[:80] if first_message else None)
         )
         branch = row.get("git_branch") or ""
+        tail_branch = tail.get("tail_branch") or ""
+        tail_worktree_path = tail.get("tail_worktree_path") or ""
+        effective_cwd = tail_worktree_path or cwd
         try:
-            cwd_exists = bool(cwd and Path(cwd).is_dir())
+            cwd_exists = bool(effective_cwd and Path(effective_cwd).is_dir())
         except OSError:
             cwd_exists = False
-        folder_path = pinned or cwd or ""
+        folder_path = pinned or cwd or effective_cwd or ""
         folder_label = Path(folder_path).name if folder_path else "Codex"
         spawn_info = spawn_by_sid.get(sid) or {}
         spawn_pid = spawn_info.get("pid")
@@ -6860,12 +6897,16 @@ def find_codex_conversations(include_old=True, repo_only=True, progress=None, li
             "jsonl_path": str(path),
             "folder_label": folder_label,
             "folder_path": folder_path,
-            "session_cwd": cwd,
+            "session_cwd": effective_cwd,
             "session_cwd_exists": cwd_exists,
-            "session_cwd_is_worktree": bool(cwd and (Path(cwd) / ".git").is_file()),
-            "worktree_dirty": _worktree_dirty_cached(cwd, modified) if cwd else False,
-            "effective_branch": None,
-            "effective_kind": None,
+            "session_cwd_is_worktree": bool(
+                tail_worktree_path or (effective_cwd and (Path(effective_cwd) / ".git").is_file())
+            ),
+            "worktree_dirty": (
+                _worktree_dirty_cached(effective_cwd, modified) if effective_cwd else False
+            ),
+            "effective_branch": tail_branch or None,
+            "effective_kind": "worktree" if tail_worktree_path else None,
             "has_edit": tail.get("has_edit", False),
             "has_commit": tail.get("has_commit", False),
             "has_push": tail.get("has_push", False),

@@ -1370,49 +1370,58 @@
   }
   .font-size-btn:hover { color: var(--text); background: var(--surface-2); }
   .conv-item {
-    padding: 10px 10px; border-radius: 6px; cursor: pointer;
-    margin-bottom: 4px; transition: background 0.15s;
+    --conv-dot-col: 9px;
+    --conv-time-col: 43px;
+    padding: 4px 10px; border-radius: 6px; cursor: pointer;
+    margin-bottom: 0; transition: background 0.15s;
     border-left: 3px solid transparent;
   }
   .conv-item:hover { background: var(--surface-2); }
   .conv-item.active { background: var(--surface-2); border-left-color: var(--purple); }
   .conv-item .conv-title-row {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
     min-width: 0;
   }
-  .conv-item .conv-main-row,
-  .conv-item .conv-meta-row {
+  .conv-item .conv-main-row {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 5px;
     min-width: 0;
+    width: 100%;
   }
-  .conv-item .conv-main-row { width: 100%; }
-  .conv-item .conv-meta-row {
-    flex-wrap: wrap;
-    padding-left: 15px;
+  .conv-item .conv-row-actions {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    margin-left: auto;
+    flex: 0 0 auto;
   }
+  .conv-item .conv-row-actions:empty { display: none; }
   .conv-item .conv-live-slot {
-    width: 9px;
+    width: var(--conv-dot-col);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    flex: 0 0 9px;
+    flex: 0 0 var(--conv-dot-col);
   }
   .conv-live-slot .conv-live-dot { margin-right: 0; }
   .conv-item .conv-title {
-    font-size: 14px; font-weight: 400; color: var(--text);
-    line-height: 1.3; flex: 1 1 auto; min-width: 0;
+    font-size: 13px; font-weight: 400; color: var(--text);
+    line-height: 1.2; flex: 1 1 auto; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     word-break: keep-all;
   }
-  /* Row metadata lives below the title so the narrow sidebar doesn't
-     need table-like scan columns for size/status/branch chips. */
+  .conv-item .conv-row-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    min-width: 0;
+  }
   .conv-item .conv-meta-inline {
-    font-size: 11px; color: var(--text-muted);
-    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 10px; color: var(--text-muted);
+    display: inline-flex; align-items: center; gap: 4px;
     flex: 0 0 auto;
     min-width: 0;
     overflow: hidden;
@@ -1421,12 +1430,13 @@
   .conv-item .conv-meta-inline .sep,
   .conv-item .conv-meta-inline .source-badge { display: none; }
   .conv-item .conv-meta-inline .sep { opacity: 0.4; }
-  /* Time stays near the front, but the row flows instead of reserving
-     fixed scan columns in the narrow sidebar. */
   .conv-item .conv-rel {
-    font-size: 11px; color: var(--text-muted);
-    flex: 0 0 auto;
+    font-size: 10px; color: var(--text-muted);
+    flex: 0 0 var(--conv-time-col);
     min-width: 0;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -1451,12 +1461,12 @@
   .conv-item .conv-live-tool {
     display: inline-flex; align-items: center; gap: 4px;
     flex: 0 1 auto; min-width: 0;
-    max-width: 240px;
-    font-size: 11px;
+    max-width: 112px;
+    font-size: 10px;
     color: #FBCA04;
     background: rgba(251,202,4,0.10);
     border-left: 2px solid rgba(251,202,4,0.6);
-    padding: 2px 6px; border-radius: 3px;
+    padding: 1px 4px; border-radius: 3px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     animation: pulse 2s infinite;
   }
@@ -1474,8 +1484,8 @@
      selector targets `.compact-rows` directly so the rule fires whether
      the parent is `.log-list`, `.conv-list`, or any other wrapper. */
   .compact-rows .conv-item {
-    padding: 8px 10px;
-    margin-bottom: 3px;
+    padding: 4px 10px;
+    margin-bottom: 0;
   }
   .compact-rows .conv-item .conv-title {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1484,7 +1494,7 @@
   }
   .compact-rows .conv-item .conv-last { display: none; }
   .compact-rows .conv-item .conv-title-row {
-    gap: 4px;
+    gap: 0;
   }
   .conv-item .conv-title.untitled {
     font-weight: 500; color: var(--text-muted); font-style: italic;
@@ -1507,7 +1517,9 @@
     padding: 2px 4px; border-radius: 3px; flex-shrink: 0;
     transition: opacity 0.15s, color 0.15s, background 0.15s;
   }
-  .conv-item:hover .conv-archive-btn { opacity: 0.7; }
+  .conv-item:hover .conv-archive-btn,
+  .conv-item.active .conv-archive-btn,
+  .conv-item .conv-archive-btn:focus-visible { opacity: 0.7; }
   .conv-item .conv-archive-btn:hover { opacity: 1; color: var(--orange); background: rgba(255,166,87,0.12); }
   .conv-item .conv-merge-btn {
     opacity: 0; font-size: 13px; cursor: pointer;
@@ -1515,30 +1527,38 @@
     padding: 2px 4px; border-radius: 3px; flex-shrink: 0;
     transition: opacity 0.15s, color 0.15s, background 0.15s;
   }
-  .conv-item:hover .conv-merge-btn { opacity: 0.7; }
+  .conv-item:hover .conv-merge-btn,
+  .conv-item.active .conv-merge-btn,
+  .conv-item .conv-merge-btn:focus-visible { opacity: 0.7; }
   .conv-item .conv-merge-btn:hover { opacity: 1; color: var(--green); background: rgba(63,185,80,0.12); }
   .conv-item .conv-merge-btn:disabled { cursor: progress; opacity: 0.5; }
-  /* Backlog-only "Start" pill — surfaces the kanban GH-issue start action
-     directly on the row so users can launch a session without flipping to
-     the board. Greenish to mirror .kanban-start-btn. */
+  /* Backlog row action buttons stay icon-sized: this column is cramped, and
+     the titles need every character they can get. */
   .conv-item .conv-start-btn {
-    font-size: 11px; font-weight: 600; cursor: pointer;
-    padding: 2px 8px; border-radius: 3px; flex-shrink: 0;
+    opacity: 0;
+    width: 22px; height: 18px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; cursor: pointer;
+    padding: 0; border-radius: 3px; flex-shrink: 0;
     border: 1px solid rgba(63,185,80,0.3);
     background: rgba(63,185,80,0.1); color: var(--green);
-    transition: background 0.15s, border-color 0.15s;
+    transition: opacity 0.15s, background 0.15s, border-color 0.15s;
   }
+  .conv-item:hover .conv-start-btn,
+  .conv-item.active .conv-start-btn,
+  .conv-item .conv-start-btn:focus-visible { opacity: 0.9; }
   .conv-item .conv-start-btn:hover { background: rgba(63,185,80,0.2); border-color: rgba(63,185,80,0.55); }
   .conv-item .conv-start-btn:disabled { cursor: progress; opacity: 0.6; }
-  /* "Close" variant of the row archive button — used for GH issue rows
-     where archiving means closing the issue "not planned" on GitHub. Same
-     hover treatment as conv-archive-btn, but always-visible text label. */
   .conv-item .conv-archive-btn.is-close {
-    opacity: 0.7; font-size: 11px; font-weight: 600;
-    padding: 2px 8px; border-radius: 3px;
+    opacity: 0; font-size: 12px; font-weight: 600;
+    width: 22px; height: 18px;
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 0; border-radius: 3px;
     border: 1px solid var(--border); background: transparent;
   }
-  .conv-item:hover .conv-archive-btn.is-close { opacity: 0.9; }
+  .conv-item:hover .conv-archive-btn.is-close,
+  .conv-item.active .conv-archive-btn.is-close,
+  .conv-item .conv-archive-btn.is-close:focus-visible { opacity: 0.7; }
   .conv-item .conv-archive-btn.is-close:hover { opacity: 1; color: var(--orange); background: rgba(255,166,87,0.12); border-color: rgba(255,166,87,0.4); }
   .conv-item .conv-title-input {
     flex: 1; font-size: 15px; font-weight: 600; color: var(--text);
@@ -1558,10 +1578,11 @@
   }
   .conv-item .meta .sep { opacity: 0.4; }
   .conv-item .branch-badge {
-    display: inline-block; font-size: 12px; padding: 2px 6px; border-radius: 3px;
+    display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px;
     background: rgba(188, 140, 255, 0.15); color: var(--purple);
     flex-shrink: 0;
-    max-width: 126px;
+    line-height: 1.1;
+    max-width: 82px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1635,12 +1656,12 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 18px;
-    height: 18px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
     flex: 0 0 auto;
     font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
-    font-size: 10px;
+    font-size: 6px;
     font-weight: 700;
     line-height: 1;
   }
@@ -1650,9 +1671,10 @@
     border: 1px solid rgba(88, 166, 255, 0.42);
   }
   .conv-signal {
-    font-size: 12px; padding: 2px 7px; border-radius: 3px;
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
     font-weight: 600; white-space: nowrap; flex: 0 0 auto;
-    max-width: 126px;
+    line-height: 1.1;
+    max-width: 86px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -2944,13 +2966,6 @@
     flex-shrink: 0;
   }
 
-  /* "All repos" toggle button active state. */
-  .conv-allrepos-toggle.is-active {
-    background: var(--accent) !important;
-    color: #fff !important;
-    border-color: var(--accent) !important;
-  }
-
   /* Folder chip rendered inside .conv-title-row for archive entries (and
    * later for any row that wants to surface its source folder). The hue is
    * set inline via --chip-hue from a stable hash of the folder label, so
@@ -2959,7 +2974,6 @@
   .conv-folder-chip {
     --chip-hue: 0;
     flex-shrink: 0;
-    margin-left: auto;
     padding: 1px 7px;
     border-radius: 9px;
     font-size: 10px;
@@ -2985,7 +2999,7 @@
   .conv-folder-group-header {
     --chip-hue: 0;
     display: flex; align-items: center; gap: 8px;
-    justify-content: flex-end;
+    justify-content: flex-start;
     padding: 8px 12px 4px;
     font-size: 11px;
     color: var(--text-muted);
@@ -3151,12 +3165,12 @@
     color: var(--text-muted); text-transform: uppercase;
     letter-spacing: 0.5px; font-weight: 600;
   }
+  .sidebar-header-actions #convFolderFilter,
   .sidebar-header-actions #sbRepoPicker {
     padding: 3px 24px 3px 8px; border-radius: 4px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     font-size: 11px; outline: none; max-width: 220px; min-width: 0;
   }
-  .sidebar-header-actions #sbRepoPicker.repo-picker-hidden { display: none; }
   /* Generic action button in the layout-agnostic topbar (Titles, View …).
      Matches the size of the repo picker so the row reads as one strip. */
   .ccc-topbar .topbar-btn {
@@ -3980,10 +3994,7 @@
         // archive toggle below — repeating it here avoids loading the
         // whole script just to label the overlay.
         let _archiveDefault = true;
-        try {
-          const _v = localStorage.getItem('ccc-archive-mode');
-          if (_v !== null) _archiveDefault = (_v === '1');
-        } catch (_) {}
+        try { localStorage.setItem('ccc-archive-mode', '1'); } catch (_) {}
         if (_archiveDefault
             && !sessionStorage.getItem('ccc-switching-to')
             && !sessionStorage.getItem('ccc-updating')) {
@@ -3999,10 +4010,9 @@
   </script>
 
   <!-- Multi-repo rail — vertical icon strip on the left edge. Populated by
-       renderRepoSidebar() from /api/registry + /api/repo/list. Empty in
-       single-repo deployments; the body.has-repo-rail class is toggled
-       by the renderer so the layout doesn't waste 48px when there's
-       nothing to show. -->
+       renderRepoSidebar() from archiveData. Empty until the archive loads;
+       body.has-repo-rail is toggled by the renderer so the layout doesn't
+       waste 48px when there's nothing to show. -->
   <aside id="ccRepoSidebar" class="ccc-repo-rail" role="navigation" aria-label="Repos"></aside>
 
   <!-- Layout-agnostic top bar — visible in BOTH list and kanban-split modes
@@ -4027,8 +4037,7 @@
       <a href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Claude Command Center — open the README on GitHub" style="color:inherit;text-decoration:none;">Claude Command Center</a>
       <div class="sidebar-header-actions">
         <a class="sh-btn sh-btn-deploy" id="sidebarDeployPill" target="_blank" rel="noopener" title="Vercel deploy — loading…" aria-label="Vercel deploy status"><span class="deploy-dot" id="deployDot"></span><span class="deploy-label" id="deployStateLabel">Vercel</span></a>
-        <button class="conv-allrepos-toggle sh-btn" id="convAllReposToggle" title="All repos — browse conversations from every folder you've ever Claude-Code'd in. Read-only; no servers spawned." aria-label="Toggle all-repos archive">&#128194; All repos</button>
-        <select id="sbRepoPicker" title="Switch this sidebar back to a specific repo server. Hidden while All repos is active."></select>
+        <select id="convFolderFilter" title="Filter conversations by folder"></select>
         <button class="conv-kanban-toggle sh-btn" id="convKanbanToggle" title="Toggle Kanban board view" aria-label="Toggle Kanban board view"><span aria-hidden="true">&#9783;</span> Board</button>
       </div>
     </div>
@@ -4510,6 +4519,12 @@
   function stripTitle(s) {
     if (!s) return s;
     return _titleStripRe ? s.replace(_titleStripRe, ' ') : s;
+  }
+  function stripGhIssueProjectTag(s) {
+    if (!s) return s;
+    return String(s)
+      .replace(/^(\s*(?:#\d+\s*[:\-\u2014]\s*)?)\[[^\]]*(?:Problem|Feature announcement)\]\s*/i, '$1')
+      .trim();
   }
   // Strip the "Fix GitHub issue #N: ... Read the issue first with `gh issue view N`,
   // then implement the fix." boilerplate from older spawn prompts. Kept here so it
@@ -6274,6 +6289,11 @@
   // ── Conversations ──
   let conversationsData = [];
   let conversationsLoaded = false;
+  // Backlog cards (GH issues, TODO/PARKING, native tasks) are produced by
+  // /api/sessions for the current repo, while /api/conversations/all is the
+  // cross-folder JSONL archive. Keep the current repo's backlog rows around so
+  // archive mode can still render the GH Issues section without switching repos.
+  let currentRepoBacklogData = [];
   // ── Split-pane state ──
   // The conversation pane can show one or two conversations side-by-side
   // (vertical) or stacked (horizontal). Per-pane state lives in
@@ -6507,6 +6527,9 @@
     try {
       const res = await fetch('/api/sessions');
       const fresh = await res.json();
+      currentRepoBacklogData = Array.isArray(fresh)
+        ? fresh.filter(c => c && c.source === 'backlog').map(c => Object.assign({}, c))
+        : [];
       // Preserve user-set fields (e.g. display_name overrides) from the
       // previous snapshot — the server can re-derive a default name on the
       // next scan and clobber a rename otherwise.
@@ -6611,7 +6634,7 @@
       renderSidebar(filterConversations($convSearch.value));
       loadAttentionList();  // piggy-back on the same refresh cycle
       hideLoadingOverlay();  // first render has happened — reveal the UI
-      _markFirstSessionsLoaded();  // unblock archive boot kick (see wireArchiveToggle)
+      _markFirstSessionsLoaded();  // unblock archive boot kick (see wireArchiveMode)
       // Auto-restore the last-opened card on first load. Only fires when
       // the user hasn't already clicked something — refresh-after-refresh
       // shouldn't yank a card out from under an active selection.
@@ -7618,11 +7641,14 @@
         const rawFirst = (!isBacklog && c.first_message)
           ? firstSentenceOf(cleanIssuePrompt(c.first_message), 90)
           : '';
-        const rawTitle = c.name_overridden
+        let rawTitle = c.name_overridden
           ? c.display_name
           : (isBacklog
               ? (c.display_name || rawFirst || '(untitled)')
               : (rawFirst || c.display_name || '(untitled)'));
+        if (c.backlog_type === 'github' || c.issue_number || c.linked_issue) {
+          rawTitle = stripGhIssueProjectTag(rawTitle);
+        }
         // Replace dashes with spaces for display (storage keeps the slug); strip user-configured title prefixes
         const title = stripTitle(rawTitle).replace(/-/g, ' ').trim();
         // Description: prefer the last assistant "outcome" message (so cards
@@ -7698,6 +7724,7 @@
           if (c.backlog_type === 'github' && c.issue_number) {
             const stripRe = new RegExp('^#?' + c.issue_number + '\\s*[:\\-—]?\\s*', 'i');
             renderBacklogTitle = title.replace(stripRe, '');
+            renderBacklogTitle = stripGhIssueProjectTag(renderBacklogTitle);
           }
           // Date + relative time
           let dateInfo = '';
@@ -8740,9 +8767,12 @@
       }
       _sessionConvs.push(c);
     }
-    const _renderRow = (c) => {
+    const _renderRow = (c, opts = {}) => {
       const cleanFirst = c.first_message ? cleanIssuePrompt(c.first_message) : '';
-      const rawTitle = c.display_name || (cleanFirst ? firstSentenceOf(cleanFirst, 60) : '(untitled)');
+      let rawTitle = c.display_name || (cleanFirst ? firstSentenceOf(cleanFirst, 60) : '(untitled)');
+      if (c.backlog_type === 'github' || c.issue_number || c.linked_issue) {
+        rawTitle = stripGhIssueProjectTag(rawTitle);
+      }
       const title = rawTitle.replace(/-/g, ' ');
       let titleClass = '';
       if (c.name_overridden) titleClass = 'user-renamed';
@@ -8820,19 +8850,23 @@
       const rel = relativeTime(c.last_interacted || c.modified);
       const active = currentConversation === c.id ? ' active' : '';
 
-      // Session signals \u2014 exactly one lifecycle chip per row. Priority
-      // chain (highest first):
-      //   1. pkood rows have their own state machine (running / idle /
-      //      blocked / stuck) \u2014 keep that set.
-      //   2. uncommitted: ground-truth `git status --porcelain` against
+      // Session signals: additive context chips followed by exactly one
+      // lifecycle chip per row. Priority chain (highest first):
+      //   1. WIP: live active work, live pending tools, mid-turn thinking,
+      //      or linked GitHub issue carrying the in-progress label. Codex
+      //      uses synthesized sidecar fields so it gets the same yellow row
+      //      signal as Claude without stale completed rollouts looking active.
+      //   2. pkood rows have their own state machine (running / idle /
+      //      blocked / stuck); keep that set.
+      //   3. uncommitted: ground-truth `git status --porcelain` against
       //      the EFFECTIVE worktree (server already remaps for sessions
       //      launched in shared clone but editing a sibling worktree).
       //      Outranks PR / pushed / committed because it means there are
       //      changes that haven't landed yet.
-      //   3. PR #N (recorded PRs; more actionable than "pushed").
-      //   4. pushed.
-      //   5. committed (local commits not yet pushed).
-      //   6. no edits (Claude has touched nothing this session).
+      //   4. PR #N (recorded PRs; more actionable than "pushed").
+      //   5. pushed.
+      //   6. committed (local commits not yet pushed).
+      //   7. no edits (agent has touched nothing this session).
       let signals = '';
       // GH-issue link chip — additive, lives at the front of the signal
       // chain. Sessions linked to a GH issue show "#N" so they're scannable
@@ -8844,6 +8878,23 @@
         : null;
       if (_linkedNum) {
         signals += '<span class="conv-signal gh-link" title="Linked to GitHub issue #' + escapeHtml(String(_linkedNum)) + '">#' + escapeHtml(String(_linkedNum)) + '</span>';
+      }
+      const _activityAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
+      const _midTurn = c.last_event_type === 'assistant' || (isCodexRow && c.last_event_type === 'user');
+      const _isActiveSidecar = c.is_live && c.sidecar_status === 'active';
+      const _knownActivityTool = c.sidecar_tool || c.pending_tool || '';
+      const _hasLivePendingTool = c.is_live && !!c.pending_tool;
+      const _isWip = !!c.gh_in_progress || !!c.pending_spawn
+        || _hasLivePendingTool
+        || (_isActiveSidecar && (_activityAge < 300 || _midTurn || !c.sidecar_ts));
+      if (_isWip && !liveToolHtml) {
+        const wipTitle = _knownActivityTool
+          ? ((c.sidecar_in_flight ? 'Currently running' : 'Last known tool') + ': ' + _knownActivityTool)
+          : (c.gh_in_progress
+              ? 'Linked GitHub issue is marked in progress'
+              : (isCodexRow ? 'Codex is working' : 'Agent is working'));
+        const wipLabel = _knownActivityTool || 'WIP';
+        signals += '<span class="conv-signal activity-working" title="' + escapeHtml(wipTitle) + '">' + escapeHtml(wipLabel) + '</span>';
       }
       if (c.source === 'pkood') {
         const ps = (c.pkood_status || '').toUpperCase();
@@ -8901,22 +8952,28 @@
       if (isBacklogRow) {
         const _issueAttr = escapeHtml(c.issue_number || '');
         const _titleAttr = escapeHtml(c.display_name || c.first_message || '');
-        startBtn = '<button class="conv-start-btn" data-role="start" data-issue="' + _issueAttr + '" data-title="' + _titleAttr + '" title="Spawn a session to work on this issue">Start</button>';
-        archiveBtn = '<button class="conv-archive-btn is-close" data-role="archive" title="Close issue (not planned)">Close</button>';
+        startBtn = '<button class="conv-start-btn" data-role="start" data-issue="' + _issueAttr + '" data-title="' + _titleAttr + '" title="Spawn a session to work on this issue" aria-label="Start issue session">&#9654;</button>';
+        archiveBtn = '<button class="conv-archive-btn is-close" data-role="archive" title="Archive issue (close as not planned)" aria-label="Archive issue">&#128229;</button>';
       } else {
         archiveBtn = '<button class="conv-archive-btn" data-role="archive" title="' + (c.archived ? 'Unarchive' : 'Archive') + '">' + (c.archived ? '&#8617;' : '&#128229;') + '</button>';
       }
+      const rowSizeHtml = isBacklogRow
+        ? ''
+        : '<span class="conv-meta-inline">'
+          + '<span>' + formatSize(c.size) + '</span>'
+          + (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
+          + '</span>';
 
-      // Suppressed (_suppressFolderChip) when the row sits under a folder
+      // Suppressed when the row sits under a folder
       // group header that already labels the folder — chip would be noise.
-      const folderChipHtml = (c.folder_label_chip && !c._suppressFolderChip)
+      const folderChipHtml = (c.folder_label_chip && !opts.suppressFolderChip)
         ? '<span class="conv-folder-chip' + (c.folder_chip_orphan ? ' is-orphan' : '')
             + '" style="--chip-hue:' + (c.folder_chip_hue | 0) + ';"'
             + ' title="' + escapeHtml(c.folder_path || c.session_cwd || '') + '">'
             + escapeHtml(c.folder_label_chip) + '</span>'
         : '';
 
-      // Live dot — sits to the left of the timestamp when this session
+      // Live dot — sits in a reserved gutter before the title when this session
       // is actively being polled (sidecar marker exists). Helps the user
       // see at a glance which rows can change in real time.
       const liveDotHtml = c.is_live
@@ -8935,22 +8992,17 @@
           + '<div class="conv-main-row">'
             + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
             + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
-            + pinnedHtml
-            + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
-            + engineIcon
             + folderChipHtml
-          + '</div>'
-          + '<div class="conv-meta-row">'
-            + liveToolHtml
-            + '<span class="conv-meta-inline">'
-            +   '<span>' + formatSize(c.size) + '</span>'
-            +   (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
+            + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
+            + pinnedHtml
+            + '<span class="conv-row-meta">'
+            +   liveToolHtml
+            +   rowSizeHtml
+            +   signals
+            +   branch
+            +   engineIcon
             + '</span>'
-            + signals
-            + branch
-            + mergeBtn
-            + startBtn
-            + archiveBtn
+            + '<span class="conv-row-actions">' + mergeBtn + startBtn + archiveBtn + '</span>'
           + '</div>'
         + '</div>'
         + ask
@@ -8960,26 +9012,31 @@
     // boundaries stay visible while scanning.
     //
     // In multi-repo (archive) mode — detected by the presence of a
-    // folder_label_chip on cards — the most-recent 24h get grouped by
-    // folder so you can scan "what's hot in chuck right now" without
-    // hopping repos. Older cards continue as a flat chrono list with
-    // gap separators (the existing single-repo behavior).
+    // folder_label_chip on cards — rows can be grouped by folder so you can
+    // scan active work by project without hopping repos. The window selector
+    // chooses which active rows are shown; the project view groups every row
+    // in that selected window.
+    const _folderFilterEl = document.getElementById('convFolderFilter');
+    const _isSpecificFolderFilter = !!(_folderFilterEl && _folderFilterEl.value && _folderFilterEl.value !== '__all__');
     const _hasFolderChips = _sessionConvs.some(c => c.folder_label_chip);
     const _ipWindow = (() => {
       if (!_hasFolderChips) return 'all';
       try {
-        return localStorage.getItem('ccc-inprogress-window') === '7d' ? '7d' : '1d';
+        const value = localStorage.getItem('ccc-inprogress-window');
+        return (value === '1d' || value === '7d' || value === 'all') ? value : '1d';
       } catch (_) {
         return '1d';
       }
     })();
-    const _ipWindowDays = _ipWindow === '7d' ? 7 : 1;
-    const _ipWindowCutoff = Math.floor(Date.now() / 1000) - (_ipWindowDays * 24 * 3600);
+    const _ipWindowDays = _ipWindow === '7d' ? 7 : (_ipWindow === '1d' ? 1 : null);
+    const _ipWindowCutoff = _ipWindowDays
+      ? Math.floor(Date.now() / 1000) - (_ipWindowDays * 24 * 3600)
+      : null;
     const _visibleSessionConvs = _hasFolderChips
-      ? _sessionConvs.filter(c => (c.modified || 0) >= _ipWindowCutoff)
+      ? (_ipWindowCutoff ? _sessionConvs.filter(c => (c.modified || 0) >= _ipWindowCutoff) : _sessionConvs)
       : _sessionConvs;
     // User-controlled grouping preference for the In Progress section.
-    // 'project' (default): group last-24h by folder. 'time': flat chrono
+    // 'project' (default): group by folder. 'time': flat chrono
     // list with gap separators. Only meaningful when there are folder
     // chips (i.e. multi-repo / archive mode); the In Progress header's
     // by-project / by-time toggle (only shown when _hasFolderChips) writes
@@ -8989,7 +9046,7 @@
       catch (_) { return 'project'; }
     })();
     const _shouldGroupByFolder = _hasFolderChips && _ipGrouping === 'project';
-    const _flatRowsWithSeparators = (cards) => cards.map((c, i, arr) => {
+    const _flatRowsWithSeparators = (cards, opts = {}) => cards.map((c, i, arr) => {
       let separator = '';
       if (i > 0) {
         const newer = (arr[i - 1] && arr[i - 1].modified) || 0;
@@ -9002,23 +9059,15 @@
             + '</div>';
         }
       }
-      return separator + _renderRow(c);
+      return separator + _renderRow(c, opts);
     }).join('');
 
     let _activeRowsHtml;
     if (_shouldGroupByFolder) {
-      const _nowSec = Date.now() / 1000;
-      const _24hAgo = _nowSec - 24 * 3600;
-      const _recent = [];
-      const _older = [];
-      for (const c of _visibleSessionConvs) {
-        if ((c.modified || 0) >= _24hAgo) _recent.push(c);
-        else _older.push(c);
-      }
-      // Group recent cards by folder; preserve folder order by the most
+      // Group cards by folder; preserve folder order by the most
       // recent card in each group (freshest folder appears first).
       const _byFolder = new Map();
-      for (const c of _recent) {
+      for (const c of _visibleSessionConvs) {
         const key = c.folder_label_chip || c.folder_path || '(unknown)';
         if (!_byFolder.has(key)) _byFolder.set(key, []);
         _byFolder.get(key).push(c);
@@ -9031,8 +9080,6 @@
       const _groupHtml = _folderEntries.map(([folder, cards]) => {
         const hue = (cards[0].folder_chip_hue | 0);
         const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
-        // Suppress per-row chip — the group header already labels the folder.
-        for (const c of cards) c._suppressFolderChip = true;
         // data-folder-path lets the drop handler know which repo to pin
         // a dropped row to. Empty when the folder couldn't be resolved
         // (orphan slug); drop is suppressed in that case.
@@ -9044,21 +9091,18 @@
           + '<span class="conv-folder-group-chip' + orphan + '">' + escapeHtml(folder) + '</span>'
           + '<span class="conv-folder-group-count">' + cards.length + '</span>'
           + '</div>'
-          + _flatRowsWithSeparators(cards)
+          + _flatRowsWithSeparators(cards, { suppressFolderChip: true })
           + '</div>';
       }).join('');
-      let _olderHtml = '';
-      if (_older.length) {
-        _olderHtml = '<div class="conv-folder-group-divider">Older than 24 h</div>'
-          + _flatRowsWithSeparators(_older);
-      }
-      _activeRowsHtml = _groupHtml + _olderHtml;
+      _activeRowsHtml = _isSpecificFolderFilter
+        ? _flatRowsWithSeparators(_visibleSessionConvs, { suppressFolderChip: true })
+        : _groupHtml;
     } else {
-      _activeRowsHtml = _flatRowsWithSeparators(_visibleSessionConvs);
+      _activeRowsHtml = _flatRowsWithSeparators(_visibleSessionConvs, { suppressFolderChip: _isSpecificFolderFilter });
     }
     if (!_visibleSessionConvs.length) {
-      _activeRowsHtml = '<div class="archive-empty-state">No in-progress sessions in the last '
-        + (_ipWindow === '7d' ? '7 days' : 'day') + '.</div>';
+      const _emptyWindowLabel = _ipWindow === 'all' ? '' : (' in the last ' + (_ipWindow === '7d' ? '7 days' : 'day'));
+      _activeRowsHtml = '<div class="archive-empty-state">No in-progress sessions' + _emptyWindowLabel + '.</div>';
     }
     // In progress section: every row that's not a backlog card or archived.
     // Mirrors the kanban "In progress" column (key: 'working' under the
@@ -9069,13 +9113,14 @@
     if (_sessionConvs.length > 0) {
       const _ipCollapsed = localStorage.getItem('ccc-inprogress-collapsed') === '1';
       const _ipArrow = _ipCollapsed ? '▸' : '▾';
-      // 1d / 7d and by-project / by-time toggles, only when there are
+      // 1d / 7d / All and by-project / by-time toggles, only when there are
       // folder chips (otherwise the controls are not meaningful). Inline
       // spans avoid nested-button HTML; click handlers stop propagation.
       const _ipWindowToggle = _hasFolderChips
         ? '<span class="conv-grouping-toggle conv-window-toggle" data-role="window-toggle" title="Limit In progress rows by recent activity">'
             + '<span class="grouping-opt' + (_ipWindow === '1d' ? ' is-active' : '') + '" data-window="1d">1d</span>'
             + '<span class="grouping-opt' + (_ipWindow === '7d' ? ' is-active' : '') + '" data-window="7d">7d</span>'
+            + '<span class="grouping-opt' + (_ipWindow === 'all' ? ' is-active' : '') + '" data-window="all">All</span>'
           + '</span>'
         : '';
       // by-project / by-time toggle, only when there are folder chips
@@ -9110,7 +9155,7 @@
     if (_readyToMergeConvs.length > 0) {
       const _rtmCollapsed = localStorage.getItem('ccc-readytomerge-collapsed') === '1';
       const _rtmArrow = _rtmCollapsed ? '▸' : '▾';
-      const _rtmRows = _readyToMergeConvs.map(_renderRow).join('');
+      const _rtmRows = _readyToMergeConvs.map(c => _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter })).join('');
       _readyToMergeHtml =
         '<div class="conv-readytomerge-section' + (_rtmCollapsed ? ' collapsed' : '') + '" data-role="readytomerge-section">'
         + '<button type="button" class="conv-readytomerge-header" data-role="readytomerge-toggle" aria-expanded="' + (!_rtmCollapsed) + '">'
@@ -9129,7 +9174,7 @@
     if (_ghIssueConvs.length > 0) {
       const _ghCollapsed = localStorage.getItem('ccc-ghissues-collapsed') === '1';
       const _ghArrow = _ghCollapsed ? '▸' : '▾';
-      const _ghRows = _ghIssueConvs.map(_renderRow).join('');
+      const _ghRows = _ghIssueConvs.map(c => _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter })).join('');
       _ghIssuesHtml =
         '<div class="conv-ghissues-section' + (_ghCollapsed ? ' collapsed' : '') + '" data-role="ghissues-section">'
         + '<button type="button" class="conv-ghissues-header" data-role="ghissues-toggle" aria-expanded="' + (!_ghCollapsed) + '">'
@@ -9148,7 +9193,7 @@
     if (_archivedConvs.length > 0) {
       const _arcCollapsed = localStorage.getItem('ccc-archived-collapsed') !== '0';
       const _arcArrow = _arcCollapsed ? '▸' : '▾';
-      const _arcRows = _archivedConvs.map(_renderRow).join('');
+      const _arcRows = _archivedConvs.map(c => _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter })).join('');
       _archivedHtml =
         '<div class="conv-archived-section' + (_arcCollapsed ? ' collapsed' : '') + '" data-role="archived-section">'
         + '<button type="button" class="conv-archived-header" data-role="archived-toggle" aria-expanded="' + (!_arcCollapsed) + '">'
@@ -9250,7 +9295,7 @@
         const opt = ev.target.closest('[data-window]');
         if (!opt) return;
         const value = opt.getAttribute('data-window');
-        if (value !== '1d' && value !== '7d') return;
+        if (value !== '1d' && value !== '7d' && value !== 'all') return;
         try { localStorage.setItem('ccc-inprogress-window', value); } catch (_) {}
         if (typeof archiveMode !== 'undefined' && archiveMode) {
           const $search = document.getElementById('convSearch');
@@ -9391,6 +9436,10 @@
               const ac = archiveData.find(x => x.session_id === sessionId);
               if (ac) ac.archived = data.archived;
             }
+            if (typeof currentRepoBacklogData !== 'undefined' && Array.isArray(currentRepoBacklogData)) {
+              const bc = currentRepoBacklogData.find(x => x.id === convId || x.session_id === sessionId);
+              if (bc) bc.archived = data.archived;
+            }
             renderSidebar(filterConversations($convSearch.value));
             if (data.archived && nextSelectId) {
               selectConversation(nextSelectId);
@@ -9420,7 +9469,8 @@
         if (_spawningKeys.has(spawnKey)) return;
         _spawningKeys.add(spawnKey);
         btn.disabled = true;
-        btn.textContent = 'Spawning…';
+        btn.textContent = '…';
+        btn.title = 'Spawning session…';
         const tempPid = 'tmp-' + Date.now();
         insertPendingSpawnCard(tempPid, sessionName, false);
         (async () => {
@@ -10410,7 +10460,8 @@
       const url = issue.url || '';
       let html = '<div style="padding:20px;max-width:900px;">';
       html += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;">';
-      html += '<div><h1 style="margin:0 0 6px;font-size:20px;">' + escapeHtml(issue.title || '(no title)') + ' <span style="color:var(--text-muted);font-weight:400;">#' + escapeHtml(String(issueNum)) + '</span></h1>';
+      const issueTitle = stripGhIssueProjectTag(issue.title || '(no title)');
+      html += '<div><h1 style="margin:0 0 6px;font-size:20px;">' + escapeHtml(issueTitle) + ' <span style="color:var(--text-muted);font-weight:400;">#' + escapeHtml(String(issueNum)) + '</span></h1>';
       html += '<div style="font-size:12px;color:var(--text-muted);">' + escapeHtml((issue.author && issue.author.login) || '') + ' &middot; ' + escapeHtml(created) + ' &middot; <span style="color:' + (issue.state === 'OPEN' ? 'var(--green)' : 'var(--text-muted)') + ';">' + escapeHtml(issue.state || '') + '</span></div></div>';
       if (url) html += '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener" style="font-size:12px;color:var(--accent);">Open on GitHub &#x2197;</a>';
       html += '</div>';
@@ -11404,7 +11455,9 @@
   // entries, PARKING_LOT items, native-task summaries). No session events
   // exist for these — only the card's own metadata + issue body.
   function _renderBacklogDetail(c) {
-    const title = c.display_name || '';
+    const title = (c.backlog_type === 'github' || c.issue_number)
+      ? stripGhIssueProjectTag(c.display_name || '')
+      : (c.display_name || '');
     const body = c.first_message || '';
     const labels = (c.issue_labels || c.gh_labels || []).map(function(l) {
       return '<span class="conv-signal" style="margin-right:4px;background:rgba(139,148,158,0.15);color:var(--text-muted);">' + escapeHtml(l) + '</span>';
@@ -13102,11 +13155,154 @@
     }
   }
 
+  // ── Archive folder filter ──
+  // The sidebar now defaults to the cross-folder archive. This select is a
+  // local predicate over archiveData, not a server-side repo switch.
+  const ARCHIVE_FOLDER_ALL = '__all__';
+  const ARCHIVE_FOLDER_FILTER_KEY = 'ccc-archive-folder-filter';
+  const $convFolderFilter = document.getElementById('convFolderFilter');
+  let repoListState = { repos: [], current: '', recent: [] };
+  let archiveFolderFilter = (() => {
+    try { return localStorage.getItem(ARCHIVE_FOLDER_FILTER_KEY) || ARCHIVE_FOLDER_ALL; }
+    catch (_) { return ARCHIVE_FOLDER_ALL; }
+  })();
+
+  function _pathLeaf(path) {
+    const parts = String(path || '').split('/').filter(Boolean);
+    return parts[parts.length - 1] || String(path || '');
+  }
+
+  function _pathParentLeaf(path) {
+    const parts = String(path || '').split('/').filter(Boolean);
+    return parts.length > 1 ? parts[parts.length - 2] : '';
+  }
+
+  function _archiveFolderValue(c) {
+    return String((c && (c.folder_path || c.folder_label || c.slug)) || '');
+  }
+
+  function _currentRepoArchiveFolder() {
+    const current = (repoListState && repoListState.current) || '';
+    if (current) {
+      const match = (repoListState.repos || []).find(repo => repo.path === current);
+      return {
+        path: current,
+        label: (match && match.label) || _pathLeaf(current) || current,
+      };
+    }
+    return { path: '', label: '' };
+  }
+
+  function _currentRepoBacklogArchiveRows() {
+    if (!Array.isArray(currentRepoBacklogData) || !currentRepoBacklogData.length) return [];
+    const folder = _currentRepoArchiveFolder();
+    if (!folder.path) return [];
+    return currentRepoBacklogData.map(item => {
+      const row = Object.assign({}, item);
+      row.folder_path = folder.path;
+      row.folder_label = folder.label;
+      row.slug = folder.path;
+      row.git_branch = row.git_branch || row.branch || '';
+      row.mtime = row.modified || 0;
+      row.size = row.size || 0;
+      if (_archivedBacklogIds.has(row.id)) row.archived = true;
+      return row;
+    });
+  }
+
+  function _archiveRowsWithBacklog() {
+    const rows = Array.isArray(archiveData) ? archiveData.slice() : [];
+    const seen = new Set(rows.map(c => c && (c.session_id || c.id)).filter(Boolean));
+    for (const row of _currentRepoBacklogArchiveRows()) {
+      const key = row.session_id || row.id;
+      if (key && seen.has(key)) continue;
+      rows.push(row);
+      if (key) seen.add(key);
+    }
+    return rows;
+  }
+
+  function _archiveFolderOptions() {
+    const knownRepos = (repoListState && Array.isArray(repoListState.repos)) ? repoListState.repos : [];
+    if (knownRepos.length) {
+      return knownRepos.map(repo => ({
+        value: repo.path,
+        path: repo.path,
+        baseLabel: repo.label || _pathLeaf(repo.path) || repo.path,
+        label: repo.label || _pathLeaf(repo.path) || repo.path,
+      }));
+    }
+
+    // Fallback for the narrow window before /api/repo/list returns, or if it
+    // fails: derive options from the archive itself. This preserves behavior
+    // without making the primary UI depend on server-side switching.
+    const byPath = new Map();
+    for (const c of (Array.isArray(archiveData) ? archiveData : [])) {
+      const value = _archiveFolderValue(c);
+      if (!value || byPath.has(value)) continue;
+      byPath.set(value, {
+        value,
+        path: value,
+        baseLabel: c.folder_label || _pathLeaf(value) || value,
+      });
+    }
+    const counts = new Map();
+    for (const item of byPath.values()) {
+      counts.set(item.baseLabel, (counts.get(item.baseLabel) || 0) + 1);
+    }
+    const options = Array.from(byPath.values()).map(item => {
+      let label = item.baseLabel;
+      if ((counts.get(item.baseLabel) || 0) > 1) {
+        const parent = _pathParentLeaf(item.path);
+        label = parent ? `${item.baseLabel} (${parent})` : item.path;
+      }
+      return { ...item, label };
+    });
+    options.sort((a, b) => a.label.localeCompare(b.label));
+    return options;
+  }
+
+  function renderArchiveFolderFilter() {
+    if (!$convFolderFilter) return;
+    const options = _archiveFolderOptions();
+    const hasCurrent = archiveFolderFilter === ARCHIVE_FOLDER_ALL
+      || options.some(opt => opt.value === archiveFolderFilter);
+    if (!hasCurrent) {
+      archiveFolderFilter = ARCHIVE_FOLDER_ALL;
+      try { localStorage.setItem(ARCHIVE_FOLDER_FILTER_KEY, archiveFolderFilter); } catch (_) {}
+    }
+
+    $convFolderFilter.innerHTML = '';
+    const all = document.createElement('option');
+    all.value = ARCHIVE_FOLDER_ALL;
+    all.textContent = 'All';
+    all.title = 'Show conversations from every folder';
+    $convFolderFilter.appendChild(all);
+
+    for (const optData of options) {
+      const opt = document.createElement('option');
+      opt.value = optData.value;
+      opt.textContent = optData.label;
+      opt.title = optData.path;
+      $convFolderFilter.appendChild(opt);
+    }
+    $convFolderFilter.value = archiveFolderFilter;
+  }
+
+  function setArchiveFolderFilter(value, opts = {}) {
+    archiveFolderFilter = value || ARCHIVE_FOLDER_ALL;
+    try { localStorage.setItem(ARCHIVE_FOLDER_FILTER_KEY, archiveFolderFilter); } catch (_) {}
+    renderArchiveFolderFilter();
+    renderRepoSidebar();
+    if (opts.render !== false) {
+      renderArchiveList(document.getElementById('convSearch')?.value || '');
+    }
+  }
+
   // ── Sidebar repo picker ──
-  // Single source of truth for the watched repo. The <select> gives a fast
-  // dropdown for known repos; the last "Pick a repo…" option opens a proper
-  // modal with a Recent list and a Browse button that shells out to the
-  // native macOS folder chooser for anything not in the known set.
+  // Legacy switcher code is intentionally dormant in the archive-filter UI.
+  // It stays for Phase C cleanup, but no control is rendered for it now.
+  const ALL_REPOS_SENTINEL = '__all_repos__';
   const PICKER_SENTINEL = '__pick__';
   const $sbRepoPicker = document.getElementById('sbRepoPicker');
 
@@ -13148,6 +13344,36 @@
   // change handler route to the right code path.
   const SWITCH_PREFIX = 'switch::';
 
+  function _appendAllReposPickerOption() {
+    if (!$sbRepoPicker) return;
+    const opt = document.createElement('option');
+    opt.value = ALL_REPOS_SENTINEL;
+    opt.textContent = 'All';
+    opt.title = "Browse conversations from every folder you've used with Claude Code.";
+    if (archiveMode) opt.selected = true;
+    $sbRepoPicker.appendChild(opt);
+  }
+
+  function _syncRepoPickerSelection() {
+    if (!$sbRepoPicker) return;
+    $sbRepoPicker.setAttribute('aria-hidden', 'false');
+    const desired = archiveMode ? ALL_REPOS_SENTINEL : ($sbRepoPicker.dataset.repoValue || '');
+    if (desired && Array.from($sbRepoPicker.options).some(opt => opt.value === desired)) {
+      $sbRepoPicker.value = desired;
+    }
+    $sbRepoPicker.dataset.prev = $sbRepoPicker.value;
+  }
+
+  function _withArchiveModeOverride(url, on) {
+    try {
+      const u = new URL(url, window.location.href);
+      u.searchParams.set('ccc_archive', on ? '1' : '0');
+      return u.toString();
+    } catch (_) {
+      return url;
+    }
+  }
+
   function renderPeerPickerSelect() {
     if (!$sbRepoPicker) return;
     const { peers } = peerState;
@@ -13155,6 +13381,7 @@
 
     const here = window.location;
     const peerPaths = new Set(peers.map(p => p.repo_path));
+    _appendAllReposPickerOption();
 
     // Section 1: live peers. Selecting navigates to that server's port.
     if (peers.length) {
@@ -13167,7 +13394,11 @@
         const suffix = isHere ? ' (this server)' : ` (:${peer.port})`;
         opt.textContent = (peer.label || peer.repo_path) + suffix;
         opt.title = peer.repo_path;
-        if (isHere) opt.selected = true;
+        if (isHere) {
+          opt.dataset.repoValue = opt.value;
+          $sbRepoPicker.dataset.repoValue = opt.value;
+          if (!archiveMode) opt.selected = true;
+        }
         grpRunning.appendChild(opt);
       }
       $sbRepoPicker.appendChild(grpRunning);
@@ -13186,6 +13417,10 @@
         opt.value = SWITCH_PREFIX + repo.path;
         opt.textContent = repo.label || repo.path;
         opt.title = repo.path + '\n(switches this server\'s repo; no new process)';
+        if (repo.path === repoListState.current) {
+          $sbRepoPicker.dataset.repoValue = opt.value;
+          if (!archiveMode) opt.selected = true;
+        }
         grpSwitch.appendChild(opt);
       }
       $sbRepoPicker.appendChild(grpSwitch);
@@ -13196,31 +13431,20 @@
       opt.value = '';
       opt.textContent = 'No repos found';
       opt.disabled = true;
-      opt.selected = true;
       $sbRepoPicker.appendChild(opt);
     }
 
-    $sbRepoPicker.dataset.prev = $sbRepoPicker.value;
-    updateRepoPickerVisibility();
+    _syncRepoPickerSelection();
   }
 
   function updateRepoPickerVisibility() {
-    if (!$sbRepoPicker) return;
-    let hidden = false;
-    try {
-      hidden = !!archiveMode;
-    } catch (_) {
-      try { hidden = localStorage.getItem('ccc-archive-mode') !== '0'; } catch (_) {}
-    }
-    $sbRepoPicker.classList.toggle('repo-picker-hidden', hidden);
-    $sbRepoPicker.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+    _syncRepoPickerSelection();
   }
 
   // ── Repo sidebar (vertical icon rail) ──────────────────────────────────
-  // Same data as the dropdown (peers + switchable repos), different
-  // presentation: persistent left strip with one circle per repo, click to
-  // navigate (peer) or switch this server (legacy). Hidden when nothing to
-  // show by toggling body.has-repo-rail; rail itself is always in the DOM.
+  // Same data as the folder filter, different presentation: persistent left
+  // strip with one circle per folder. Clicks filter archive rows locally.
+  // Hidden when nothing to show by toggling body.has-repo-rail.
   function _railInitial(label, path) {
     const src = String(label || path || '?').replace(/[^A-Za-z0-9]+/g, ' ').trim();
     return src.charAt(0).toUpperCase() || '?';
@@ -13229,85 +13453,35 @@
   function renderRepoSidebar() {
     const $rail = document.getElementById('ccRepoSidebar');
     if (!$rail) return;
-    const here = window.location;
-    const peers = (peerState && peerState.peers) || [];
-    const peerPaths = new Set(peers.map(p => p.repo_path));
-    const knownRepos = (repoListState && repoListState.repos) ? repoListState.repos : [];
-    const switchable = knownRepos.filter(r => !peerPaths.has(r.path));
-
+    const folders = _archiveFolderOptions();
     $rail.innerHTML = '';
 
-    // Section 1: live peers.
-    for (const peer of peers) {
+    for (const folder of folders) {
       const btn = document.createElement('button');
       btn.type = 'button';
-      const isHere = isCurrentPeer(peer);
-      btn.className = 'rail-btn' + (isHere ? ' is-active' : '');
-      btn.textContent = _railInitial(peer.label, peer.repo_path);
-      btn.title = `${peer.label || peer.repo_path}\n${peer.repo_path}\nport :${peer.port}` +
-                  (isHere ? '\n(this server)' : '');
-      btn.dataset.path = peer.repo_path;
-      if (isHere) {
+      const isActive = archiveFolderFilter === folder.value;
+      btn.className = 'rail-btn' + (isActive ? ' is-active' : '');
+      btn.textContent = _railInitial(folder.label, folder.path);
+      btn.title = `${folder.label}\n${folder.path}`;
+      btn.dataset.path = folder.value;
+      if (isActive) {
         btn.setAttribute('aria-current', 'true');
-      } else {
-        const url = `${here.protocol}//${here.hostname}:${peer.port}/`;
-        btn.addEventListener('click', () => {
-          // Same overlay/treatment as the dropdown's navigate path.
-          const $overlay = document.getElementById('cccLoadingOverlay');
-          if ($overlay) {
-            $overlay.classList.remove('fade-out', 'gone');
-            const $label = document.getElementById('cccLoadingLabel');
-            if ($label) {
-              $label.innerHTML =
-                '<strong>Loading ' + String(peer.label || peer.repo_path).replace(/[<>&]/g, '') + '</strong>' +
-                '<div class="ccc-loading-detail">Switching to that server\'s page.</div>';
-            }
-          }
-          window.location.href = url;
-        });
       }
-      $rail.appendChild(btn);
-    }
-
-    // Divider (only if both sections will have icons).
-    if (peers.length && switchable.length) {
-      const div = document.createElement('div');
-      div.className = 'rail-divider';
-      $rail.appendChild(div);
-    }
-
-    // Section 2: switchable known repos. Click → /api/repo/switch on this
-    // server (legacy one-off flow).
-    for (const repo of switchable) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'rail-btn is-switchable';
-      btn.textContent = _railInitial(repo.label, repo.path);
-      btn.title = `${repo.label || repo.path}\n${repo.path}\n(not running — click switches this server's repo)`;
-      btn.dataset.path = repo.path;
-      btn.addEventListener('click', () => {
-        switchToRepo(repo.path, repo.label || repo.path);
-      });
+      btn.addEventListener('click', () => setArchiveFolderFilter(folder.value));
       $rail.appendChild(btn);
     }
 
     // Toggle layout class only when there's something to show.
-    document.body.classList.toggle('has-repo-rail', peers.length + switchable.length > 0);
+    document.body.classList.toggle('has-repo-rail', folders.length > 0);
   }
 
   // ── All-repos archive mode ──────────────────────────────────────────────
   // Read-only browse of every conversation across every folder under
-  // ~/.claude/projects/. Toggled by #convAllReposToggle in the sidebar
-  // header; while on, replaces the sidebar list with archive rows.
-  // Default is ON — most users want the cross-folder view first; opt out
-  // sticks via localStorage.
+  // ~/.claude/projects/. This is now the normal sidebar data source; the
+  // folder dropdown narrows this archive locally instead of switching repos.
   const _ARCHIVE_MODE_KEY = 'ccc-archive-mode';
-  let archiveMode = (() => {
-    try {
-      const v = localStorage.getItem(_ARCHIVE_MODE_KEY);
-      return v === null ? true : v === '1';
-    } catch (_) { return true; }
-  })();
+  let archiveMode = true;
+  try { localStorage.setItem(_ARCHIVE_MODE_KEY, '1'); } catch (_) {}
   let archiveData = [];
   let archiveLoaded = false;
 
@@ -13320,8 +13494,14 @@
     } catch (_) { return []; }
   }
   async function refreshArchiveData() {
-    archiveData = await loadArchiveAll();
+    const [convs] = await Promise.all([
+      loadArchiveAll(),
+      repoListState.repos.length ? Promise.resolve(null) : loadRepoList().catch(() => null),
+    ]);
+    archiveData = convs;
     archiveLoaded = true;
+    renderArchiveFolderFilter();
+    renderRepoSidebar();
     return archiveData;
   }
 
@@ -13341,17 +13521,25 @@
     const $list = document.getElementById('convList');
     if (!$list) return;
     const q = (filter || '').trim().toLowerCase();
-    const rows = q ? archiveData.filter(c =>
-      ((c.first_message || '') + ' ' + (c.folder_label || '') + ' ' + (c.git_branch || ''))
+    const archiveRows = _archiveRowsWithBacklog();
+    const byFolder = archiveFolderFilter === ARCHIVE_FOLDER_ALL
+      ? archiveRows
+      : archiveRows.filter(c => _archiveFolderValue(c) === archiveFolderFilter);
+    const rows = q ? byFolder.filter(c =>
+      ((c.display_name || '') + ' ' + (c.first_message || '') + ' ' + (c.folder_label || '') + ' ' + (c.git_branch || '') + ' ' + (c.branch || ''))
         .toLowerCase().includes(q)
-    ) : archiveData;
+    ) : byFolder;
 
-    if (!archiveLoaded && !archiveData.length) {
+    if (!archiveLoaded && !archiveRows.length) {
       $list.innerHTML = '<div class="archive-empty-state">Loading archive&hellip;</div>';
       return;
     }
-    if (!archiveData.length) {
+    if (!archiveRows.length) {
       $list.innerHTML = '<div class="archive-empty-state">No conversations on disk.</div>';
+      return;
+    }
+    if (!byFolder.length) {
+      $list.innerHTML = '<div class="archive-empty-state">No conversations in this folder.</div>';
       return;
     }
     if (!rows.length) {
@@ -13367,6 +13555,48 @@
     // of these folders, supercharging the row with live data is just a
     // matter of merging the peer's session record into this shape.
     const shaped = rows.map(c => {
+      if (c.source === 'backlog') {
+        const folderOrphan = !c.folder_path;
+        return Object.assign({}, c, {
+          id: c.id || c.session_id,
+          session_id: c.session_id || c.id,
+          first_message: c.first_message || '',
+          display_name: c.display_name || '',
+          name_overridden: !!c.name_overridden,
+          last_assistant_text: '',
+          modified: c.modified || c.mtime || 0,
+          last_interacted: c.modified || c.mtime || 0,
+          size: c.size || 0,
+          is_live: !!c.is_live,
+          archived: !!c.archived,
+          worktree_dirty: !!c.worktree_dirty,
+          has_commit: !!c.has_commit,
+          has_push: !!c.has_push,
+          has_edit: !!c.has_edit,
+          tail_pr_number: c.tail_pr_number || null,
+          tail_pr_url: c.tail_pr_url || null,
+          pr_state: c.pr_state || null,
+          sidecar_status: c.sidecar_status || null,
+          sidecar_tool: c.sidecar_tool || null,
+          sidecar_file: c.sidecar_file || null,
+          sidecar_ts: c.sidecar_ts || 0,
+          sidecar_in_flight: !!c.sidecar_in_flight,
+          sidecar_has_writes: !!c.sidecar_has_writes,
+          needs_approval: !!c.needs_approval,
+          needs_approval_message: c.needs_approval_message || '',
+          session_cwd: c.session_cwd || c.folder_path,
+          session_cwd_exists: !!c.folder_path,
+          session_cwd_is_worktree: !!c.session_cwd_is_worktree,
+          branch: c.branch || c.git_branch || '',
+          effective_branch: c.effective_branch || null,
+          effective_kind: c.effective_kind || null,
+          folder_label_chip: c.folder_label,
+          folder_chip_hue: _hashHue(c.folder_label || c.slug),
+          folder_chip_orphan: folderOrphan,
+          folder_path: c.folder_path,
+          pinned_repo: !!c.pinned_repo,
+        });
+      }
       const folderOrphan = (c.folder_path === c.slug);
       return {
         id: c.session_id,
@@ -13458,11 +13688,9 @@
     renderConversationList(shaped);
   }
 
-  async function setArchiveMode(on) {
-    archiveMode = !!on;
-    try { localStorage.setItem(_ARCHIVE_MODE_KEY, archiveMode ? '1' : '0'); } catch (_) {}
-    const $btn = document.getElementById('convAllReposToggle');
-    if ($btn) $btn.classList.toggle('is-active', archiveMode);
+  async function setArchiveMode(on, opts = {}) {
+    archiveMode = true;
+    try { localStorage.setItem(_ARCHIVE_MODE_KEY, '1'); } catch (_) {}
     updateRepoPickerVisibility();
     const $list = document.getElementById('convList');
     const $kanban = document.getElementById('kanbanBoard');
@@ -13482,17 +13710,19 @@
       if (archiveMode) renderArchiveList(document.getElementById('convSearch')?.value || '');
     } else {
       // Restore: re-trigger the normal session-list load.
-      try { await loadConversationList(); } catch (_) {}
+      if (opts.reloadCurrent !== false) {
+        try { await loadConversationList(); } catch (_) {}
+      }
     }
   }
 
-  (function wireArchiveToggle() {
-    const $btn = document.getElementById('convAllReposToggle');
-    if ($btn) {
-      $btn.addEventListener('click', () => setArchiveMode(!archiveMode));
-      // Reflect initial active state before the boot kick fires below.
-      $btn.classList.toggle('is-active', archiveMode);
-      updateRepoPickerVisibility();
+  (function wireArchiveMode() {
+    updateRepoPickerVisibility();
+    renderArchiveFolderFilter();
+    if ($convFolderFilter) {
+      $convFolderFilter.addEventListener('change', () => {
+        setArchiveFolderFilter($convFolderFilter.value || ARCHIVE_FOLDER_ALL);
+      });
     }
     const $search = document.getElementById('convSearch');
     if ($search) {
@@ -13531,8 +13761,6 @@
   // ── Legacy repo-list (used by the modal + custom-repos browser) ─────────
   // Shared state so the modal can reuse what the dropdown already fetched
   // and the dropdown can refresh itself after an add-via-modal.
-  let repoListState = { repos: [], current: '', recent: [] };
-
   async function loadRepoList() {
     const r = await fetch('/api/repo/list');
     const d = await r.json();
@@ -13548,12 +13776,16 @@
     if (!$sbRepoPicker) return;
     const { repos, current } = repoListState;
     $sbRepoPicker.innerHTML = '';
+    _appendAllReposPickerOption();
     for (const repo of repos) {
       const opt = document.createElement('option');
-      opt.value = repo.path;
+      opt.value = SWITCH_PREFIX + repo.path;
       opt.textContent = repo.label || repo.path;
       opt.title = repo.path;
-      if (repo.path === current) opt.selected = true;
+      if (repo.path === current) {
+        $sbRepoPicker.dataset.repoValue = opt.value;
+        if (!archiveMode) opt.selected = true;
+      }
       $sbRepoPicker.appendChild(opt);
     }
     // Sentinel option — selecting it opens the modal instead of switching.
@@ -13566,7 +13798,7 @@
     pick.textContent = 'Pick a repo…';
     $sbRepoPicker.appendChild(pick);
     // Remember current selection so we can restore on failure / cancel.
-    $sbRepoPicker.dataset.prev = current;
+    _syncRepoPickerSelection();
   }
 
   // Shared switcher used by both the dropdown change handler and the modal.
@@ -13660,34 +13892,48 @@
     });
     if (document.visibilityState === 'visible') _peerStartPoll();
 
-    $sbRepoPicker.addEventListener('change', () => {
+    $sbRepoPicker.addEventListener('change', async () => {
       const target = $sbRepoPicker.value;
+      const selectedLabel = $sbRepoPicker.options[$sbRepoPicker.selectedIndex]?.textContent || target;
       if (!target) return;
+      if (target === ALL_REPOS_SENTINEL) {
+        await setArchiveMode(true);
+        return;
+      }
       // SWITCH_PREFIX: legacy "switch this server's REPO_ROOT" path. Used
       // when the user picks a known-but-not-running repo from the dropdown
       // (the one-off peek flow).
       if (target.startsWith(SWITCH_PREFIX)) {
         const repoPath = target.slice(SWITCH_PREFIX.length);
-        const targetLabel = $sbRepoPicker.options[$sbRepoPicker.selectedIndex]?.textContent || repoPath;
+        const targetLabel = selectedLabel || repoPath;
+        if (repoPath === repoListState.current) {
+          await setArchiveMode(false);
+          return;
+        }
+        await setArchiveMode(false, { reloadCurrent: false });
         switchToRepo(repoPath, targetLabel);
         return;
       }
       // Otherwise: navigation URL to a peer's port. Same-origin = no-op.
       const here = window.location;
       const sameOriginUrl = `${here.protocol}//${here.host}/`;
-      if (target === sameOriginUrl) return;
+      if (target === sameOriginUrl) {
+        if (archiveMode) await setArchiveMode(false);
+        return;
+      }
+      await setArchiveMode(false, { reloadCurrent: false });
       const $overlay = document.getElementById('cccLoadingOverlay');
       if ($overlay) {
         $overlay.classList.remove('fade-out', 'gone');
         const $label = document.getElementById('cccLoadingLabel');
         if ($label) {
-          const lbl = $sbRepoPicker.options[$sbRepoPicker.selectedIndex]?.textContent || target;
+          const lbl = selectedLabel || target;
           $label.innerHTML =
             '<strong>Loading ' + String(lbl).replace(/[<>&]/g, '') + '</strong>' +
             '<div class="ccc-loading-detail">Switching to that server\'s page.</div>';
         }
       }
-      window.location.href = target;
+      window.location.href = _withArchiveModeOverride(target, false);
     });
 
     // Stash the current value so we can restore on failure.

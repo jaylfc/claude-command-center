@@ -1,0 +1,1 @@
+- Codex session summaries that report an opened PR, branch, and worktree now populate the same sidebar metadata as Claude sessions, so they show `PR #N`, render worktree branch indicators, and land in Ready to merge.

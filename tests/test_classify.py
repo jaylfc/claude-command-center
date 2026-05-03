@@ -65,6 +65,40 @@ class TestExtractTailMetaPrLink(unittest.TestCase):
         )
 
 
+class TestExtractCodexTailMetaSummary(unittest.TestCase):
+    def test_agent_summary_sets_pr_branch_and_worktree_fields(self):
+        server = _fresh_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp) / "demo-repo-wt-feature"
+            path = Path(tmp) / "rollout.jsonl"
+            message = (
+                "Opened the PR: https://github.com/octo-org/demo-repo/pull/25\n"
+                "Branch: feat/codex-parity\n"
+                f"Worktree: {worktree}\n"
+            )
+            path.write_text(
+                json.dumps({
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message",
+                        "message": message,
+                        "timestamp": "2026-05-02T12:00:00Z",
+                    },
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            meta = server._extract_codex_tail_meta(path)
+
+        self.assertEqual(meta["tail_pr_number"], 25)
+        self.assertEqual(
+            meta["tail_pr_url"],
+            "https://github.com/octo-org/demo-repo/pull/25",
+        )
+        self.assertEqual(meta["tail_branch"], "feat/codex-parity")
+        self.assertEqual(meta["tail_worktree_path"], str(worktree))
+
+
 class TestFindConversationsOnMockFixture(unittest.TestCase):
     """find_conversations() should locate the fixture session and parse its
     signals (has_edit, pending_tool, last_event_type, session_state)."""
@@ -193,6 +227,8 @@ class TestCodexConversationAdapter(unittest.TestCase):
         cls.tmp_home = tempfile.mkdtemp(prefix="ccc-codex-home-")
         cls.fake_repo = (Path(cls.tmp_home) / "fake-repo").resolve()
         cls.fake_repo.mkdir(parents=True)
+        cls.fake_worktree = (Path(cls.tmp_home) / "fake-repo-wt-codex").resolve()
+        cls.fake_worktree.mkdir(parents=True)
         resolved_home = Path(cls.tmp_home).resolve()
         cls._prev_env = {
             "CCC_WATCH_REPO": os.environ.get("CCC_WATCH_REPO"),
@@ -255,7 +291,10 @@ class TestCodexConversationAdapter(unittest.TestCase):
                         "DID: Edited the readme.\n"
                         "INSIGHT: Codex rollout parsed.\n"
                         "NEXT_STEP_USER: Review it.\n"
-                        "</session-state>"
+                        "</session-state>\n\n"
+                        "Opened the PR: https://github.com/octo-org/demo-repo/pull/25\n"
+                        "Branch: feat/codex-parity\n"
+                        f"Worktree: {cls.fake_worktree}"
                     ),
                     "phase": "final_answer",
                 },
@@ -378,6 +417,16 @@ class TestCodexConversationAdapter(unittest.TestCase):
         self.assertTrue(card["has_edit"])
         self.assertEqual(card["last_event_type"], "result")
         self.assertEqual(card["session_state"]["did"], "Edited the readme.")
+        self.assertEqual(card["tail_pr_number"], 25)
+        self.assertEqual(
+            card["tail_pr_url"],
+            "https://github.com/octo-org/demo-repo/pull/25",
+        )
+        self.assertEqual(card["effective_branch"], "feat/codex-parity")
+        self.assertEqual(card["effective_kind"], "worktree")
+        self.assertEqual(card["folder_path"], str(self.fake_repo))
+        self.assertEqual(card["session_cwd"], str(self.fake_worktree))
+        self.assertTrue(card["session_cwd_is_worktree"])
 
     def test_codex_rollout_parses_into_conversation_events(self):
         parsed = self.server.parse_conversation(CODEX_SESSION_ID)

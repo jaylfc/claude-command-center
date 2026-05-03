@@ -1,1 +1,2 @@
-- Show Codex thinking and active-tool activity in conversation list rows using the same live chip treatment as Claude sessions.
+- Show Codex thinking, active-tool activity, and pending spawns in conversation list rows, preferring the exact running tool name and falling back to the yellow WIP signal when no tool is known.
+- Hide stale Codex pending-tool activity chips once the Codex session is no longer live.

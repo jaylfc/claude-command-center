@@ -1,0 +1,1 @@
+- Conversation archive filtering now keeps the `GH Issues` and `Ready to merge` sections visible in All view and when narrowed to a project, using the same client-side folder filter as the rest of the sidebar.
