@@ -3803,6 +3803,137 @@
     background: rgba(96, 137, 230, 0.85);
   }
   .stats-models-row .pct { color: var(--text-muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* ======================================================================
+     History search — right-side drawer + click-through detail pane.
+     Read-only window onto ~/.claude-index/index.db. Class prefix: .hsd-
+     ====================================================================== */
+  .hsd-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0, 0, 0, 0.42);
+    display: flex; justify-content: flex-end;
+    opacity: 0; pointer-events: none;
+    transition: opacity 160ms ease;
+  }
+  .hsd-overlay[data-open="1"] { opacity: 1; pointer-events: auto; }
+  .hsd-overlay[hidden] { display: none !important; }
+
+  .hsd-drawer {
+    width: min(820px, 96vw); height: 100vh;
+    background: var(--bg, #0f1115);
+    color: var(--text, #e6e6e6);
+    border-left: 1px solid var(--border, #2a2d33);
+    box-shadow: -10px 0 30px rgba(0, 0, 0, 0.45);
+    display: flex; flex-direction: column;
+    transform: translateX(100%);
+    transition: transform 220ms cubic-bezier(.2,.7,.2,1);
+  }
+  .hsd-overlay[data-open="1"] .hsd-drawer { transform: translateX(0); }
+
+  .hsd-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border, #2a2d33);
+  }
+  .hsd-header h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .hsd-close {
+    background: transparent; color: var(--text-muted, #9aa0aa);
+    border: none; font-size: 22px; cursor: pointer; line-height: 1;
+    padding: 4px 8px;
+  }
+  .hsd-close:hover { color: var(--text, #fff); }
+
+  .hsd-controls { padding: 12px 18px 8px; }
+  .hsd-input {
+    width: 100%; padding: 9px 12px; box-sizing: border-box;
+    background: var(--surface, #1a1d23); color: var(--text, #e6e6e6);
+    border: 1px solid var(--border, #2a2d33); border-radius: 6px;
+    font-size: 14px;
+  }
+  .hsd-input:focus { outline: none; border-color: var(--accent, #4ea1ff); }
+  .hsd-filters {
+    display: flex; align-items: center; gap: 12px; margin-top: 8px;
+    font-size: 12px; color: var(--text-muted, #9aa0aa);
+  }
+  .hsd-since {
+    background: var(--surface, #1a1d23); color: var(--text, #e6e6e6);
+    border: 1px solid var(--border, #2a2d33); border-radius: 4px;
+    padding: 4px 6px; font-size: 12px;
+  }
+  .hsd-repo-only { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .hsd-status { min-height: 16px; font-size: 11px; color: var(--text-muted, #9aa0aa); margin-top: 4px; }
+  .hsd-status.is-error { color: #e07a7a; }
+
+  .hsd-body {
+    flex: 1; min-height: 0;
+    display: grid; grid-template-columns: minmax(280px, 42%) 1fr;
+    gap: 1px; background: var(--border, #2a2d33);
+  }
+  .hsd-results {
+    margin: 0; padding: 0; list-style: none;
+    background: var(--bg, #0f1115);
+    overflow-y: auto;
+  }
+  .hsd-result {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border, #2a2d33);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .hsd-result:hover { background: var(--surface, #1a1d23); }
+  .hsd-result.is-selected { background: var(--surface-2, #20232a); border-left: 2px solid var(--accent, #4ea1ff); padding-left: 12px; }
+  .hsd-result-meta {
+    display: flex; gap: 10px; font-size: 11px; color: var(--text-muted, #9aa0aa);
+    margin-bottom: 4px; align-items: baseline;
+  }
+  .hsd-result-meta .role { font-weight: 600; color: var(--text, #e6e6e6); }
+  .hsd-result-meta .ts { font-variant-numeric: tabular-nums; }
+  .hsd-result-cwd {
+    font-size: 11px; color: var(--text-muted, #9aa0aa);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    direction: rtl; text-align: left;
+  }
+  .hsd-result-snippet {
+    font-size: 12px; line-height: 1.45; margin-top: 4px;
+    color: var(--text, #e6e6e6);
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .hsd-result-snippet mark {
+    background: rgba(255, 209, 102, 0.32); color: inherit;
+    padding: 0 2px; border-radius: 2px;
+  }
+
+  .hsd-detail {
+    background: var(--bg, #0f1115);
+    overflow-y: auto;
+    padding: 14px 18px;
+    font-size: 13px; line-height: 1.5;
+  }
+  .hsd-detail-empty {
+    color: var(--text-muted, #9aa0aa); font-style: italic; margin-top: 12px;
+  }
+  .hsd-detail-meta {
+    display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px;
+    font-size: 11px; color: var(--text-muted, #9aa0aa);
+    padding-bottom: 10px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--border, #2a2d33);
+  }
+  .hsd-detail-meta dt { color: var(--text-muted, #9aa0aa); }
+  .hsd-detail-meta dd { margin: 0; color: var(--text, #e6e6e6); word-break: break-all; }
+  .hsd-detail-content {
+    white-space: pre-wrap; word-break: break-word;
+    font-family: inherit;
+  }
+
+  .hsd-empty-state {
+    padding: 30px 18px; text-align: center;
+    color: var(--text-muted, #9aa0aa); font-size: 13px;
+  }
+
+  @media (max-width: 720px) {
+    .hsd-body { grid-template-columns: 1fr; grid-template-rows: 50% 50%; }
+  }
 </style>
 <!-- Optional Morning side-nav. Loaded conditionally based on the feature
      flag so installs without the morning plugin don't get a 404 in the
@@ -4029,6 +4160,7 @@
     <button id="kptWorktreesBtn" class="topbar-btn" title="Show all worktrees of this repo, with an indicator for those that have uncommitted changes." aria-label="Show worktrees">&#127807; Worktrees</button>
     <button id="statsBtn" class="topbar-btn" title="Usage stats — sessions, messages, tokens, streaks across every Claude Code transcript on this machine." aria-label="Show usage stats">&#128202; Stats</button>
     <button id="termToggleBtn" class="topbar-btn" title="Open the in-UI terminal panel — run quick shell commands (git status, npm test, ./script.sh) without leaving the page. One-shot per command, no interactive TTY (no vim/top)." aria-label="Toggle terminal panel">&#9000; Terminal</button>
+    <button id="historyBtn" class="topbar-btn" title="Search past Claude Code conversations across every project on this Mac (powered by the local claude-index). Shortcut: /" aria-label="Search past conversations">&#128269; History</button>
     <div id="setupBanner" class="ccc-setup-banner"></div>
   </div>
 
@@ -4494,6 +4626,40 @@
         <div class="stats-loading">Loading…</div>
       </div>
     </div>
+  </div>
+
+  <!-- History search — right-side drawer over a backdrop.
+       Read-only window onto ~/.claude-index/index.db (see /api/search-history). -->
+  <div id="hsdOverlay" class="hsd-overlay" role="dialog" aria-modal="true" aria-labelledby="hsdTitle" hidden>
+    <aside class="hsd-drawer" aria-label="History search">
+      <header class="hsd-header">
+        <h2 id="hsdTitle">&#128269; History search</h2>
+        <button type="button" id="hsdCloseBtn" class="hsd-close" aria-label="Close">&times;</button>
+      </header>
+      <div class="hsd-controls">
+        <input type="search" id="hsdInput" class="hsd-input"
+               placeholder="Search past Claude Code conversations…" autocomplete="off"
+               spellcheck="false" />
+        <div class="hsd-filters">
+          <select id="hsdSince" class="hsd-since" aria-label="Time window">
+            <option value="">All time</option>
+            <option value="1d">Today</option>
+            <option value="7d" selected>Past 7 days</option>
+            <option value="30d">Past 30 days</option>
+          </select>
+          <label class="hsd-repo-only">
+            <input type="checkbox" id="hsdRepoOnly"> This repo only
+          </label>
+        </div>
+        <div class="hsd-status" id="hsdStatus" aria-live="polite"></div>
+      </div>
+      <div class="hsd-body">
+        <ul class="hsd-results" id="hsdResults" role="listbox" tabindex="0"></ul>
+        <article class="hsd-detail" id="hsdDetail">
+          <div class="hsd-detail-empty">Click a result to view the full message.</div>
+        </article>
+      </div>
+    </aside>
   </div>
 
 <script>
@@ -16226,6 +16392,244 @@
       e.preventDefault();
       if ($panel.classList.contains('open')) closePanel(); else openPanel();
     }
+  });
+})();
+</script>
+
+<script>
+// ============================================================================
+// History search — search past Claude Code conversations from inside CCC.
+// Read-only window onto ~/.claude-index/index.db via /api/search-history and
+// /api/history-message. Self-contained; no dependencies on other CCC modules.
+// ============================================================================
+(function () {
+  const $overlay = document.getElementById('hsdOverlay');
+  if (!$overlay) return;  // markup not present — feature disabled in this build
+  const $btn      = document.getElementById('historyBtn');
+  const $closeBtn = document.getElementById('hsdCloseBtn');
+  const $input    = document.getElementById('hsdInput');
+  const $since    = document.getElementById('hsdSince');
+  const $repoOnly = document.getElementById('hsdRepoOnly');
+  const $status   = document.getElementById('hsdStatus');
+  const $results  = document.getElementById('hsdResults');
+  const $detail   = document.getElementById('hsdDetail');
+
+  let _searchSeq = 0;     // monotonic — guards against out-of-order responses
+  let _debounceT = null;
+  let _selectedUuid = null;
+
+  // Resolve the current repo for the "this repo only" filter. Prefer the
+  // global repoListState the rest of the UI maintains; fall back to a
+  // one-off fetch if it hasn't loaded yet.
+  async function currentRepoCwd() {
+    try {
+      if (typeof repoListState !== 'undefined' && repoListState && repoListState.current) {
+        return repoListState.current;
+      }
+    } catch (e) { /* fall through */ }
+    try {
+      const r = await fetch('/api/repo/list');
+      if (!r.ok) return '';
+      const j = await r.json();
+      return (j && j.current) || '';
+    } catch (e) { return ''; }
+  }
+
+  function setStatus(text, isError) {
+    $status.textContent = text || '';
+    $status.classList.toggle('is-error', !!isError);
+  }
+
+  function fmtTs(iso) {
+    if (!iso) return '';
+    // 2026-04-30T17:03:29.123Z → 2026-04-30 17:03
+    return String(iso).slice(0, 16).replace('T', ' ');
+  }
+
+  function shortCwd(cwd) {
+    if (!cwd) return '';
+    return cwd.replace(/^\/Users\/[^/]+/, '~');
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // Snippet contains literal <mark>...</mark> tags from FTS5; render them.
+  // Everything outside the marks is escaped so user content can't inject.
+  function renderSnippet(snippet) {
+    const s = String(snippet == null ? '' : snippet);
+    const parts = s.split(/(<mark>|<\/mark>)/g);
+    let out = '';
+    let inMark = false;
+    for (const part of parts) {
+      if (part === '<mark>') { out += '<mark>'; inMark = true; }
+      else if (part === '</mark>') { out += '</mark>'; inMark = false; }
+      else { out += escapeHtml(part); }
+    }
+    return out;
+  }
+
+  function renderResults(results) {
+    if (!results || !results.length) {
+      $results.innerHTML = '<li class="hsd-empty-state">No matches.</li>';
+      return;
+    }
+    const html = results.map(r => {
+      const ts = fmtTs(r.timestamp);
+      const role = escapeHtml(r.type || '');
+      const cwd = shortCwd(r.cwd || '');
+      const snippet = renderSnippet(r.snippet);
+      const uuid = escapeHtml(r.uuid || '');
+      return `
+        <li class="hsd-result" data-uuid="${uuid}">
+          <div class="hsd-result-meta">
+            <span class="role">${role}</span>
+            <span class="ts">${escapeHtml(ts)}</span>
+          </div>
+          <div class="hsd-result-cwd" title="${escapeHtml(r.cwd || '')}">${escapeHtml(cwd)}</div>
+          <div class="hsd-result-snippet">${snippet}</div>
+        </li>`;
+    }).join('');
+    $results.innerHTML = html;
+  }
+
+  function renderDetail(msg) {
+    if (!msg) {
+      $detail.innerHTML = '<div class="hsd-detail-empty">Click a result to view the full message.</div>';
+      return;
+    }
+    const meta = [
+      ['Time', fmtTs(msg.timestamp)],
+      ['Type', msg.type || ''],
+      ['Role', msg.role || ''],
+      ['Session', msg.session_id || ''],
+      ['CWD', msg.cwd || ''],
+      ['Branch', msg.git_branch || '-'],
+      ['Model', msg.model || ''],
+    ];
+    const metaHtml = meta.map(([k, v]) =>
+      `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`
+    ).join('');
+    $detail.innerHTML = `
+      <dl class="hsd-detail-meta">${metaHtml}</dl>
+      <pre class="hsd-detail-content">${escapeHtml(msg.content || '')}</pre>
+    `;
+  }
+
+  async function runSearch() {
+    const q = $input.value.trim();
+    if (!q) {
+      $results.innerHTML = '';
+      setStatus('');
+      return;
+    }
+    const seq = ++_searchSeq;
+    setStatus('Searching…');
+
+    const params = new URLSearchParams({ q, limit: '50' });
+    const since = $since.value;
+    if (since) params.set('since', since);
+    if ($repoOnly.checked) {
+      const cwd = await currentRepoCwd();
+      if (cwd) params.set('cwd', cwd);
+    }
+
+    let json;
+    try {
+      const r = await fetch('/api/search-history?' + params.toString());
+      json = await r.json();
+    } catch (e) {
+      if (seq !== _searchSeq) return;
+      setStatus('Network error — see console.', true);
+      console.error(e);
+      return;
+    }
+    if (seq !== _searchSeq) return;  // newer query already in flight
+
+    if (json.error) {
+      setStatus(json.error, true);
+      $results.innerHTML = '';
+      return;
+    }
+    const n = (json.results || []).length;
+    setStatus(n ? `${n} result${n === 1 ? '' : 's'}` : 'No matches');
+    renderResults(json.results || []);
+  }
+
+  function debouncedSearch() {
+    if (_debounceT) clearTimeout(_debounceT);
+    _debounceT = setTimeout(runSearch, 220);
+  }
+
+  async function loadDetail(uuid) {
+    if (!uuid) return;
+    _selectedUuid = uuid;
+    // Highlight the selected row.
+    Array.from($results.querySelectorAll('.hsd-result')).forEach(el => {
+      el.classList.toggle('is-selected', el.getAttribute('data-uuid') === uuid);
+    });
+    $detail.innerHTML = '<div class="hsd-detail-empty">Loading…</div>';
+    let msg = null;
+    try {
+      const r = await fetch('/api/history-message?uuid=' + encodeURIComponent(uuid));
+      if (r.ok) msg = await r.json();
+    } catch (e) { console.error(e); }
+    renderDetail(msg);
+  }
+
+  function openDrawer() {
+    $overlay.hidden = false;
+    // Force reflow then mark open so the CSS transition runs.
+    void $overlay.offsetHeight;
+    $overlay.dataset.open = '1';
+    setTimeout(() => $input.focus(), 50);
+    if (!$input.value) {
+      // Empty drawer — show hint, no fetch.
+      $results.innerHTML = '<li class="hsd-empty-state">Type to search past Claude Code conversations.</li>';
+      $detail.innerHTML = '<div class="hsd-detail-empty">Click a result to view the full message.</div>';
+    }
+  }
+
+  function closeDrawer() {
+    delete $overlay.dataset.open;
+    setTimeout(() => { $overlay.hidden = true; }, 220);
+  }
+
+  // ----- wiring -----
+  if ($btn) $btn.addEventListener('click', openDrawer);
+  $closeBtn.addEventListener('click', closeDrawer);
+
+  // Click backdrop (but not the drawer itself) to close.
+  $overlay.addEventListener('click', (e) => {
+    if (e.target === $overlay) closeDrawer();
+  });
+
+  $input.addEventListener('input', debouncedSearch);
+  $input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); runSearch(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); }
+  });
+  $since.addEventListener('change', runSearch);
+  $repoOnly.addEventListener('change', runSearch);
+
+  $results.addEventListener('click', (e) => {
+    const li = e.target.closest('.hsd-result');
+    if (li) loadDetail(li.getAttribute('data-uuid'));
+  });
+
+  // Global '/' shortcut to open the drawer (unless typing in another input).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== '/') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const tag = (e.target && e.target.tagName) || '';
+    const editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
+                     (e.target && e.target.isContentEditable);
+    if (editable) return;
+    e.preventDefault();
+    openDrawer();
   });
 })();
 </script>
