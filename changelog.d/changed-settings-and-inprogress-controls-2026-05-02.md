@@ -1,0 +1,1 @@
+- Simplified Settings to appearance, network access, and help, and moved recent In Progress filtering into a 1d/7d sidebar toggle.

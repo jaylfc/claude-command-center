@@ -2939,6 +2939,13 @@
     background: var(--accent);
     color: #fff;
   }
+  .conv-inprogress-tools {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+  .conv-inprogress-tools .conv-grouping-toggle { margin-left: 0; }
   .archive-empty-state {
     padding: 24px 16px;
     text-align: center;
@@ -3472,6 +3479,23 @@
   .desktop-popover .pop-divider {
     height: 1px; background: var(--border); margin: 4px 2px;
   }
+  .desktop-popover .pop-submenu { position: relative; }
+  .desktop-popover .pop-submenu summary { list-style: none; }
+  .desktop-popover .pop-submenu summary::-webkit-details-marker { display: none; }
+  .desktop-popover .pop-submenu .pop-chevron {
+    margin-left: auto;
+    color: var(--text-muted);
+  }
+  .desktop-popover .pop-submenu[open] .pop-chevron { transform: rotate(90deg); }
+  .desktop-popover .pop-submenu-panel {
+    display: none;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px 0 4px 22px;
+    padding-left: 6px;
+    border-left: 1px solid var(--border);
+  }
+  .desktop-popover .pop-submenu[open] .pop-submenu-panel { display: flex; }
 
   /* ── Cmd+K search modal (shares nsm-* visual language) ──
      A scrollable list of sessions filtered live by display_name /
@@ -3930,25 +3954,24 @@
         </button>
         <div class="desktop-popover" id="settingsPopover" role="menu" aria-label="Settings menu" style="bottom:calc(100% + 6px);right:0;">
           <div id="appearancePopover" role="group" aria-label="Appearance options">
-            <div class="pop-section-label">Theme</div>
-            <button class="pop-item" type="button" data-theme="light" role="menuitemradio"><span class="pop-check" data-check-theme="light"></span><span>Light</span></button>
-            <button class="pop-item" type="button" data-theme="dark" role="menuitemradio"><span class="pop-check" data-check-theme="dark"></span><span>Dark</span></button>
-            <button class="pop-item" type="button" data-theme="system" role="menuitemradio"><span class="pop-check" data-check-theme="system"></span><span>Match system</span></button>
-            <div class="pop-divider"></div>
-            <div class="pop-section-label">Font</div>
-            <button class="pop-item" type="button" data-font="system" role="menuitemradio"><span class="pop-check" data-check-font="system"></span><span>System</span></button>
-            <button class="pop-item" type="button" data-font="mono" role="menuitemradio"><span class="pop-check" data-check-font="mono"></span><span>Mono</span></button>
+            <details class="pop-submenu">
+              <summary class="pop-item"><span class="pop-icon">&#9680;</span><span>Theme</span><span class="pop-chevron">&#8250;</span></summary>
+              <div class="pop-submenu-panel">
+                <button class="pop-item" type="button" data-theme="light" role="menuitemradio"><span class="pop-check" data-check-theme="light"></span><span>Light</span></button>
+                <button class="pop-item" type="button" data-theme="dark" role="menuitemradio"><span class="pop-check" data-check-theme="dark"></span><span>Dark</span></button>
+                <button class="pop-item" type="button" data-theme="system" role="menuitemradio"><span class="pop-check" data-check-theme="system"></span><span>Match system</span></button>
+              </div>
+            </details>
+            <details class="pop-submenu">
+              <summary class="pop-item"><span class="pop-icon">Aa</span><span>Font</span><span class="pop-chevron">&#8250;</span></summary>
+              <div class="pop-submenu-panel">
+                <button class="pop-item" type="button" data-font="system" role="menuitemradio"><span class="pop-check" data-check-font="system"></span><span>System</span></button>
+                <button class="pop-item" type="button" data-font="mono" role="menuitemradio"><span class="pop-check" data-check-font="mono"></span><span>Mono</span></button>
+              </div>
+            </details>
           </div>
           <div class="pop-divider"></div>
-          <div class="pop-section-label">View</div>
-          <button class="pop-item" id="kptRecentBtn" type="button" title="Show only sessions/issues touched in the last 10 hours"><span class="pop-icon">10h</span><span>Last 10h</span></button>
-          <button class="pop-item" id="kptDescToggle" type="button" title="Compact mode — hide the description preview on cards"><span class="pop-icon">&#8801;</span><span>Compact cards</span></button>
-          <button class="pop-item" id="kptGitOnlyToggle" type="button" title="Show only cards linked to a GitHub issue"><span class="pop-icon">#</span><span>GitHub only</span></button>
-          <label class="pop-item" title="Spawn the new session in a fresh git worktree (`feat/<slug>` branch) so it can't accidentally commit to main"><input type="checkbox" id="kptWorktreeToggle" style="margin:0;"><span>Spawn in worktree</span></label>
-          <div class="pop-divider"></div>
-          <button class="pop-item" type="button" id="settingsCmdkBtn"><span class="pop-icon">⌘K</span><span>Search sessions</span></button>
           <button class="pop-item" type="button" id="networkAccessBtn"><span class="pop-icon">⇄</span><span>Network access…</span></button>
-          <a class="pop-item" href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener"><span class="pop-icon">↗</span><span>View on GitHub</span></a>
           <a class="pop-item" href="https://github.com/amirfish1/claude-command-center#readme" target="_blank" rel="noopener"><span class="pop-icon">?</span><span>Get help</span></a>
         </div>
       </div>
@@ -8621,6 +8644,19 @@
     // hopping repos. Older cards continue as a flat chrono list with
     // gap separators (the existing single-repo behavior).
     const _hasFolderChips = _sessionConvs.some(c => c.folder_label_chip);
+    const _ipWindow = (() => {
+      if (!_hasFolderChips) return 'all';
+      try {
+        return localStorage.getItem('ccc-inprogress-window') === '7d' ? '7d' : '1d';
+      } catch (_) {
+        return '1d';
+      }
+    })();
+    const _ipWindowDays = _ipWindow === '7d' ? 7 : 1;
+    const _ipWindowCutoff = Math.floor(Date.now() / 1000) - (_ipWindowDays * 24 * 3600);
+    const _visibleSessionConvs = _hasFolderChips
+      ? _sessionConvs.filter(c => (c.modified || 0) >= _ipWindowCutoff)
+      : _sessionConvs;
     // User-controlled grouping preference for the In Progress section.
     // 'project' (default): group last-24h by folder. 'time': flat chrono
     // list with gap separators. Only meaningful when there are folder
@@ -8654,7 +8690,7 @@
       const _24hAgo = _nowSec - 24 * 3600;
       const _recent = [];
       const _older = [];
-      for (const c of _sessionConvs) {
+      for (const c of _visibleSessionConvs) {
         if ((c.modified || 0) >= _24hAgo) _recent.push(c);
         else _older.push(c);
       }
@@ -8695,7 +8731,11 @@
       }
       _activeRowsHtml = _groupHtml + _olderHtml;
     } else {
-      _activeRowsHtml = _flatRowsWithSeparators(_sessionConvs);
+      _activeRowsHtml = _flatRowsWithSeparators(_visibleSessionConvs);
+    }
+    if (!_visibleSessionConvs.length) {
+      _activeRowsHtml = '<div class="archive-empty-state">No in-progress sessions in the last '
+        + (_ipWindow === '7d' ? '7 days' : 'day') + '.</div>';
     }
     // In progress section: every row that's not a backlog card or archived.
     // Mirrors the kanban "In progress" column (key: 'working' under the
@@ -8706,6 +8746,15 @@
     if (_sessionConvs.length > 0) {
       const _ipCollapsed = localStorage.getItem('ccc-inprogress-collapsed') === '1';
       const _ipArrow = _ipCollapsed ? '▸' : '▾';
+      // 1d / 7d and by-project / by-time toggles, only when there are
+      // folder chips (otherwise the controls are not meaningful). Inline
+      // spans avoid nested-button HTML; click handlers stop propagation.
+      const _ipWindowToggle = _hasFolderChips
+        ? '<span class="conv-grouping-toggle conv-window-toggle" data-role="window-toggle" title="Limit In progress rows by recent activity">'
+            + '<span class="grouping-opt' + (_ipWindow === '1d' ? ' is-active' : '') + '" data-window="1d">1d</span>'
+            + '<span class="grouping-opt' + (_ipWindow === '7d' ? ' is-active' : '') + '" data-window="7d">7d</span>'
+          + '</span>'
+        : '';
       // by-project / by-time toggle, only when there are folder chips
       // (otherwise grouping is meaningless). Inline spans so the click
       // doesn't bubble to the section's collapse button (handler does
@@ -8716,13 +8765,16 @@
             + '<span class="grouping-opt' + (_ipGrouping === 'time' ? ' is-active' : '') + '" data-grouping="time">by time</span>'
           + '</span>'
         : '';
+      const _ipTools = (_ipWindowToggle || _ipGroupingToggle)
+        ? '<span class="conv-inprogress-tools">' + _ipWindowToggle + _ipGroupingToggle + '</span>'
+        : '';
       _inProgressHtml =
         '<div class="conv-inprogress-section' + (_ipCollapsed ? ' collapsed' : '') + '" data-role="inprogress-section">'
         + '<button type="button" class="conv-inprogress-header" data-role="inprogress-toggle" aria-expanded="' + (!_ipCollapsed) + '">'
         +   '<span class="conv-inprogress-arrow">' + _ipArrow + '</span>'
         +   '<span class="conv-inprogress-label">In progress</span>'
-        +   '<span class="conv-inprogress-count">' + _sessionConvs.length + '</span>'
-        +   _ipGroupingToggle
+        +   '<span class="conv-inprogress-count" title="' + _sessionConvs.length + ' total in-progress sessions">' + _visibleSessionConvs.length + '</span>'
+        +   _ipTools
         + '</button>'
         + '<div class="conv-inprogress-list">' + _activeRowsHtml + '</div>'
         + '</div>';
@@ -8836,7 +8888,7 @@
       $inProgressToggle.addEventListener('click', (ev) => {
         // The grouping toggle (project / time) lives inside this header
         // button — its own listener stops propagation, but be defensive.
-        if (ev.target.closest('[data-role="grouping-toggle"]')) return;
+        if (ev.target.closest('[data-role="grouping-toggle"], [data-role="window-toggle"]')) return;
         ev.stopPropagation();
         const section = $inProgressToggle.closest('[data-role="inprogress-section"]');
         if (!section) return;
@@ -8860,6 +8912,23 @@
         if (!opt) return;
         const value = opt.getAttribute('data-grouping');
         try { localStorage.setItem('ccc-inprogress-grouping', value); } catch (_) {}
+        if (typeof archiveMode !== 'undefined' && archiveMode) {
+          const $search = document.getElementById('convSearch');
+          renderArchiveList($search ? $search.value : '');
+        } else if (typeof loadConversationList === 'function') {
+          loadConversationList();
+        }
+      });
+    }
+    const $windowToggle = $convList.querySelector('[data-role="window-toggle"]');
+    if ($windowToggle) {
+      $windowToggle.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const opt = ev.target.closest('[data-window]');
+        if (!opt) return;
+        const value = opt.getAttribute('data-window');
+        if (value !== '1d' && value !== '7d') return;
+        try { localStorage.setItem('ccc-inprogress-window', value); } catch (_) {}
         if (typeof archiveMode !== 'undefined' && archiveMode) {
           const $search = document.getElementById('convSearch');
           renderArchiveList($search ? $search.value : '');
