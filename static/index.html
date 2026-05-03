@@ -71,6 +71,7 @@
     background: var(--surface);
     display: flex; flex-direction: column; overflow: hidden;
     flex-shrink: 0;
+    container-type: inline-size; container-name: sidebar;
   }
   .sidebar-resizer {
     width: 6px; cursor: col-resize; flex-shrink: 0;
@@ -1216,6 +1217,7 @@
     vertical-align: middle;
     animation: ccc-live-dot-pulse 2.4s ease-out infinite;
   }
+  .conv-live-slot .conv-live-dot { margin-right: 0; }
   @keyframes ccc-live-dot-pulse {
     0%   { box-shadow: 0 0 0 0 rgba(88,166,255,0.55); }
     70%  { box-shadow: 0 0 0 6px rgba(88,166,255,0); }
@@ -1386,12 +1388,28 @@
     box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.20);
   }
   .conv-item .conv-title-row {
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: 14px 62px minmax(0, 1fr) 68px 92px max-content;
+    align-items: center;
+    column-gap: 6px;
+  }
+  .conv-item .conv-live-slot {
+    width: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .conv-item .conv-title-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
   }
   .conv-item .conv-title {
     font-size: 14px; font-weight: 400; color: var(--text);
     line-height: 1.3; flex: 1 1 auto; min-width: 0;
-    word-break: break-word;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    word-break: keep-all;
   }
   /* Meta-inline — rel-time, size, branch — squeezed onto the title row
      so each card stays one+one lines instead of three. Numeric data sits
@@ -1399,16 +1417,21 @@
   .conv-item .conv-meta-inline {
     font-size: 11px; color: var(--text-muted);
     display: inline-flex; align-items: center; gap: 6px;
-    flex: 0 0 auto;
+    justify-content: flex-end;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
   }
+  .conv-item .conv-meta-inline .sep,
+  .conv-item .conv-meta-inline .source-badge { display: none; }
   .conv-item .conv-meta-inline .sep { opacity: 0.4; }
   /* Time-first column on the row — fixed-ish width so titles still
      align across cards regardless of "5m ago" vs "23h ago". */
   .conv-item .conv-rel {
     font-size: 11px; color: var(--text-muted);
-    flex: 0 0 auto;
-    min-width: 56px;
+    min-width: 0;
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   /* Date-gap separator — slim labelled rule between cards whose
      modified-times are far apart. Visual cue that you're crossing a
@@ -1464,7 +1487,6 @@
   }
   .compact-rows .conv-item .conv-last { display: none; }
   .compact-rows .conv-item .conv-title-row {
-    flex-wrap: nowrap;
     align-items: center;
   }
   .conv-item .conv-title.untitled {
@@ -1539,8 +1561,12 @@
   }
   .conv-item .meta .sep { opacity: 0.4; }
   .conv-item .branch-badge {
-    display: inline-block; font-size: 12px; padding: 2px 6px; border-radius: 3px;
+    display: block; font-size: 12px; padding: 2px 6px; border-radius: 3px;
     background: rgba(188, 140, 255, 0.15); color: var(--purple);
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   /* Worktree-flavoured branch pill — orange palette + 🌿 leaf so
      the row can be scanned at a glance for "is this session editing in
@@ -1607,9 +1633,48 @@
     background: var(--green); animation: pulse 2s infinite;
     display: inline-block; flex-shrink: 0;
   }
+  .conv-item .conv-signals {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .conv-item .conv-branch-cell {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .conv-item .conv-row-actions {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    min-width: 24px;
+  }
   .conv-signal {
     font-size: 12px; padding: 2px 7px; border-radius: 3px;
     font-weight: 600; white-space: nowrap; flex-shrink: 0;
+  }
+  .conv-item .conv-signals .conv-signal {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @container sidebar (min-width: 520px) {
+    .conv-item .conv-title-row {
+      grid-template-columns: 14px 70px minmax(0, 1fr) 78px 112px 96px max-content;
+      column-gap: 8px;
+    }
+    .conv-item .conv-signals { display: inline-flex; }
+  }
+  @container sidebar (min-width: 680px) {
+    .conv-item .conv-title-row {
+      grid-template-columns: 14px 70px minmax(0, 1fr) 132px 126px 130px max-content;
+    }
+    .conv-item .conv-meta-inline .sep,
+    .conv-item .conv-meta-inline .source-badge { display: inline-block; }
   }
   .conv-signal.stage { background: rgba(188,140,255,0.15); color: var(--purple); }
   .conv-signal.committed { background: rgba(63,185,80,0.15); color: var(--green); }
@@ -2958,6 +3023,11 @@
     text-overflow: ellipsis;
   }
   .conv-folder-group-chip.is-orphan { opacity: 0.55; font-style: italic; }
+  .conv-folder-group + .conv-folder-group {
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+    padding-top: 6px;
+  }
   .conv-folder-group-count {
     color: var(--text-muted);
     font-size: 10px;
@@ -8876,21 +8946,21 @@
       return '<div class="conv-item' + active + (isCodexRow ? ' is-codex' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
-          + liveDotHtml
+          + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
           + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
-          + folderChipHtml
-          + pinnedHtml
-          + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
-          + liveToolHtml
+          + '<span class="conv-title-cell">'
+          +   folderChipHtml
+          +   pinnedHtml
+          +   '<span class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</span>'
+          +   liveToolHtml
+          + '</span>'
           + '<span class="conv-meta-inline">'
           +   '<span>' + formatSize(c.size) + '</span>'
           +   (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
           + '</span>'
-          + signals
-          + branch
-          + mergeBtn
-          + startBtn
-          + archiveBtn
+          + '<span class="conv-signals">' + signals + '</span>'
+          + '<span class="conv-branch-cell">' + branch + '</span>'
+          + '<span class="conv-row-actions">' + mergeBtn + startBtn + archiveBtn + '</span>'
         + '</div>'
         + ask
       + '</div>';
@@ -8976,13 +9046,15 @@
         // a dropped row to. Empty when the folder couldn't be resolved
         // (orphan slug); drop is suppressed in that case.
         const dropPath = cards[0].folder_path || '';
-        return '<div class="conv-folder-group-header" style="--chip-hue:' + hue + ';"'
+        return '<div class="conv-folder-group">'
+          + '<div class="conv-folder-group-header" style="--chip-hue:' + hue + ';"'
           + ' data-folder-path="' + escapeHtml(dropPath) + '"'
           + ' data-folder-label="' + escapeHtml(folder) + '">'
           + '<span class="conv-folder-group-chip' + orphan + '">' + escapeHtml(folder) + '</span>'
           + '<span class="conv-folder-group-count">' + cards.length + '</span>'
           + '</div>'
-          + _flatRowsWithSeparators(cards);
+          + _flatRowsWithSeparators(cards)
+          + '</div>';
       }).join('');
       let _olderHtml = '';
       if (_older.length) {

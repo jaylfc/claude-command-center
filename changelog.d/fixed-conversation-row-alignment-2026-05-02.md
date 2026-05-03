@@ -1,0 +1,1 @@
+- Aligned conversation list rows into fixed scan columns, reserved live-dot space, clipped long worktree names, and added project separators.
