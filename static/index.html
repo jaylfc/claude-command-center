@@ -200,6 +200,10 @@
     animation: pulse 2s infinite;
   }
   .toolbar .jump-btn .jump-icon { font-size: 13px; line-height: 1; }
+  .launch-split {
+    display: inline-flex; align-items: stretch;
+    position: relative;
+  }
   .toolbar .launch-btn {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 5px 12px; border-radius: 6px; cursor: pointer;
@@ -211,6 +215,51 @@
   .toolbar .launch-btn:hover { background: rgba(88, 166, 255, 0.22); }
   .toolbar .launch-btn:active { transform: scale(0.97); }
   .toolbar .launch-btn.launching { opacity: 0.6; }
+  .toolbar .launch-btn.opening { opacity: 0.6; }
+  .toolbar .launch-split .launch-btn {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .launch-choice-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 5px 8px; margin-left: -1px;
+    border-radius: 0 6px 6px 0; cursor: pointer;
+    background: rgba(88, 166, 255, 0.12); color: var(--accent);
+    border: 1px solid rgba(88, 166, 255, 0.35);
+    font-size: 11px; font-weight: 700; font-family: inherit;
+    line-height: 1;
+    transition: background 0.15s, transform 0.1s;
+  }
+  .launch-choice-btn:hover { background: rgba(88, 166, 255, 0.22); }
+  .launch-choice-menu {
+    display: none;
+    position: absolute; left: 0; top: calc(100% + 4px);
+    min-width: 170px; padding: 6px 0;
+    background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    z-index: 60;
+  }
+  .launch-choice-menu.open { display: block; }
+  .launch-choice-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    width: 100%; padding: 7px 12px;
+    background: transparent; border: none; border-radius: 0;
+    color: var(--text); cursor: pointer;
+    font-size: 13px; font-family: inherit; text-align: left;
+    white-space: nowrap;
+  }
+  .launch-choice-item:hover { background: var(--surface-2); }
+  .launch-choice-item:disabled {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: 0.58;
+  }
+  .launch-choice-item:disabled:hover { background: transparent; }
+  .launch-choice-hint {
+    color: var(--text-muted);
+    font-size: 11px;
+  }
   /* Close & announce — full ship+broadcast flow. Lives in convToolbar so
      it's available without the user having to scroll up to the sticky
      "Original ask" header. */
@@ -273,18 +322,6 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     max-width: 180px;
   }
-  .toolbar .desktop-btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 12px; border-radius: 6px; cursor: pointer;
-    background: rgba(57, 210, 192, 0.12); color: var(--cyan);
-    border: 1px solid rgba(57, 210, 192, 0.35);
-    font-size: 12px; font-weight: 600; font-family: inherit;
-    transition: background 0.15s, transform 0.1s;
-  }
-  .toolbar .desktop-btn:hover { background: rgba(57, 210, 192, 0.22); }
-  .toolbar .desktop-btn:active { transform: scale(0.97); }
-  .toolbar .desktop-btn.opening { opacity: 0.6; }
-
   .content {
     flex: 1; overflow-y: auto; padding: 16px 20px;
     scroll-behavior: smooth;
@@ -2477,10 +2514,10 @@
     .conv-panel-toolbar #cpFontPlus { display: none; }
   }
   @container convpane (max-width: 260px) {
-    /* At very narrow widths, drop the live "live" badge and Desktop label
-       — keep only the essentials (Jump / Launch / Kill / Close). */
+    /* At very narrow widths, drop the live "live" badge and launch menu
+       label area. Keep only the essentials (Jump / Launch / Kill / Close). */
     .conv-panel-toolbar #cpLiveBadge,
-    .conv-panel-toolbar #cpDesktopBtn { display: none !important; }
+    .conv-panel-toolbar .cp-launch-split .launch-choice-btn { display: none !important; }
     .conv-panel-toolbar { padding: 6px 8px; }
     .conv-panel-view { padding: 12px 12px; }
   }
@@ -2490,6 +2527,33 @@
     cursor: pointer; white-space: nowrap;
   }
   .conv-panel-toolbar button:hover { background: var(--surface-2); }
+  .conv-panel-toolbar .cp-launch-split {
+    display: inline-flex;
+    position: relative;
+  }
+  .conv-panel-toolbar .cp-launch-split #cpLaunchBtn {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .conv-panel-toolbar .cp-launch-split .launch-choice-btn {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    padding: 5px 7px;
+  }
+  .conv-panel-toolbar .launch-choice-menu .launch-choice-item {
+    width: 100%;
+    border: none;
+    border-radius: 0;
+    padding: 7px 12px;
+    background: transparent;
+    color: var(--text);
+  }
+  .conv-panel-toolbar .launch-choice-menu .launch-choice-item:hover {
+    background: var(--surface-2);
+  }
+  .conv-panel-toolbar .launch-choice-menu .launch-choice-item:disabled:hover {
+    background: transparent;
+  }
   .conv-panel-toolbar .cpt-session-id {
     font-size: 11px; color: var(--text-muted); font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
     opacity: 0.6; cursor: pointer; user-select: all; margin-left: auto;
@@ -3358,8 +3422,8 @@
     /* Jump/Launch only affect the host's Terminal.app — useless when the UI is
        viewed from a remote/mobile context. Hide to avoid the "clicked, nothing
        happened" UX. */
-    #cpJumpBtn, #cpLaunchBtn, #cpDesktopBtn,
-    #jumpBtnConv, #launchBtnConv, #desktopBtnConv,
+    #cpJumpBtn, #cpLaunchSplit,
+    #jumpBtnConv, #launchWrapConv,
     .toolbar .resume-btn { display: none !important; }
 
     /* Kill iOS double-tap-to-click on cards (hover states triggered first tap) */
@@ -3987,18 +4051,18 @@
         <span class="jump-icon">&#8599;</span>
         <span class="jump-label">Jump to terminal</span>
       </button>
-      <button class="launch-btn" id="launchBtnConv" style="display:none;" title="Open a new terminal and resume this session">
-        <span class="jump-icon">&#43;</span>
-        <span class="jump-label">Launch in terminal</span>
-      </button>
+      <span class="launch-split" id="launchWrapConv" style="display:none;">
+        <button class="launch-btn" id="launchBtnConv" title="Open a new terminal and resume this session">
+          <span class="jump-icon">&#43;</span>
+          <span class="jump-label">Launch</span>
+        </button>
+        <button class="launch-choice-btn" id="launchChoiceBtnConv" type="button" title="Choose launch target" aria-label="Choose launch target" aria-haspopup="menu" aria-expanded="false">&#9662;</button>
+        <span class="launch-choice-menu" id="launchChoiceMenuConv" role="menu" aria-hidden="true"></span>
+      </span>
       <span class="live-badge" id="liveBadgeConv" style="display:none;" title="Streaming directly from the headless agent's stdout (block-level)">
         <span class="live-badge-dot"></span>
         <span class="live-badge-label">live</span>
       </span>
-      <button class="desktop-btn" id="desktopBtnConv" style="display:none;" title="Resume this session in the Claude Desktop app">
-        <span class="jump-icon">&#9636;</span>
-        <span class="jump-label">Open in Claude Desktop</span>
-      </button>
       <span class="status" id="convStatus"></span>
       <div class="font-size-controls" style="margin-left:auto;">
         <button class="font-size-btn" id="fontMinus" title="Decrease font size">A-</button>
@@ -4072,12 +4136,15 @@
       <div class="conv-panel-toolbar" id="convPanelToolbar">
         <button class="mobile-back-btn" id="cpMobileBackBtn" title="Back to board">&#8592; Back</button>
         <button id="cpJumpBtn" style="display:none;" title="Jump to terminal"><span>&#8599;</span> Jump</button>
-        <button id="cpLaunchBtn" style="display:none;" title="Launch in terminal"><span>&#43;</span> Launch</button>
+        <span class="launch-split cp-launch-split" id="cpLaunchSplit" style="display:none;">
+          <button id="cpLaunchBtn" title="Launch in terminal"><span>&#43;</span> Launch</button>
+          <button class="launch-choice-btn" id="cpLaunchChoiceBtn" type="button" title="Choose launch target" aria-label="Choose launch target" aria-haspopup="menu" aria-expanded="false">&#9662;</button>
+          <span class="launch-choice-menu" id="cpLaunchChoiceMenu" role="menu" aria-hidden="true"></span>
+        </span>
         <span class="live-badge" id="cpLiveBadge" style="display:none;" title="Streaming directly from the headless agent's stdout (block-level)">
           <span class="live-badge-dot"></span>
           <span class="live-badge-label">live</span>
         </span>
-        <button id="cpDesktopBtn" style="display:none;" title="Open in Claude Desktop"><span>&#9636;</span> Desktop</button>
         <button id="cpKillBtn" style="display:none;" title="Kill agent">Kill</button>
         <div style="display:flex;gap:4px;margin-left:auto;">
           <button id="cpFontMinus" title="Decrease font size">A-</button>
@@ -4566,8 +4633,10 @@
   let liveStatusRenderTicker = null;
 
   const $jumpBtnConv = document.getElementById('jumpBtnConv');
+  const $launchWrapConv = document.getElementById('launchWrapConv');
   const $launchBtnConv = document.getElementById('launchBtnConv');
-  const $desktopBtnConv = document.getElementById('desktopBtnConv');
+  const $launchChoiceBtnConv = document.getElementById('launchChoiceBtnConv');
+  const $launchChoiceMenuConv = document.getElementById('launchChoiceMenuConv');
   const $convToolbar = document.getElementById('convToolbar');
   const $announceBtnConv = document.getElementById('announceBtnConv');
   const $pkoodKillBtn = document.getElementById('pkoodKillBtn');
@@ -4610,14 +4679,125 @@
     if (activeTab === 'sessions') return [$launchBtnConv];
     return [];
   }
-  function desktopButtonsForActiveTab() {
-    if (activeTab === 'sessions') return [$desktopBtnConv];
+  function launchWrapsForActiveTab() {
+    if (activeTab === 'sessions') return [$launchWrapConv];
     return [];
   }
+  function desktopButtonsForActiveTab() { return []; }
   function allResumeButtons() { return []; }
   function allJumpButtons() { return [$jumpBtnConv].filter(Boolean); }
   function allLaunchButtons() { return [$launchBtnConv].filter(Boolean); }
-  function allDesktopButtons() { return [$desktopBtnConv].filter(Boolean); }
+  function allLaunchWraps() { return [$launchWrapConv].filter(Boolean); }
+  function allLaunchChoiceButtons() { return [$launchChoiceBtnConv, document.getElementById('cpLaunchChoiceBtn')].filter(Boolean); }
+  function allLaunchChoiceMenus() { return [$launchChoiceMenuConv, document.getElementById('cpLaunchChoiceMenu')].filter(Boolean); }
+  function allDesktopButtons() { return []; }
+
+  function launchTargetsForCurrentSession() {
+    const isCodex = currentSession.source === 'codex';
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentSession.id || '');
+    return [
+      { id: 'terminal', label: 'Terminal', hint: 'default', disabled: false },
+      {
+        id: 'desktop',
+        label: 'Claude Desktop',
+        hint: (!isCodex && isUuid) ? 'app' : 'Claude only',
+        disabled: isCodex || !isUuid,
+      },
+      {
+        id: 'codex',
+        label: 'Codex',
+        hint: isCodex ? 'app' : 'Codex only',
+        disabled: !isCodex,
+      },
+    ];
+  }
+
+  function renderLaunchChoiceMenu(menu) {
+    if (!menu) return;
+    menu.textContent = '';
+    for (const target of launchTargetsForCurrentSession()) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'launch-choice-item';
+      item.setAttribute('role', 'menuitem');
+      item.dataset.launchTarget = target.id;
+      if (target.disabled) {
+        item.disabled = true;
+        item.title = target.hint;
+      }
+      const label = document.createElement('span');
+      label.textContent = target.label;
+      item.appendChild(label);
+      const hint = document.createElement('span');
+      hint.className = 'launch-choice-hint';
+      hint.textContent = target.hint;
+      item.appendChild(hint);
+      menu.appendChild(item);
+    }
+  }
+
+  function closeLaunchChoiceMenus() {
+    for (const menu of allLaunchChoiceMenus()) {
+      menu.classList.remove('open');
+      menu.setAttribute('aria-hidden', 'true');
+    }
+    for (const btn of allLaunchChoiceButtons()) {
+      btn.setAttribute('aria-expanded', 'false');
+    }
+  }
+
+  function toggleLaunchChoiceMenu(btn, menu) {
+    if (!btn || !menu) return;
+    const willOpen = !menu.classList.contains('open');
+    closeLaunchChoiceMenus();
+    if (!willOpen) return;
+    renderLaunchChoiceMenu(menu);
+    menu.classList.add('open');
+    menu.setAttribute('aria-hidden', 'false');
+    btn.setAttribute('aria-expanded', 'true');
+  }
+
+  function launchButtonFromTrigger(trigger) {
+    if (trigger && trigger.closest && trigger.closest('#cpLaunchSplit')) {
+      return document.getElementById('cpLaunchBtn');
+    }
+    return $launchBtnConv;
+  }
+
+  function actionButtonSnapshot(btn) {
+    const label = btn && btn.querySelector ? btn.querySelector('.jump-label') : null;
+    return {
+      html: btn ? btn.innerHTML : '',
+      label,
+      text: label ? label.textContent : (btn ? btn.textContent : ''),
+    };
+  }
+
+  function setActionButtonText(btn, text) {
+    const label = btn && btn.querySelector ? btn.querySelector('.jump-label') : null;
+    if (label) label.textContent = text;
+    else if (btn) btn.textContent = text;
+  }
+
+  function restoreActionButtonText(btn, snapshot) {
+    if (!btn || !snapshot) return;
+    if (snapshot.label) snapshot.label.textContent = snapshot.text;
+    else btn.innerHTML = snapshot.html;
+  }
+
+  async function launchTarget(target, trigger) {
+    const btn = launchButtonFromTrigger(trigger);
+    closeLaunchChoiceMenus();
+    if (target === 'desktop') {
+      await openInClaudeDesktop({ currentTarget: btn });
+      return;
+    }
+    if (target === 'codex') {
+      await openInCodexDesktop({ currentTarget: btn });
+      return;
+    }
+    await launchTerminal({ currentTarget: btn });
+  }
 
   // The Resume-in-CLI button used to live in convToolbar; it was removed
   // because every session row already exposes the same command via its
@@ -4762,10 +4942,10 @@
   function updateJumpButton() {
     const live = liveStatus.live;
     const sid = currentSession.id;
+    const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const canJump = live && liveStatus.tty && liveStatus.terminalApp;
-    const canLaunch = !!sid && !canJump;  // only show Launch when Jump isn't available
-    const canOpenDesktop = !!sid && !isCodex;  // Claude Desktop links only handle Claude sessions
+    const canShowLaunch = !!sid && !isPkood;
 
     // Jump buttons
     const activeJump = jumpButtonsForActiveTab();
@@ -4783,33 +4963,27 @@
       }
     }
 
-    // Launch buttons (dormant sessions)
+    // Launch split: Terminal remains the default action; the dropdown keeps
+    // Claude Desktop / Codex discoverable even when Jump is also visible.
     const activeLaunch = launchButtonsForActiveTab();
+    const activeLaunchWraps = launchWrapsForActiveTab();
+    for (const wrap of allLaunchWraps()) {
+      if (!activeLaunchWraps.includes(wrap)) wrap.style.display = 'none';
+    }
+    for (const wrap of activeLaunchWraps) {
+      if (!wrap) continue;
+      wrap.style.display = canShowLaunch ? 'inline-flex' : 'none';
+    }
     for (const btn of allLaunchButtons()) {
       if (!activeLaunch.includes(btn)) btn.style.display = 'none';
     }
     for (const btn of activeLaunch) {
       if (!btn) continue;
-      if (canLaunch) {
+      if (canShowLaunch) {
         btn.style.display = 'inline-flex';
-        btn.title = isCodex ? 'Open a new Terminal window and run codex resume' : 'Open a new Terminal window and run claude --resume';
-        btn.querySelector('.jump-label').textContent = 'Launch in terminal';
-      } else {
-        btn.style.display = 'none';
-      }
-    }
-
-    // Desktop buttons (always-visible third destination)
-    const activeDesktop = desktopButtonsForActiveTab();
-    for (const btn of allDesktopButtons()) {
-      if (!activeDesktop.includes(btn)) btn.style.display = 'none';
-    }
-    for (const btn of activeDesktop) {
-      if (!btn) continue;
-      if (canOpenDesktop) {
-        btn.style.display = 'inline-flex';
-        btn.title = 'Resume this session in the Claude Desktop app';
-        btn.querySelector('.jump-label').textContent = 'Open in Claude Desktop';
+        btn.title = isCodex ? 'Open a Terminal window and run codex resume' : 'Open a Terminal window and run claude --resume';
+        btn.querySelector('.jump-label').textContent = 'Launch';
+        renderLaunchChoiceMenu($launchChoiceMenuConv);
       } else {
         btn.style.display = 'none';
       }
@@ -5103,9 +5277,10 @@
   async function launchTerminal(ev) {
     const btn = ev && ev.currentTarget;
     if (!btn || !currentSession.id) return;
-    const origLabel = btn.querySelector('.jump-label').textContent;
+    const snapshot = actionButtonSnapshot(btn);
     btn.classList.add('launching');
-    btn.querySelector('.jump-label').textContent = 'Launching…';
+    btn.disabled = true;
+    setActionButtonText(btn, 'Launching...');
     try {
       const res = await fetch('/api/launch-terminal', {
         method: 'POST',
@@ -5117,33 +5292,40 @@
       });
       const data = await res.json();
       if (data.ok) {
-        btn.querySelector('.jump-label').textContent = 'Launched!';
+        setActionButtonText(btn, 'Launched!');
         setTimeout(() => {
           btn.classList.remove('launching');
-          btn.querySelector('.jump-label').textContent = origLabel;
+          btn.disabled = false;
+          restoreActionButtonText(btn, snapshot);
         }, 1500);
         // The launched terminal will become live shortly — poll right away
         setTimeout(refreshLiveStatus, 1500);
       } else {
-        btn.querySelector('.jump-label').textContent = 'Failed: ' + (data.error || 'unknown');
+        setActionButtonText(btn, 'Failed: ' + (data.error || 'unknown'));
         setTimeout(() => {
           btn.classList.remove('launching');
-          btn.querySelector('.jump-label').textContent = origLabel;
+          btn.disabled = false;
+          restoreActionButtonText(btn, snapshot);
         }, 3000);
       }
     } catch (err) {
       btn.classList.remove('launching');
-      btn.querySelector('.jump-label').textContent = 'Error';
-      setTimeout(() => { btn.querySelector('.jump-label').textContent = origLabel; }, 2000);
+      setActionButtonText(btn, 'Error');
+      setTimeout(() => {
+        btn.disabled = false;
+        restoreActionButtonText(btn, snapshot);
+      }, 2000);
     }
   }
 
   async function openInClaudeDesktop(ev) {
     const btn = ev && ev.currentTarget;
     if (!btn || !currentSession.id) return;
-    const origLabel = btn.querySelector('.jump-label').textContent;
+    if (currentSession.source === 'codex') return;
+    const snapshot = actionButtonSnapshot(btn);
     btn.classList.add('opening');
-    btn.querySelector('.jump-label').textContent = 'Opening…';
+    btn.disabled = true;
+    setActionButtonText(btn, 'Opening...');
     try {
       const res = await fetch('/api/open-in-desktop', {
         method: 'POST',
@@ -5152,22 +5334,67 @@
       });
       const data = await res.json();
       if (data.ok) {
-        btn.querySelector('.jump-label').textContent = 'Opened!';
+        setActionButtonText(btn, 'Opened!');
         setTimeout(() => {
           btn.classList.remove('opening');
-          btn.querySelector('.jump-label').textContent = origLabel;
+          btn.disabled = false;
+          restoreActionButtonText(btn, snapshot);
         }, 1500);
       } else {
-        btn.querySelector('.jump-label').textContent = 'Failed: ' + (data.error || 'unknown');
+        setActionButtonText(btn, 'Failed: ' + (data.error || 'unknown'));
         setTimeout(() => {
           btn.classList.remove('opening');
-          btn.querySelector('.jump-label').textContent = origLabel;
+          btn.disabled = false;
+          restoreActionButtonText(btn, snapshot);
         }, 3000);
       }
     } catch (err) {
       btn.classList.remove('opening');
-      btn.querySelector('.jump-label').textContent = 'Error';
-      setTimeout(() => { btn.querySelector('.jump-label').textContent = origLabel; }, 2000);
+      setActionButtonText(btn, 'Error');
+      setTimeout(() => {
+        btn.disabled = false;
+        restoreActionButtonText(btn, snapshot);
+      }, 2000);
+    }
+  }
+
+  async function openInCodexDesktop(ev) {
+    const btn = ev && ev.currentTarget;
+    if (!btn || !currentSession.id) return;
+    if (currentSession.source !== 'codex') return;
+    const snapshot = actionButtonSnapshot(btn);
+    btn.classList.add('opening');
+    btn.disabled = true;
+    setActionButtonText(btn, 'Opening...');
+    try {
+      const res = await fetch('/api/open-in-codex', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ session_id: currentSession.id, cwd: currentSession.cwd }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setActionButtonText(btn, 'Opened!');
+        setTimeout(() => {
+          btn.classList.remove('opening');
+          btn.disabled = false;
+          restoreActionButtonText(btn, snapshot);
+        }, 1500);
+      } else {
+        setActionButtonText(btn, 'Failed: ' + (data.error || 'unknown'));
+        setTimeout(() => {
+          btn.classList.remove('opening');
+          btn.disabled = false;
+          restoreActionButtonText(btn, snapshot);
+        }, 3000);
+      }
+    } catch (err) {
+      btn.classList.remove('opening');
+      setActionButtonText(btn, 'Error');
+      setTimeout(() => {
+        btn.disabled = false;
+        restoreActionButtonText(btn, snapshot);
+      }, 2000);
     }
   }
 
@@ -5375,6 +5602,36 @@
   for (const btn of allJumpButtons()) btn.addEventListener('click', jumpToTerminal);
   for (const btn of allLaunchButtons()) btn.addEventListener('click', launchTerminal);
   for (const btn of allDesktopButtons()) btn.addEventListener('click', openInClaudeDesktop);
+  if ($launchChoiceBtnConv) {
+    $launchChoiceBtnConv.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleLaunchChoiceMenu($launchChoiceBtnConv, $launchChoiceMenuConv);
+    });
+  }
+  const $cpLaunchChoiceBtnGlobal = document.getElementById('cpLaunchChoiceBtn');
+  const $cpLaunchChoiceMenuGlobal = document.getElementById('cpLaunchChoiceMenu');
+  if ($cpLaunchChoiceBtnGlobal) {
+    $cpLaunchChoiceBtnGlobal.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleLaunchChoiceMenu($cpLaunchChoiceBtnGlobal, $cpLaunchChoiceMenuGlobal);
+    });
+  }
+  for (const menu of allLaunchChoiceMenus()) {
+    menu.addEventListener('click', (e) => {
+      const item = e.target.closest('[data-launch-target]');
+      if (!item) return;
+      e.preventDefault();
+      e.stopPropagation();
+      launchTarget(item.dataset.launchTarget, item);
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('.launch-split')) return;
+    closeLaunchChoiceMenus();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeLaunchChoiceMenus();
+  });
 
   function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
@@ -10342,17 +10599,16 @@
   // ── Split panel toolbar buttons ──
   function updateSplitToolbar() {
     const $cpJumpBtn = document.getElementById('cpJumpBtn');
+    const $cpLaunchSplit = document.getElementById('cpLaunchSplit');
     const $cpLaunchBtn = document.getElementById('cpLaunchBtn');
-    const $cpDesktopBtn = document.getElementById('cpDesktopBtn');
+    const $cpLaunchChoiceMenu = document.getElementById('cpLaunchChoiceMenu');
     const $cpKillBtn = document.getElementById('cpKillBtn');
     if (!$cpJumpBtn) return;
     const sid = currentSession.id;
     const live = liveStatus.live;
     const isPkood = currentSession.source === 'pkood';
-    const isCodex = currentSession.source === 'codex';
-    // Jump / Launch are mutually exclusive: live-with-tty → Jump, else → Launch.
-    // Showing both made it easy to accidentally spawn a duplicate terminal on
-    // a session that already has one open.
+    // Jump is still useful for live terminals, while Launch now owns the
+    // terminal/app resume destinations as a split button.
     const hasLiveTty = live && !!liveStatus.tty && !isPkood;
     $cpJumpBtn.style.display = hasLiveTty ? '' : 'none';
     $cpJumpBtn.onclick = async () => {
@@ -10364,58 +10620,23 @@
         });
       } catch (_) {}
     };
-    $cpLaunchBtn.style.display = (sid && !isPkood && !hasLiveTty) ? '' : 'none';
+    if ($cpLaunchSplit) $cpLaunchSplit.style.display = (sid && !isPkood) ? 'inline-flex' : 'none';
+    if ($cpLaunchBtn) {
+      $cpLaunchBtn.style.display = '';
+      $cpLaunchBtn.title = 'Launch in terminal';
+      $cpLaunchBtn.innerHTML = '<span>&#43;</span> Launch';
+      $cpLaunchBtn.disabled = false;
+    }
+    renderLaunchChoiceMenu($cpLaunchChoiceMenu);
     $cpLaunchBtn.onclick = async () => {
       if (!sid) return;
-      $cpLaunchBtn.textContent = 'Launching...';
-      try {
-        await fetch('/api/launch-terminal', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ session_id: sid, cwd: currentSession.cwd }),
-        });
-        $cpLaunchBtn.textContent = 'Launched!';
-        $cpLaunchBtn.disabled = true;  // block re-clicks during the startup window
-        // Refresh live status on a quick schedule so the button flips to Jump
-        // without waiting for the 5s poll. Claude cold-start can take ~3-5s.
-        setTimeout(refreshLiveStatus, 700);
-        setTimeout(refreshLiveStatus, 2000);
-        setTimeout(refreshLiveStatus, 4000);
-        setTimeout(refreshLiveStatus, 7000);
-        setTimeout(() => {
-          $cpLaunchBtn.innerHTML = '<span>&#43;</span> Launch';
-          $cpLaunchBtn.disabled = false;
-        }, 7000);
-      } catch (_) {
-        $cpLaunchBtn.innerHTML = '<span>&#43;</span> Launch';
-      }
-    };
-    // Desktop: Claude Desktop deep links only handle Claude sessions.
-    $cpDesktopBtn.style.display = (sid && !isPkood && !isCodex) ? '' : 'none';
-    $cpDesktopBtn.onclick = async () => {
-      if (!sid) return;
-      const origHTML = $cpDesktopBtn.innerHTML;
-      $cpDesktopBtn.textContent = 'Opening…';
-      $cpDesktopBtn.disabled = true;
-      let ok = false;
-      try {
-        const res = await fetch('/api/open-in-desktop', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ session_id: sid }),
-        });
-        const data = await res.json();
-        if (data.ok) {
-          $cpDesktopBtn.textContent = 'Opened!';
-          ok = true;
-        } else {
-          $cpDesktopBtn.textContent = 'Failed: ' + (data.error || 'unknown');
-        }
-      } catch (_) {
-        $cpDesktopBtn.textContent = 'Error';
-      }
-      setTimeout(() => {
-        $cpDesktopBtn.innerHTML = origHTML;
-        $cpDesktopBtn.disabled = false;
-      }, ok ? 1500 : 3000);
+      await launchTerminal({ currentTarget: $cpLaunchBtn });
+      // Refresh live status on a quick schedule so the button flips to Jump
+      // without waiting for the 5s poll. Claude cold-start can take ~3-5s.
+      setTimeout(refreshLiveStatus, 700);
+      setTimeout(refreshLiveStatus, 2000);
+      setTimeout(refreshLiveStatus, 4000);
+      setTimeout(refreshLiveStatus, 7000);
     };
     // Kill: show for pkood
     $cpKillBtn.style.display = isPkood ? '' : 'none';

@@ -3720,6 +3720,34 @@ def open_session_in_claude_desktop(session_id):
     return {"ok": True, "url": url}
 
 
+def open_session_in_codex_desktop(session_id, cwd=None):
+    """Open the macOS Codex app for a Codex session.
+
+    Codex.app registers a `codex://` URL scheme. We mirror the Claude
+    Desktop launch path with a best-effort resume URL so the UI can expose a
+    distinct app destination next to the terminal fallback.
+    """
+    if not session_id:
+        return {"ok": False, "error": "missing session_id"}
+    if not _is_codex_session(session_id):
+        return {"ok": False, "error": "Codex launch only handles Codex sessions"}
+    if sys.platform != "darwin":
+        return {"ok": False, "error": "Codex app launch is macOS-only"}
+    params = {"session": session_id}
+    if cwd:
+        params["cwd"] = cwd
+    url = "codex://resume?" + urllib.parse.urlencode(params)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        log_path = LOG_DIR / f"codex-desktop-{session_id[:8]}.log"
+        lf = open(log_path, "w")
+        subprocess.Popen(["open", url], stdout=lf, stderr=lf)
+    except (FileNotFoundError, OSError) as e:
+        print(f"open_session_in_codex_desktop: {e!r}", file=sys.stderr, flush=True)
+        return {"ok": False, "error": "could not launch Codex", "url": url}
+    return {"ok": True, "url": url}
+
+
 def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
     """Open a new terminal window and run the resume command for this session.
 
@@ -13367,6 +13395,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 payload = {}
             sid = payload.get("session_id", "")
             self.send_json(open_session_in_claude_desktop(sid))
+        elif path == "/api/open-in-codex":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            sid = payload.get("session_id", "")
+            cwd = payload.get("cwd") or None
+            self.send_json(open_session_in_codex_desktop(sid, cwd))
         elif path == "/api/term/run":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

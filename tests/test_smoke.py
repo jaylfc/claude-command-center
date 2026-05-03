@@ -48,6 +48,23 @@ class TestServerImports(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("error", r)
 
+    def test_open_session_in_codex_desktop_rejects_bad_input(self):
+        """The helper exists and rejects empty / non-Codex session IDs
+        without trying to spawn `open(1)`."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "open_session_in_codex_desktop"))
+        with mock.patch.object(server.subprocess, "Popen") as popen:
+            r = server.open_session_in_codex_desktop("")
+            self.assertFalse(r["ok"])
+            self.assertIn("error", r)
+            with mock.patch.object(server, "_is_codex_session", return_value=False):
+                r = server.open_session_in_codex_desktop("not-codex")
+            self.assertFalse(r["ok"])
+            self.assertIn("error", r)
+            popen.assert_not_called()
+
     def test_morning_disabled_when_plugin_absent(self):
         """If morning.py isn't importable, MORNING_ENABLED must be False
         no matter what CCC_ENABLE_MORNING says."""

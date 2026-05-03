@@ -1,0 +1,1 @@
+- Combined terminal and app resume controls into one Launch split button with Terminal, Claude Desktop, and Codex destinations.
