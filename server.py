@@ -4499,6 +4499,143 @@ def _fetch_issue_titles():
     return _issue_titles_cache
 
 
+# ---------------------------------------------------------------------------
+# Cross-repo issues — Phase B of the multi-repo design.
+#
+# Aggregates `gh issue list` across every known repo (recent ∪ pinned), in
+# parallel, with per-repo TTL cache. Lets the UI surface a flat "issues
+# across all my work" list without needing the user to switch repos. Each
+# returned issue carries its repo_path / repo_label so click-to-spawn can
+# target the right cwd. Failures (no gh auth in some folder, missing dir,
+# timeout) are isolated per-repo — one bad folder doesn't break the rest.
+# ---------------------------------------------------------------------------
+
+_CROSS_REPO_ISSUES_CACHE = {}  # repo_path → {issues, error, ts}
+_CROSS_REPO_ISSUES_LOCK = threading.Lock()
+_CROSS_REPO_ISSUES_TTL = 300  # 5 minutes — same as the per-repo cache
+
+
+def _fetch_one_repo_issues(repo_path):
+    """Fetch open + recently-closed issues for ONE repo. Cached per-repo
+    by repo_path. Returns {"issues": list, "error": str|None, "ts": float}.
+    Never raises — every failure mode lands in the `error` field so the
+    aggregator can degrade gracefully."""
+    cache_key = str(repo_path)
+    now = time.time()
+    with _CROSS_REPO_ISSUES_LOCK:
+        cached = _CROSS_REPO_ISSUES_CACHE.get(cache_key)
+        if cached and (now - cached["ts"]) < _CROSS_REPO_ISSUES_TTL:
+            return cached
+
+    issues = []
+    error = None
+    try:
+        if not Path(repo_path).is_dir():
+            error = "directory not found"
+        elif not (Path(repo_path) / ".git").is_dir():
+            error = "not a git repo"
+        else:
+            try:
+                open_out = subprocess.run(
+                    ["gh", "issue", "list", "--state", "open", "--limit", "100",
+                     "--json", "number,title,labels,body,createdAt,updatedAt,state,stateReason"],
+                    capture_output=True, text=True, timeout=10, cwd=str(repo_path),
+                )
+                if open_out.returncode == 0:
+                    issues.extend(json.loads(open_out.stdout))
+                else:
+                    # Swallow common gh failures (no auth, no remote, etc.)
+                    # into an error string. stderr first line is enough.
+                    err = (open_out.stderr or "").strip().splitlines()
+                    error = (err[0] if err else "gh exited non-zero")[:200]
+            except subprocess.TimeoutExpired:
+                error = "gh timed out (10s)"
+            except FileNotFoundError:
+                error = "gh CLI not installed"
+            except json.JSONDecodeError:
+                error = "gh returned malformed JSON"
+            # Only attempt closed if open succeeded — otherwise we'd double-
+            # report the same auth error.
+            if not error:
+                try:
+                    closed_out = subprocess.run(
+                        ["gh", "issue", "list", "--state", "closed", "--limit", "60",
+                         "--json", "number,title,labels,body,createdAt,updatedAt,closedAt,state,stateReason"],
+                        capture_output=True, text=True, timeout=10, cwd=str(repo_path),
+                    )
+                    if closed_out.returncode == 0:
+                        issues.extend(json.loads(closed_out.stdout))
+                    # Closed-failure is non-fatal — open list is the
+                    # important one for backlog UX.
+                except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+                    pass
+    except OSError as e:
+        error = f"OSError: {e}"[:200]
+
+    result = {"issues": issues, "error": error, "ts": now}
+    with _CROSS_REPO_ISSUES_LOCK:
+        _CROSS_REPO_ISSUES_CACHE[cache_key] = result
+    return result
+
+
+def fetch_cross_repo_issues():
+    """Walk known repos in parallel; return a tagged flat list + per-repo
+    error map.
+
+    Repo set: `_load_recent_repos() ∪ _load_custom_repos()` — same source
+    the rail / dropdown uses. Each issue gets `repo_path` + `repo_label`
+    grafted on so click-to-spawn knows the cwd; sorted by updatedAt desc.
+
+    Returns:
+        {
+          "issues": [{...gh fields..., "repo_path", "repo_label"}, ...],
+          "errors": {repo_path: error_string},
+          "fetched_at": epoch,
+        }
+    """
+    try:
+        repos = list(dict.fromkeys(  # dedupe, preserve order
+            _load_recent_repos() + _load_custom_repos()
+        ))
+    except Exception:
+        repos = []
+    if not repos:
+        return {"issues": [], "errors": {}, "fetched_at": time.time()}
+
+    out = []
+    errors = {}
+    # Parallelize: ~10 repos × 1–3s each → 1–3s total instead of 10–30s.
+    # 8 workers is enough for typical fleets without spawning a thread storm.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=min(8, len(repos))) as ex:
+        futures = {ex.submit(_fetch_one_repo_issues, r): r for r in repos}
+        for f in as_completed(futures):
+            repo = futures[f]
+            try:
+                result = f.result()
+            except Exception as e:
+                errors[repo] = f"unexpected: {e}"[:200]
+                continue
+            if result.get("error"):
+                errors[repo] = result["error"]
+                # Even on error, surface any issues that *did* parse
+                # before the error (defensive — shouldn't happen given
+                # the early-return shape, but cheap).
+            label = Path(repo).name
+            for issue in result.get("issues") or []:
+                # Tag with repo info so the UI knows where to spawn.
+                issue["repo_path"] = repo
+                issue["repo_label"] = label
+                out.append(issue)
+
+    # Sort by updatedAt desc (fall back to createdAt then 0).
+    out.sort(
+        key=lambda i: i.get("updatedAt") or i.get("createdAt") or "",
+        reverse=True,
+    )
+    return {"issues": out, "errors": errors, "fetched_at": time.time()}
+
+
 def _fetch_backlog_issues():
     """Fetch open + recently-closed GitHub issues with labels and body.
     Cached 5 minutes. Closed issues get a `state_reason` field so the UI
@@ -11935,6 +12072,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # caller is expected to show a loading state.
             convs = find_all_conversations()
             self.send_json({"conversations": convs, "count": len(convs)})
+        elif path == "/api/issues/all":
+            # Cross-repo GH issues: walk recent ∪ pinned repos in parallel,
+            # run `gh issue list` per repo with a 5-min per-repo cache,
+            # return a flat reverse-chrono list tagged with repo_path +
+            # repo_label. Per-repo errors (no auth, missing dir, no remote)
+            # land in the `errors` map so the UI can surface them without
+            # the whole call failing. Cold first request takes 1–3s
+            # parallel; warm hits are sub-100ms.
+            payload = fetch_cross_repo_issues()
+            self.send_json(payload)
         elif path == "/api/identity":
             # This server's own identity card. Used by peers (and the UI on
             # peers' behalf) to verify a registry entry's port still belongs
