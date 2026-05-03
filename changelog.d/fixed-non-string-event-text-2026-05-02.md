@@ -1,0 +1,1 @@
+- Fixed conversation rendering when tool results contain image/block payloads instead of plain text.

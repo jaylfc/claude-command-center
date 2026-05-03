@@ -4403,6 +4403,30 @@
       .replace(/\n+Run `gh issue view \d+`[^\n]*(title may be truncated\)\.?)?\s*$/i, '')
       .trim();
   }
+
+  function eventTextString(value) {
+    if (typeof value === 'string') return value;
+    if (value == null) return '';
+    const blockText = (item) => {
+      if (typeof item === 'string') return item;
+      if (item == null) return '';
+      if (typeof item !== 'object') return String(item);
+      if (typeof item.text === 'string') return item.text;
+      const blockType = item.type || item.kind || '';
+      if (blockType === 'input_image' || blockType === 'image') return '[image]';
+      if (blockType) return '[' + String(blockType).replace(/_/g, ' ') + ']';
+      try { return JSON.stringify(item); } catch (_) { return String(item); }
+    };
+    if (Array.isArray(value)) {
+      return value.map(blockText).filter(Boolean).join('\n');
+    }
+    if (typeof value.text === 'string') return value.text;
+    const valueType = value.type || value.kind || '';
+    if (valueType === 'input_image' || valueType === 'image') return '[image]';
+    if (valueType) return '[' + String(valueType).replace(/_/g, ' ') + ']';
+    try { return JSON.stringify(value, null, 2); } catch (_) { return String(value); }
+  }
+
   // Strip a leading URL or absolute file path from a prompt, when followed by
   // more text. Drag-and-dropped screenshots / pasted links land at the start of
   // first_message and would otherwise dominate the auto-generated title.
@@ -11197,7 +11221,7 @@
     get() { return splitState.panes[splitState.activeIndex].currentSession; },
     set(v) { splitState.panes[splitState.activeIndex].currentSession = v; },
   });
-  const _normSend = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const _normSend = (s) => eventTextString(s).replace(/\s+/g, ' ').trim();
 
   // Render a TODO.md backlog card in the conv pane. No session exists yet —
   // just show the TODO text and the two spawn buttons so the user can start one.
@@ -12195,7 +12219,7 @@
         // Inline the result text under the most recent tool_call in the
         // current group. If we can't find one, drop the marker silently —
         // empty .event.tool_result rows are hidden by CSS anyway.
-        const text = (ev.text || '').trim();
+        const text = eventTextString(ev.text).trim();
         if (text && _currentToolGroup) {
           const calls = _currentToolGroup.querySelectorAll('.tool-call');
           const last = calls[calls.length - 1];
