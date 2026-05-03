@@ -1,0 +1,1 @@
+- Replaced the bold Codex row background in the conversation list with a small right-edge Codex marker.
