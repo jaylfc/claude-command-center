@@ -1378,10 +1378,21 @@
   .conv-item.active { background: var(--surface-2); border-left-color: var(--purple); }
   .conv-item .conv-title-row {
     display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .conv-item .conv-main-row,
+  .conv-item .conv-meta-row {
+    display: flex;
     align-items: center;
     gap: 6px;
-    flex-wrap: wrap;
     min-width: 0;
+  }
+  .conv-item .conv-main-row { width: 100%; }
+  .conv-item .conv-meta-row {
+    flex-wrap: wrap;
+    padding-left: 15px;
   }
   .conv-item .conv-live-slot {
     width: 9px;
@@ -1397,9 +1408,8 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     word-break: keep-all;
   }
-  /* Meta-inline — rel-time, size, branch — squeezed onto the title row
-     so each card stays one+one lines instead of three. Numeric data sits
-     muted next to the heading rather than hogging its own row. */
+  /* Row metadata lives below the title so the narrow sidebar doesn't
+     need table-like scan columns for size/status/branch chips. */
   .conv-item .conv-meta-inline {
     font-size: 11px; color: var(--text-muted);
     display: inline-flex; align-items: center; gap: 6px;
@@ -1464,8 +1474,8 @@
      selector targets `.compact-rows` directly so the rule fires whether
      the parent is `.log-list`, `.conv-list`, or any other wrapper. */
   .compact-rows .conv-item {
-    padding: 3px 14px;
-    margin-bottom: 1px;
+    padding: 8px 10px;
+    margin-bottom: 3px;
   }
   .compact-rows .conv-item .conv-title {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1474,8 +1484,7 @@
   }
   .compact-rows .conv-item .conv-last { display: none; }
   .compact-rows .conv-item .conv-title-row {
-    flex-wrap: nowrap;
-    align-items: center;
+    gap: 4px;
   }
   .conv-item .conv-title.untitled {
     font-weight: 500; color: var(--text-muted); font-style: italic;
@@ -2950,6 +2959,7 @@
   .conv-folder-chip {
     --chip-hue: 0;
     flex-shrink: 0;
+    margin-left: auto;
     padding: 1px 7px;
     border-radius: 9px;
     font-size: 10px;
@@ -2975,6 +2985,7 @@
   .conv-folder-group-header {
     --chip-hue: 0;
     display: flex; align-items: center; gap: 8px;
+    justify-content: flex-end;
     padding: 8px 12px 4px;
     font-size: 11px;
     color: var(--text-muted);
@@ -3000,6 +3011,7 @@
     padding-top: 6px;
   }
   .conv-folder-group-count {
+    flex-shrink: 0;
     color: var(--text-muted);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
@@ -8920,22 +8932,26 @@
       return '<div class="conv-item' + active + (isCodexRow ? ' is-codex' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
-          + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
-          + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
-          + folderChipHtml
-          + pinnedHtml
-          + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
-          + liveToolHtml
-          + '<span class="conv-meta-inline">'
-          +   '<span>' + formatSize(c.size) + '</span>'
-          +   (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
-          + '</span>'
-          + signals
-          + branch
-          + mergeBtn
-          + startBtn
-          + archiveBtn
-          + engineIcon
+          + '<div class="conv-main-row">'
+            + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
+            + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
+            + pinnedHtml
+            + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
+            + engineIcon
+            + folderChipHtml
+          + '</div>'
+          + '<div class="conv-meta-row">'
+            + liveToolHtml
+            + '<span class="conv-meta-inline">'
+            +   '<span>' + formatSize(c.size) + '</span>'
+            +   (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
+            + '</span>'
+            + signals
+            + branch
+            + mergeBtn
+            + startBtn
+            + archiveBtn
+          + '</div>'
         + '</div>'
         + ask
       + '</div>';

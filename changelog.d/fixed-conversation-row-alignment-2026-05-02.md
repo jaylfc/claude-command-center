@@ -1,1 +1,1 @@
-- Reverted the conversation list's fixed scan columns back to a more compact wrapping row layout while preserving a tiny live-dot gutter and clipping long branch names.
+- Reverted the conversation list's fixed scan columns back to a more compact wrapping row layout while preserving a tiny live-dot gutter, clipping long branch names, and right-aligning repo chips.
