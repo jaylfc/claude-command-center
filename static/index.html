@@ -1217,7 +1217,6 @@
     vertical-align: middle;
     animation: ccc-live-dot-pulse 2.4s ease-out infinite;
   }
-  .conv-live-slot .conv-live-dot { margin-right: 0; }
   @keyframes ccc-live-dot-pulse {
     0%   { box-shadow: 0 0 0 0 rgba(88,166,255,0.55); }
     70%  { box-shadow: 0 0 0 6px rgba(88,166,255,0); }
@@ -1371,30 +1370,27 @@
   }
   .font-size-btn:hover { color: var(--text); background: var(--surface-2); }
   .conv-item {
-    padding: 12px 14px; border-radius: 6px; cursor: pointer;
-    margin-bottom: 6px; transition: background 0.15s;
+    padding: 10px 10px; border-radius: 6px; cursor: pointer;
+    margin-bottom: 4px; transition: background 0.15s;
     border-left: 3px solid transparent;
   }
   .conv-item:hover { background: var(--surface-2); }
   .conv-item.active { background: var(--surface-2); border-left-color: var(--purple); }
   .conv-item .conv-title-row {
-    display: grid;
-    grid-template-columns: 14px 62px minmax(0, 1fr) 68px 92px max-content;
+    display: flex;
     align-items: center;
-    column-gap: 6px;
+    gap: 6px;
+    flex-wrap: wrap;
+    min-width: 0;
   }
   .conv-item .conv-live-slot {
-    width: 14px;
+    width: 9px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    flex: 0 0 9px;
   }
-  .conv-item .conv-title-cell {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
+  .conv-live-slot .conv-live-dot { margin-right: 0; }
   .conv-item .conv-title {
     font-size: 14px; font-weight: 400; color: var(--text);
     line-height: 1.3; flex: 1 1 auto; min-width: 0;
@@ -1407,7 +1403,7 @@
   .conv-item .conv-meta-inline {
     font-size: 11px; color: var(--text-muted);
     display: inline-flex; align-items: center; gap: 6px;
-    justify-content: flex-end;
+    flex: 0 0 auto;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -1415,10 +1411,11 @@
   .conv-item .conv-meta-inline .sep,
   .conv-item .conv-meta-inline .source-badge { display: none; }
   .conv-item .conv-meta-inline .sep { opacity: 0.4; }
-  /* Time-first column on the row — fixed-ish width so titles still
-     align across cards regardless of "5m ago" vs "23h ago". */
+  /* Time stays near the front, but the row flows instead of reserving
+     fixed scan columns in the narrow sidebar. */
   .conv-item .conv-rel {
     font-size: 11px; color: var(--text-muted);
+    flex: 0 0 auto;
     min-width: 0;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -1477,6 +1474,7 @@
   }
   .compact-rows .conv-item .conv-last { display: none; }
   .compact-rows .conv-item .conv-title-row {
+    flex-wrap: nowrap;
     align-items: center;
   }
   .conv-item .conv-title.untitled {
@@ -1551,9 +1549,10 @@
   }
   .conv-item .meta .sep { opacity: 0.4; }
   .conv-item .branch-badge {
-    display: block; font-size: 12px; padding: 2px 6px; border-radius: 3px;
+    display: inline-block; font-size: 12px; padding: 2px 6px; border-radius: 3px;
     background: rgba(188, 140, 255, 0.15); color: var(--purple);
-    max-width: 100%;
+    flex-shrink: 0;
+    max-width: 126px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1623,25 +1622,6 @@
     background: var(--green); animation: pulse 2s infinite;
     display: inline-block; flex-shrink: 0;
   }
-  .conv-item .conv-signals {
-    display: none;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-    overflow: hidden;
-  }
-  .conv-item .conv-branch-cell {
-    display: block;
-    min-width: 0;
-    overflow: hidden;
-  }
-  .conv-item .conv-row-actions {
-    display: inline-flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 4px;
-    min-width: 24px;
-  }
   .conv-engine-icon {
     display: inline-flex;
     align-items: center;
@@ -1662,27 +1642,10 @@
   }
   .conv-signal {
     font-size: 12px; padding: 2px 7px; border-radius: 3px;
-    font-weight: 600; white-space: nowrap; flex-shrink: 0;
-  }
-  .conv-item .conv-signals .conv-signal {
-    flex: 0 1 auto;
-    min-width: 0;
+    font-weight: 600; white-space: nowrap; flex: 0 0 auto;
+    max-width: 126px;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-  @container sidebar (min-width: 520px) {
-    .conv-item .conv-title-row {
-      grid-template-columns: 14px 70px minmax(0, 1fr) 78px 112px 96px max-content;
-      column-gap: 8px;
-    }
-    .conv-item .conv-signals { display: inline-flex; }
-  }
-  @container sidebar (min-width: 680px) {
-    .conv-item .conv-title-row {
-      grid-template-columns: 14px 70px minmax(0, 1fr) 132px 126px 130px max-content;
-    }
-    .conv-item .conv-meta-inline .sep,
-    .conv-item .conv-meta-inline .source-badge { display: inline-block; }
   }
   .conv-signal.stage { background: rgba(188,140,255,0.15); color: var(--purple); }
   .conv-signal.committed { background: rgba(63,185,80,0.15); color: var(--green); }
@@ -8959,19 +8922,20 @@
         + '<div class="conv-title-row">'
           + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
           + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
-          + '<span class="conv-title-cell">'
-          +   folderChipHtml
-          +   pinnedHtml
-          +   '<span class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</span>'
-          +   liveToolHtml
-          + '</span>'
+          + folderChipHtml
+          + pinnedHtml
+          + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
+          + liveToolHtml
           + '<span class="conv-meta-inline">'
           +   '<span>' + formatSize(c.size) + '</span>'
           +   (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
           + '</span>'
-          + '<span class="conv-signals">' + signals + '</span>'
-          + '<span class="conv-branch-cell">' + branch + '</span>'
-          + '<span class="conv-row-actions">' + mergeBtn + startBtn + archiveBtn + engineIcon + '</span>'
+          + signals
+          + branch
+          + mergeBtn
+          + startBtn
+          + archiveBtn
+          + engineIcon
         + '</div>'
         + ask
       + '</div>';

@@ -1,1 +1,1 @@
-- Aligned conversation list rows into fixed scan columns, reserved live-dot space, clipped long worktree names, and added project separators.
+- Reverted the conversation list's fixed scan columns back to a more compact wrapping row layout while preserving a tiny live-dot gutter and clipping long branch names.
