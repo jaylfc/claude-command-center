@@ -1379,6 +1379,29 @@
   }
   .conv-item:hover { background: var(--surface-2); }
   .conv-item.active { background: var(--surface-2); border-left-color: var(--purple); }
+  .conv-item.is-history-match { border-left-color: rgba(120, 168, 255, 0.5); }
+  .conv-history-badge {
+    display: inline-block; margin-left: 6px; padding: 1px 5px;
+    font-size: 9px; font-weight: 500; line-height: 1.4;
+    color: rgba(120, 168, 255, 0.95);
+    background: rgba(120, 168, 255, 0.12);
+    border: 1px solid rgba(120, 168, 255, 0.35);
+    border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em;
+    vertical-align: middle;
+  }
+  .conv-history-snippet {
+    margin: 2px 0 4px 14px; padding: 4px 8px;
+    font-size: 11px; line-height: 1.4;
+    color: var(--muted); background: rgba(255,255,255,0.025);
+    border-left: 2px solid rgba(120, 168, 255, 0.25);
+    border-radius: 0 4px 4px 0;
+    white-space: pre-wrap; word-break: break-word;
+    overflow: hidden; max-height: 3.5em;
+  }
+  .conv-history-snippet mark {
+    background: rgba(255, 213, 100, 0.3); color: var(--text);
+    padding: 0 2px; border-radius: 2px;
+  }
   .conv-item .conv-title-row {
     display: flex;
     min-width: 0;
@@ -9164,7 +9187,20 @@
         ? '<button class="conv-repo-pin" data-role="unpin-repo" title="Pinned to this repo. Click to reset to the session’s real repo.">&#128204;</button>'
         : '';
 
-      return '<div class="conv-item' + active + (isCodexRow ? ' is-codex' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '">'
+      // History-search match indicators. `_historySnippet` (with HTML <mark>
+      // already embedded) is set when this session was matched by the
+      // claude-index FTS5 backend in addition to / instead of the local
+      // session-list filter. Badge renders as a sibling of `.conv-title`
+      // so the rename flow that reads the title's textContent doesn't
+      // scoop the badge text into the edit box.
+      const historyBadgeHtml = c._historyMatch
+        ? '<span class="conv-history-badge" title="Matched in conversation history (claude-index)">history</span>'
+        : '';
+      const historySnippetHtml = c._historySnippet
+        ? '<div class="conv-history-snippet">' + c._historySnippet + '</div>'
+        : '';
+
+      return '<div class="conv-item' + active + (isCodexRow ? ' is-codex' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
@@ -9172,6 +9208,7 @@
             + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
             + folderChipHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
+            + historyBadgeHtml
             + pinnedHtml
             + '<span class="conv-row-meta">'
             +   liveToolHtml
@@ -9184,6 +9221,7 @@
           + '</div>'
         + '</div>'
         + ask
+        + historySnippetHtml
       + '</div>';
     };
     // Active list keeps the date-gap separators so morning/evening
@@ -13002,12 +13040,153 @@
         || (c.branch || '').toLowerCase().includes(q)
         || (c.source || '').toLowerCase().includes(q);
     });
-    return applyConvSort(filtered);
+    const sorted = applyConvSort(filtered);
+    return _decorateWithHistoryMatches(sorted, q);
+  }
+
+  // ── History-search augmentation ──────────────────────────────────────
+  // The session-list filter above only sees sessions already loaded into
+  // conversationsData. The local claude-index FTS5 store covers every
+  // conversation on this Mac, including ones not currently loaded. We
+  // keep the two paths independent: the existing filter is unchanged,
+  // and history matches are OR-unioned in via decorations + synthetic
+  // rows below. If the index is missing or the request fails, the local
+  // filter still works as today (zero degradation).
+  //
+  // _historyState.map: session_id → { snippet, ts, cwd, type }
+  // _historyState.query: the query the map was built for; stale queries
+  //                       are ignored to avoid showing decorations from a
+  //                       previous keystroke after the user has typed more.
+  const _historyState = { query: '', map: new Map(), broaden: false };
+  let _historyFetchSeq = 0;
+  let _historyFetchTimer = null;
+
+  // Strip <mark> tags so we can use snippet text as a synthetic title
+  // without leaking HTML through escapeHtml later.
+  function _stripHistoryHtml(s) {
+    return (s || '').replace(/<mark>/g, '').replace(/<\/mark>/g, '').replace(/…/g, '');
+  }
+
+  function _decorateWithHistoryMatches(localSorted, qLower) {
+    // Empty query or stale state → strip any leftover decorations and bail.
+    if (!qLower || _historyState.query !== qLower) {
+      for (const c of localSorted) {
+        if (c._historyMatch) {
+          c._historyMatch = false;
+          c._historySnippet = '';
+        }
+      }
+      return localSorted;
+    }
+    const map = _historyState.map;
+    if (!map.size) return localSorted;
+    // Decorate locally-known sessions that also matched in history.
+    const seen = new Set();
+    for (const c of localSorted) {
+      const sid = c.session_id || c.id;
+      if (sid && map.has(sid)) {
+        const hit = map.get(sid);
+        c._historyMatch = true;
+        c._historySnippet = hit.snippet;
+        seen.add(sid);
+      } else if (c._historyMatch) {
+        // Was decorated for a previous query; clear.
+        c._historyMatch = false;
+        c._historySnippet = '';
+      }
+    }
+    // Append synthetic rows for sessions that the local filter doesn't
+    // know about. Minimal fields: enough for the row renderer to fall
+    // back gracefully. Click handler opens by data-session-id, which
+    // CCC's session-loader knows how to resolve.
+    const synthetic = [];
+    for (const [sid, hit] of map.entries()) {
+      if (seen.has(sid)) continue;
+      const titleSrc = _stripHistoryHtml(hit.snippet).trim();
+      synthetic.push({
+        id: sid,
+        session_id: sid,
+        display_name: titleSrc.slice(0, 80) || ('Session ' + sid.slice(0, 8)),
+        first_message: '',
+        last_prompt: '',
+        branch: '',
+        source: 'history',
+        cwd: hit.cwd || '',
+        session_cwd: hit.cwd || '',
+        modified: (hit.ts || 0) * 1000,
+        size: 0,
+        archived: false,
+        _historyMatch: true,
+        _historySnippet: hit.snippet,
+        _historyOnly: true,
+      });
+    }
+    // History-only rows trail the local matches. Within themselves they
+    // keep history-search BM25 order (already sorted by score in the
+    // server response, so insertion order suffices).
+    return localSorted.concat(synthetic);
+  }
+
+  function _fetchHistoryAugment(query) {
+    const q = (query || '').trim();
+    const qLower = q.toLowerCase();
+    const seq = ++_historyFetchSeq;
+    if (!q) {
+      _historyState.query = '';
+      _historyState.map = new Map();
+      return Promise.resolve();
+    }
+    // Default scope = current repo, mirroring the rest of the list view.
+    // The "Broaden outside of repo" toggle (when wired) will flip this.
+    const params = new URLSearchParams({ q, limit: '50', since: '90d' });
+    if (!_historyState.broaden) {
+      const cwd = (window.repoListState && repoListState.current && repoListState.current.cwd) || '';
+      if (cwd) params.set('cwd', cwd);
+    }
+    return fetch('/api/search-history?' + params.toString())
+      .then(r => r.ok ? r.json() : { results: [] })
+      .catch(() => ({ results: [] }))
+      .then(data => {
+        // Drop stale responses — newer keystroke already in flight.
+        if (seq !== _historyFetchSeq) return;
+        const results = (data && data.results) || [];
+        const bySession = new Map();
+        for (const r of results) {
+          const sid = r.session_id;
+          if (!sid) continue;
+          // First hit per session wins (FTS5 returns BM25-sorted, so the
+          // best snippet is naturally first).
+          if (!bySession.has(sid)) {
+            bySession.set(sid, {
+              snippet: r.snippet || '',
+              ts: r.ts_unix || 0,
+              cwd: r.cwd || '',
+              type: r.type || '',
+            });
+          }
+        }
+        _historyState.query = qLower;
+        _historyState.map = bySession;
+      });
   }
 
   // Conversation search filter
   $convSearch.addEventListener('input', () => {
+    // Re-render immediately with the local filter — instant response,
+    // no waiting on the network.
     renderSidebar(filterConversations($convSearch.value));
+    // Debounced history fetch; on completion, re-render with augmentation.
+    if (_historyFetchTimer) clearTimeout(_historyFetchTimer);
+    const q = $convSearch.value;
+    _historyFetchTimer = setTimeout(() => {
+      _fetchHistoryAugment(q).then(() => {
+        // Only re-render if the input still holds this query — user may
+        // have already typed more, in which case a newer fetch is queued.
+        if ($convSearch.value === q) {
+          renderSidebar(filterConversations($convSearch.value));
+        }
+      });
+    }, 180);
   });
 
   // ── Issues dashboard ──
@@ -13813,13 +13992,30 @@
     const byFolder = archiveFolderFilter === ARCHIVE_FOLDER_ALL
       ? archiveRows
       : archiveRows.filter(c => _archiveFolderValue(c) === archiveFolderFilter);
-    const rows = q ? byFolder.filter(c =>
+    let rows = q ? byFolder.filter(c =>
       // session_id + id let users paste a session UUID into the search box
       // and find the conversation directly — useful when CCC tooling, logs
       // or external scripts surface a UUID without a title.
       ((c.display_name || '') + ' ' + (c.first_message || '') + ' ' + (c.folder_label || '') + ' ' + (c.git_branch || '') + ' ' + (c.branch || '') + ' ' + (c.session_id || '') + ' ' + (c.id || ''))
         .toLowerCase().includes(q)
     ) : byFolder;
+
+    // OR-union with history-search results. The local substring filter
+    // above only sees title/branch/folder text; the indexer covers full
+    // message content. If a session in the archive matched the indexer
+    // for this same query, include it here even if the substring filter
+    // rejected it. Decorations (badge + snippet) are applied below in the
+    // post-shape pass. Synthetic rows for sessions outside archiveRows
+    // are handled in non-archive list mode only for now.
+    if (q && _historyState.query === q && _historyState.map.size) {
+      const seen = new Set(rows.map(c => c.session_id || c.id));
+      const extra = [];
+      for (const c of byFolder) {
+        const sid = c.session_id || c.id;
+        if (!seen.has(sid) && _historyState.map.has(sid)) extra.push(c);
+      }
+      if (extra.length) rows = rows.concat(extra);
+    }
 
     if (!archiveLoaded && !archiveRows.length) {
       $list.innerHTML = '<div class="archive-empty-state">Loading archive&hellip;</div>';
@@ -13953,6 +14149,21 @@
         pinned_repo: !!c.pinned_repo,
       };
     });
+
+    // History-augmentation: badge + snippet for archive entries that the
+    // indexer matched for this same query. The conv-item template reads
+    // c._historyMatch / c._historySnippet. Skipped when state is stale
+    // (debounced fetch hasn't completed for this keystroke yet).
+    if (q && _historyState.query === q && _historyState.map.size) {
+      for (const s of shaped) {
+        const sid = s.session_id || s.id;
+        if (sid && _historyState.map.has(sid)) {
+          const hit = _historyState.map.get(sid);
+          s._historyMatch = true;
+          s._historySnippet = hit.snippet;
+        }
+      }
+    }
 
     // Make sure the list is visible (kanban is hidden in setArchiveMode).
     const $kanban = document.getElementById('kanbanBoard');
