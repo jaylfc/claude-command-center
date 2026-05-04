@@ -2167,7 +2167,8 @@ SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 5
+_CONV_META_SCHEMA_VERSION = 6
+_CONV_META_COMPAT_SCHEMA_VERSIONS = {5, 6}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -2189,7 +2190,7 @@ def _load_conv_meta_cache():
         return
     if not isinstance(data, dict):
         return
-    if data.get("schema_version") != _CONV_META_SCHEMA_VERSION:
+    if data.get("schema_version") not in _CONV_META_COMPAT_SCHEMA_VERSIONS:
         return
     entries = data.get("entries")
     if not isinstance(entries, dict):
@@ -2411,6 +2412,7 @@ def _extract_tail_meta(path):
         "pending_tool": None,     # tool awaiting approval (last assistant had tool_use, no result yet)
         "pending_file": None,     # file path from pending tool
         "last_assistant_text": None,  # last text block from an assistant message (the "outcome")
+        "model": None,
         # Issue number detected from Bash/commit content — covers sessions where the
         # issue wasn't in the spawn prompt (e.g. Claude ran `gh issue create` mid-session).
         "tail_issue_number": None,
@@ -2516,15 +2518,21 @@ def _extract_tail_meta(path):
                                 )
                 # Session signals from tool calls
                 elif t == "assistant":
+                    msg = _safe_parse_message(ev.get("message", {}))
+                    if msg.get("model"):
+                        meta["model"] = msg.get("model")
+                    content = msg.get("content", [])
+                    if not isinstance(content, list):
+                        content = []
                     last_tool_name = None
                     last_tool_file = None
                     # Capture last text block from this assistant turn as the "outcome"
-                    for block in ev.get("message", {}).get("content", []):
+                    for block in content:
                         if block.get("type") == "text":
                             txt = (block.get("text") or "").strip()
                             if txt:
                                 meta["last_assistant_text"] = txt
-                    for block in ev.get("message", {}).get("content", []):
+                    for block in content:
                         if block.get("type") != "tool_use":
                             continue
                         name = block.get("name", "")
@@ -5515,6 +5523,7 @@ def find_conversations(progress=None, include_old=True, live_sids=None):
             # pass. See find_all_conversations for the broader rationale.
             "pr_state": None,
             "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
+            "model": tail_meta.get("model"),
             "archived": sid in archived_set,
             "verified": sid in verified_set,
             # True when this row is showing here because the user pinned the
@@ -5887,6 +5896,12 @@ def find_all_sessions(progress=None, include_old=True):
         dm = desktop_meta.get(c.get("session_id"))
         if dm:
             c["desktop_app"] = True
+            if dm.get("model") and not c.get("model"):
+                c["model"] = dm["model"]
+            if dm.get("cwd") and not c.get("session_cwd"):
+                c["session_cwd"] = dm["cwd"]
+                c["session_cwd_exists"] = Path(dm["cwd"]).is_dir()
+                c["session_cwd_is_worktree"] = bool((Path(dm["cwd"]) / ".git").is_file())
             if dm.get("title") and not c.get("name_overridden"):
                 # Only replace auto-slug / CLI-generated names; never overwrite a user rename.
                 raw_name = (c.get("display_name") or "").strip()
@@ -10450,6 +10465,41 @@ def _rates_for_model(model):
     return list(_FALLBACK_RATES)
 
 
+def _diagnostic_context_tokens(diagnostics):
+    """Best-effort context-size hint from newer Claude Code diagnostics.
+
+    Some recent Claude transcripts omit the normal `message.usage` object
+    entirely but still record how many input tokens missed the prompt cache.
+    That value is not billable-usage data, but it is a useful lower-bound
+    context sample for the footer instead of rendering a blank/unknown row.
+    """
+    if not isinstance(diagnostics, dict):
+        return 0
+
+    candidates = []
+    miss = diagnostics.get("cache_miss_reason")
+    if isinstance(miss, dict):
+        candidates.append(miss.get("cache_missed_input_tokens"))
+
+    for key in (
+        "context_tokens",
+        "input_tokens",
+        "prompt_tokens",
+        "cache_missed_input_tokens",
+    ):
+        candidates.append(diagnostics.get(key))
+
+    best = 0
+    for value in candidates:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            best = max(best, value)
+        elif isinstance(value, str) and value.isdigit():
+            best = max(best, int(value))
+    return best
+
+
 def extract_session_usage(session_id):
     """Walk a session's JSONL transcript and return token-usage stats.
 
@@ -10479,8 +10529,9 @@ def extract_session_usage(session_id):
     }
     if _is_codex_session(session_id):
         return _extract_codex_usage(session_id)
+    desktop_meta = _load_desktop_app_metadata().get(session_id) or {}
     if not PROJECTS_ROOT.is_dir():
-        return empty
+        return {**empty, "model": desktop_meta.get("model") or ""}
     jsonl = None
     for pd in PROJECTS_ROOT.iterdir():
         if not pd.is_dir():
@@ -10490,7 +10541,7 @@ def extract_session_usage(session_id):
             jsonl = cand
             break
     if not jsonl:
-        return empty
+        return {**empty, "model": desktop_meta.get("model") or ""}
 
     latest = 0
     peak = 0
@@ -10498,7 +10549,9 @@ def extract_session_usage(session_id):
     total_cw = 0
     total_cr = 0
     total_out = 0
-    model = ""
+    model = desktop_meta.get("model") or ""
+    diagnostic_latest = 0
+    diagnostic_peak = 0
     try:
         with open(jsonl, "r") as f:
             for line in f:
@@ -10516,6 +10569,12 @@ def extract_session_usage(session_id):
                 msg = _safe_parse_message(ev.get("message", {}))
                 if msg.get("model"):
                     model = msg.get("model")
+                diag_window = _diagnostic_context_tokens(
+                    msg.get("diagnostics") or ev.get("diagnostics")
+                )
+                if diag_window:
+                    diagnostic_latest = diag_window
+                    diagnostic_peak = max(diagnostic_peak, diag_window)
                 u = msg.get("usage") or {}
                 if not isinstance(u, dict):
                     continue
@@ -10537,7 +10596,12 @@ def extract_session_usage(session_id):
                 if isinstance(tout, int):
                     total_out += tout
     except OSError:
-        return empty
+        return {**empty, "model": model}
+
+    if not latest and diagnostic_latest:
+        latest = diagnostic_latest
+    if not peak and diagnostic_peak:
+        peak = diagnostic_peak
 
     # Best-effort context limit. Claude Code's 1M-context variant uses a
     # `[1m]` suffix in some surfaces, but the JSONL strips it ("claude-
