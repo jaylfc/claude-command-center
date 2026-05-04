@@ -12,7 +12,7 @@ Usage:
     CCC_WATCH_REPO=~/dev/foo ./run.sh
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import ast
 import base64
@@ -10577,6 +10577,171 @@ def extract_session_usage(session_id):
 
 
 # ---------------------------------------------------------------------------
+# Conversation history search — read-only window onto the separate `claude-index`
+# tool. CCC never writes to ~/.claude-index/index.db; the FTS5 mirror there has
+# triggers that keep itself in sync, and an accidental write here would corrupt
+# them. We open with `mode=ro` so even a stray INSERT raises.
+# ---------------------------------------------------------------------------
+
+_HISTORY_INDEX_PATH = Path.home() / ".claude-index" / "index.db"
+_history_conn = None
+_history_conn_lock = threading.Lock()
+
+# What counts as "user composed an FTS5 query, leave it alone": quoted
+# phrases, explicit boolean keywords, parens, prefix-star. NOT '-', '+',
+# '^', ':' on their own — those routinely show up in identifiers /
+# filenames the user wants to search literally (e.g. `archive-filter-1d33`,
+# `feat/foo-bar`, `user@example.com`).
+_HISTORY_FTS_OPERATOR_RE = re.compile(r'["()*]|\b(?:AND|OR|NOT|NEAR)\b', re.IGNORECASE)
+_HISTORY_FTS_TOKEN_RE = re.compile(r"[\w']+", re.UNICODE)
+
+
+def _rewrite_history_query(q):
+    """Bare multi-word queries → OR-form so a single missing word doesn't
+    zero out FTS5's implicit-AND. Tokens are quoted so embedded punctuation
+    (e.g. '-' inside an identifier) can't be mis-parsed as an operator.
+
+    Mirrors rewrite_query() in claude-index — kept inline so CCC has no
+    runtime dependency on that package.
+    """
+    q = (q or "").strip()
+    if not q or _HISTORY_FTS_OPERATOR_RE.search(q):
+        return q
+    tokens = _HISTORY_FTS_TOKEN_RE.findall(q)
+    if not tokens:
+        return q
+    if len(tokens) == 1:
+        return tokens[0]
+    return " OR ".join(f'"{t}"' for t in tokens)
+
+
+def _history_since_threshold(since):
+    """Parse '7d', '24h', '30m', '2w' into a unix-timestamp threshold.
+    Returns None for empty / 'all' / unparseable input — caller treats
+    that as "no time filter".
+    """
+    if not since:
+        return None
+    s = since.strip().lower()
+    if s in ("all", "any", "0"):
+        return None
+    now = time.time()
+    try:
+        if s.endswith("d"):
+            return now - int(s[:-1]) * 86400
+        if s.endswith("h"):
+            return now - int(s[:-1]) * 3600
+        if s.endswith("m"):
+            return now - int(s[:-1]) * 60
+        if s.endswith("w"):
+            return now - int(s[:-1]) * 7 * 86400
+    except ValueError:
+        pass
+    return None
+
+
+def _open_history_index():
+    """Return a cached read-only sqlite3.Connection to the claude-index
+    store, or None if the index file doesn't exist yet (user never ran
+    the indexer).
+
+    `mode=ro` enforces read-only at the URI level so even a stray
+    INSERT here would raise instead of silently mutating the file.
+    `check_same_thread=False` is safe because http.server's threading
+    mixin runs handlers across worker threads, and FTS5 reads don't
+    require per-thread connections.
+    """
+    global _history_conn
+    if _history_conn is not None:
+        return _history_conn
+    with _history_conn_lock:
+        if _history_conn is not None:
+            return _history_conn
+        if not _HISTORY_INDEX_PATH.is_file():
+            return None
+        uri = f"file:{_HISTORY_INDEX_PATH}?mode=ro"
+        try:
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+        except sqlite3.OperationalError:
+            return None
+        conn.row_factory = sqlite3.Row
+        _history_conn = conn
+        return conn
+
+
+def search_conversation_history(query, limit=20, cwd_like=None, since=None):
+    """BM25-ranked FTS5 search over the indexed conversation history.
+
+    Returns a dict {results: [...]} on success, or
+    {error: str, results: []} when the index is missing or a query is
+    rejected by FTS5 (malformed operator usage, etc.).
+    """
+    conn = _open_history_index()
+    if conn is None:
+        return {
+            "error": (
+                "Conversation index not found at ~/.claude-index/index.db. "
+                "Install and run the claude-index tool to build it."
+            ),
+            "results": [],
+        }
+    fts_query = _rewrite_history_query(query)
+    if not fts_query:
+        return {"results": []}
+    where = ["messages_fts MATCH ?"]
+    params = [fts_query]
+    if cwd_like:
+        where.append("m.cwd LIKE ?")
+        params.append(f"%{cwd_like}%")
+    threshold = _history_since_threshold(since)
+    if threshold is not None:
+        where.append("m.ts_unix >= ?")
+        params.append(threshold)
+    try:
+        limit = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    sql = f"""
+        SELECT m.uuid, m.session_id, m.type, m.cwd, m.git_branch,
+               m.timestamp, m.ts_unix,
+               snippet(messages_fts, 0, '<mark>', '</mark>', '…', 12) AS snippet,
+               bm25(messages_fts) AS score
+        FROM messages_fts
+        JOIN messages m ON m.id = messages_fts.rowid
+        WHERE {' AND '.join(where)}
+        ORDER BY score
+        LIMIT ?
+    """
+    params.append(limit)
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as e:
+        # FTS5 rejects malformed queries (unbalanced quotes, dangling
+        # operators, etc.) with OperationalError. Surface as an empty
+        # result + error string so the UI can show "syntax error" rather
+        # than a 500.
+        return {"error": f"search failed: {e}", "results": []}
+    return {"results": [dict(r) for r in rows]}
+
+
+def get_history_message(uuid):
+    """Fetch a single message by uuid from the conversation index, or
+    None if not found. Used by the click-through panel."""
+    if not uuid:
+        return None
+    conn = _open_history_index()
+    if conn is None:
+        return None
+    row = conn.execute(
+        "SELECT uuid, session_id, type, role, cwd, project_dir, git_branch, "
+        "timestamp, ts_unix, model, source_file, source_line, content "
+        "FROM messages WHERE uuid = ?",
+        (uuid,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
 # Global usage stats — aggregated across every transcript under PROJECTS_ROOT.
 # Powers the /api/stats endpoint and the "Stats" overlay in the UI.
 #
@@ -12012,6 +12177,29 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(_run_healthcheck())
         elif path == "/api/version":
             self.send_json({"version": __version__})
+        elif path == "/api/search-history":
+            # Read-only window onto ~/.claude-index/index.db built by the
+            # separate claude-index tool. Returns BM25-ranked matches with
+            # <mark>-highlighted snippets. q empty → empty result.
+            qs = urllib.parse.parse_qs(parsed.query)
+            q = (qs.get("q", [""])[0] or "").strip()
+            if not q:
+                self.send_json({"results": []})
+            else:
+                cwd_like = (qs.get("cwd", [""])[0] or "").strip() or None
+                since = (qs.get("since", [""])[0] or "").strip() or None
+                limit_raw = (qs.get("limit", ["20"])[0] or "20").strip()
+                self.send_json(search_conversation_history(
+                    q, limit=limit_raw, cwd_like=cwd_like, since=since,
+                ))
+        elif path == "/api/history-message":
+            qs = urllib.parse.parse_qs(parsed.query)
+            uuid = (qs.get("uuid", [""])[0] or "").strip()
+            msg = get_history_message(uuid)
+            if msg is None:
+                self.send_json({"error": "not found"}, 404)
+            else:
+                self.send_json(msg)
         elif path == "/api/version/check":
             # Is the local install behind the latest GitHub release? Used by
             # the in-app "Update available" pill. Cached 6h in memory so we
