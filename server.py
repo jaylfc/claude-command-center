@@ -10689,6 +10689,35 @@ def _rewrite_history_query(q):
     return " OR ".join(f'"{t}"' for t in tokens)
 
 
+# Patterns that crowd out useful preview text in FTS5 snippets. The cleaner
+# below strips them before the snippet hits the UI.
+#  - `[tool_use:NAME]` markers introduced by the indexer for assistant tool calls
+#  - line-number prefixes from Read-tool / cat -n output: `1031\t...` and `1049- ...`
+#  - markdown-table separator rows (`| --- | --- |`) that dominate changelog hits
+_HISTORY_SNIPPET_TOOL_USE_RE = re.compile(r'\[tool_use:[^\]]+\]\s*')
+_HISTORY_SNIPPET_LINENUM_RE = re.compile(r'\b\d{1,6}(?:\t|-(?=\s))')
+_HISTORY_SNIPPET_TABLE_SEP_RE = re.compile(r'\|?\s*-{3,}(?:\s*\|\s*-{3,})+\s*\|?')
+_HISTORY_SNIPPET_WS_RE = re.compile(r'[ \t]{2,}')
+
+
+def _clean_history_snippet(snippet):
+    """Strip noise from an FTS5-returned snippet so the preview shows real text
+    instead of tool-call boilerplate or cat-n line numbers.
+
+    `<mark>` highlight tags survive — none of the patterns we strip can contain
+    them. If cleaning empties the snippet (rare: a result that was *only* noise),
+    return the original so the UI still has something to show.
+    """
+    if not snippet:
+        return snippet
+    s = _HISTORY_SNIPPET_TOOL_USE_RE.sub('', snippet)
+    s = _HISTORY_SNIPPET_LINENUM_RE.sub(' ', s)
+    s = _HISTORY_SNIPPET_TABLE_SEP_RE.sub(' ', s)
+    s = _HISTORY_SNIPPET_WS_RE.sub(' ', s)
+    s = s.strip()
+    return s if s else snippet
+
+
 def _history_since_threshold(since):
     """Parse '7d', '24h', '30m', '2w' into a unix-timestamp threshold.
     Returns None for empty / 'all' / unparseable input — caller treats
@@ -10795,7 +10824,11 @@ def search_conversation_history(query, limit=20, cwd_like=None, since=None):
         # result + error string so the UI can show "syntax error" rather
         # than a 500.
         return {"error": f"search failed: {e}", "results": []}
-    return {"results": [dict(r) for r in rows]}
+    results = [dict(r) for r in rows]
+    for r in results:
+        if r.get("snippet"):
+            r["snippet"] = _clean_history_snippet(r["snippet"])
+    return {"results": results}
 
 
 def get_history_message(uuid):
