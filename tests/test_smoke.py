@@ -236,6 +236,17 @@ class TestRepoContextHelpers(unittest.TestCase):
         sig = inspect.signature(server.spawn_session_codex)
         self.assertEqual(list(sig.parameters), ["prompt", "name", "cwd", "repo_path"])
 
+    def test_spawn_session_gemini_exists(self):
+        """`spawn_session_gemini` must exist alongside the other engines
+        and accept explicit cwd/repo context."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "spawn_session_gemini"))
+        import inspect
+        sig = inspect.signature(server.spawn_session_gemini)
+        self.assertEqual(list(sig.parameters), ["prompt", "name", "cwd", "repo_path", "worktree"])
+
     def test_record_spawn_to_registry_persists_engine(self):
         """The on-disk spawn registry must round-trip an `engine` field
         so a CCC restart can branch claude-vs-codex reattach logic."""
@@ -258,9 +269,9 @@ class TestRepoContextHelpers(unittest.TestCase):
             finally:
                 server.SPAWNED_PIDS_FILE = orig
 
-    def test_pid_is_engine_process_recognises_codex(self):
+    def test_pid_is_engine_process_recognises_codex_and_gemini(self):
         """`_pid_is_engine_process` must accept an `engine` arg and match
-        the right argv[0] basename for it (`claude` or `codex`)."""
+        the right argv[0] basename for it."""
         for mod in ("server", "morning", "morning_store"):
             sys.modules.pop(mod, None)
         server = importlib.import_module("server")
@@ -275,6 +286,8 @@ class TestRepoContextHelpers(unittest.TestCase):
                     r.stdout = "/usr/local/bin/claude -p --verbose\n"
                 elif pid == "22222":
                     r.stdout = "/Applications/Codex.app/Contents/Resources/codex exec --json\n"
+                elif pid == "33333":
+                    r.stdout = "/usr/local/bin/node /usr/local/bin/gemini --output-format stream-json\n"
             return r
 
         with mock.patch.object(server.subprocess, "run", side_effect=fake_run):
@@ -282,6 +295,106 @@ class TestRepoContextHelpers(unittest.TestCase):
             self.assertFalse(server._pid_is_engine_process(11111, "codex"))
             self.assertTrue(server._pid_is_engine_process(22222, "codex"))
             self.assertFalse(server._pid_is_engine_process(22222, "claude"))
+            self.assertTrue(server._pid_is_engine_process(33333, "gemini"))
+            self.assertFalse(server._pid_is_engine_process(33333, "codex"))
+
+    def test_gemini_chat_parsing_usage_and_row_signals(self):
+        """Gemini chat JSON should render as a first-class session row."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        chat = {
+            "sessionId": sid,
+            "startTime": "2026-05-04T01:00:00.000Z",
+            "lastUpdated": "2026-05-04T01:02:00.000Z",
+            "kind": "main",
+            "messages": [
+                {
+                    "id": "u1",
+                    "timestamp": "2026-05-04T01:00:00.000Z",
+                    "type": "user",
+                    "content": [{"text": "Create the probe file."}],
+                },
+                {
+                    "id": "g1",
+                    "timestamp": "2026-05-04T01:01:00.000Z",
+                    "type": "gemini",
+                    "content": "I created and committed the probe.",
+                    "model": "gemini-test-model",
+                    "tokens": {
+                        "input": 1200,
+                        "output": 30,
+                        "cached": 200,
+                        "thoughts": 5,
+                        "tool": 0,
+                        "total": 1235,
+                    },
+                    "toolCalls": [{
+                        "id": "run_shell_command_1",
+                        "name": "run_shell_command",
+                        "args": {
+                            "command": "printf 'ok\\n' > probe.txt && git add probe.txt && git commit -m \"probe: gemini\"",
+                            "description": "Create and commit probe file.",
+                        },
+                        "status": "success",
+                        "timestamp": "2026-05-04T01:01:10.000Z",
+                        "result": [{
+                            "functionResponse": {
+                                "response": {
+                                    "output": "Output: [feat/demo abc1234] probe: gemini\n 1 file changed, 1 insertion(+)"
+                                }
+                            }
+                        }],
+                    }],
+                },
+                {
+                    "id": "g2",
+                    "timestamp": "2026-05-04T01:02:00.000Z",
+                    "type": "gemini",
+                    "content": "Branch: feat/demo\nCommit: abc1234 probe: gemini\nWorktree: /tmp/example-worktree",
+                    "model": "gemini-test-model",
+                    "tokens": {
+                        "input": 1300,
+                        "output": 20,
+                        "cached": 250,
+                        "thoughts": 4,
+                        "tool": 0,
+                        "total": 1324,
+                    },
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            gemini_home = pathlib.Path(tmp) / ".gemini"
+            project = gemini_home / "tmp" / "example-project"
+            chats = project / "chats"
+            chats.mkdir(parents=True)
+            (project / ".project_root").write_text("/tmp/example-repo")
+            chat_path = chats / "session-2026-05-04T01-00-aaaaaaaa.json"
+            chat_path.write_text(json.dumps(chat))
+            orig_home = server.GEMINI_HOME
+            server.GEMINI_HOME = gemini_home
+            try:
+                self.assertTrue(server._is_gemini_session(sid))
+                parsed = server.parse_conversation(sid)
+                usage = server.extract_session_usage(sid)
+                rows = server.find_gemini_conversations(include_old=True, repo_only=False)
+            finally:
+                server.GEMINI_HOME = orig_home
+
+        self.assertGreaterEqual(len(parsed["events"]), 4)
+        self.assertEqual(usage["latest_input_tokens"], 1300)
+        self.assertEqual(usage["total_cache_read_tokens"], 450)
+        self.assertEqual(usage["model"], "gemini-test-model")
+        row = rows[0]
+        self.assertEqual(row["source"], "gemini")
+        self.assertTrue(row["has_edit"])
+        self.assertTrue(row["has_commit"])
+        self.assertEqual(row["effective_branch"], "feat/demo")
+        self.assertEqual(row["session_cwd"], "/tmp/example-worktree")
 
     def test_reattach_spawned_orphans_defaults_legacy_rows_to_claude(self):
         """A registry row written before the `engine` field existed
