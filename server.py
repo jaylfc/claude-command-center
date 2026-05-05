@@ -3723,6 +3723,43 @@ def find_live_codex_processes():
     return procs
 
 
+def find_live_gemini_processes():
+    """Return running Gemini CLI processes with pid, tty, cwd, terminal app, command."""
+    procs = []
+    try:
+        ps_out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,tty=,comm=,args="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return procs
+    for line in ps_out.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 3:
+            continue
+        pid_s, tty, comm = parts[:3]
+        args = parts[3] if len(parts) > 3 else ""
+        arg_parts = args.split()
+        basenames = {comm.rsplit("/", 1)[-1]}
+        basenames.update(p.rsplit("/", 1)[-1] for p in arg_parts[:4])
+        if "gemini" not in basenames:
+            continue
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        cwd = _proc_cwd(pid)
+        term_app, _term_pid = _proc_ancestor_terminal(pid)
+        procs.append({
+            "pid": pid,
+            "tty": tty if tty != "??" else None,
+            "cwd": cwd,
+            "terminal_app": term_app,
+            "command": args,
+        })
+    return procs
+
+
 def _load_session_registry():
     """Read ~/.claude/sessions/*.json and return {session_id: {pid, cwd, ...}}.
 
@@ -3825,6 +3862,37 @@ def session_live_status(session_id, session_cwd):
         result["live"] = True
         return result
 
+    if _is_gemini_session(session_id):
+        path = _resolve_gemini_chat_path(session_id)
+        if path:
+            try:
+                result["recently_written"] = (time.time() - path.stat().st_mtime) < 300
+            except OSError:
+                pass
+        if not session_cwd:
+            session_cwd = find_session_cwd(session_id)
+        matches = []
+        for p in find_live_gemini_processes():
+            cmd = p.get("command") or ""
+            if session_id in cmd or (session_cwd and p.get("cwd") == session_cwd):
+                matches.append(p)
+        result["match_count"] = len(matches)
+        if not matches:
+            return result
+        if len(matches) > 1:
+            exact = [p for p in matches if session_id in (p.get("command") or "")]
+            if len(exact) == 1:
+                matches = exact
+            else:
+                result["ambiguous"] = True
+                return result
+        match = matches[0]
+        result["pid"] = match["pid"]
+        result["tty"] = match.get("tty")
+        result["terminal_app"] = match.get("terminal_app")
+        result["live"] = True
+        return result
+
     # Recency check on the .jsonl file (for the "is actively being used" signal)
     jsonl_name = session_id + ".jsonl"
     recent = False
@@ -3907,7 +3975,13 @@ def _shell_quote(s):
 def _build_resume_command(session_id, cwd, cwd_exists):
     """Same logic as the frontend buildResumeCommand — keep them in sync."""
     is_codex = _is_codex_session(session_id)
-    resume_cmd = f"codex resume {session_id}" if is_codex else f"claude --resume {session_id}"
+    is_gemini = _is_gemini_session(session_id)
+    if is_codex:
+        resume_cmd = f"codex resume {session_id}"
+    elif is_gemini:
+        resume_cmd = f"gemini --resume {session_id}"
+    else:
+        resume_cmd = f"claude --resume {session_id}"
     if not cwd:
         return resume_cmd
     q_cwd = _shell_quote(cwd)
@@ -4585,6 +4659,12 @@ def find_session_cwd(session_id):
                 cwd = tail.get("cwd") or cwd
             except Exception:
                 pass
+        if cwd:
+            _session_cwd_cache[session_id] = cwd
+            return cwd
+    gemini_path = _resolve_gemini_chat_path(session_id)
+    if gemini_path:
+        cwd = _gemini_project_root_for_chat(gemini_path)
         if cwd:
             _session_cwd_cache[session_id] = cwd
             return cwd
@@ -6033,6 +6113,19 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
         if progress:
             progress("codex", state="error", detail=f"Codex thread scan failed: {exc}")
 
+    if progress:
+        progress("gemini", state="running", detail="Reading Gemini sessions.")
+    try:
+        conversations.extend(find_gemini_conversations(
+            repo_path=repo_path,
+            include_old=include_old,
+            repo_only=True,
+            progress=progress,
+        ))
+    except Exception as exc:
+        if progress:
+            progress("gemini", state="error", detail=f"Gemini session scan failed: {exc}")
+
     # Add pkood agents — and merge in their linked claude-session card, if any.
     # Pkood spawns a claude process in a tmux pty, which produces a regular
     # ~/.claude/projects/*/*.jsonl file. Without dedup the kanban would show
@@ -6163,7 +6256,7 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
         )
     desktop_meta = _load_desktop_app_metadata()
     for c in conversations:
-        if c.get("source") != "codex":
+        if c.get("source") not in ("codex", "gemini"):
             _add_sidecar_fields(c)
         # Desktop-app metadata decoration: use human-friendly title if present,
         # and flag the session as having been touched by the desktop app.
@@ -6290,6 +6383,8 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
 
 def parse_conversation(conversation_id, after_line=0, repo_path=None):
     """Parse a conversation JSONL file into structured events."""
+    if _is_gemini_session(conversation_id):
+        return _parse_gemini_conversation(conversation_id, after_line=after_line)
     filepath, parser = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
     events = []
     line_num = 0
@@ -6968,7 +7063,9 @@ def _codex_command_signals(cmd):
     )
     subcommands = {m.group(1) for m in git_subcmd.finditer(head)}
     edit_like = bool(re.search(
-        r"\b(apply_patch|tee|sed\s+-i|perl\s+-pi)\b|(?:^|[\s;&|])cat\s+>|write_text\s*\(",
+        r"\b(apply_patch|tee|sed\s+-i|perl\s+-pi)\b|"
+        r"(?:^|[\s;&|])cat\s+>|write_text\s*\(|"
+        r"(?:^|[\s;&|])(?:printf|echo)\b[^;\n]*>\s*\S+",
         cmd,
     ))
     return {
@@ -7765,6 +7862,931 @@ def _extract_codex_timeline(session_id):
     return {"events": events, "total_turns": turn}
 
 
+# ---------------------------------------------------------------------------
+# Gemini CLI integration
+# ---------------------------------------------------------------------------
+
+GEMINI_HOME = Path.home() / ".gemini"
+GEMINI_CONTEXT_LIMIT = 1_000_000
+
+
+def _resolve_gemini_bin():
+    """Locate a usable Gemini CLI binary.
+
+    Priority order mirrors Codex:
+      1. $CCC_GEMINI_BIN when set and executable.
+      2. `shutil.which("gemini")`.
+    """
+    env_bin = os.environ.get("CCC_GEMINI_BIN")
+    if env_bin:
+        if os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
+            return {"available": True, "bin": env_bin, "source": "env"}
+        return {
+            "available": False,
+            "bin": None,
+            "code": "gemini_unavailable",
+            "reason": f"CCC_GEMINI_BIN is set to {env_bin!r} but it isn't an executable file",
+        }
+    which_bin = shutil.which("gemini")
+    if which_bin:
+        return {"available": True, "bin": which_bin, "source": "path"}
+    return {
+        "available": False,
+        "bin": None,
+        "code": "gemini_unavailable",
+        "reason": "Gemini CLI not found. Install Gemini CLI or set CCC_GEMINI_BIN.",
+    }
+
+
+def _gemini_tmp_root():
+    return GEMINI_HOME / "tmp"
+
+
+def _gemini_chat_paths():
+    root = _gemini_tmp_root()
+    if not root.is_dir():
+        return []
+    paths = []
+    try:
+        for project_dir in root.iterdir():
+            chats = project_dir / "chats"
+            if not chats.is_dir():
+                continue
+            try:
+                paths.extend(p for p in chats.glob("session-*.json") if p.is_file())
+            except OSError:
+                continue
+    except OSError:
+        return []
+    try:
+        paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        paths.sort(key=lambda p: str(p), reverse=True)
+    return paths
+
+
+def _load_gemini_chat(path):
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _gemini_project_dir_for_chat(path):
+    try:
+        return Path(path).parent.parent
+    except (TypeError, ValueError):
+        return None
+
+
+def _gemini_project_root_for_chat(path):
+    project_dir = _gemini_project_dir_for_chat(path)
+    if not project_dir:
+        return ""
+    root_file = project_dir / ".project_root"
+    try:
+        return root_file.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _resolve_gemini_chat_path(session_id):
+    if not session_id:
+        return None
+    short = session_id.split("-", 1)[0]
+    paths = _gemini_chat_paths()
+    # Filename embeds the leading UUID segment; check likely matches first.
+    likely = [p for p in paths if short and short in p.name]
+    for p in likely + [p for p in paths if p not in likely]:
+        data = _load_gemini_chat(p)
+        if data and data.get("sessionId") == session_id:
+            return p
+    return None
+
+
+def _is_gemini_session(session_id):
+    return bool(_resolve_gemini_chat_path(session_id))
+
+
+def _iso_ts_epoch(ts):
+    if not ts:
+        return 0.0
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _gemini_message_text(msg):
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _gemini_tool_args(call):
+    args = call.get("args") if isinstance(call, dict) else {}
+    return args if isinstance(args, dict) else {}
+
+
+def _gemini_tool_command(call):
+    args = _gemini_tool_args(call)
+    cmd = args.get("command") or ""
+    return cmd if isinstance(cmd, str) else ""
+
+
+def _gemini_tool_name(call):
+    return (call.get("name") or call.get("displayName") or "tool").rsplit(".", 1)[-1]
+
+
+def _gemini_tool_detail(call):
+    args = _gemini_tool_args(call)
+    cmd = _gemini_tool_command(call)
+    return args.get("description") or cmd or call.get("description") or ""
+
+
+def _gemini_tool_output(call):
+    chunks = []
+    result = call.get("result") if isinstance(call, dict) else None
+    if isinstance(result, list):
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            response = (((item.get("functionResponse") or {}).get("response") or {}))
+            out = response.get("output") or response.get("error") or ""
+            if isinstance(out, str) and out:
+                chunks.append(out)
+    elif isinstance(result, str):
+        chunks.append(result)
+    return "\n".join(chunks)
+
+
+def _extract_gemini_session_id_from_log(log_path):
+    if not log_path:
+        return None
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "init" and ev.get("session_id"):
+                    return ev["session_id"]
+    except OSError:
+        return None
+    return None
+
+
+def _gemini_spawn_pid_by_session_id():
+    out = {}
+    for s in _spawned_sessions:
+        if s.get("engine") != "gemini":
+            continue
+        sid = s.get("resumed_sid") or _extract_gemini_session_id_from_log(s.get("log"))
+        if sid and sid not in out:
+            try:
+                alive = s["proc"].poll() is None
+            except Exception:
+                alive = False
+            out[sid] = {
+                "pid": s.get("pid"),
+                "alive": alive,
+                "log": s.get("log"),
+            }
+    return out
+
+
+def _extract_gemini_stream_tail_meta(log_path):
+    meta = {
+        "last_event_type": None,
+        "last_meaningful_ts": 0,
+        "pending_tool": None,
+        "pending_file": None,
+        "model": None,
+    }
+    pending = set()
+    if not log_path:
+        return meta
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts_epoch = _iso_ts_epoch(ev.get("timestamp"))
+                ev_type = ev.get("type")
+                if ev.get("model"):
+                    meta["model"] = ev.get("model") or meta["model"]
+                if ev_type == "message":
+                    role = ev.get("role")
+                    if role == "user":
+                        meta["last_event_type"] = "user"
+                    elif role == "assistant":
+                        meta["last_event_type"] = "assistant"
+                    if ts_epoch:
+                        meta["last_meaningful_ts"] = ts_epoch
+                elif ev_type == "tool_use":
+                    tool_id = ev.get("tool_id") or ""
+                    if tool_id:
+                        pending.add(tool_id)
+                    name = ev.get("tool_name") or "tool"
+                    params = ev.get("parameters") if isinstance(ev.get("parameters"), dict) else {}
+                    detail = params.get("description") or params.get("command") or ""
+                    meta["pending_tool"] = name.rsplit(".", 1)[-1]
+                    meta["pending_file"] = detail[:80] if isinstance(detail, str) else None
+                    meta["last_event_type"] = "assistant"
+                    if ts_epoch:
+                        meta["last_meaningful_ts"] = ts_epoch
+                elif ev_type == "tool_result":
+                    tool_id = ev.get("tool_id") or ""
+                    if tool_id in pending:
+                        pending.discard(tool_id)
+                    if not pending:
+                        meta["pending_tool"] = None
+                        meta["pending_file"] = None
+                    meta["last_event_type"] = "assistant"
+                    if ts_epoch:
+                        meta["last_meaningful_ts"] = ts_epoch
+                elif ev_type == "result":
+                    meta["last_event_type"] = "result"
+                    meta["pending_tool"] = None
+                    meta["pending_file"] = None
+                    if ts_epoch:
+                        meta["last_meaningful_ts"] = ts_epoch
+                    stats = ev.get("stats") if isinstance(ev.get("stats"), dict) else {}
+                    models = stats.get("models") if isinstance(stats.get("models"), dict) else {}
+                    if models:
+                        meta["model"] = next(reversed(models.keys()))
+    except OSError:
+        pass
+    return meta
+
+
+def _extract_gemini_tail_meta(path):
+    try:
+        mtime = Path(path).stat().st_mtime
+    except OSError:
+        return {}
+    cached = _conv_meta_cache.get(str(path))
+    if cached and cached.get("mtime") == mtime and cached.get("engine") == "gemini":
+        return cached
+    data = _load_gemini_chat(path)
+    if not data:
+        return {}
+    meta = {
+        "engine": "gemini",
+        "mtime": mtime,
+        "first_message": None,
+        "last_prompt": None,
+        "last_assistant_text": None,
+        "last_event_type": None,
+        "last_meaningful_ts": 0,
+        "pending_tool": None,
+        "pending_file": None,
+        "has_edit": False,
+        "has_commit": False,
+        "has_push": False,
+        "last_edit_pos": 0,
+        "last_commit_pos": 0,
+        "last_push_pos": 0,
+        "tail_pr_number": None,
+        "tail_pr_url": None,
+        "tail_branch": None,
+        "tail_worktree_path": None,
+        "cwd": _gemini_project_root_for_chat(path),
+        "model": None,
+    }
+    pr_url_re = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d{1,7})")
+    messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    for pos, msg in enumerate(messages, start=1):
+        if not isinstance(msg, dict):
+            continue
+        ts_epoch = _iso_ts_epoch(msg.get("timestamp"))
+        if ts_epoch:
+            meta["last_meaningful_ts"] = ts_epoch
+        mtype = msg.get("type")
+        if mtype == "user":
+            text = _gemini_message_text(msg).strip()
+            if text:
+                meta["first_message"] = meta["first_message"] or text
+                meta["last_prompt"] = text
+            meta["last_event_type"] = "user"
+            continue
+        if mtype != "gemini":
+            continue
+        text = _gemini_message_text(msg).strip()
+        if text:
+            meta["last_assistant_text"] = text
+            meta.update(_extract_codex_summary_signals(text, pr_url_re))
+        meta["model"] = msg.get("model") or meta["model"]
+        meta["last_event_type"] = "assistant"
+        for call in msg.get("toolCalls") or []:
+            if not isinstance(call, dict):
+                continue
+            name = _gemini_tool_name(call)
+            detail = _gemini_tool_detail(call)
+            meta["pending_tool"] = name
+            meta["pending_file"] = detail[:80] if isinstance(detail, str) else None
+            cmd = _gemini_tool_command(call)
+            if cmd:
+                signals = _codex_command_signals(cmd)
+                if signals["edit"]:
+                    meta["has_edit"] = True
+                    meta["last_edit_pos"] = pos
+                if signals["commit"]:
+                    meta["has_commit"] = True
+                    meta["last_commit_pos"] = pos
+                if signals["push"]:
+                    meta["has_push"] = True
+                    meta["last_push_pos"] = pos
+                output = _gemini_tool_output(call)
+                if signals["pr"] and output:
+                    mp = pr_url_re.search(output)
+                    if mp:
+                        meta["tail_pr_number"] = int(mp.group(2))
+                        meta["tail_pr_url"] = (
+                            "https://github.com/" + mp.group(1) + "/pull/" + mp.group(2)
+                        )
+            if call.get("status") in ("success", "cancelled", "error"):
+                meta["pending_tool"] = None
+                meta["pending_file"] = None
+    if not meta["last_meaningful_ts"]:
+        meta["last_meaningful_ts"] = _iso_ts_epoch(data.get("lastUpdated")) or mtime
+    with _conv_meta_cache_lock:
+        _conv_meta_cache[str(path)] = meta
+        global _conv_meta_cache_dirty
+        _conv_meta_cache_dirty = True
+    return meta
+
+
+def _gemini_activity_fields_from_tail(tail, live):
+    fields = {
+        "sidecar_status": None,
+        "sidecar_has_writes": False,
+        "sidecar_tool": None,
+        "sidecar_file": None,
+        "sidecar_ts": 0,
+        "sidecar_in_flight": False,
+    }
+    if not live or not tail:
+        return fields
+    ts = tail.get("last_meaningful_ts") or 0
+    pending_tool = tail.get("pending_tool")
+    if pending_tool:
+        fields.update({
+            "sidecar_status": "active",
+            "sidecar_tool": pending_tool,
+            "sidecar_file": tail.get("pending_file"),
+            "sidecar_ts": ts,
+            "sidecar_in_flight": True,
+        })
+        return fields
+    if tail.get("last_event_type") in ("user", "assistant"):
+        fields.update({
+            "sidecar_status": "active",
+            "sidecar_tool": "Thinking",
+            "sidecar_file": None,
+            "sidecar_ts": ts,
+            "sidecar_in_flight": True,
+        })
+    return fields
+
+
+def _git_branch_for_cwd(cwd):
+    if not cwd or not Path(cwd).is_dir():
+        return ""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return ""
+    if out.returncode != 0:
+        return ""
+    branch = (out.stdout or "").strip()
+    return "" if branch == "HEAD" else branch
+
+
+def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, progress=None, limit=None):
+    paths = _gemini_chat_paths()
+    if not paths:
+        return []
+    repo_path_obj = None
+    if repo_only:
+        repo_path = resolve_repo_path(repo_path)
+        repo_path_obj = Path(repo_path)
+    try:
+        repo_pins = _load_repo_pins()
+    except Exception:
+        repo_pins = {}
+    try:
+        name_overrides = _load_session_name_overrides()
+    except Exception:
+        name_overrides = {}
+    try:
+        archived_set = set(_load_archived_conversations())
+    except Exception:
+        archived_set = set()
+    try:
+        verified_set = set(_load_verified_conversations())
+    except Exception:
+        verified_set = set()
+    try:
+        last_interactions = _load_last_interactions()
+    except Exception:
+        last_interactions = {}
+
+    cutoff = _session_scan_cutoff_ts(include_old)
+    max_rows = _session_scan_file_limit(include_old)
+    spawn_by_sid = _gemini_spawn_pid_by_session_id()
+    git_top_cache = {}
+    out = []
+    scanned = 0
+    for path in paths:
+        if limit and scanned >= int(limit):
+            break
+        data = _load_gemini_chat(path)
+        if not data:
+            continue
+        sid = data.get("sessionId") or ""
+        if not sid:
+            continue
+        scanned += 1
+        tail = _extract_gemini_tail_meta(path) or {}
+        cwd = tail.get("cwd") or _gemini_project_root_for_chat(path)
+        pinned = repo_pins.get(sid)
+        pinned_repo = False
+        if repo_only:
+            if pinned and pinned != repo_path:
+                continue
+            if pinned == repo_path:
+                pinned_repo = True
+            elif not _codex_cwd_matches_repo(cwd, repo_path_obj, git_top_cache):
+                continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        modified = tail.get("last_meaningful_ts") or _iso_ts_epoch(data.get("lastUpdated")) or st.st_mtime
+        freshness = max(modified, last_interactions.get(sid) or 0)
+        if not include_old and sid not in spawn_by_sid and cutoff > 0 and freshness < cutoff:
+            continue
+        if not include_old and max_rows > 0 and len(out) >= max_rows:
+            continue
+        first_message = (tail.get("first_message") or "").strip()
+        display_name = (
+            name_overrides.get(sid)
+            or (first_message[:80] if first_message else None)
+            or "Gemini session"
+        )
+        tail_worktree_path = tail.get("tail_worktree_path") or ""
+        effective_cwd = tail_worktree_path or cwd
+        try:
+            cwd_exists = bool(effective_cwd and Path(effective_cwd).is_dir())
+        except OSError:
+            cwd_exists = False
+        folder_path = pinned or cwd or effective_cwd or ""
+        folder_label = Path(folder_path).name if folder_path else "Gemini"
+        spawn_info = spawn_by_sid.get(sid) or {}
+        spawn_pid = spawn_info.get("pid")
+        spawn_alive = bool(spawn_info.get("alive"))
+        activity_tail = tail
+        if spawn_alive and spawn_info.get("log"):
+            stream_tail = _extract_gemini_stream_tail_meta(spawn_info.get("log"))
+            if stream_tail:
+                activity_tail = {**tail, **{k: v for k, v in stream_tail.items() if v not in (None, "", 0)}}
+        gemini_activity = _gemini_activity_fields_from_tail(activity_tail, spawn_alive)
+        branch = tail.get("tail_branch") or _git_branch_for_cwd(effective_cwd)
+        out.append({
+            "id": sid,
+            "session_id": sid,
+            "source": "gemini",
+            "engine": "gemini",
+            "timestamp": "",
+            "branch": branch,
+            "git_branch": branch,
+            "first_message": first_message[:200],
+            "display_name": display_name,
+            "name_overridden": bool(name_overrides.get(sid)),
+            "last_prompt": (tail.get("last_prompt") or "")[:200],
+            "size": st.st_size,
+            "modified": modified,
+            "modified_human": time.strftime("%Y-%m-%d %H:%M", time.localtime(modified)),
+            "mtime": modified,
+            "jsonl_path": str(path),
+            "folder_label": folder_label,
+            "folder_path": folder_path,
+            "session_cwd": effective_cwd,
+            "session_cwd_exists": cwd_exists,
+            "session_cwd_is_worktree": bool(
+                tail_worktree_path or (effective_cwd and (Path(effective_cwd) / ".git").is_file())
+            ),
+            "worktree_dirty": (
+                _worktree_dirty_cached(effective_cwd, modified) if effective_cwd else False
+            ),
+            "effective_branch": tail.get("tail_branch") or None,
+            "effective_kind": "worktree" if tail_worktree_path else None,
+            "has_edit": tail.get("has_edit", False),
+            "has_commit": tail.get("has_commit", False),
+            "has_push": tail.get("has_push", False),
+            "last_edit_pos": tail.get("last_edit_pos", 0),
+            "last_commit_pos": tail.get("last_commit_pos", 0),
+            "last_push_pos": tail.get("last_push_pos", 0),
+            "last_event_type": activity_tail.get("last_event_type") or tail.get("last_event_type"),
+            "pending_tool": activity_tail.get("pending_tool") or tail.get("pending_tool"),
+            "pending_file": activity_tail.get("pending_file") or tail.get("pending_file"),
+            "last_assistant_text": tail.get("last_assistant_text"),
+            "tail_issue_number": None,
+            "tail_pr_number": tail.get("tail_pr_number"),
+            "tail_pr_url": tail.get("tail_pr_url"),
+            "pr_state": None,
+            "session_state": _parse_session_state(tail.get("last_assistant_text")),
+            "archived": sid in archived_set,
+            "verified": sid in verified_set,
+            "pinned_repo": pinned_repo,
+            "last_interacted": last_interactions.get(sid),
+            "is_live": spawn_alive,
+            "spawn_pid": spawn_pid,
+            **gemini_activity,
+            "needs_approval": False,
+            "needs_approval_message": "",
+            "model": tail.get("model") or "",
+            "reasoning_effort": "",
+        })
+    _prime_pr_states(c.get("tail_pr_url") for c in out)
+    for c in out:
+        if c.get("tail_pr_url"):
+            c["pr_state"] = _get_pr_state(c["tail_pr_url"])
+    out.sort(key=lambda x: x.get("last_interacted") or x.get("modified") or 0, reverse=True)
+    if progress:
+        progress(
+            "gemini",
+            state="done",
+            count=len(out),
+            total=scanned,
+            detail=f"{len(out)} Gemini session card(s) ready.",
+        )
+    return out
+
+
+def _gemini_token_usage_from_message(msg):
+    tokens = msg.get("tokens") if isinstance(msg, dict) else {}
+    if not isinstance(tokens, dict):
+        return None
+    input_tokens = _codex_int(tokens.get("input"))
+    cached = _codex_int(tokens.get("cached"))
+    output = _codex_int(tokens.get("output"))
+    thoughts = _codex_int(tokens.get("thoughts"))
+    tool = _codex_int(tokens.get("tool"))
+    total = _codex_int(tokens.get("total"))
+    if not any((input_tokens, cached, output, thoughts, tool, total)):
+        return None
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached,
+        "output_tokens": output,
+        "reasoning_output_tokens": thoughts,
+        "tool_tokens": tool,
+        "total_tokens": total,
+    }
+
+
+def _parse_gemini_conversation(session_id, after_line=0):
+    path = _resolve_gemini_chat_path(session_id)
+    data = _load_gemini_chat(path) if path else None
+    if not data:
+        return {"events": [], "last_line": 0}
+    events = []
+    line_num = 0
+    messages = data.get("messages") if isinstance(data.get("messages"), list) else []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        ts = msg.get("timestamp") or ""
+        mtype = msg.get("type")
+        if mtype == "user":
+            line_num += 1
+            if line_num > after_line:
+                text = _gemini_message_text(msg)
+                if text:
+                    events.append({"line": line_num, "ts": ts, "type": "user_text", "text": text, "images": []})
+            continue
+        if mtype != "gemini":
+            continue
+        text = _gemini_message_text(msg).strip()
+        if text:
+            line_num += 1
+            if line_num > after_line:
+                events.append({
+                    "line": line_num,
+                    "ts": ts,
+                    "type": "assistant",
+                    "message_id": msg.get("id") or f"gemini-{line_num}",
+                    "blocks": [{"kind": "text", "text": text}],
+                })
+        for call in msg.get("toolCalls") or []:
+            if not isinstance(call, dict):
+                continue
+            line_num += 1
+            if line_num > after_line:
+                detail = _gemini_tool_detail(call)
+                if isinstance(detail, str) and len(detail) > 200:
+                    detail = detail[:200] + "..."
+                events.append({
+                    "line": line_num,
+                    "ts": call.get("timestamp") or ts,
+                    "type": "assistant",
+                    "message_id": f"gemini-tool-{line_num}",
+                    "blocks": [{"kind": "tool_use", "name": _gemini_tool_name(call), "detail": detail or ""}],
+                })
+            output = _gemini_tool_output(call)
+            if output:
+                line_num += 1
+                if line_num > after_line:
+                    if len(output) > 800:
+                        output = output[:800] + "\n..."
+                    events.append({
+                        "line": line_num,
+                        "ts": call.get("timestamp") or ts,
+                        "type": "tool_result",
+                        "text": output,
+                        "tool_use_id": call.get("id", ""),
+                        "is_error": call.get("status") == "error",
+                    })
+        usage = _gemini_token_usage_from_message(msg)
+        if usage:
+            line_num += 1
+            if line_num > after_line:
+                events.append({
+                    "line": line_num,
+                    "ts": ts,
+                    "type": "result",
+                    "duration_ms": "?",
+                    "token_usage": usage,
+                })
+    return {"events": events, "last_line": line_num}
+
+
+def _extract_gemini_usage(session_id):
+    empty = {
+        "latest_input_tokens": 0,
+        "peak_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_input_tokens": 0,
+        "total_cache_creation_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "model": "",
+        "context_limit": GEMINI_CONTEXT_LIMIT,
+        "cost_usd": 0.0,
+        "cost_breakdown_usd": {"input": 0.0, "cache_creation": 0.0,
+                               "cache_read": 0.0, "output": 0.0},
+    }
+    path = _resolve_gemini_chat_path(session_id)
+    data = _load_gemini_chat(path) if path else None
+    if not data:
+        return empty
+    latest = 0
+    peak = 0
+    total_in = 0
+    total_cached = 0
+    total_out = 0
+    model = ""
+    for msg in data.get("messages") or []:
+        if not isinstance(msg, dict) or msg.get("type") != "gemini":
+            continue
+        if msg.get("model"):
+            model = msg.get("model")
+        usage = _gemini_token_usage_from_message(msg)
+        if not usage:
+            continue
+        window = usage["input_tokens"]
+        if window:
+            latest = window
+            peak = max(peak, window)
+        total_cached += usage["cached_input_tokens"]
+        total_in += max(usage["input_tokens"] - usage["cached_input_tokens"], 0)
+        total_out += usage["output_tokens"] + usage["reasoning_output_tokens"] + usage.get("tool_tokens", 0)
+    return {
+        **empty,
+        "latest_input_tokens": latest,
+        "peak_input_tokens": peak,
+        "total_output_tokens": total_out,
+        "total_input_tokens": total_in,
+        "total_cache_read_tokens": total_cached,
+        "model": model,
+    }
+
+
+def _extract_gemini_timeline(session_id):
+    path = _resolve_gemini_chat_path(session_id)
+    data = _load_gemini_chat(path) if path else None
+    if not data:
+        return {"events": [], "total_turns": 0}
+    events = []
+    turn = 0
+    for msg in data.get("messages") or []:
+        if not isinstance(msg, dict) or msg.get("type") != "gemini":
+            continue
+        turn += 1
+        ts = msg.get("timestamp") or ""
+        for call in msg.get("toolCalls") or []:
+            if not isinstance(call, dict):
+                continue
+            cmd = _gemini_tool_command(call)
+            if not cmd:
+                continue
+            kind = None
+            subject = ""
+            if _TIMELINE_PR_CREATE_RE.search(cmd):
+                kind = "pr"
+                m = _TIMELINE_PR_TITLE_RE.search(cmd)
+                if m:
+                    subject = m.group(1)
+            elif _TIMELINE_PUSH_RE.search(cmd):
+                kind = "push"
+            elif _TIMELINE_COMMIT_RE.search(cmd):
+                kind = "commit"
+                m = _TIMELINE_COMMIT_MSG_RE.search(cmd)
+                if m:
+                    subject = m.group(1)
+            if not kind:
+                continue
+            output = _gemini_tool_output(call)
+            entry = {
+                "kind": kind,
+                "turn": turn,
+                "ts": call.get("timestamp") or ts,
+                "subject": subject,
+                "success": call.get("status") == "success",
+            }
+            if kind == "commit":
+                m = _TIMELINE_COMMIT_RESULT_RE.search(output)
+                if m:
+                    entry["sha"] = m.group(1)
+                    if not entry.get("subject"):
+                        entry["subject"] = m.group(2).strip()[:200]
+            elif kind == "pr":
+                m = _TIMELINE_PR_NUMBER_FROM_URL_RE.search(output)
+                if m:
+                    entry["pr_number"] = int(m.group(1))
+            events.append(entry)
+    return {"events": events, "total_turns": turn}
+
+
+def resume_session_gemini(session_id, text):
+    """Resume a Gemini session with a one-shot headless prompt."""
+    resolved = _resolve_gemini_bin()
+    if not resolved["available"]:
+        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    for s in _spawned_sessions:
+        if s.get("engine") == "gemini" and s.get("resumed_sid") == session_id:
+            try:
+                if s["proc"].poll() is None:
+                    return {
+                        "ok": False,
+                        "error": "Gemini is already running for this session; wait for it to finish before sending another prompt.",
+                        "pid": s.get("pid"),
+                        "via": "gemini-resume-busy",
+                    }
+            except Exception:
+                pass
+    cwd = find_session_cwd(session_id) or str(Path.cwd())
+    if not Path(cwd).is_dir():
+        cwd = str(Path.cwd())
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    log_filename = f"resume-gemini-{session_id[:8]}-{timestamp}.log"
+    log_dir = repo_log_dir(_git_toplevel_for_existing_dir(cwd) or cwd)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / log_filename
+    cmd = [resolved["bin"], "--approval-mode", os.environ.get("CCC_GEMINI_APPROVAL_MODE", "yolo"),
+           "--output-format", "stream-json", "--resume", session_id]
+    model = os.environ.get("CCC_GEMINI_MODEL")
+    if model:
+        cmd.extend(["--model", model])
+    cmd.extend(["-p", text])
+    log_fh = open(log_path, "w")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        return {"ok": False, "error": str(e), "via": "gemini-resume"}
+    entry = {
+        "pid": proc.pid,
+        "name": f"resume-gemini-{session_id[:8]}",
+        "log": str(log_path),
+        "prompt": text[:200],
+        "started": timestamp,
+        "proc": proc,
+        "log_fh": log_fh,
+        "resumed_sid": session_id,
+        "fifo": None,
+        "stdin_fd": None,
+        "engine": "gemini",
+    }
+    _spawned_sessions.append(entry)
+    _record_spawn_to_registry(
+        pid=proc.pid,
+        name=entry["name"],
+        log_path=log_path,
+        cwd=cwd,
+        spawned_at=timestamp,
+        command_summary=text[:200],
+        fifo=None,
+        engine="gemini",
+    )
+    return {"ok": True, "pid": proc.pid, "log": str(log_path), "resumed": True, "via": "gemini-resume"}
+
+
+def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=False):
+    """Spawn a headless Gemini CLI run and return tracking info."""
+    resolved = _resolve_gemini_bin()
+    if not resolved["available"]:
+        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    ctx = require_repo_context({"cwd": cwd, "repo_path": repo_path}, allow_session=False)
+    spawn_cwd = ctx["cwd"]
+    session_name = _slugify(name or prompt) or "unnamed"
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    log_filename = f"spawn-gemini-{session_name}-{timestamp}.log"
+    log_dir = repo_log_dir(ctx["repo_path"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / log_filename
+    cmd = [
+        resolved["bin"],
+        "--approval-mode", os.environ.get("CCC_GEMINI_APPROVAL_MODE", "yolo"),
+        "--output-format", "stream-json",
+    ]
+    model = os.environ.get("CCC_GEMINI_MODEL")
+    if model:
+        cmd.extend(["--model", model])
+    if worktree:
+        cmd.extend(["--worktree", session_name])
+    cmd.extend(["-p", prompt])
+    log_fh = open(log_path, "w")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd=spawn_cwd,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        return {"ok": False, "error": str(e), "via": "gemini-spawn"}
+    entry = {
+        "pid": proc.pid,
+        "name": session_name,
+        "log": str(log_path),
+        "prompt": prompt[:200],
+        "started": timestamp,
+        "proc": proc,
+        "log_fh": log_fh,
+        "fifo": None,
+        "stdin_fd": None,
+        "engine": "gemini",
+    }
+    _spawned_sessions.append(entry)
+    _record_spawn_to_registry(
+        pid=proc.pid,
+        name=session_name,
+        log_path=log_path,
+        cwd=spawn_cwd,
+        spawned_at=timestamp,
+        command_summary=prompt[:200],
+        fifo=None,
+        engine="gemini",
+    )
+    return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
+
+
 def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
     """Spawn a headless Claude Code session and return tracking info.
 
@@ -8132,6 +9154,8 @@ def _find_live_spawn_entry_for_session(session_id):
         log = s.get("log")
         if s.get("engine") == "codex" and _extract_codex_thread_id_from_log(log) == session_id:
             return s
+        if s.get("engine") == "gemini" and _extract_gemini_session_id_from_log(log) == session_id:
+            return s
         if log and session_id in _log_session_ids(log):
             return s
     return None
@@ -8292,11 +9316,12 @@ def _record_spawn_to_registry(pid, name, log_path, cwd, spawned_at, command_summ
     """Append a freshly-spawned session to the on-disk registry. The
     session_id is filled in lazily by the reattach sweep (it isn't known
     at fork time — Claude emits it in the first stream-json event, Codex
-    emits it in its `--json` event stream).
+    emits it in its `--json` event stream, Gemini emits it in its init
+    stream-json event).
     The fifo path is persisted so a fresh CCC instance can reopen the
     write side after a restart and continue injecting messages (Claude
-    only — Codex exec is one-shot).
-    `engine` ("claude" or "codex") tells the boot-time reattach sweep
+    only — Codex/Gemini headless runs are one-shot).
+    `engine` ("claude", "codex", or "gemini") tells the boot-time reattach sweep
     which ps-grep to use and which JSONL ingestion path to skip."""
     entries = _load_spawn_registry()
     entries.append({
@@ -8331,9 +9356,10 @@ def _pid_is_engine_process(pid, engine):
     (any python process whose argv mentions the engine name would otherwise
     pass).
 
-    `engine` is one of "claude" or "codex" — the basename we expect at
-    argv[0]."""
-    if engine not in ("claude", "codex"):
+    `engine` is one of "claude", "codex", or "gemini" — the basename we expect
+    at argv[0] (Gemini's npm wrapper may appear as a node process whose argv
+    includes the gemini script path)."""
+    if engine not in ("claude", "codex", "gemini"):
         return False
     try:
         out = subprocess.run(
@@ -8350,7 +9376,11 @@ def _pid_is_engine_process(pid, engine):
     parts = cmd.split()
     if not parts:
         return False
-    return parts[0].rsplit("/", 1)[-1] == engine
+    if parts[0].rsplit("/", 1)[-1] == engine:
+        return True
+    if engine == "gemini":
+        return any(p.rsplit("/", 1)[-1] == "gemini" for p in parts[1:4])
+    return False
 
 
 def _reattach_spawned_orphans():
@@ -8410,6 +9440,11 @@ def _reattach_spawned_orphans():
         elif engine == "codex" and not session_id and log_path:
             try:
                 session_id = _extract_codex_thread_id_from_log(log_path)
+            except Exception:
+                session_id = None
+        elif engine == "gemini" and not session_id and log_path:
+            try:
+                session_id = _extract_gemini_session_id_from_log(log_path)
             except Exception:
                 session_id = None
         # Looks legit — re-add to the in-memory map with a stub proc.
@@ -8498,6 +9533,8 @@ def _inject_text_into_session(session_id, text):
         return {"ok": False, "error": "missing session_id or text"}
     if _is_codex_session(session_id):
         return resume_session_codex(session_id, text)
+    if _is_gemini_session(session_id):
+        return resume_session_gemini(session_id, text)
     cwd = find_session_cwd(session_id)
     status = session_live_status(session_id, cwd)
     tty = status.get("tty")
@@ -9977,6 +11014,8 @@ def _resolve_spawn_log_for_session(session_id):
             matches = True
         elif s.get("engine") == "codex":
             matches = _extract_codex_thread_id_from_log(log) == session_id
+        elif s.get("engine") == "gemini":
+            matches = _extract_gemini_session_id_from_log(log) == session_id
         else:
             matches = session_id in _log_session_ids(log)
         if matches:
@@ -9998,6 +11037,8 @@ def _resolve_spawn_log_for_session(session_id):
             if not matches:
                 if entry.get("engine") == "codex":
                     matches = _extract_codex_thread_id_from_log(log) == session_id
+                elif entry.get("engine") == "gemini":
+                    matches = _extract_gemini_session_id_from_log(log) == session_id
                 else:
                     sids_in_log = _log_session_ids(log)
                     matches = session_id in sids_in_log
@@ -10043,6 +11084,35 @@ def _normalize_spawn_event(ev):
     if not isinstance(ev, dict):
         return None
     t = ev.get("type")
+    if t == "message" and ev.get("role") == "assistant":
+        text = ev.get("content") or ""
+        if not text:
+            return None
+        return {
+            "type": "assistant_block",
+            "message_id": "gemini-stream",
+            "blocks": [{"type": "text", "text": text}],
+        }
+    if t == "tool_use":
+        params = ev.get("parameters") if isinstance(ev.get("parameters"), dict) else {}
+        summary = params.get("description") or params.get("command") or ""
+        return {
+            "type": "assistant_block",
+            "message_id": ev.get("tool_id") or "gemini-tool",
+            "blocks": [{
+                "type": "tool_use",
+                "name": ev.get("tool_name") or "tool",
+                "id": ev.get("tool_id") or "",
+                "summary": str(summary)[:160] if summary else "",
+            }],
+        }
+    if t == "result" and ("status" in ev or "stats" in ev):
+        return {
+            "type": "result",
+            "subtype": ev.get("status", ""),
+            "duration_ms": (ev.get("stats") or {}).get("duration_ms") if isinstance(ev.get("stats"), dict) else None,
+            "num_turns": None,
+        }
     if t == "assistant":
         msg = ev.get("message") or {}
         content = msg.get("content") or []
@@ -10863,6 +11933,8 @@ def extract_session_timeline(session_id):
     """
     if _is_codex_session(session_id):
         return _extract_codex_timeline(session_id)
+    if _is_gemini_session(session_id):
+        return _extract_gemini_timeline(session_id)
     if not PROJECTS_ROOT.is_dir():
         return {"events": [], "total_turns": 0}
     jsonl = None
@@ -11073,6 +12145,8 @@ def extract_session_usage(session_id):
     }
     if _is_codex_session(session_id):
         return _extract_codex_usage(session_id)
+    if _is_gemini_session(session_id):
+        return _extract_gemini_usage(session_id)
     desktop_meta = _load_desktop_app_metadata().get(session_id) or {}
     if not PROJECTS_ROOT.is_dir():
         return {**empty, "model": desktop_meta.get("model") or ""}
@@ -12467,6 +13541,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             info = _resolve_codex_bin()
             info["model"] = os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
             self.send_json(info)
+        elif path == "/api/sessions/spawn-gemini/availability":
+            info = _resolve_gemini_bin()
+            info["model"] = os.environ.get("CCC_GEMINI_MODEL", "auto")
+            info["approval_mode"] = os.environ.get("CCC_GEMINI_APPROVAL_MODE", "yolo")
+            self.send_json(info)
         elif path == "/api/loading-status":
             self.send_json(_session_load_snapshot())
         elif path == "/api/sessions":
@@ -13676,6 +14755,62 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_json(e.as_payload(), e.status)
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/sessions/spawn-gemini":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            prompt = (payload.get("prompt") or "").strip()
+            name = (payload.get("name") or "").strip() or None
+            cwd_raw = payload.get("cwd")
+            cwd_input = cwd_raw.strip() if isinstance(cwd_raw, str) else ""
+            cwd_resolved = None
+            cwd_error = None
+            if cwd_input:
+                try:
+                    expanded = os.path.expanduser(cwd_input)
+                    candidate = Path(expanded).resolve()
+                except (OSError, RuntimeError) as e:
+                    cwd_error = f"could not resolve path ({e})"
+                else:
+                    home = Path.home().resolve()
+                    try:
+                        st = os.stat(candidate)
+                    except OSError as e:
+                        cwd_error = f"path does not exist ({e.strerror or e})"
+                    else:
+                        if not stat.S_ISDIR(st.st_mode):
+                            cwd_error = f"not a directory: {candidate}"
+                        else:
+                            try:
+                                candidate.relative_to(home)
+                            except ValueError:
+                                cwd_error = f"path is outside $HOME ({home}): {candidate}"
+                            else:
+                                cwd_resolved = candidate
+            if not prompt:
+                self.send_json({"ok": False, "error": "missing prompt"}, 400)
+            elif cwd_error:
+                self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
+            else:
+                try:
+                    result = spawn_session_gemini(
+                        prompt,
+                        name=name,
+                        cwd=str(cwd_resolved) if cwd_resolved else None,
+                        repo_path=payload.get("repo_path"),
+                        worktree=bool(payload.get("worktree")),
+                    )
+                    if result.get("code") == "gemini_unavailable":
+                        self.send_json(result, 503)
+                    else:
+                        self.send_json(result)
+                except RepoContextError as e:
+                    self.send_json(e.as_payload(), e.status)
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)}, 500)
         elif re.match(r"^/api/sessions/spawned/\d+/inject$", path):
             pid = int(path.split("/")[4])
             length = int(self.headers.get("Content-Length", "0"))
@@ -14823,6 +15958,31 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
 
     def _stream_conversation(self, conversation_id, after_line):
         """SSE endpoint for real-time conversation tailing."""
+        if _is_gemini_session(conversation_id):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            last_keepalive = time.time()
+            try:
+                while True:
+                    result = _parse_gemini_conversation(conversation_id, after_line=after_line)
+                    events = result.get("events") or []
+                    if events:
+                        after_line = result.get("last_line") or after_line
+                        payload = {"events": events, "last_line": after_line}
+                        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
+                        self.wfile.flush()
+                    now = time.time()
+                    if now - last_keepalive >= 5:
+                        self.wfile.write(b"event: keepalive\ndata: {}\n\n")
+                        self.wfile.flush()
+                        last_keepalive = now
+                    time.sleep(0.5)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
         filepath, parser = _resolve_conversation_reader(conversation_id)
         if not filepath.exists():
             self.send_json({"error": "Conversation not found"}, 404)

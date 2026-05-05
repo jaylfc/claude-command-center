@@ -1816,6 +1816,11 @@
     background: rgba(88, 166, 255, 0.10);
     border: 1px solid rgba(88, 166, 255, 0.42);
   }
+  .conv-engine-icon.gemini {
+    color: #7aa2ff;
+    background: rgba(122, 162, 255, 0.10);
+    border: 1px solid rgba(122, 162, 255, 0.42);
+  }
   .conv-signal {
     font-size: 10px; padding: 1px 5px; border-radius: 3px;
     font-weight: 600; white-space: nowrap; flex: 0 0 auto;
@@ -1850,6 +1855,7 @@
   .conv-signal.gh-link { background: rgba(139,148,158,0.12); color: var(--text-muted); font-weight: 600; }
   .conv-item .source-badge.pkood { background: rgba(210,153,34,0.2); color: var(--orange); }
   .conv-item .source-badge.codex { background: rgba(88,166,255,0.18); color: #79c0ff; }
+  .conv-item .source-badge.gemini { background: rgba(122,162,255,0.16); color: #9bb7ff; }
   .pkood-tail-output {
     white-space: pre-wrap; word-break: break-word; font-family: 'SF Mono',SFMono-Regular,Consolas,monospace;
     font-size: 13px; line-height: 1.5; padding: 16px 20px; color: var(--text);
@@ -4559,9 +4565,10 @@
                the Esc button (mutually exclusive — Esc only appears for live
                sessions, this only for `__new__`). updateInputBar() toggles
                visibility. -->
-          <select id="convInputEngineSelect" class="engine-select" title="Engine that spawns this new session — claude or codex" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+          <select id="convInputEngineSelect" class="engine-select" title="Engine that spawns this new session — claude, codex, or gemini" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
             <option value="claude">claude</option>
             <option value="codex">codex</option>
+            <option value="gemini">gemini</option>
           </select>
           <button class="esc-btn" id="convEscBtn" title="Send Esc to terminal — cancels in-flight response (or kills a headless spawn)">Esc</button>
           <button class="send-btn" id="convSendBtn" title="Send to terminal">&gt;</button>
@@ -4578,9 +4585,10 @@
         <input type="text" class="kpt-search" id="kptSearch" placeholder="Search sessions...">
         <button id="kptRefreshBtn" title="Refresh data" aria-label="Refresh data">&#8634;</button>
         <input type="text" class="kpt-new-session" id="kptNewSession" placeholder="New session prompt...">
-        <select id="kptToolbarEngineSelect" title="Engine that spawns the new session — claude or codex" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+        <select id="kptToolbarEngineSelect" title="Engine that spawns the new session — claude, codex, or gemini" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
           <option value="claude">claude</option>
           <option value="codex">codex</option>
+          <option value="gemini">gemini</option>
         </select>
         <button id="kptRunBtn" title="Run new session" aria-label="Run new session">Run</button>
         <button id="kptListViewBtn" title="Switch to list view" aria-label="Switch to list view">&#9783;</button>
@@ -4692,6 +4700,7 @@
           <select id="nsmEngineSelect" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px;">
             <option value="claude">claude</option>
             <option value="codex">codex</option>
+            <option value="gemini">gemini</option>
           </select>
         </label>
         <label class="nsm-pkood" title="Spawn the session in a fresh git worktree (`feat/<slug>` branch) so it can't accidentally commit to main."><input type="checkbox" id="nsmWorktree"> 🌿 worktree</label>
@@ -5242,13 +5251,17 @@
   }
 
   function buildResumeCommand(sid, cwd, cwdExists) {
-    if (!cwd) return 'claude --resume ' + sid;
+    const engine = currentSession && currentSession.source;
+    const resumeCmd = engine === 'codex'
+      ? 'codex resume ' + sid
+      : (engine === 'gemini' ? 'gemini --resume ' + sid : 'claude --resume ' + sid);
+    if (!cwd) return resumeCmd;
     // Derive worktree branch from a `.claude/worktrees/...` path:
     // e.g. /Users/.../.claude/worktrees/claude-fix/issue-88 -> branch "claude-fix/issue-88"
     const wtMatch = cwd.match(/\/\.claude\/worktrees\/(.+)$/);
     const quotedCwd = shellQuote(cwd);
     if (cwdExists) {
-      return 'cd ' + quotedCwd + ' && claude --resume ' + sid;
+      return 'cd ' + quotedCwd + ' && ' + resumeCmd;
     }
     // Directory missing — try to recreate the worktree first, then resume.
     if (wtMatch) {
@@ -5258,9 +5271,9 @@
       const quotedBranch = shellQuote(branch);
       return '(cd ' + quotedRepo + ' && git worktree add ' + quotedCwd + ' ' + quotedBranch +
              ' 2>/dev/null || git worktree add ' + quotedCwd + ' -b ' + quotedBranch + ' origin/main)' +
-             ' && cd ' + quotedCwd + ' && claude --resume ' + sid;
+             ' && cd ' + quotedCwd + ' && ' + resumeCmd;
     }
-    return 'cd ' + quotedCwd + ' && claude --resume ' + sid;
+    return 'cd ' + quotedCwd + ' && ' + resumeCmd;
   }
 
   function resumeButtonsForActiveTab() { return []; }
@@ -5287,14 +5300,15 @@
 
   function launchTargetsForCurrentSession() {
     const isCodex = currentSession.source === 'codex';
+    const isGemini = currentSession.source === 'gemini';
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentSession.id || '');
     return [
       { id: 'terminal', label: 'Terminal', hint: 'default', disabled: false },
       {
         id: 'desktop',
         label: 'Claude Desktop',
-        hint: (!isCodex && isUuid) ? 'app' : 'Claude only',
-        disabled: isCodex || !isUuid,
+        hint: (!isCodex && !isGemini && isUuid) ? 'app' : 'Claude only',
+        disabled: isCodex || isGemini || !isUuid,
       },
       {
         id: 'codex',
@@ -5402,7 +5416,8 @@
     const sid = currentSession.id;
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
-    if (!sid || isPkood || isCodex) {
+    const isGemini = currentSession.source === 'gemini';
+    if (!sid || isPkood || isCodex || isGemini) {
       $announceBtnConv.style.display = 'none';
       delete $announceBtnConv.dataset.sessionId;
       return;
@@ -5462,11 +5477,12 @@
     const sid = currentSession && currentSession.id;
     const isPkood = currentSession && currentSession.source === 'pkood';
     const isCodex = currentSession && currentSession.source === 'codex';
+    const isGemini = currentSession && currentSession.source === 'gemini';
     const repos = (typeof repoListState !== 'undefined' && repoListState.repos) || [];
     const currentCwd = (currentSession && currentSession.cwd) || '';
     let html = '';
     html += '<div class="com-section-label">Move to repo</div>';
-    if (!sid || isPkood || isCodex) {
+    if (!sid || isPkood || isCodex || isGemini) {
       html += '<div class="com-item com-current">No movable session selected</div>';
     } else if (!repos.length) {
       html += '<div class="com-item com-current">No known repos. Add one in the Repo picker.</div>';
@@ -5544,6 +5560,7 @@
     const sid = currentSession.id;
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
+    const isGemini = currentSession.source === 'gemini';
     const canJump = live && liveStatus.tty && liveStatus.terminalApp;
     const canShowLaunch = !!sid && !isPkood;
 
@@ -5581,7 +5598,8 @@
       if (!btn) continue;
       if (canShowLaunch) {
         btn.style.display = 'inline-flex';
-        btn.title = isCodex ? 'Open a Terminal window and run codex resume' : 'Open a Terminal window and run claude --resume';
+        btn.title = isCodex ? 'Open a Terminal window and run codex resume'
+          : (isGemini ? 'Open a Terminal window and run gemini --resume' : 'Open a Terminal window and run claude --resume');
         btn.querySelector('.jump-label').textContent = 'Launch';
         renderLaunchChoiceMenu($launchChoiceMenuConv);
       } else {
@@ -6004,7 +6022,7 @@
   async function openInClaudeDesktop(ev) {
     const btn = ev && ev.currentTarget;
     if (!btn || !currentSession.id) return;
-    if (currentSession.source === 'codex') return;
+    if (currentSession.source === 'codex' || currentSession.source === 'gemini') return;
     const snapshot = actionButtonSnapshot(btn);
     btn.classList.add('opening');
     btn.disabled = true;
@@ -6092,6 +6110,7 @@
     if (!$convInputBar) return;
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
+    const isGemini = currentSession.source === 'gemini';
     const live = liveStatus.live && liveStatus.tty;
     const isConvTab = activeTab === 'sessions';
     const hasSession = !!currentSession.id;
@@ -6128,6 +6147,9 @@
       } else if (isCodex) {
         $convTtyLabel.textContent = live ? (liveStatus.tty || 'codex') : 'codex';
         $convInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
+      } else if (isGemini) {
+        $convTtyLabel.textContent = live ? (liveStatus.tty || 'gemini') : 'gemini';
+        $convInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
       } else if (live) {
         $convTtyLabel.textContent = liveStatus.tty;
         $convInput.placeholder = 'Send to terminal...';
@@ -7121,8 +7143,9 @@
       modified: Date.now() / 1000, size: 0, branch: '',
       last_event_type: null, pending_tool: null, pending_file: null,
       name_overridden: false,
-      // Codex also gets a durable thread in ~/.codex; the log path is only
-      // a fallback while the thread row is materializing.
+      // Fire-and-watch engines also get durable engine-native sessions; the
+      // log path is only a fallback while the real row is materializing.
+      agent_log_path: (source === 'codex' || source === 'gemini') ? (logPath || null) : null,
       codex_log_path: source === 'codex' ? (logPath || null) : null,
     };
     if (meta && typeof meta === 'object') {
@@ -7148,10 +7171,10 @@
     if (typeof selectConversation === 'function') {
       selectConversation(id);
     }
-    // Auto-cleanup after 30s for Claude placeholders. Codex placeholders
+    // Auto-cleanup after 30s for Claude placeholders. Fire-and-watch placeholders
     // stick around until the durable thread row appears, with the spawn log
     // as a fallback if the CLI exits before creating a thread.
-    if (source !== 'codex') {
+    if (source !== 'codex' && source !== 'gemini') {
       setTimeout(() => {
         if (pendingSpawns.has(pid)) {
           pendingSpawns.delete(pid);
@@ -9649,11 +9672,15 @@
         }
       }
       const isCodexRow = c.source === 'codex' || c.engine === 'codex';
+      const isGeminiRow = c.source === 'gemini' || c.engine === 'gemini';
       let sourceBadge = '';
       if (c.source === 'pkood') sourceBadge = '<span class="source-badge pkood">pkood</span>';
       else if (isCodexRow) sourceBadge = '<span class="source-badge codex">codex</span>';
+      else if (isGeminiRow) sourceBadge = '<span class="source-badge gemini">gemini</span>';
       const engineIcon = isCodexRow
         ? '<span class="conv-engine-icon codex" title="Codex session" aria-label="Codex session">C</span>'
+        : isGeminiRow
+          ? '<span class="conv-engine-icon gemini" title="Gemini session" aria-label="Gemini session">G</span>'
         : '';
       // Prefer "last interacted" (the user's last UI action) over "last
       // event" (which includes Claude's autonomous responses) so the row
@@ -9694,7 +9721,7 @@
       const _activityAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
       const _rowActivityTs = c.sidecar_ts || c.last_interacted || c.modified || 0;
       const _rowActivityAge = _rowActivityTs ? Math.max(0, Math.floor(Date.now() / 1000 - _rowActivityTs)) : 9999;
-      const _midTurn = c.last_event_type === 'assistant' || (isCodexRow && c.last_event_type === 'user');
+      const _midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow) && c.last_event_type === 'user');
       const _isActiveSidecar = c.is_live && c.sidecar_status === 'active';
       const _knownActivityTool = c.sidecar_tool || c.pending_tool || '';
       const _hasLivePendingTool = c.is_live && !!c.pending_tool;
@@ -9713,7 +9740,7 @@
           ? ((c.sidecar_in_flight ? 'Currently running' : 'Last known tool') + ': ' + _knownActivityTool)
           : (c.gh_in_progress
               ? 'Linked GitHub issue is marked in progress'
-              : (isCodexRow ? 'Codex is working' : 'Agent is working'));
+              : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : 'Agent is working')));
         const wipLabel = _codexOpenTurn ? 'WIP' : (_knownActivityTool || 'WIP');
         signals += '<span class="conv-signal activity-working" title="' + escapeHtml(wipTitle) + '">' + escapeHtml(wipLabel) + '</span>';
       }
@@ -9838,7 +9865,7 @@
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
-      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
+      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
@@ -11702,7 +11729,10 @@
       setCopyableSessionId($cpSessionId, sid);
     }
     const paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId}"]`);
-    if (paneEl) paneEl.classList.toggle('is-codex-session', source === 'codex');
+    if (paneEl) {
+      paneEl.classList.toggle('is-codex-session', source === 'codex');
+      paneEl.classList.toggle('is-gemini-session', source === 'gemini');
+    }
     if (source === 'backlog') {
       setCurrentSession(null, null, null, false, null);
     } else {
@@ -11769,14 +11799,16 @@
     if (!$convPanelInput) return;
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
+    const isGemini = currentSession.source === 'gemini';
     const live = liveStatus.live && liveStatus.tty;
     const hasSession = !!currentSession.id;
     if (hasSession && kanbanView) {
       $convPanelInput.classList.add('visible');
-      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (liveStatus.tty || (live ? '' : 'offline')));
+      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (liveStatus.tty || (live ? '' : 'offline'))));
       if ($cpInput) {
         if (isPkood) $cpInput.placeholder = 'Send to pkood agent...';
         else if (isCodex) $cpInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
+        else if (isGemini) $cpInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
         else if (live) $cpInput.placeholder = 'Send to terminal...';
         else $cpInput.placeholder = 'Send to terminal (offline)...';
       }
@@ -12357,20 +12389,24 @@
       // Pre-swap (toolbar Run): spawn_pid is still 'tmp-...'. Show a
       // placeholder until the spawn POST returns and re-selects this card.
       const $view = getConvView();
-      $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Spawning codex run…</div>';
+      const engine = card && card.source === 'gemini' ? 'gemini' : 'codex';
+      $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Spawning ' + engine + ' run…</div>';
       return;
     }
     const $view = getConvView();
+    const engine = card.source === 'gemini' ? 'gemini' : 'codex';
     try {
       const res = await fetch('/api/sessions/spawned/' + encodeURIComponent(card.spawn_pid) + '/log?_=' + Date.now());
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (!data.ok) {
-        $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load codex log: ' + escapeHtml(data.error || ('HTTP ' + res.status)) + '</div>';
+        $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load ' + engine + ' log: ' + escapeHtml(data.error || ('HTTP ' + res.status)) + '</div>';
         stopCodexLogPoller();
         return;
       }
       const atBottom = $view.scrollHeight - $view.scrollTop - $view.clientHeight < 40;
-      $view.innerHTML = renderCodexLogHtml(data);
+      $view.innerHTML = (data.engine === 'gemini' || engine === 'gemini')
+        ? renderGeminiLogHtml(data)
+        : renderCodexLogHtml(data);
       if (atBottom) $view.scrollTop = $view.scrollHeight;
       // Process exited — stop polling. Final render already in place.
       if (!data.running) stopCodexLogPoller();
@@ -12446,6 +12482,69 @@
     return '<div class="codex-log" style="padding:16px 20px;">' + headerHtml + msgsHtml + usageHtml + stderrHtml + '</div>';
   }
 
+  function renderGeminiLogHtml(data) {
+    const lines = (data.text || '').split('\n').filter(Boolean);
+    const messages = [];
+    let usage = null;
+    let sessionId = '';
+    const stderrLines = [];
+    for (const line of lines) {
+      try {
+        const ev = JSON.parse(line);
+        if (ev.type === 'init' && ev.session_id) {
+          sessionId = ev.session_id;
+        } else if (ev.type === 'message' && ev.role === 'assistant' && ev.content) {
+          const last = messages[messages.length - 1];
+          if (last && last.role === 'assistant') last.text += ev.content;
+          else messages.push({ role: 'assistant', text: ev.content });
+        } else if (ev.type === 'tool_use') {
+          const params = ev.parameters || {};
+          const detail = params.description || params.command || '';
+          messages.push({ role: 'system', text: '[' + (ev.tool_name || 'tool') + (detail ? ': ' + detail : '') + ']' });
+        } else if (ev.type === 'tool_result') {
+          messages.push({ role: 'system', text: '[' + (ev.status || 'tool result') + ']' });
+        } else if (ev.type === 'result' && ev.stats) {
+          usage = ev.stats;
+        }
+      } catch (_) {
+        const text = (line || '').trim();
+        if (text && !/^YOLO mode is enabled\./.test(text) && text !== 'MCP issues detected. Run /mcp list for status.') {
+          stderrLines.push(line);
+        }
+      }
+    }
+    const status = data.running
+      ? '<span class="codex-status running" style="color:var(--green);">running</span>'
+      : ('<span class="codex-status finished" style="color:var(--text-muted);">finished' + (data.exit_code != null ? ' (exit ' + data.exit_code + ')' : '') + '</span>');
+    const usageHtml = usage
+      ? ('<div class="codex-usage" style="margin-top:12px;padding:8px 10px;background:rgba(139,148,158,0.08);border-radius:6px;font-size:12px;color:var(--text-muted);font-family:var(--font-mono,monospace);">'
+        + 'in ' + (usage.input_tokens || usage.input || 0)
+        + (usage.cached ? ' (' + usage.cached + ' cached)' : '')
+        + ' · out ' + (usage.output_tokens || 0)
+        + '</div>')
+      : '';
+    const msgsHtml = messages.length
+      ? messages.map(m => {
+          if (m.role === 'assistant') {
+            return '<div class="codex-msg assistant" style="margin-bottom:14px;padding:10px 12px;background:rgba(122,162,255,0.07);border-left:2px solid #7aa2ff;border-radius:4px;white-space:pre-wrap;line-height:1.55;">' + escapeHtml(m.text) + '</div>';
+          }
+          return '<div class="codex-msg system" style="margin-bottom:6px;font-size:12px;color:var(--text-muted);font-family:var(--font-mono,monospace);">' + escapeHtml(m.text) + '</div>';
+        }).join('')
+      : '<div class="empty-state" style="height:auto;padding:24px;color:var(--text-muted);">gemini is thinking…</div>';
+    const stderrHtml = stderrLines.length
+      ? ('<details style="margin-top:14px;font-size:12px;color:var(--text-muted);"><summary style="cursor:pointer;">gemini stderr (' + stderrLines.length + ' line' + (stderrLines.length === 1 ? '' : 's') + ')</summary>'
+        + '<pre style="margin:8px 0 0;padding:8px;background:rgba(139,148,158,0.08);border-radius:4px;white-space:pre-wrap;font-family:var(--font-mono,monospace);">' + escapeHtml(stderrLines.join('\n')) + '</pre>'
+        + '</details>')
+      : '';
+    const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
+      + '<span class="source-badge gemini" style="background:rgba(122,162,255,0.16);color:#9bb7ff;padding:2px 8px;border-radius:10px;font-weight:600;">gemini</span>'
+      + status
+      + (sessionId ? '<span style="font-family:var(--font-mono,monospace);">session ' + escapeHtml(sessionId.slice(0, 8)) + '…</span>' : '')
+      + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
+      + '</div>';
+    return '<div class="codex-log gemini-log" style="padding:16px 20px;">' + headerHtml + msgsHtml + usageHtml + stderrHtml + '</div>';
+  }
+
   async function fetchConversationEvents(paneId) {
     if (paneId) {
       const idx = paneIndexByPaneId(paneId);
@@ -12471,7 +12570,7 @@
     // thread row appears in /api/sessions.
     if (id.startsWith('spawning-')) {
       const c = (conversationsData || []).find(x => x.id === id);
-      if (c && c.source === 'codex') {
+      if (c && (c.source === 'codex' || c.source === 'gemini')) {
         await loadCodexLog(c);
         stopCodexLogPoller();
         codexLogPoller = setInterval(() => {
@@ -15458,12 +15557,12 @@
   function getSpawnEngine() {
     try {
       const v = localStorage.getItem('ccc.spawnEngine');
-      if (v === 'claude' || v === 'codex') return v;
+      if (v === 'claude' || v === 'codex' || v === 'gemini') return v;
     } catch (_) {}
     return 'claude';
   }
   function setSpawnEngine(v) {
-    if (v !== 'claude' && v !== 'codex') return;
+    if (v !== 'claude' && v !== 'codex' && v !== 'gemini') return;
     try { localStorage.setItem('ccc.spawnEngine', v); } catch (_) {}
     // $nsmEngineSelect is declared further down in this script; by the
     // time any user interaction calls setSpawnEngine() it will exist.
@@ -15476,30 +15575,37 @@
     sel.value = getSpawnEngine();
     sel.addEventListener('change', () => setSpawnEngine(sel.value));
   });
-  // Probe Codex availability so a user with no Codex install sees the
+  // Probe alternate-engine availability so a user with no CLI install sees the
   // option greyed out instead of getting a 503 mid-spawn. Polled on
   // window focus too — handles "I just installed it; refresh the UI"
   // without a hard reload.
+  async function refreshEngineAvailability() {
+    async function probe(engine, endpoint, label) {
+      try {
+        const r = await fetch(endpoint);
+        const d = await r.json();
+        const reason = d.available ? '' : (d.reason || (label + ' CLI not found'));
+        const selectors = [$convInputEngineSelect, $kptToolbarEngineSelect,
+          (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)];
+        selectors.forEach(sel => {
+          const opt = sel && sel.querySelector('option[value="' + engine + '"]');
+          if (!opt) return;
+          opt.disabled = !d.available;
+          opt.title = reason;
+          opt.textContent = d.available ? engine : (engine + ' (unavailable)');
+        });
+        if (!d.available && getSpawnEngine() === engine) setSpawnEngine('claude');
+      } catch (_) {}
+    }
+    await Promise.all([
+      probe('codex', '/api/sessions/spawn-codex/availability', 'Codex'),
+      probe('gemini', '/api/sessions/spawn-gemini/availability', 'Gemini'),
+    ]);
+  }
   async function refreshCodexAvailability() {
     try {
-      const r = await fetch('/api/sessions/spawn-codex/availability');
-      const d = await r.json();
-      const reason = d.available ? '' : (d.reason || 'Codex CLI not found');
-      const selectors = [$convInputEngineSelect, $kptToolbarEngineSelect,
-        (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)];
-      selectors.forEach(sel => {
-        const opt = sel && sel.querySelector('option[value="codex"]');
-        if (!opt) return;
-        opt.disabled = !d.available;
-        opt.title = reason;
-        opt.textContent = d.available ? 'codex' : 'codex (unavailable)';
-      });
-      // If the user had codex selected but it's no longer available,
-      // fall back to claude so the next spawn doesn't 503.
-      if (!d.available && getSpawnEngine() === 'codex') setSpawnEngine('claude');
-    } catch (_) {
-      // Probe is best-effort; a network blip shouldn't disable the dropdown.
-    }
+      await refreshEngineAvailability();
+    } catch (_) {}
   }
   refreshCodexAvailability();
   window.addEventListener('focus', refreshCodexAvailability);
@@ -15708,10 +15814,11 @@
       // placeholder only materialized after /api/sessions/spawn responded.
       const subject = prompt.length > 60 ? prompt.slice(0, 60) + '…' : prompt;
       const tempPid = 'tmp-' + Date.now();
-      // Source for the optimistic card: 'codex' renders the codex chip
-      // (Task 9); 'pkood' keeps the orange pkood chip; 'claude' uses
+      // Source for the optimistic card: alternate engines render their chip;
+      // 'pkood' keeps the orange pkood chip; 'claude' uses
       // 'interactive' (no chip).
       const cardSource = engine === 'codex' ? 'codex'
+                       : engine === 'gemini' ? 'gemini'
                        : engine === 'pkood' ? 'pkood'
                        : 'interactive';
       insertPendingSpawnCard(tempPid, subject, cardSource);
@@ -15720,9 +15827,10 @@
       try {
         const endpoint = engine === 'pkood' ? '/api/pkood/spawn'
                        : engine === 'codex' ? '/api/sessions/spawn-codex'
+                       : engine === 'gemini' ? '/api/sessions/spawn-gemini'
                        : '/api/sessions/spawn';
         // pkood and codex don't support the worktree flag — drop it for those.
-        const body = engine === 'claude'
+        const body = (engine === 'claude' || engine === 'gemini')
           ? { prompt, repo_path: repoPath, worktree: useWorktree }
           : { prompt, repo_path: repoPath };
         const res = await fetch(endpoint, {
@@ -15742,9 +15850,9 @@
             const placeholder = conversationsData.find(x => x.id === 'spawning-' + tempPid);
             if (placeholder) {
               placeholder.spawn_pid = data.pid;
-              // Codex spawns are fire-and-watch; stash the log path so the
+              // Fire-and-watch engines stash the log path so the
               // right-pane renderer can fetch /api/sessions/spawned/<pid>/log.
-              if (engine === 'codex' && data.log) placeholder.codex_log_path = data.log;
+              if ((engine === 'codex' || engine === 'gemini') && data.log) placeholder.agent_log_path = data.log;
               pendingSpawns.delete(tempPid);
               pendingSpawns.set(data.pid, placeholder);
             }
@@ -15754,10 +15862,10 @@
           setTimeout(refreshConversationList, 600);
           setTimeout(refreshConversationList, 1500);
           setTimeout(refreshConversationList, 3000);
-          // If the user picked codex, refocus the right pane on the
-          // placeholder so renderCodexPlaceholder kicks in for the new pid
+          // If the user picked a fire-and-watch engine, refocus the right pane on the
+          // placeholder so log rendering kicks in for the new pid
           // (the auto-select fired when tempPid was still in play).
-          if (engine === 'codex' && typeof selectConversation === 'function') {
+          if ((engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
             selectConversation('spawning-' + tempPid);
           }
         } else {
@@ -15835,7 +15943,8 @@
     $nsmSubmit.textContent = 'Launching...';
     try {
       const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
-                                          : '/api/sessions/spawn';
+                     : engine === 'gemini' ? '/api/sessions/spawn-gemini'
+                     : '/api/sessions/spawn';
       const body = engine === 'codex'
         ? { prompt, name: effectiveSubject, repo_path: repoPath }
         : { prompt, name: effectiveSubject, repo_path: repoPath, worktree: useWorktree };
@@ -15846,7 +15955,9 @@
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
         closeNewSessionModal();
-        const cardSource = engine === 'codex' ? 'codex' : 'interactive';
+        const cardSource = engine === 'codex' ? 'codex'
+                         : engine === 'gemini' ? 'gemini'
+                         : 'interactive';
         insertPendingSpawnCard(data.pid, effectiveSubject, cardSource);
         // Tight poll schedule so the real card replaces the placeholder fast.
         setTimeout(refreshConversationList, 600);
@@ -15960,7 +16071,7 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ agent_id: agentId, message: text }),
           });
-        } else if (currentSession.spawnPid && currentSession.source !== 'codex') {
+        } else if (currentSession.spawnPid && currentSession.source !== 'codex' && currentSession.source !== 'gemini') {
           // Headless session we spawned — push via stdin pipe
           res = await fetch('/api/sessions/spawned/' + currentSession.spawnPid + '/inject', {
             method: 'POST',
@@ -16763,7 +16874,8 @@
     const spawnCwd = getSpawnCwd();
     const $view = getConvView();
     if ($view) {
-      const engineLabel = getSpawnEngine() === 'codex' ? 'Codex' : 'Claude';
+      const spawnEngine = getSpawnEngine();
+      const engineLabel = spawnEngine === 'codex' ? 'Codex' : (spawnEngine === 'gemini' ? 'Gemini' : 'Claude');
       const repoLabel = selectedRepoLabel() || _pathLeaf(spawnCwd) || spawnCwd || 'pick a folder below';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
@@ -16872,7 +16984,8 @@
     };
     try {
       const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
-                                          : '/api/sessions/spawn';
+                     : engine === 'gemini' ? '/api/sessions/spawn-gemini'
+                     : '/api/sessions/spawn';
       const spawnBody = { prompt, name: subject, repo_path: repoPath, cwd: repoPath };
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -16880,7 +16993,7 @@
       });
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
-        insertPendingSpawnCard(data.pid, subject, engine === 'codex' ? 'codex' : 'interactive', data.log);
+        insertPendingSpawnCard(data.pid, subject, engine === 'codex' ? 'codex' : (engine === 'gemini' ? 'gemini' : 'interactive'), data.log);
         if ($convInput) $convInput.value = '';
         const $view = getConvView();
         if ($view) {
