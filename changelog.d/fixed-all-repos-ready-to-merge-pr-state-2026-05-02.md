@@ -1,3 +1,0 @@
-- All Repos rows now preserve resolved PR state before reusing the sidebar renderer, so merged or closed PR sessions no longer linger in Ready to merge just because they once recorded a `PR #N` chip.
-- Rows with a recorded PR now show `PR #N` even outside worktree rows, so the remaining Ready to merge entries explain why they are actionable.
-- The All Repos scanner now defines its recent-session probe window at module load, avoiding a fresh-process `NameError` while building archive metadata.

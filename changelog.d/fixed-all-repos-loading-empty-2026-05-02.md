@@ -1,1 +1,0 @@
-- "All repos" now keeps its loading state during the first cold archive scan instead of briefly showing "No conversations on disk."

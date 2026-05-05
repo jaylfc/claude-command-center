@@ -1,1 +1,0 @@
-- Add Gemini CLI as a third session engine with discovery, transcript viewing, token usage, spawn/resume, and activity/commit signals.

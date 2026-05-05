@@ -11087,6 +11087,11 @@
       // Remove any stray divider in unsplit mode.
       const oldDivider = $split.querySelector('.conv-split-divider');
       if (oldDivider) oldDivider.remove();
+      // Clear the inline `flex: <ratio> 1 0` left over from the divider drag.
+      // With a single flex child whose flex-grow < 1, the spec only distributes
+      // that fraction of free space — the remainder stays empty, so the pane
+      // would render at the dragged ratio (e.g. half height) instead of full.
+      $split.querySelectorAll('.conv-pane').forEach(p => { p.style.flex = ''; });
       return;
     }
     $split.setAttribute('data-orientation', splitState.orientation);
@@ -17016,12 +17021,21 @@
       if (data.ok) {
         insertPendingSpawnCard(data.pid, subject, engine === 'codex' ? 'codex' : (engine === 'gemini' ? 'gemini' : 'interactive'), data.log);
         if ($convInput) $convInput.value = '';
-        const $view = getConvView();
-        if ($view) {
-          $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
-            + '<div style="font-size:15px;color:var(--text);">Spawning new session…</div>'
-            + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">It will appear in the sidebar in a moment — click it to follow along.</div>'
-            + '</div>';
+        // Fire-and-watch engines need the right pane to switch to the new
+        // placeholder so the spawn-log poller (`/api/sessions/spawned/<pid>/log`)
+        // kicks in. Without this the pane stays on the "Spawning new session…"
+        // empty state and the user can't see the agent running. Mirrors the
+        // kanban-toolbar dispatch path.
+        if ((engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+          selectConversation('spawning-' + data.pid);
+        } else {
+          const $view = getConvView();
+          if ($view) {
+            $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
+              + '<div style="font-size:15px;color:var(--text);">Spawning new session…</div>'
+              + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">It will appear in the sidebar in a moment — click it to follow along.</div>'
+              + '</div>';
+          }
         }
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);

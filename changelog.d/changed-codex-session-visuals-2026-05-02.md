@@ -1,1 +1,0 @@
-- Made Codex sessions visually distinct with blue-tinted sidebar rows and a blue conversation-pane accent.

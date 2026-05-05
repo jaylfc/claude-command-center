@@ -1,1 +1,0 @@
-- Use Claude diagnostic context samples as a fallback for the conversation footer when transcripts omit normal token-usage records.

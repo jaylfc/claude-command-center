@@ -1,1 +1,0 @@
-- Replaced the All repos toggle with a persistent archive folder filter that narrows the conversation list without switching server repos.

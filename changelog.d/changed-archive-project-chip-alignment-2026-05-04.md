@@ -1,1 +1,0 @@
-- Aligned archive project group chips with the row time column and retired the alternate Board toggle from the sidebar.

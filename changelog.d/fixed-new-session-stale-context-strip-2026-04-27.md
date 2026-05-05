@@ -1,1 +1,0 @@
-- Fixed the input-context strip (worktree/branch/ctx-token pills) lingering with stale data from the previously selected session when entering "Start a new session" mode.

@@ -1,1 +1,0 @@
-- Worktree sidebar rows now show a `PR #N` chip (linked to the PR Claude opened with `gh pr create`) instead of the generic `committed`/`pushed` chip when the PR number is detectable.
