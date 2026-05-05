@@ -1,1 +1,0 @@
-- Show completed read-only agent sessions as read-only instead of no edits so helper/subagent work does not look idle.

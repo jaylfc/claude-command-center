@@ -1,2 +1,0 @@
-- Add an "All" In Progress window and group every session in the selected window by project when using the by-project view.
-- Show the project chip before the session title when In Progress rows are shown by time.

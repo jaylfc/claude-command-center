@@ -1,1 +1,0 @@
-- "Original ask" sticky-header text now skips the sibling-spawn preamble ("You are a sibling Claude Code session…", sandbox rules, footguns) and starts from the embedded `## Feature:` / `## Task:` / `## Goal:` heading. The boilerplate is identical across every spawn — burying it makes the actual task scannable.

@@ -1,1 +1,0 @@
-- Load recent and live session cards first so large transcript histories no longer block the initial board render.

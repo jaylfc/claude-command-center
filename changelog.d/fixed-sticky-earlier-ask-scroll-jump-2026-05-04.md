@@ -1,1 +1,0 @@
-- Fixed a transcript scroll jump when later user messages move into the sticky "Earlier ask" panel.

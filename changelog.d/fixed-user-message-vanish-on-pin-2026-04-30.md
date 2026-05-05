@@ -1,1 +1,0 @@
-- Fixed user-message bubble vanishing when sticky header expanded: the dynamic-ask tracker now measures against the stable original-ask block (not the growing full sticky) and briefly un-pins the active bubble before re-measuring, so a just-scrolled-past question can be un-pinned again on scroll-back.

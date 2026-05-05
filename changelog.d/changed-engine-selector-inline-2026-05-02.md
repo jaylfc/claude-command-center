@@ -1,1 +1,0 @@
-- Engine picker (claude vs codex) now sits inline next to the new-session prompt — in the sidebar's bottom input bar (occupies the Esc slot in `__new__` mode) and the Kanban toolbar — instead of being buried in the View ▾ menu. All selectors stay in sync via `localStorage.ccc.spawnEngine`.

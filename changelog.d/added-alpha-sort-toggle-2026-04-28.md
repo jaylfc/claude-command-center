@@ -1,1 +1,0 @@
-- Added an alphabetical sort toggle (A↓) in the sidebar header. Click to sort sessions A–Z by title; click again or use the chronological sort button to switch back.
