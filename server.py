@@ -6629,6 +6629,9 @@ def _extract_files_from_conversation(conversation_id):
 
     Cheap to call: single linear pass, no I/O beyond the JSONL read.
     """
+    if _is_gemini_session(conversation_id):
+        return _extract_files_from_gemini_conversation(conversation_id)
+
     filepath = _resolve_conversation_path(conversation_id)
     seen = {}  # target -> {label, target, kind, category, first_line}
     line_num = 0
@@ -6723,7 +6726,81 @@ def _extract_files_from_conversation(conversation_id):
     # Group + sort by first_line ascending within each category.
     groups = {}
     for row in seen.values():
-        cat = row.pop("category")
+        cat = row["category"]
+        groups.setdefault(cat, []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda r: r["first_line"])
+
+    return {"count": len(seen), "truncated": truncated, "groups": groups}
+
+
+def _extract_files_from_gemini_conversation(session_id):
+    """Gemini version of the extractor. Operates on a single JSON object
+    rather than a line-by-line JSONL."""
+    path = _resolve_gemini_chat_path(session_id)
+    data = _load_gemini_chat(path) if path else None
+    if not data:
+        return {"count": 0, "truncated": False, "groups": {}}
+
+    seen = {}
+    truncated = False
+
+    def consider(target, kind, idx):
+        nonlocal truncated
+        if not target or target in seen:
+            return
+        category = _categorize_file_target(target)
+        if not category:
+            return
+        if len(seen) >= _FFC_MAX_ENTRIES:
+            truncated = True
+            return
+        if kind == "url":
+            try:
+                parsed = urllib.parse.urlsplit(target)
+                tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                label = tail or parsed.netloc or target
+            except ValueError:
+                label = target
+        else:
+            label = os.path.basename(target) or target
+        seen[target] = {
+            "label": label,
+            "target": target,
+            "kind": kind,
+            "category": category,
+            "first_line": idx + 1,
+        }
+
+    messages = data.get("messages") or []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+
+        # Surface text (user/assistant)
+        text = _gemini_message_text(msg)
+        if text:
+            for target, kind in _ffc_iter_targets(text):
+                consider(target, kind, idx)
+
+        # Tool calls and results
+        for call in msg.get("toolCalls") or []:
+            if not isinstance(call, dict):
+                continue
+            # Scan arguments
+            for s in _ffc_flatten_strings(call.get("args")):
+                for target, kind in _ffc_iter_targets(s):
+                    consider(target, kind, idx)
+            # Scan results
+            output = _gemini_tool_output(call)
+            if output:
+                for target, kind in _ffc_iter_targets(output):
+                    consider(target, kind, idx)
+
+    # Group + sort by first_line ascending within each category.
+    groups = {}
+    for row in seen.values():
+        cat = row["category"]
         groups.setdefault(cat, []).append(row)
     for rows in groups.values():
         rows.sort(key=lambda r: r["first_line"])
