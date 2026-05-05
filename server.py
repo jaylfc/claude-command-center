@@ -1220,6 +1220,11 @@ def find_all_conversations(limit_per_folder=None):
                 except Exception:
                     pass
 
+            # Use transcript activity for the row timestamp. The JSONL file
+            # can be rewritten later by metadata-only entries such as
+            # custom-title updates; those should not make an old session look
+            # active again in the archive list.
+            row_mtime = tail_meta.get("last_meaningful_ts") or stat.st_mtime
             out.append({
                 "session_id": session_id,
                 "jsonl_path": str(f),
@@ -1233,7 +1238,7 @@ def find_all_conversations(limit_per_folder=None):
                 # any `cd` into a worktree), not the launch values.
                 "session_cwd": effective_cwd,
                 "session_cwd_is_worktree": cwd_is_worktree,
-                "mtime": stat.st_mtime,
+                "mtime": row_mtime,
                 "size": stat.st_size,
                 "first_message": first_message[:200] if first_message else None,
                 # Both keys: `branch`/`git_branch` is the JSONL's literal
