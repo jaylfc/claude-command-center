@@ -700,6 +700,11 @@ def resolve_repo_path(value):
 
     The sentinel "ALL" is intentionally rejected here. Aggregate scope belongs
     to aggregate endpoints, not to the repo_path field.
+
+    Pure validator: never mutates server-side state. Bumping recent-repos is
+    the API boundary's job (see require_repo_context); doing it here would
+    pollute the recent list with cache-invalidation calls and other
+    behind-the-scenes path normalizations.
     """
     raw = str(value or "").strip()
     if not raw:
@@ -713,6 +718,14 @@ def resolve_repo_path(value):
     if not p.is_dir():
         raise RepoContextError("invalid_repo_path", f"repo_path is not a directory: {p}", path=str(p))
 
+    # Allow rule: must be in the known-repos list OR look like a real repo
+    # (`.git` or `.claude` directory present). The looks-like-repo escape
+    # hatch is intentional ergonomics — it lets first-time spawns into a
+    # discovered folder succeed without a separate /api/repo/add round-trip.
+    # The trade-off: any reachable directory with `.git` is acceptable, so
+    # the gate isn't a strict allow-list. Path traversal is still bounded
+    # by `Path.resolve()` above, and shell-out endpoints layer their own
+    # sandboxing on top (see /api/open's REPO_ROOT-style clamps).
     known = set(_known_repo_paths())
     s = str(p)
     git_marker = p / ".git"
@@ -724,7 +737,6 @@ def resolve_repo_path(value):
             path=s,
             status=403,
         )
-    _record_recent_repo(s)
     return s
 
 
@@ -738,6 +750,13 @@ def _resolve_cwd_context(value):
         raise RepoContextError("invalid_cwd", f"could not resolve cwd: {e}", path=raw)
     if not cwd.is_dir():
         raise RepoContextError("invalid_cwd", f"cwd is not a directory: {cwd}", path=str(cwd))
+    # If `cwd` is inside a git worktree, repo_path = the toplevel (the canonical
+    # repo). If `cwd` is in a non-git directory, repo_path falls back to cwd
+    # itself — that's the documented edge case where repo_path == cwd. Most
+    # usefully: bare scratch folders that the user wants to spawn a session
+    # in. The repo_path-must-look-like-a-repo gate in resolve_repo_path()
+    # still applies, so a non-git cwd has to live inside a known-repo entry
+    # or have a .claude dir to pass validation.
     repo_top = _git_toplevel_for_existing_dir(cwd) or str(cwd)
     return {"repo_path": resolve_repo_path(repo_top), "cwd": str(cwd)}
 
@@ -765,7 +784,14 @@ def repo_from_session(session_id):
 
 
 def require_repo_context(payload=None, query=None, *, allow_session=True):
-    """Return {repo_path, cwd} or raise RepoContextError."""
+    """Return {repo_path, cwd} or raise RepoContextError.
+
+    This is the API boundary — every repo-scoped endpoint funnels through
+    here. As a side effect, a successful resolution bumps the recent-repos
+    list (so the UI's recent dropdown stays in sync with what the user is
+    actually doing). resolve_repo_path() itself stays pure so internal
+    callers (cache invalidation, deprecated shims) don't pollute recents.
+    """
     payload = payload if isinstance(payload, dict) else {}
     query = query if isinstance(query, dict) else {}
 
@@ -790,12 +816,22 @@ def require_repo_context(payload=None, query=None, *, allow_session=True):
             # explicit repo path. That is valid for spawn/resume style calls;
             # keep both concrete values visible to callers.
             cwd = cwd_ctx["cwd"]
-        return {"repo_path": repo, "cwd": cwd}
-    if cwd_raw:
-        return _resolve_cwd_context(cwd_raw)
-    if allow_session and sid_raw:
-        return repo_from_session(sid_raw)
-    raise RepoContextError("repo_required", "repo_path is required for this endpoint")
+        ctx = {"repo_path": repo, "cwd": cwd}
+    elif cwd_raw:
+        ctx = _resolve_cwd_context(cwd_raw)
+    elif allow_session and sid_raw:
+        ctx = repo_from_session(sid_raw)
+    else:
+        raise RepoContextError("repo_required", "repo_path is required for this endpoint")
+
+    # Recent-repos bookkeeping happens here, at the boundary, not inside
+    # resolve_repo_path. Internal validators (cache pop, 410 shim, etc.)
+    # therefore don't move the user's recent list around behind their back.
+    try:
+        _record_recent_repo(ctx["repo_path"])
+    except Exception:
+        pass
+    return ctx
 
 
 # Archive view delegates all per-session JSONL inspection to the
