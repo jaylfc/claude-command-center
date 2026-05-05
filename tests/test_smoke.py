@@ -437,6 +437,15 @@ class TestRepoContextHelpers(unittest.TestCase):
                 server._spawned_sessions.extend(orig_sessions)
 
 
+    def test_term_endpoints_registered(self):
+        """Smoke check: /api/term/run and /api/term/cancel branches present in do_POST."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        src = pathlib.Path(server.__file__).read_text()
+        self.assertIn('"/api/term/run"', src)
+        self.assertIn('"/api/term/cancel"', src)
+
     def test_reveal_file_route_registered(self):
         """Smoke check: POST /api/reveal-file branch present in do_POST."""
         for mod in ("server",):
