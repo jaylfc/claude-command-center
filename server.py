@@ -49,6 +49,14 @@ _CUSTOM_REPOS_FILE = COMMAND_CENTER_STATE_DIR / "custom-repos.txt"
 # used so the dropdown/modal can surface them at the top.
 _RECENT_REPOS_FILE = COMMAND_CENTER_STATE_DIR / "recent-repos.txt"
 _RECENT_REPOS_CAP = 10
+# Idle-session reaper: SIGTERM any `claude` process whose JSONL has had no
+# meaningful event (user/assistant/result — admin writes like custom-title
+# don't count) in the last N hours. Sweep runs every M seconds while the
+# server is alive. Archive-time kill catches sessions you explicitly retire;
+# this catches the long tail you abandoned without archiving (and the cron
+# agents nobody remembered to stop).
+_IDLE_REAPER_AGE_HOURS = 24
+_IDLE_REAPER_INTERVAL_S = 1800  # 30 min
 # Stable scratch cwd for short-lived background `claude -p` calls (title
 # summarizers, morning braindump, etc.). Without this, those calls
 # could run in whichever directory launched the server and pollute an unrelated
@@ -13054,6 +13062,90 @@ def _kill_session_by_id(session_id):
     return result
 
 
+def _reap_idle_sessions(now=None):
+    """Sweep registered `claude` sessions and SIGTERM the ones whose JSONL
+    has had no meaningful event in `_IDLE_REAPER_AGE_HOURS`.
+
+    Activity signal is `last_meaningful_ts` from `_extract_tail_meta` — the
+    timestamp of the most recent user/assistant/result event. Administrative
+    writes (custom-title, agent-name, pr-link) don't bump it, so a session
+    isn't kept alive just because something renamed it. If the JSONL has
+    never had a meaningful event, falls back to file mtime so a never-active
+    spawn can't live forever.
+
+    Returns a list of {sid, pid, age_hours} for everything reaped. Caller
+    can log; this function deliberately doesn't print so it's safe to call
+    from tests.
+
+    Skips: pkood agents, codex sessions, anything whose argv[0] basename
+    isn't `claude`. Multi-PID-per-sid (Resume scenario) is handled because
+    each PID gets its own `~/.claude/sessions/<pid>.json` file and is
+    evaluated independently.
+    """
+    import signal as _signal
+    sessions_dir = Path.home() / ".claude" / "sessions"
+    if not sessions_dir.is_dir():
+        return []
+    if now is None:
+        now = time.time()
+    cutoff = now - _IDLE_REAPER_AGE_HOURS * 3600
+    reaped = []
+    for f in sessions_dir.glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        pid = data.get("pid")
+        if not sid or not pid:
+            continue
+        if not _pid_is_engine_process(pid, "claude"):
+            continue
+        jsonl = _find_session_jsonl(sid)
+        if not jsonl:
+            # No JSONL on disk → nothing to measure activity against. Use
+            # the sessions/<pid>.json mtime as a last-resort age signal so
+            # an orphaned registration doesn't strand a process forever.
+            try:
+                last_active = f.stat().st_mtime
+            except OSError:
+                continue
+        else:
+            meta = _extract_tail_meta(jsonl)
+            last_active = meta.get("last_meaningful_ts") or 0
+            if not last_active:
+                try:
+                    last_active = jsonl.stat().st_mtime
+                except OSError:
+                    continue
+        if last_active >= cutoff:
+            continue
+        try:
+            os.kill(int(pid), _signal.SIGTERM)
+            reaped.append({
+                "sid": sid,
+                "pid": int(pid),
+                "age_hours": round((now - last_active) / 3600, 1),
+            })
+        except (OSError, ProcessLookupError):
+            continue
+    return reaped
+
+
+def _idle_reaper_loop():
+    """Background-thread driver for `_reap_idle_sessions`. Sleeps first so
+    server start isn't followed by an immediate kill spree before the user
+    has had a chance to look at the dashboard."""
+    while True:
+        try:
+            time.sleep(_IDLE_REAPER_INTERVAL_S)
+            reaped = _reap_idle_sessions()
+            for r in reaped:
+                print(f"[idle-reaper] SIGTERM pid={r['pid']} sid={r['sid'][:8]} idle={r['age_hours']}h")
+        except Exception as e:
+            print(f"[idle-reaper] sweep failed: {e}")
+
+
 def morning_move(payload):
     """Unified dispatcher for all kanban drag-drop transitions.
 
@@ -16812,6 +16904,10 @@ def main():
     # Warm the metadata cache in the background so the first /api/sessions
     # request returns instantly instead of taking ~3s.
     threading.Thread(target=_warm_cache, daemon=True).start()
+    # Idle-session reaper: sweeps every 30 min, SIGTERMs `claude` processes
+    # whose JSONL has been quiet for >24h. Catches abandoned-but-not-archived
+    # sessions and forgotten cron agents that the archive-time kill misses.
+    threading.Thread(target=_idle_reaper_loop, daemon=True).start()
     print()
     try:
         server.serve_forever()
