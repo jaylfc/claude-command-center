@@ -1,0 +1,1 @@
+- Hid low-priority archive row metadata, starting with file size, when the sidebar is too narrow for readable session titles.

@@ -816,6 +816,13 @@
      Hide its in-conversation chat bubble so the same text isn't shown twice
      (sticky + bubble) when no scrolling has occurred yet. */
   .conversations-view .event.user_text.is-pinned-in-sticky { display: none; }
+  /* Later user messages mirrored into the sticky header's "Earlier ask" slot
+     must keep their layout space. Removing them with display:none changes
+     scrollHeight mid-scroll and makes the transcript jump under the cursor. */
+  .conversations-view .event.user_text.is-dynamic-pinned-in-sticky {
+    visibility: hidden;
+    pointer-events: none;
+  }
   .conversations-view .event.tool_result { display: none; }
   /* Tool-call group — fused "Ran N commands ▾" container. */
   .conversations-view .tool-call-group {
@@ -900,12 +907,11 @@
     overflow-y: auto;
   }
   /* Original ask: first sentence at default size, rest small + grey,
-     always wraps (no horizontal scroll). The .csh-col-ask column is the
-     scroll container now (fixed-height panel above), so the user-msg
-     itself grows freely. */
+     always wraps (no horizontal scroll). Each ask body scrolls inside its
+     fixed-height slot so long summaries do not clip under the sticky header. */
   .conv-sticky-header .csh-col-ask .user-msg {
     white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
-    max-height: none; overflow: visible;
+    max-height: none; overflow-x: hidden; overflow-y: auto;
   }
   .conv-sticky-header .csh-col-ask .ask-first,
   .conv-sticky-header .csh-col-ask .earlier-first {
@@ -1475,9 +1481,9 @@
   }
   .conv-item .conv-row-meta {
     display: grid;
-    grid-template-columns: 64px 96px 74px 12px;
+    grid-template-columns: 64px max-content max-content 12px;
     align-items: center;
-    column-gap: 4px;
+    column-gap: 0;
     justify-content: end;
     flex: 0 0 auto;
     min-width: 0;
@@ -1489,6 +1495,7 @@
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
+    text-align: right;
   }
   .conv-item .conv-status-slot,
   .conv-item .conv-branch-slot,
@@ -1496,17 +1503,24 @@
     min-width: 0;
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    overflow: hidden;
+    gap: 0;
     white-space: nowrap;
   }
-  .conv-item .conv-status-slot { justify-content: flex-start; }
-  .conv-item .conv-branch-slot { justify-content: flex-start; }
-  .conv-item .conv-engine-slot { justify-content: center; }
+  .conv-item .conv-status-slot {
+    min-width: max-content;
+    overflow: visible;
+  }
+  .conv-item .conv-branch-slot,
+  .conv-item .conv-engine-slot {
+    overflow: hidden;
+  }
+  .conv-item .conv-status-slot { justify-content: flex-end; }
+  .conv-item .conv-branch-slot { justify-content: flex-end; }
+  .conv-item .conv-engine-slot { justify-content: flex-end; }
   .conv-item .conv-status-slot:empty,
   .conv-item .conv-branch-slot:empty,
   .conv-item .conv-engine-slot:empty { display: none; }
-  .conv-item .conv-status-slot .conv-live-tool { max-width: 100%; }
+  .conv-item .conv-status-slot .conv-live-tool { max-width: none; }
   .conv-item .conv-meta-inline .sep,
   .conv-item .conv-meta-inline .source-badge { display: none; }
   .conv-item .conv-meta-inline .sep { opacity: 0.4; }
@@ -1540,14 +1554,14 @@
      for "last completed", blue for "currently in flight". */
   .conv-item .conv-live-tool {
     display: inline-flex; align-items: center; gap: 4px;
-    flex: 0 1 auto; min-width: 0;
-    max-width: 112px;
+    flex: 0 0 auto; min-width: max-content;
+    max-width: none;
     font-size: 10px;
     color: #FBCA04;
     background: rgba(251,202,4,0.10);
     border-left: 2px solid rgba(251,202,4,0.6);
     padding: 1px 4px; border-radius: 3px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
     animation: pulse 2s infinite;
   }
   .conv-item .conv-live-tool .conv-live-name { font-weight: 600; }
@@ -1589,18 +1603,44 @@
     gap: 3px;
   }
   .conv-folder-group .conv-item.is-grouped-row .conv-row-meta {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
     margin-left: 6px;
   }
   .conv-folder-group .conv-item.is-grouped-row .conv-meta-inline {
-    min-width: auto;
+    min-width: 0;
   }
   .conv-folder-group .conv-item.is-grouped-row .conv-status-slot,
   .conv-folder-group .conv-item.is-grouped-row .conv-branch-slot,
   .conv-folder-group .conv-item.is-grouped-row .conv-engine-slot {
     flex: 0 0 auto;
+  }
+  @container sidebar (max-width: 760px) {
+    .conv-item .conv-meta-inline {
+      display: none;
+    }
+    .conv-item .conv-row-meta {
+      grid-template-columns: max-content max-content 12px;
+    }
+  }
+  @container sidebar (max-width: 640px) {
+    .conv-item .conv-engine-slot {
+      display: none !important;
+    }
+    .conv-item .conv-row-meta {
+      grid-template-columns: max-content max-content;
+    }
+  }
+  @container sidebar (max-width: 560px) {
+    .conv-item .conv-branch-slot {
+      display: none !important;
+    }
+    .conv-item .conv-row-meta {
+      grid-template-columns: max-content;
+    }
+  }
+  @container sidebar (max-width: 500px) {
+    .conv-folder-chip {
+      max-width: 104px;
+    }
   }
   .conv-item .conv-title.untitled {
     font-weight: 500; color: var(--text-muted); font-style: italic;
@@ -1780,9 +1820,6 @@
     font-size: 10px; padding: 1px 5px; border-radius: 3px;
     font-weight: 600; white-space: nowrap; flex: 0 0 auto;
     line-height: 1.1;
-    max-width: 86px;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .conv-signal.stage { background: rgba(188,140,255,0.15); color: var(--purple); }
   .conv-signal.committed { background: rgba(63,185,80,0.15); color: var(--green); }
@@ -1803,6 +1840,7 @@
   .conv-signal.pkood-running { background: rgba(63,185,80,0.15); color: var(--green); }
   .conv-signal.pkood-idle { background: rgba(88,166,255,0.1); color: var(--accent); }
   .conv-signal.no-edits { background: rgba(88,166,255,0.1); color: var(--accent); }
+  .conv-signal.read-only { background: rgba(139,148,158,0.12); color: var(--text-muted); }
   .conv-signal.pkood-blocked { background: rgba(248,81,73,0.15); color: var(--red); animation: pulse 2s infinite; }
   .conv-signal.pkood-stuck { background: rgba(248,81,73,0.25); color: var(--red); font-weight: 700; }
   /* "#N" issue-link chip on sidebar rows tied to a GH issue. Muted on
@@ -1924,7 +1962,42 @@
     display: flex; gap: 6px; align-items: center;
     padding: 8px 12px 0;
   }
-  .conv-list-header .search-wrap { flex: 1; }
+  .conv-list-header .search-wrap { flex: 1; position: relative; }
+  .conv-search-input {
+    width: 100%;
+    padding: 6px 30px 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 12px;
+    outline: none;
+  }
+  .conv-search-clear {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    width: 20px;
+    height: 20px;
+    transform: translateY(-50%);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0;
+  }
+  .search-wrap.has-value .conv-search-clear { display: flex; }
+  .conv-search-clear:hover,
+  .conv-search-clear:focus-visible {
+    background: var(--surface-2);
+    color: var(--text);
+  }
   .conv-refresh-btn {
     width: 28px; height: 28px; flex-shrink: 0;
     border-radius: 4px; border: 1px solid var(--border);
@@ -2207,6 +2280,7 @@
   .kanban-card .kanban-card-stage.committed { background: rgba(63,185,80,0.15); color: var(--green); }
   .kanban-card .kanban-card-stage.testing { background: rgba(251,202,4,0.15); color: #FBCA04; }
   .kanban-card .kanban-card-stage.no-edits { background: rgba(88,166,255,0.1); color: var(--accent); margin-left: 4px; }
+  .kanban-card .kanban-card-stage.read-only { background: rgba(139,148,158,0.12); color: var(--text-muted); margin-left: 4px; }
   .kanban-issue-badge {
     display: inline-block; font-size: 11px; padding: 1px 6px;
     border-radius: 3px; margin-right: 6px; font-weight: 600;
@@ -2359,16 +2433,22 @@
   .nsm-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
   /* --- Files-from-conversation (pill + modal) ----------------------- */
-  /* Pill lives in .conv-sticky-header; only rendered when count > 0. */
+  /* Pill lives inside the sticky header's fixed-height activity column; only
+     rendered when count > 0. Keeping it inside .csh-row avoids changing the
+     sticky header's outer height after the async files request resolves. */
   .ffc-pill {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 3px 10px; margin-left: 8px;
+    padding: 3px 10px; margin: 0 0 6px 0;
     border: 1px solid var(--border, #30363d);
     border-radius: 999px;
     background: var(--surface-2, #161b22);
     color: var(--text, #c9d1d9);
     font-size: 11px; font-weight: 500; cursor: pointer;
     line-height: 1.4;
+  }
+  .conv-sticky-header .csh-col-activity > .ffc-pill {
+    flex: 0 0 auto;
+    align-self: flex-start;
   }
   .ffc-pill:hover { border-color: var(--accent, #58a6ff); color: var(--accent, #58a6ff); }
   .ffc-pill[hidden] { display: none !important; }
@@ -2731,6 +2811,8 @@
     font-size: 11px; color: var(--text-muted); font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
     opacity: 0.6; cursor: pointer; user-select: all; margin-left: auto;
   }
+  #convSessionId.copied,
+  .conv-panel-toolbar .cpt-session-id.copied { color: var(--green); opacity: 1; }
   .conv-panel-view {
     flex: 1; overflow-y: auto; padding: 16px 20px;
   }
@@ -3125,7 +3207,7 @@
     opacity: 0.7;
   }
   .conv-folder-group-chip {
-    grid-column: 3;
+    grid-column: 2 / 4;
     justify-self: start;
     min-width: 0;
     padding: 2px 9px;
@@ -3153,8 +3235,25 @@
     font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
+  #convKanbanToggle { display: none; }
   #convList .conv-folder-group.collapsed > .conv-item,
-  #convList .conv-folder-group.collapsed > .conv-gap-separator { display: none; }
+  #convList .conv-folder-group.collapsed > .conv-gap-separator,
+  #convList .conv-folder-group.collapsed > .conv-ghissues-more { display: none; }
+  .conv-ghissues-more {
+    display: flex;
+    padding: 2px 10px 3px calc(10px + var(--conv-dot-col, 9px) + var(--conv-time-col, 43px) + 6px);
+  }
+  .conv-ghissues-more-btn {
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.25;
+    padding: 2px 0;
+  }
+  .conv-ghissues-more-btn:hover { color: var(--cyan); text-decoration: underline; }
   .conv-folder-group-divider {
     padding: 12px 12px 4px;
     font-size: 10px;
@@ -3204,6 +3303,31 @@
   }
   .conv-inprogress-tools .conv-grouping-toggle,
   .conv-ghissues-tools .conv-grouping-toggle { margin-left: 0; }
+  .conv-ghissues-refresh {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .conv-ghissues-refresh:hover,
+  .conv-ghissues-refresh:focus-visible {
+    background: var(--surface-2);
+    color: var(--accent);
+  }
+  .conv-ghissues-refresh.is-spinning {
+    color: var(--accent);
+    animation: ccc-spin 0.8s linear infinite;
+  }
   .archive-empty-state {
     padding: 24px 16px;
     text-align: center;
@@ -4314,7 +4438,8 @@
     <div class="conv-list-panel" id="convListPanel">
       <div class="conv-list-header">
         <div class="search-wrap">
-          <input type="text" id="convSearch" placeholder="Search conversations..." style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;outline:none;">
+          <input type="text" id="convSearch" class="conv-search-input" placeholder="Search conversations..." autocomplete="off">
+          <button type="button" id="convSearchClear" class="conv-search-clear" title="Clear search" aria-label="Clear search">&times;</button>
         </div>
       </div>
       <div class="log-list" id="convList" style="overflow-y:auto;flex:1;min-height:0;max-height:none;">
@@ -5299,18 +5424,25 @@
       $announceBtnConv.textContent = 'Sending...';
       const cmd = feature.trim() ? '/announce-feature ' + feature.trim() : '/announce-feature';
       try {
-        await fetch('/api/inject-input', {
+        const res = await fetch('/api/inject-input', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ session_id: sid, text: cmd }),
         });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || data.message || ('HTTP ' + res.status));
+        }
         $announceBtnConv.textContent = 'Sent ✓';
         $announceBtnConv.style.opacity = '0.6';
       } catch (err) {
+        const reason = (err && err.message) || 'unknown error';
         $announceBtnConv.textContent = 'Failed';
+        showOpToast('Close & announce failed: ' + reason, 'error');
         setTimeout(() => {
           $announceBtnConv.textContent = 'Close & announce';
           $announceBtnConv.disabled = false;
+          $announceBtnConv.style.opacity = '';
         }, 2000);
       }
     });
@@ -5739,6 +5871,59 @@
 
   const $convSessionId = document.getElementById('convSessionId');
 
+  async function copyTextValue(text) {
+    const value = String(text || '');
+    if (!value) return false;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(value);
+        return true;
+      } catch (_) {}
+    }
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
+    ta.remove();
+    return ok;
+  }
+
+  function setCopyableSessionId(el, sid) {
+    if (!el) return;
+    const value = sid || '';
+    el.textContent = value;
+    if (value) {
+      el.dataset.copySessionId = value;
+      el.title = 'Click to copy session ID';
+    } else {
+      delete el.dataset.copySessionId;
+      el.title = '';
+    }
+  }
+
+  document.addEventListener('click', async (ev) => {
+    const el = ev.target.closest('[data-copy-session-id]');
+    if (!el) return;
+    ev.stopPropagation();
+    const sid = el.dataset.copySessionId || el.textContent || '';
+    const ok = await copyTextValue(sid);
+    if (!ok) {
+      showOpToast('Copy failed — select and copy manually', 'error');
+      return;
+    }
+    el.textContent = 'copied!';
+    el.classList.add('copied');
+    setTimeout(() => {
+      if (el.dataset.copySessionId === sid) el.textContent = sid;
+      el.classList.remove('copied');
+    }, 1000);
+  });
+
   function setCurrentSession(source, sid, cwd, cwdExists, spawnPid, repoPath) {
     currentSession = {
       id: sid || null,
@@ -5755,17 +5940,7 @@
       const _cic = document.getElementById('convInputContext');
       if (_cic) _cic.classList.remove('is-new-session');
     }
-    if ($convSessionId) {
-      $convSessionId.textContent = sid || '';
-      $convSessionId.onclick = () => {
-        if (!sid) return;
-        navigator.clipboard.writeText(sid).then(() => {
-          const orig = $convSessionId.textContent;
-          $convSessionId.textContent = 'copied!';
-          setTimeout(() => { $convSessionId.textContent = orig; }, 1000);
-        });
-      };
-    }
+    setCopyableSessionId($convSessionId, sid);
     if (source === 'pkood') {
       // Pkood sessions don't need live status polling or resume button
       if (liveStatusTimer) { clearInterval(liveStatusTimer); liveStatusTimer = null; }
@@ -6058,7 +6233,7 @@
         $input.value = '';
       } else {
         flashRed();
-        const reason = data.error || ('HTTP ' + res.status);
+        const reason = formatInjectFailure(data, res.status);
         showOpToast('Send failed: ' + reason, 'error');
       }
     } catch (err) {
@@ -6067,6 +6242,14 @@
     }
     $sendBtn.disabled = false;
     $input.focus();
+  }
+
+  function formatInjectFailure(data, status) {
+    if (data && (data.code === 'macos_keystroke_permission' || data.code === 'macos_automation_permission')) {
+      return data.error || 'macOS blocked CCC from sending input to the terminal.';
+    }
+    if (data && (data.error || data.message)) return data.error || data.message;
+    return 'HTTP ' + status;
   }
 
   async function sendEscToTerminal() {
@@ -6157,6 +6340,10 @@
     const div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
+  }
+
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   // Replace literal `.claude/pasted-images/paste-*.{png,jpg,…}` paths inside
@@ -6598,6 +6785,7 @@
   const $convListPanel = document.getElementById('convListPanel');
   const $convList = document.getElementById('convList');
   const $convSearch = document.getElementById('convSearch');
+  const $convSearchClear = document.getElementById('convSearchClear');
   const $kanbanBoard = document.getElementById('kanbanBoard');
   const $convKanbanToggle = document.getElementById('convKanbanToggle');
 
@@ -6641,7 +6829,8 @@
     } catch (_) { /* localStorage may be disabled — fail silently */ }
   })();
 
-  let kanbanView = localStorage.getItem('ccc-kanban-view') === 'true';
+  let kanbanView = false;
+  try { localStorage.setItem('ccc-kanban-view', 'false'); } catch (_) {}
   let kanbanCollapsed = {}; // column_key -> bool, tracks user collapse state
   try { kanbanCollapsed = JSON.parse(localStorage.getItem('ccc-kanban-collapsed') || '{}'); } catch (_) {}
   let kanbanShowAll = {};   // column_key -> bool, tracks "show all" state for large columns
@@ -6909,7 +7098,7 @@
   // Pending spawn placeholders (optimistic UI) — keyed by pid.
   const pendingSpawns = new Map();
 
-  function insertPendingSpawnCard(pid, subject, sourceOrEngine, logPath) {
+  function insertPendingSpawnCard(pid, subject, sourceOrEngine, logPath, meta) {
     if (!pid) return;
     const id = 'spawning-' + pid;
     // Backwards-compat: this used to take `usePkood: bool`. Accept
@@ -6936,6 +7125,16 @@
       // a fallback while the thread row is materializing.
       codex_log_path: source === 'codex' ? (logPath || null) : null,
     };
+    if (meta && typeof meta === 'object') {
+      Object.assign(card, meta);
+      card.id = id;
+      card.session_id = id;
+      card.source = source;
+      card.spawn_pid = pid;
+      card.pending_spawn = true;
+      card.is_live = true;
+      card.archived = false;
+    }
     pendingSpawns.set(pid, card);
     conversationsData = [card, ...conversationsData];
     // Pin to Working column for the moment
@@ -7106,7 +7305,7 @@
         _firstUserMsgRendered = false;
         _currentToolGroup = null;
         _currentToolCount = 0;
-        if ($cpSessionId) $cpSessionId.textContent = real.session_id || '';
+        setCopyableSessionId($cpSessionId, real.session_id || '');
         fetchConversationEvents();
         startConvStream();
         if (real.session_id && real.source !== 'codex') startSpawnStream(real.session_id);
@@ -7522,6 +7721,11 @@
   // *before* it asks for a re-render, so the legitimate post-save
   // refresh still flows through.
   let _renameInProgress = false;
+  function isInlineRenameInProgress() {
+    if (_renameInProgress) return true;
+    const $list = document.getElementById('convList');
+    return !!($list && $list.querySelector('.conv-title-input'));
+  }
   function renderSidebar(convs) {
     if (_renameInProgress) return;
     // Archive-mode guard: while "All repos" is on, the sidebar renders the
@@ -7705,6 +7909,67 @@
   })();
   // Guard against double-spawn from rapid mobile taps. Key is "issue-<num>" or session name.
   const _spawningKeys = new Set();
+  const _optimisticStartedIssueKeys = new Set();
+  const _OPTIMISTIC_ISSUE_START_TTL_MS = 60000;
+
+  function _issueStartKey(issueNum, repoPath) {
+    const num = String(issueNum || '').trim();
+    if (!num) return '';
+    return String(repoPath || '').trim() + '#' + num;
+  }
+
+  function _markIssueOptimisticallyStarted(issueNum, repoPath) {
+    const key = _issueStartKey(issueNum, repoPath);
+    if (!key) return;
+    _optimisticStartedIssueKeys.add(key);
+    setTimeout(() => {
+      _optimisticStartedIssueKeys.delete(key);
+    }, _OPTIMISTIC_ISSUE_START_TTL_MS);
+  }
+
+  function _clearOptimisticStartedIssue(issueNum, repoPath) {
+    const key = _issueStartKey(issueNum, repoPath);
+    if (key) _optimisticStartedIssueKeys.delete(key);
+  }
+
+  function _isOptimisticallyStartedIssueRow(row) {
+    if (!row || row.source !== 'backlog' || row.backlog_type !== 'github' || !row.issue_number) return false;
+    const repoPath = rowRepoPath(row) || row.spawn_cwd || '';
+    return _optimisticStartedIssueKeys.has(_issueStartKey(row.issue_number, repoPath));
+  }
+
+  function _pendingIssueSpawnMeta(issueNum, repoPath) {
+    if (!issueNum) return {};
+    const label = (repoPath && (
+      ((repoListState.repos || []).find(repo => repo.path === repoPath) || {}).label ||
+      _pathLeaf(repoPath)
+    )) || '';
+    const meta = {
+      linked_issue: issueNum,
+      issue_number: issueNum,
+    };
+    if (repoPath) {
+      meta.repo_path = repoPath;
+      meta.folder_path = repoPath;
+      meta.folder_label = label || repoPath;
+      meta.folder_label_chip = label || repoPath;
+      meta.folder_chip_hue = _hashHue(label || repoPath);
+      meta.folder_chip_orphan = false;
+      meta.spawn_cwd = repoPath;
+      meta.cwd = repoPath;
+    }
+    return meta;
+  }
+
+  function _removePendingSpawnCard(pid) {
+    if (!pid) return;
+    const id = 'spawning-' + pid;
+    pendingSpawns.delete(pid);
+    delete columnOverrides[id];
+    conversationsData = conversationsData.filter(x => x && x.id !== id);
+    try { localStorage.setItem('ccc-column-overrides', JSON.stringify(columnOverrides)); } catch (_) {}
+    renderSidebar(filterConversations($convSearch.value));
+  }
   // Client-side persistence for archived TODO.md / PARKING_LOT.md backlog cards.
   // (The server re-parses those files on every request, so archive state has to
   // live in the browser to stick.)
@@ -7748,6 +8013,10 @@
       throw new Error(res.status + ' ' + (text || res.statusText));
     }
     try { return await res.json(); } catch (_) { return {}; }
+  }
+
+  function archivePayloadForRow(row, sessionId) {
+    return withRepoPath({ session_id: sessionId }, rowRepoPath(row));
   }
 
   function showOpToast(msg, kind) {
@@ -8011,15 +8280,32 @@
     return 'working';
   }
 
-  // True when this session has never edited a file. Drives the "no edits"
-  // chip in both the list view and the kanban card. Doesn't care about
-  // liveness — a live session that hasn't touched anything yet is just as
-  // "no edits" as a dead one. Excludes verified / archived (terminal state,
+  // True when a finished session produced useful output but intentionally
+  // left files alone. This keeps read-only helper/subagent work from looking
+  // like an abandoned shell.
+  function hasReadOnlyWork(c) {
+    if (!c) return false;
+    if (c.verified || c.archived) return false;
+    if (c.source === 'backlog') return false;
+    if (c.is_live || c.pending_spawn) return false;
+    if (c.has_edit || c.has_commit || c.has_push || c.tail_pr_number) return false;
+    const lastType = String(c.last_event_type || '').toLowerCase();
+    return !!(
+      String(c.last_assistant_text || '').trim()
+      || c.pending_tool
+      || lastType === 'result'
+    );
+  }
+
+  // True when this session has never edited a file and has no completed
+  // read-only output to show. Drives the "no edits" chip in both the list
+  // view and the kanban card. Excludes verified / archived (terminal state,
   // chip is noise) and backlog (different render path).
   function hasNoEdits(c) {
     if (!c) return false;
     if (c.verified || c.archived) return false;
     if (c.source === 'backlog') return false;
+    if (hasReadOnlyWork(c)) return false;
     return !c.has_edit;
   }
 
@@ -8240,8 +8526,8 @@
           html += '<div class="kanban-card-title">' + escapeHtml(renderBacklogTitle) + '</div>';
           if (dateInfo) html += '<div style="margin-top:6px;">' + dateInfo + '</div>';
           html += '<div style="display:flex;gap:4px;margin-top:6px;">';
-          html += '<button class="kanban-start-btn" data-issue="' + escapeHtml(c.issue_number || '') + '" data-title="' + escapeHtml(c.display_name || c.first_message || '') + '" style="flex:1;padding:4px 10px;border-radius:4px;border:1px solid rgba(63,185,80,0.3);background:rgba(63,185,80,0.1);color:var(--green);font-size:11px;font-weight:600;cursor:pointer;">Start session</button>';
-          html += '<button class="kanban-start-edit-btn" data-issue="' + escapeHtml(c.issue_number || '') + '" data-title="' + escapeHtml(c.display_name || c.first_message || '') + '" data-body="' + escapeHtml(c.first_message || '') + '" title="Edit the prompt before launching" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text-muted);font-size:11px;cursor:pointer;">Edit &amp; start</button>';
+          html += '<button class="kanban-start-btn" data-issue="' + escapeAttr(c.issue_number || '') + '" data-title="' + escapeAttr(c.display_name || c.first_message || '') + '" style="flex:1;padding:4px 10px;border-radius:4px;border:1px solid rgba(63,185,80,0.3);background:rgba(63,185,80,0.1);color:var(--green);font-size:11px;font-weight:600;cursor:pointer;">Start session</button>';
+          html += '<button class="kanban-start-edit-btn" data-issue="' + escapeAttr(c.issue_number || '') + '" data-title="' + escapeAttr(c.display_name || c.first_message || '') + '" data-body="' + escapeAttr(c.first_message || '') + '" title="Edit the prompt before launching" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text-muted);font-size:11px;cursor:pointer;">Edit &amp; start</button>';
           // Per-card AI-summarize ✨ — only renders when this card hasn't been
           // summarized yet, so users can scan visually for cards that still
           // need a better title and click them one by one.
@@ -8294,7 +8580,8 @@
         const pendingSpawn = c.pending_spawn ? ' pending-spawn' : '';
         const recentlyBorn = isRecentlyBorn(c.session_id) ? ' recently-born' : '';
         const noEditsAttr = hasNoEdits(c) ? ' no-edits' : '';
-        html += '<div class="kanban-card' + active + trulyActive + pendingSpawn + recentlyBorn + noEditsAttr + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="' + colKey + '">';
+        const readOnlyAttr = hasReadOnlyWork(c) ? ' read-only' : '';
+        html += '<div class="kanban-card' + active + trulyActive + pendingSpawn + recentlyBorn + noEditsAttr + readOnlyAttr + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="' + colKey + '">';
         // Create-issue button only when no issue is linked. The "view issue" link
         // was removed — tapping the #NNN badge in the title opens the issue.
         const linkedIssue = c.linked_issue || c.issue_number || '';
@@ -8390,7 +8677,9 @@
         }
         html += '<div class="kanban-card-stage ' + stageCls + '">' + escapeHtml(stageLabel) + '</div>';
         if (noEditsAttr) {
-          html += '<span class="kanban-card-stage no-edits" title="Claude has not edited any files in this session">no edits</span>';
+          html += '<span class="kanban-card-stage no-edits" title="Agent has not edited any files in this session">no edits</span>';
+        } else if (readOnlyAttr) {
+          html += '<span class="kanban-card-stage read-only" title="Agent completed read-only work without file edits">read-only</span>';
         }
 
         // ── Task 8: Approve/Deny for waiting cards with pending_tool ──
@@ -9110,7 +9399,7 @@
         const prompt = (issueNum
           ? 'Fix issue #' + issueNum + ' — ' + cleanTitle + '\n\nRun `gh issue view ' + issueNum + '` for the full body (title may be truncated).'
           : cleanTitle) + SESSION_STATE_INSTRUCTION;
-        const spawnKey = issueNum ? ('issue-' + issueNum) : sessionName;
+        const spawnKey = issueNum ? (_issueStartKey(issueNum, repoPath) || ('issue-' + issueNum)) : sessionName;
         if (_spawningKeys.has(spawnKey)) return;  // already spawning — ignore duplicate tap
         _spawningKeys.add(spawnKey);
         btn.disabled = true;
@@ -9123,7 +9412,8 @@
         // Optimistically insert a pending-spawn card in Working using a temp id.
         // The real card replaces it once the spawn_pid matches (see loadConversationList).
         const tempPid = 'tmp-' + Date.now();
-        insertPendingSpawnCard(tempPid, sessionName, false);
+        if (issueNum) _markIssueOptimisticallyStarted(issueNum, repoPath);
+        insertPendingSpawnCard(tempPid, sessionName, false, null, _pendingIssueSpawnMeta(issueNum, repoPath));
         // No need for a second render — insertPendingSpawnCard already renders.
         // Fire spawn in background so it doesn't block UI.
         (async () => { try {
@@ -9133,7 +9423,8 @@
             body: JSON.stringify(withRepoPath({ prompt: prompt, name: sessionName }, repoPath)),
           });
           const data = await res.json().catch(() => ({}));
-          if (data.ok && data.pid) {
+          if (!res.ok || !data.ok) throw new Error(data.error || 'spawn_failed');
+          if (data.pid) {
             const placeholder = conversationsData.find(x => x.id === 'spawning-' + tempPid);
             if (placeholder) {
               placeholder.spawn_pid = data.pid;
@@ -9149,7 +9440,14 @@
               body: JSON.stringify(withRepoPath({}, repoPath)),
             }).catch(() => {});
           }
-        } catch (_) {}
+        } catch (_) {
+          _clearOptimisticStartedIssue(issueNum, repoPath);
+          _removePendingSpawnCard(tempPid);
+          btn.disabled = false;
+          btn.textContent = 'Start session';
+          if (card) card.classList.remove('spawning');
+          showOpToast('Could not start issue session.', 'error');
+        }
         setTimeout(function() { refreshConversationList(); }, 800);
         setTimeout(function() { refreshConversationList(); }, 2500);
         // Release the duplicate-tap guard after the refresh window closes.
@@ -9212,6 +9510,7 @@
   }
 
   function renderConversationList(convs) {
+    convs = (Array.isArray(convs) ? convs : []).filter(c => !_isOptimisticallyStartedIssueRow(c));
     _applyOptimisticTouches(convs);
     if (!convs.length) {
       $convList.innerHTML =
@@ -9378,7 +9677,8 @@
       //   4. PR #N (recorded PRs; more actionable than "pushed").
       //   5. pushed.
       //   6. committed (local commits not yet pushed).
-      //   7. no edits (agent has touched nothing this session).
+      //   7. read-only (agent produced output without touching files).
+      //   8. no edits (agent has touched nothing this session).
       let signals = '';
       // GH-issue link chip — additive, lives at the front of the signal
       // chain. Sessions linked to a GH issue show "#N" so they're scannable
@@ -9447,8 +9747,10 @@
         signals += '<span class="conv-signal pushed">pushed</span>';
       } else if (c.has_commit) {
         signals += '<span class="conv-signal committed">committed</span>';
+      } else if (hasReadOnlyWork(c)) {
+        signals += '<span class="conv-signal read-only" title="Agent completed read-only work without file edits">read-only</span>';
       } else if (hasNoEdits(c)) {
-        signals += '<span class="conv-signal no-edits" title="Claude has not edited any files in this session">no edits</span>';
+        signals += '<span class="conv-signal no-edits" title="Agent has not edited any files in this session">no edits</span>';
       }
 
       // Merge button: shown when this row plausibly has an open PR.
@@ -9470,19 +9772,13 @@
       let startBtn = '';
       let archiveBtn;
       if (isBacklogRow) {
-        const _issueAttr = escapeHtml(c.issue_number || '');
-        const _titleAttr = escapeHtml(c.display_name || c.first_message || '');
+        const _issueAttr = escapeAttr(c.issue_number || '');
+        const _titleAttr = escapeAttr(c.display_name || c.first_message || '');
         // Issue rows carry their concrete repo so the spawn handler can target
         // the right folder without relying on server state.
-        const _spawnCwdAttr = escapeHtml(c.spawn_cwd || c.folder_path || '');
+        const _spawnCwdAttr = escapeAttr(c.spawn_cwd || c.folder_path || '');
         startBtn = '<button class="conv-start-btn" data-role="start" data-issue="' + _issueAttr + '" data-title="' + _titleAttr + '" data-spawn-cwd="' + _spawnCwdAttr + '" title="Spawn a session to work on this issue" aria-label="Start issue session">&#9654;</button>';
-        // Cross-repo issue rows skip the archive button in All mode; a
-        // concrete repo filter can manage issues with the row repo context.
-        if (c.id && String(c.id).startsWith('xrepo-issue-')) {
-          archiveBtn = '';
-        } else {
-          archiveBtn = '<button class="conv-archive-btn is-close" data-role="archive" title="Archive issue (close as not planned)" aria-label="Archive issue">&#128229;</button>';
-        }
+        archiveBtn = '<button class="conv-archive-btn is-close" data-role="archive" title="Archive issue (close as not planned)" aria-label="Archive issue">&#128229;</button>';
       } else {
         archiveBtn = '<button class="conv-archive-btn" data-role="archive" title="' + (c.archived ? 'Unarchive' : 'Archive') + '">' + (c.archived ? '&#8617;' : '&#128229;') + '</button>';
       }
@@ -9509,6 +9805,9 @@
             + ' title="' + escapeHtml(c.folder_path || c.session_cwd || '') + '">'
             + escapeHtml(c.folder_label_chip) + '</span>'
         : '';
+      const folderChipBeforeTitle = opts.folderChipBeforeTitle !== false;
+      const leftFolderChipHtml = folderChipBeforeTitle ? '' : folderChipHtml;
+      const titleFolderChipHtml = folderChipBeforeTitle ? folderChipHtml : '';
 
       // Live dot — sits in a reserved gutter before the title when this session
       // is actively being polled (sidecar marker exists). Helps the user
@@ -9538,13 +9837,15 @@
         : '';
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
-      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '">'
+      const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
+      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
             + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
+            + leftFolderChipHtml
             + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
-            + folderChipHtml
+            + titleFolderChipHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
             + historyBadgeHtml
             + pinnedHtml
@@ -9626,6 +9927,30 @@
         + '<span class="conv-folder-group-count">' + count + '</span>'
         + '</div>';
     };
+    const _GH_ISSUE_PREVIEW_LIMIT = 5;
+    const _ghIssueExpandedStorageKey = (key) =>
+      'ccc-ghissues-expanded:' + String(key || '').slice(0, 180);
+    const _isGhIssueProjectExpanded = (key) => {
+      try { return localStorage.getItem(_ghIssueExpandedStorageKey(key)) === '1'; }
+      catch (_) { return false; }
+    };
+    const _ghIssueShowMoreHtml = (key, hiddenCount, expanded) => {
+      if (hiddenCount <= 0) return '';
+      return '<div class="conv-ghissues-more">'
+        + '<button type="button" class="conv-ghissues-more-btn" data-role="ghissues-show-more"'
+        + ' data-expanded="' + (expanded ? '1' : '0') + '"'
+        + ' data-expanded-key="' + escapeHtml(_ghIssueExpandedStorageKey(key)) + '">'
+        + (expanded ? 'Show fewer' : ('Show ' + hiddenCount + ' more'))
+        + '</button>'
+        + '</div>';
+    };
+    const _ghIssueProjectRowsHtml = (cards, key, opts = {}) => {
+      const expanded = _isGhIssueProjectExpanded(key);
+      const hiddenCount = Math.max(0, cards.length - _GH_ISSUE_PREVIEW_LIMIT);
+      const visibleCards = expanded ? cards : cards.slice(0, _GH_ISSUE_PREVIEW_LIMIT);
+      return visibleCards.map(c => _renderRow(c, opts)).join('')
+        + _ghIssueShowMoreHtml(key, hiddenCount, expanded);
+    };
 
     let _activeRowsHtml;
     if (_shouldGroupByFolder) {
@@ -9643,6 +9968,9 @@
         return bMax - aMax;
       });
       const _groupHtml = _folderEntries.map(([folder, cards]) => {
+        if (cards.length === 1) {
+          return _renderRow(cards[0], { folderChipBeforeTitle: true });
+        }
         const hue = (cards[0].folder_chip_hue | 0);
         const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
         // data-folder-path lets the drop handler know which repo to pin
@@ -9764,11 +10092,21 @@
           const collapsed = _isFolderGroupCollapsed('ghissues', collapseKey);
           return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
             + _folderGroupHeaderHtml('ghissues', folder, cards.length, hue, orphan, collapseKey)
-            + cards.map(c => _renderRow(c, { suppressFolderChip: true })).join('')
+            + _ghIssueProjectRowsHtml(cards, collapseKey, { suppressFolderChip: true })
             + '</div>';
         }).join('');
       } else {
-        _ghRows = _flatRowsWithSeparators(_ghIssueConvs, { suppressFolderChip: _isSpecificFolderFilter });
+        const _ghFlatIsSingleProject = _isSpecificFolderFilter || !_ghHasFolderChips;
+        if (_ghFlatIsSingleProject) {
+          const _flatProjectKey = selectedRepoPath() || 'single-repo-gh-issues';
+          _ghRows = _ghIssueProjectRowsHtml(
+            _ghIssueConvs,
+            _flatProjectKey,
+            { suppressFolderChip: _isSpecificFolderFilter }
+          );
+        } else {
+          _ghRows = _flatRowsWithSeparators(_ghIssueConvs, { suppressFolderChip: _isSpecificFolderFilter });
+        }
       }
       const _ghGroupingToggle = _ghHasFolderChips
         ? '<span class="conv-grouping-toggle" data-role="ghissues-grouping-toggle">'
@@ -9776,9 +10114,8 @@
             + '<span class="grouping-opt' + (_ghGrouping === 'time' ? ' is-active' : '') + '" data-grouping="time">by time</span>'
           + '</span>'
         : '';
-      const _ghTools = _ghGroupingToggle
-        ? '<span class="conv-ghissues-tools">' + _ghGroupingToggle + '</span>'
-        : '';
+      const _ghRefresh = '<span class="conv-ghissues-refresh' + (ghIssuesRefreshing ? ' is-spinning' : '') + '" data-role="ghissues-refresh" role="button" tabindex="0" title="Refresh GitHub issues" aria-label="Refresh GitHub issues">&#8635;</span>';
+      const _ghTools = '<span class="conv-ghissues-tools">' + _ghRefresh + _ghGroupingToggle + '</span>';
       _ghIssuesHtml =
         '<div class="conv-ghissues-section' + (_ghCollapsed ? ' collapsed' : '') + '" data-role="ghissues-section">'
         + '<button type="button" class="conv-ghissues-header" data-role="ghissues-toggle" aria-expanded="' + (!_ghCollapsed) + '">'
@@ -9831,7 +10168,7 @@
     const $ghIssuesToggle = $convList.querySelector('[data-role="ghissues-toggle"]');
     if ($ghIssuesToggle) {
       $ghIssuesToggle.addEventListener('click', (ev) => {
-        if (ev.target.closest('[data-role="ghissues-grouping-toggle"]')) return;
+        if (ev.target.closest('[data-role="ghissues-grouping-toggle"], [data-role="ghissues-refresh"]')) return;
         ev.stopPropagation();
         const section = $ghIssuesToggle.closest('[data-role="ghissues-section"]');
         if (!section) return;
@@ -9858,6 +10195,36 @@
         }
       });
     }
+    const $ghIssuesRefresh = $convList.querySelector('[data-role="ghissues-refresh"]');
+    if ($ghIssuesRefresh) {
+      const runGhIssuesRefresh = (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        refreshGhIssuesSection();
+      };
+      $ghIssuesRefresh.addEventListener('click', runGhIssuesRefresh);
+      $ghIssuesRefresh.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') runGhIssuesRefresh(ev);
+      });
+    }
+    $convList.querySelectorAll('[data-role="ghissues-show-more"]').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const key = btn.getAttribute('data-expanded-key') || '';
+        if (!key) return;
+        const expanded = btn.getAttribute('data-expanded') === '1';
+        try {
+          if (expanded) localStorage.removeItem(key);
+          else localStorage.setItem(key, '1');
+        } catch (_) {}
+        if (typeof archiveMode !== 'undefined' && archiveMode) {
+          const $search = document.getElementById('convSearch');
+          renderArchiveList($search ? $search.value : '');
+        } else if (typeof loadConversationList === 'function') {
+          loadConversationList();
+        }
+      });
+    });
     // Toggle handler for the Ready to merge section header.
     const $rtmToggle = $convList.querySelector('[data-role="readytomerge-toggle"]');
     if ($rtmToggle) {
@@ -10064,29 +10431,37 @@
                       || findSibling(item.previousElementSibling, 'prev');
         }
         try {
+          const c = conversationsData.find(x => x.id === convId || x.session_id === sessionId);
+          const repoPath = (c && rowRepoPath(c)) || item.dataset.repoPath || '';
           const data = await ccPostJson('/api/conversations/' + convId + '/archive',
-            { session_id: sessionId });
-          if (data.ok) {
-            const c = conversationsData.find(x => x.id === convId);
-            if (c) {
-              c.archived = data.archived;
-              setOptimisticOverride(c.session_id, { archived: c.archived });
-            }
-            // Patch archiveData (Round 5 / #13) so the next archive
-            // re-render reflects the new archived state — same reason
-            // as the rename patch above.
-            if (typeof archiveData !== 'undefined' && Array.isArray(archiveData)) {
-              const ac = archiveData.find(x => x.session_id === sessionId);
-              if (ac) ac.archived = data.archived;
-            }
-            if (typeof currentRepoBacklogData !== 'undefined' && Array.isArray(currentRepoBacklogData)) {
-              const bc = currentRepoBacklogData.find(x => x.id === convId || x.session_id === sessionId);
-              if (bc) bc.archived = data.archived;
-            }
-            renderSidebar(filterConversations($convSearch.value));
-            if (data.archived && nextSelectId) {
-              selectConversation(nextSelectId);
-            }
+            archivePayloadForRow(c || { repo_path: repoPath }, sessionId));
+          if (!data.ok) {
+            const ghError = data.github && data.github.stderr;
+            throw new Error(data.error || ghError || 'archive failed');
+          }
+          if (c) {
+            c.archived = data.archived;
+            setOptimisticOverride(c.session_id, { archived: c.archived });
+          }
+          if ((convId || '').startsWith('xrepo-issue-') || (convId || '').startsWith('backlog-issue-')) {
+            if (data.archived) _archivedBacklogIds.add(convId);
+            else _archivedBacklogIds.delete(convId);
+            _persistArchivedBacklog();
+          }
+          // Patch archiveData (Round 5 / #13) so the next archive
+          // re-render reflects the new archived state — same reason
+          // as the rename patch above.
+          if (typeof archiveData !== 'undefined' && Array.isArray(archiveData)) {
+            const ac = archiveData.find(x => x.session_id === sessionId);
+            if (ac) ac.archived = data.archived;
+          }
+          if (typeof currentRepoBacklogData !== 'undefined' && Array.isArray(currentRepoBacklogData)) {
+            const bc = currentRepoBacklogData.find(x => x.id === convId || x.session_id === sessionId);
+            if (bc) bc.archived = data.archived;
+          }
+          renderSidebar(filterConversations($convSearch.value));
+          if (data.archived && nextSelectId) {
+            selectConversation(nextSelectId);
           }
         } catch (err) {
           showOpToast('Archive failed (' + err.message + ')', 'error');
@@ -10111,20 +10486,22 @@
         const prompt = (issueNum
           ? 'Fix issue #' + issueNum + ' — ' + cleanTitle + '\n\nRun `gh issue view ' + issueNum + '` for the full body (title may be truncated).'
           : cleanTitle) + SESSION_STATE_INSTRUCTION;
-        const spawnKey = issueNum ? ('issue-' + issueNum) : sessionName;
+        const spawnRepoPath = spawnCwd || repoPathForIssueNumber(issueNum);
+        const spawnKey = issueNum ? (_issueStartKey(issueNum, spawnRepoPath) || ('issue-' + issueNum)) : sessionName;
         if (_spawningKeys.has(spawnKey)) return;
         _spawningKeys.add(spawnKey);
         btn.disabled = true;
         btn.textContent = '…';
         btn.title = 'Spawning session…';
         const tempPid = 'tmp-' + Date.now();
-        insertPendingSpawnCard(tempPid, sessionName, false);
+        if (issueNum) _markIssueOptimisticallyStarted(issueNum, spawnRepoPath);
+        insertPendingSpawnCard(tempPid, sessionName, false, null, _pendingIssueSpawnMeta(issueNum, spawnRepoPath));
         (async () => {
           try {
             const spawnBody = { prompt: prompt, name: sessionName };
-            if (spawnCwd) {
-              spawnBody.cwd = spawnCwd;
-              spawnBody.repo_path = spawnCwd;
+            if (spawnRepoPath) {
+              spawnBody.cwd = spawnRepoPath;
+              spawnBody.repo_path = spawnRepoPath;
             }
             const res = await fetch('/api/sessions/spawn', {
               method: 'POST',
@@ -10132,7 +10509,8 @@
               body: JSON.stringify(spawnBody),
             });
             const data = await res.json().catch(() => ({}));
-            if (data.ok && data.pid) {
+            if (!res.ok || !data.ok) throw new Error(data.error || 'spawn_failed');
+            if (data.pid) {
               const placeholder = conversationsData.find(x => x.id === 'spawning-' + tempPid);
               if (placeholder) {
                 placeholder.spawn_pid = data.pid;
@@ -10140,14 +10518,21 @@
                 pendingSpawns.set(data.pid, placeholder);
               }
             }
-            if (issueNum && spawnCwd) {
+            if (issueNum && spawnRepoPath) {
               fetch('/api/issues/' + issueNum + '/mark-in-progress', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ repo_path: spawnCwd }),
+                body: JSON.stringify({ repo_path: spawnRepoPath }),
               }).catch(() => {});
             }
-          } catch (_) {}
+          } catch (_) {
+            _clearOptimisticStartedIssue(issueNum, spawnRepoPath);
+            _removePendingSpawnCard(tempPid);
+            btn.disabled = false;
+            btn.innerHTML = '&#9654;';
+            btn.title = 'Spawn a session to work on this issue';
+            showOpToast('Could not start issue session.', 'error');
+          }
           setTimeout(refreshConversationList, 800);
           setTimeout(refreshConversationList, 2500);
           setTimeout(() => { _spawningKeys.delete(spawnKey); }, 8000);
@@ -10469,6 +10854,7 @@
   }
 
   async function refreshConversationList() {
+    if (isInlineRenameInProgress()) return;
     if ($convRefreshBtn) $convRefreshBtn.classList.add('spinning');
     conversationsLoaded = false;
     if (typeof archiveMode !== 'undefined' && archiveMode) {
@@ -11246,6 +11632,19 @@
     return html;
   }
 
+  let conversationPaneLoading = false;
+  let conversationPaneLoadToken = 0;
+
+  function scheduleSessionMetadataFetches(convId, sid) {
+    if (!sid) return;
+    setTimeout(() => {
+      if (currentConversation !== convId) return;
+      fetchSessionTimeline(sid);
+      fetchSessionWorkspace(sid);
+      fetchSessionUsage(sid);
+    }, 150);
+  }
+
   async function selectConversation(id, paneId) {
     paneId = paneId || activePaneId();
     const paneIdx = paneIndexByPaneId(paneId);
@@ -11277,17 +11676,13 @@
       await renderIssueInConvPane(selectedRow.issue_number, rowRepoPath(selectedRow), selectedRow.id);
       return;
     }
-    // Kick off the session-activity-timeline fetch in parallel — render
-    // happens after sticky header lands (or this fetch returns, whichever
-    // is later, via renderSessionTimelineIntoSticky).
-    if (source !== 'backlog') {
-      const timelineSid = (selectedRow || selectedConv || {}).session_id || id;
-      fetchSessionTimeline(timelineSid);
-      fetchSessionWorkspace(timelineSid);
-      fetchSessionUsage(timelineSid);
-    }
     const $view = getConvView();
     $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Loading...</div>';
+    const loadToken = ++conversationPaneLoadToken;
+    conversationPaneLoading = true;
+    const finishConversationPaneLoad = () => {
+      if (conversationPaneLoadToken === loadToken) conversationPaneLoading = false;
+    };
     // Update active state in sidebar (list view)
     $convList.querySelectorAll('.conv-item').forEach(el => {
       el.classList.toggle('active', el.dataset.id === id);
@@ -11304,14 +11699,7 @@
     // Update split panel session ID display
     if ($cpSessionId) {
       const sid = sessionIdByConv[id] || '';
-      $cpSessionId.textContent = sid;
-      $cpSessionId.onclick = () => {
-        if (!sid) return;
-        navigator.clipboard.writeText(sid).then(() => {
-          $cpSessionId.textContent = 'copied!';
-          setTimeout(() => { $cpSessionId.textContent = sid; }, 1000);
-        });
-      };
+      setCopyableSessionId($cpSessionId, sid);
     }
     const paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId}"]`);
     if (paneEl) paneEl.classList.toggle('is-codex-session', source === 'codex');
@@ -11332,39 +11720,47 @@
     // Update split panel toolbar buttons
     updateSplitToolbar();
 
-    if (source === 'pkood') {
-      stopPkoodTailPoller();
-      const agentId = id.replace(/^pkood-/, '');
-      if ($pkoodKillBtn) {
-        $pkoodKillBtn.style.display = '';
-        $pkoodKillBtn.onclick = async () => {
-          if (!confirm('Kill pkood agent "' + agentId + '"?')) return;
-          try {
-            const res = await fetch('/api/pkood/kill', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ agent_id: agentId }),
-            });
-            const data = await res.json();
-            if (data.ok) {
-              $pkoodKillBtn.textContent = 'Killed';
-              setTimeout(() => { $pkoodKillBtn.textContent = 'Kill'; refreshConversationList(); }, 1500);
-            }
-          } catch (err) {}
-        };
+    try {
+      if (source === 'pkood') {
+        stopPkoodTailPoller();
+        const agentId = id.replace(/^pkood-/, '');
+        if ($pkoodKillBtn) {
+          $pkoodKillBtn.style.display = '';
+          $pkoodKillBtn.onclick = async () => {
+            if (!confirm('Kill pkood agent "' + agentId + '"?')) return;
+            try {
+              const res = await fetch('/api/pkood/kill', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ agent_id: agentId }),
+              });
+              const data = await res.json();
+              if (data.ok) {
+                $pkoodKillBtn.textContent = 'Killed';
+                setTimeout(() => { $pkoodKillBtn.textContent = 'Kill'; refreshConversationList(); }, 1500);
+              }
+            } catch (err) {}
+          };
+        }
+        await loadPkoodTail(agentId);
+        pkoodTailPoller = setInterval(() => loadPkoodTail(agentId), 2000);
+      } else {
+        stopPkoodTailPoller();
+        if ($pkoodKillBtn) $pkoodKillBtn.style.display = 'none';
+        await fetchConversationEvents(paneId);
+        if (source !== 'backlog') startConvStream(paneId);
+        // Block-level streaming from the spawn log — only succeeds if the
+        // backend finds a CCC-spawned headless process for this session.
+        // No-op for externally launched, IDE-launched, or pkood sessions.
+        const sid = sessionIdByConv[id] || '';
+        if (sid && source !== 'codex' && source !== 'backlog') startSpawnStream(sid);
       }
-      await loadPkoodTail(agentId);
-      pkoodTailPoller = setInterval(() => loadPkoodTail(agentId), 2000);
-    } else {
-      stopPkoodTailPoller();
-      if ($pkoodKillBtn) $pkoodKillBtn.style.display = 'none';
-      await fetchConversationEvents(paneId);
-      if (source !== 'backlog') startConvStream(paneId);
-      // Block-level streaming from the spawn log — only succeeds if the
-      // backend finds a CCC-spawned headless process for this session.
-      // No-op for externally launched, IDE-launched, or pkood sessions.
-      const sid = sessionIdByConv[id] || '';
-      if (sid && source !== 'codex' && source !== 'backlog') startSpawnStream(sid);
+    } finally {
+      finishConversationPaneLoad();
+      if (source !== 'backlog') {
+        const timelineSid = (selectedRow || selectedConv || {}).session_id || id;
+        scheduleSessionMetadataFetches(id, timelineSid);
+      }
     }
   }
 
@@ -11573,9 +11969,8 @@
         const cached = cur ? _ffcCache.get(cur) : null;
         if (cached && typeof openFfcModal === 'function') openFfcModal(cached);
       });
-      // Append to the sticky header. CSS sets margin-left so it sits
-      // next to whatever was already there.
-      stickyEl.appendChild(pill);
+      const host = stickyEl.querySelector('.csh-col-activity') || stickyEl;
+      host.insertBefore(pill, host.firstChild || null);
     }
     pill.hidden = false;
     pill.querySelector('.ffc-pill-count').textContent = '(' + data.count + ')';
@@ -12201,13 +12596,13 @@
   function _dynAskApply(idx, items) {
     const st = _dynamicAskState;
     if (!st || st.currentIdx === idx) return;
-    // Unhide whichever later item was hidden during the previous swap so
-    // it pops back into view as soon as the sticky moves on. Index 0
+    // Unhide whichever later item was visually hidden during the previous
+    // swap so it pops back into view as soon as the sticky moves on. Index 0
     // (the original ask) keeps `is-pinned-in-sticky` permanently — that
-    // hide is owned by the sticky-header init code, not by this
+    // display:none hide is owned by the sticky-header init code, not by this
     // tracker, so we never touch it here.
     if (st.currentIdx > 0 && items[st.currentIdx]) {
-      items[st.currentIdx].classList.remove('is-pinned-in-sticky');
+      items[st.currentIdx].classList.remove('is-dynamic-pinned-in-sticky');
     }
     if (idx <= 0) {
       // No earlier ask scrolled past — clear the slot entirely so
@@ -12230,12 +12625,11 @@
       return;
     }
     // Original stays put, earlier-block shows the most-recent user message
-    // that's scrolled behind the sticky. Hide the in-conv bubble for the
-    // pinned message so the user doesn't see the same text twice. The
-    // layout coordinator decides whether earlier sits stacked under
-    // original or moves into the (otherwise empty) activity column.
+    // that's scrolled behind the sticky. Hide the in-conv bubble visually
+    // so the user doesn't see the same text twice, but keep its layout space
+    // so scrollHeight does not change mid-scroll.
     st.currentIdx = idx;
-    item.classList.add('is-pinned-in-sticky');
+    item.classList.add('is-dynamic-pinned-in-sticky');
     if (st.earlierFirst) st.earlierFirst.innerHTML = linkifyPastedImages(escapeHtml(text));
     _updateStickyAskSlots();
   }
@@ -12285,15 +12679,13 @@
     // user's just-typed message vanishes.
     const ref = st.sticky.querySelector('.csh-ask-original') || st.sticky;
     const threshold = ref.getBoundingClientRect().bottom;
-    // The currently-pinned item is display:none and reports bottom=0, which
-    // would falsely satisfy `bottom <= threshold` forever — so once the user
-    // scrolled past a message it could never be un-pinned. Briefly un-pin
-    // it so its bounding rect reflects its real layout position, then either
-    // re-pin (still scrolled past) or let _dynAskApply tear it down.
+    // The currently-pinned dynamic item remains in layout, but temporarily
+    // clear the visual-hide class before measurement so any legacy state
+    // from older renders cannot poison the bounding rect calculation.
     let prevPinned = null;
     if (st.currentIdx > 0 && items[st.currentIdx]) {
       prevPinned = items[st.currentIdx];
-      prevPinned.classList.remove('is-pinned-in-sticky');
+      prevPinned.classList.remove('is-dynamic-pinned-in-sticky');
     }
     let idx = 0;
     for (let i = 0; i < items.length; i++) {
@@ -12301,7 +12693,7 @@
       else break;
     }
     if (prevPinned && idx === st.currentIdx) {
-      prevPinned.classList.add('is-pinned-in-sticky');
+      prevPinned.classList.add('is-dynamic-pinned-in-sticky');
     }
     _dynAskApply(idx, items);
   }
@@ -13191,10 +13583,8 @@
               if (icon) icon.textContent = nowExpanded ? '▾' : '▴';
             });
           }
-          // Sticky auto-sizes to its current message — no resize handle, no
-          // stored height. `.csh-col-ask .user-msg` already has
-          // max-height:none and overflow:visible, so the box grows or shrinks
-          // with whichever ask is being shown.
+          // The sticky ask slots keep a stable height while their message
+          // bodies scroll internally; no resize handle or stored height.
           // Wire the dynamic-ask scroll tracker. The helpers (_dynAskItems,
           // _dynAskApply, _dynAskUpdate, _dynAskSchedule) only do work when
           // _dynamicAskState is populated and a scroll listener fires
@@ -13636,8 +14026,27 @@
       });
   }
 
+  function updateConversationSearchClear() {
+    if (!$convSearch || !$convSearchClear) return;
+    const hasValue = Boolean($convSearch.value);
+    $convSearchClear.closest('.search-wrap')?.classList.toggle('has-value', hasValue);
+  }
+
+  updateConversationSearchClear();
+
+  if ($convSearchClear) {
+    $convSearchClear.addEventListener('click', () => {
+      if (!$convSearch || !$convSearch.value) return;
+      $convSearch.value = '';
+      updateConversationSearchClear();
+      $convSearch.dispatchEvent(new Event('input', { bubbles: true }));
+      $convSearch.focus();
+    });
+  }
+
   // Conversation search filter
   $convSearch.addEventListener('input', () => {
+    updateConversationSearchClear();
     // Re-render immediately with the local filter — instant response,
     // no waiting on the network.
     renderSidebar(filterConversations($convSearch.value));
@@ -14060,12 +14469,9 @@
     });
   }
 
-  // Cross-repo issues → backlog-card-shaped rows. ID format
-  // `xrepo-issue-<repo-slug>-<number>` is intentionally distinct from the
-  // single-repo `backlog-issue-<N>` so the archive/rename endpoint regexes
-  // don't try to handle them — those operations remain repo-scoped (you
-  // can switch to that repo and use the regular flow). The Start button
-  // handler reads the row's `cwd` field to spawn into the right folder.
+  // Cross-repo issues → backlog-card-shaped rows. ID format keeps repo
+  // identity in the client row so actions can pass a concrete repo_path
+  // without switching global server state.
   function _crossRepoIssueArchiveRows() {
     if (!Array.isArray(crossRepoIssuesData) || !crossRepoIssuesData.length) return [];
     return crossRepoIssuesData.map(issue => {
@@ -14079,6 +14485,7 @@
       const createdAtStr = issue.createdAt || issue.updatedAt || '';
       let createdTs = 0;
       try { createdTs = createdAtStr ? new Date(createdAtStr).getTime() / 1000 : 0; } catch (_) {}
+      const archived = _archivedBacklogIds.has(id);
       return {
         id,
         session_id: id,
@@ -14097,7 +14504,7 @@
         size: 0,
         branch: '',
         is_live: false,
-        archived: false,
+        archived,
         verified: false,
         has_edit: false,
         has_commit: false,
@@ -14373,6 +14780,7 @@
   // issues. Closed issues are filtered out client-side here to keep the
   // section focused on actionable work.
   let crossRepoIssuesData = [];
+  let ghIssuesRefreshing = false;
   async function loadCrossRepoIssues() {
     try {
       const r = await fetch('/api/issues/all');
@@ -14399,6 +14807,30 @@
     return archiveData;
   }
 
+  async function refreshGhIssuesSection() {
+    if (ghIssuesRefreshing) return;
+    ghIssuesRefreshing = true;
+    const query = document.getElementById('convSearch')?.value || '';
+    try {
+      if (archiveMode) renderArchiveList(query);
+      if (archiveMode) {
+        crossRepoIssuesData = await loadCrossRepoIssues();
+        archiveLoaded = true;
+        renderRepoSidebar();
+        renderArchiveList(query);
+      } else {
+        await loadConversationList();
+      }
+      showOpToast('GH issues refreshed');
+    } catch (err) {
+      showOpToast('Could not refresh GH issues: ' + ((err && err.message) || 'unknown error'), 'error');
+      if (archiveMode) renderArchiveList(query);
+    } finally {
+      ghIssuesRefreshing = false;
+      if (archiveMode) renderArchiveList(document.getElementById('convSearch')?.value || query);
+    }
+  }
+
   // Stable hue 0..359 from a string. Used to color folder chips so the
   // same folder always gets the same color across renders.
   function _hashHue(s) {
@@ -14414,6 +14846,7 @@
   function renderArchiveList(filter) {
     const $list = document.getElementById('convList');
     if (!$list) return;
+    if (_renameInProgress) return;
     const q = (filter || '').trim().toLowerCase();
     const archiveRows = _archiveRowsWithBacklog();
     const byFolder = archiveFolderFilter === ARCHIVE_FOLDER_ALL
@@ -15106,6 +15539,7 @@
   if ($kptSearch) {
     $kptSearch.addEventListener('input', () => {
       $convSearch.value = $kptSearch.value;
+      updateConversationSearchClear();
       renderSidebar(filterConversations($kptSearch.value));
     });
   }
@@ -15564,7 +15998,7 @@
           if ($cpInput.__cpRefresh) $cpInput.__cpRefresh();
         } else {
           flashRed();
-          const reason = data.error || ('HTTP ' + res.status);
+          const reason = formatInjectFailure(data, res.status);
           showOpToast('Send failed: ' + reason, 'error');
         }
       } catch (err) {
@@ -15623,8 +16057,10 @@
   // loadConversationList() so the merge logic (placeholder preservation,
   // display-name override carry-over, sticky columns) lives in one place —
   // divergence here was what caused new-session rows to flicker.
-  setInterval(async () => {
-    if (activeTab !== 'sessions') return;
+	  setInterval(async () => {
+	    if (activeTab !== 'sessions') return;
+	    if (isInlineRenameInProgress()) return;
+	    if (conversationPaneLoading) return;
     // In archive mode, refresh /api/conversations/all and re-render —
     // otherwise new sessions don't appear until the user toggles archive
     // off and back on. Cheap because _extract_tail_meta is mtime-cached

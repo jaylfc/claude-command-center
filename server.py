@@ -4152,11 +4152,12 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
 
 
 def inject_input_via_keystroke(tty, terminal_app, text):
-    """Focus the terminal tab for `tty`, then type `text` + Enter via System Events.
+    """Find the terminal tab for `tty`, then send `text` + Enter to it.
 
-    This goes through the same event pipeline as real keyboard input, so
-    Claude Code's TUI properly receives and processes the text (unlike raw
-    TTY writes which bypass the input handler).
+    We use Terminal/iTerm's native AppleScript input APIs instead of raw TTY
+    writes. Raw writes bypass the TUI input handler, while native terminal
+    input lands in the same path as typed text without requiring System Events
+    keystroke permissions.
     """
     tty_short = tty.replace("/dev/", "")
     tty_full = "/dev/" + tty_short
@@ -4166,18 +4167,49 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         return s.replace("\\", "\\\\").replace('"', '\\"')
     text_lit = as_lit(text)
 
+    def failure_payload(raw_error):
+        detail = (raw_error or "").strip()
+        low = detail.lower()
+        payload = {
+            "ok": False,
+            "via": "terminal-control",
+            "tty": tty,
+            "terminal_app": terminal_app,
+            "error": detail or "AppleScript failed",
+        }
+        if "not allowed to send keystrokes" in low or ("system events" in low and "1002" in low):
+            payload.update({
+                "code": "macos_keystroke_permission",
+                "error": (
+                    "macOS blocked CCC from typing into the terminal. Allow the app "
+                    "running CCC to use Accessibility in System Settings > Privacy "
+                    "& Security, then retry."
+                ),
+                "detail": detail,
+            })
+        elif (
+            "not authorized to send apple events" in low
+            or "not authorised to send apple events" in low
+            or "not permitted to send apple events" in low
+            or "automation" in low and "not" in low and "allow" in low
+        ):
+            payload.update({
+                "code": "macos_automation_permission",
+                "error": (
+                    f"macOS blocked CCC from controlling {terminal_app}. Allow the "
+                    f"app running CCC to control {terminal_app} in System Settings "
+                    "> Privacy & Security > Automation, then retry."
+                ),
+                "detail": detail,
+            })
+        return payload
+
     if terminal_app == "iTerm2":
-        # iTerm2: find the session by tty, select it, then keystroke.
-        # We capture the previously-frontmost app BEFORE activating iTerm2 and
-        # restore it AFTER keystroking, so the user's CCC window (browser)
-        # doesn't stay buried when they send from the split-panel input.
+        # iTerm2: find the session by tty, select it, then write text through
+        # iTerm's native session API.
         script = f'''
-        set prevApp to ""
-        try
-          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
-        end try
         tell application "iTerm2"
-          set found to false
+          set foundSession to missing value
           set winCount to count of windows
           repeat with i from 1 to winCount
             try
@@ -4188,49 +4220,31 @@ def inject_input_via_keystroke(tty, terminal_app, text):
                   repeat with s in sessions of t
                     try
                       if tty of s is "{tty_full}" then
+                        set foundSession to s
                         select w
                         tell w to select t
                         select s
-                        set found to true
                         exit repeat
                       end if
                     end try
                   end repeat
-                  if found then exit repeat
+                  if foundSession is not missing value then exit repeat
                 end try
               end repeat
-              if found then exit repeat
+              if foundSession is not missing value then exit repeat
             end try
           end repeat
-          if not found then return "notfound"
-          activate
+          if foundSession is missing value then return "notfound"
+          tell foundSession to write text "{text_lit}"
         end tell
-        delay 0.15
-        tell application "System Events"
-          keystroke "{text_lit}"
-          keystroke return
-        end tell
-        delay 0.08
-        try
-          if prevApp is not "" and prevApp is not "iTerm2" then
-            tell application prevApp to activate
-          end if
-        end try
         return "ok"
         '''
     else:
-        # Terminal.app: find the tab by tty, focus it, then keystroke.
+        # Terminal.app: find the tab by tty, focus it, then send text through
+        # Terminal's native `do script ... in tab` API.
         # The reorder is re-asserted AFTER activate to win the race against
-        # macOS restoring a different Terminal window as key — otherwise
-        # keystroke lands in whichever Terminal tab was last user-focused.
-        # Capture the previously-frontmost app BEFORE stealing focus so we can
-        # hand it back after the keystroke lands — otherwise CCC (in the user's
-        # browser) stays buried behind Terminal every time they send input.
+        # macOS restoring a different Terminal window as key.
         script = f'''
-        set prevApp to ""
-        try
-          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
-        end try
         tell application "Terminal"
           set foundWin to missing value
           set foundTab to missing value
@@ -4256,24 +4270,12 @@ def inject_input_via_keystroke(tty, terminal_app, text):
           try
             set index of foundWin to 1
           end try
-          activate
-          delay 0.25
           try
             set index of foundWin to 1
           end try
           set selected of foundTab to true
+          do script "{text_lit}" in foundTab
         end tell
-        delay 0.1
-        tell application "System Events"
-          keystroke "{text_lit}"
-          keystroke return
-        end tell
-        delay 0.08
-        try
-          if prevApp is not "" and prevApp is not "Terminal" then
-            tell application prevApp to activate
-          end if
-        end try
         return "ok"
         '''
 
@@ -4288,7 +4290,7 @@ def inject_input_via_keystroke(tty, terminal_app, text):
 
     out = _run()
     if isinstance(out, Exception):
-        return {"ok": False, "error": str(out)}
+        return failure_payload(str(out))
     result_str = (out.stdout or "").strip()
     # Auto-retry once on notfound — the tab often becomes findable ~200ms later
     # after a focus/Spaces transition settles.
@@ -4296,13 +4298,22 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         time.sleep(0.2)
         out = _run()
         if isinstance(out, Exception):
-            return {"ok": False, "error": str(out)}
+            return failure_payload(str(out))
         result_str = (out.stdout or "").strip()
     if out.returncode != 0:
-        return {"ok": False, "error": (out.stderr or "").strip() or "AppleScript failed"}
+        return failure_payload((out.stderr or "").strip() or "AppleScript failed")
     if result_str == "notfound":
-        return {"ok": False, "error": f"No {terminal_app} tab found for {tty_short} — tab may be hidden, on another Space, or behind a fullscreen app"}
-    return {"ok": True, "tty": tty}
+        return {
+            "ok": False,
+            "via": "terminal-control",
+            "tty": tty,
+            "terminal_app": terminal_app,
+            "error": (
+                f"No {terminal_app} tab found for {tty_short}; the tab may be "
+                "hidden, on another Space, or behind a fullscreen app"
+            ),
+        }
+    return {"ok": True, "tty": tty, "terminal_app": terminal_app, "via": "terminal-control"}
 
 
 def interrupt_input_via_keystroke(tty, terminal_app):
@@ -8479,7 +8490,7 @@ def list_spawned_sessions():
 
 def _inject_text_into_session(session_id, text):
     """Route `text` to a session using the same fall-through as /api/inject-input:
-    AppleScript keystroke when there's a TTY, FIFO write to a live spawn,
+    terminal-control AppleScript when there's a TTY, FIFO write to a live spawn,
     else `claude --resume` headless. Returns a dict with at least
     {"ok": bool, "via": <route>}.
     """
@@ -13673,7 +13684,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             result["session_id"] = sid
             result["name"] = name
             self.send_json(result)
-        elif re.match(r"^/api/conversations/[a-f0-9-]+/archive$", path) or re.match(r"^/api/conversations/issue-\d+/archive$", path) or re.match(r"^/api/conversations/pkood-[^/]+/archive$", path) or re.match(r"^/api/conversations/backlog-(issue|todo)-\d+/archive$", path):
+        elif re.match(r"^/api/conversations/[a-f0-9-]+/archive$", path) or re.match(r"^/api/conversations/issue-\d+/archive$", path) or re.match(r"^/api/conversations/pkood-[^/]+/archive$", path) or re.match(r"^/api/conversations/backlog-(issue|todo)-\d+/archive$", path) or re.match(r"^/api/conversations/xrepo-issue-[^/]+-\d+/archive$", path):
             conv_id = path.split("/")[-2]
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
@@ -13683,7 +13694,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 payload = {}
             sid = payload.get("session_id") or conv_id
             # Backlog GitHub issue: close with "not planned" reason
-            backlog_match = re.match(r"^backlog-issue-(\d+)$", conv_id)
+            backlog_match = re.match(r"^(?:backlog-issue|xrepo-issue-.+)-(\d+)$", conv_id)
             if backlog_match:
                 issue_num = backlog_match.group(1)
                 try:

@@ -1,0 +1,1 @@
+- Keep inline session-title edits alive when the conversation list auto-refreshes.

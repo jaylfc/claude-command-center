@@ -1,0 +1,1 @@
+- Fixed grouped archive rows so size, status, and branch chips stay aligned in stable right-side columns.

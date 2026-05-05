@@ -1,0 +1,1 @@
+- Fixed live terminal sends to avoid macOS System Events keystroke failures and show clearer permission guidance when terminal automation is blocked.
