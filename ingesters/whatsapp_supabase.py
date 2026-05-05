@@ -117,8 +117,21 @@ class Daemon:
         )
         try:
             with urllib.request.urlopen(req, timeout=5) as resp:
-                payload = resp.read().decode("utf-8", errors="replace")
-            LOG.info("inject ok · reason=%s · resp=%s", reason, payload[:200])
+                payload_text = resp.read().decode("utf-8", errors="replace")
+            try:
+                resp_json = json.loads(payload_text)
+            except json.JSONDecodeError:
+                resp_json = {}
+            if resp_json.get("submitted") is False:
+                LOG.warning(
+                    "inject typed-but-not-submitted · reason=%s · grant osascript "
+                    "Accessibility (System Settings > Privacy & Security > "
+                    "Accessibility) to enable auto-submit · detail=%s",
+                    reason,
+                    (resp_json.get("detail") or "").splitlines()[0][:160],
+                )
+            else:
+                LOG.info("inject ok · reason=%s · resp=%s", reason, payload_text[:200])
         except urllib.error.URLError as exc:
             LOG.error("inject failed · reason=%s · err=%s", reason, exc)
 

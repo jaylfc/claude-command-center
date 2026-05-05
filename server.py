@@ -4277,10 +4277,20 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
 def inject_input_via_keystroke(tty, terminal_app, text):
     """Find the terminal tab for `tty`, then send `text` + Enter to it.
 
-    We use Terminal/iTerm's native AppleScript input APIs instead of raw TTY
-    writes. Raw writes bypass the TUI input handler, while native terminal
-    input lands in the same path as typed text without requiring System Events
-    keystroke permissions.
+    Two stages, both inside one osascript call:
+      1. Native terminal input API (`do script` for Terminal.app,
+         `write text` for iTerm2) types the text into the TTY without
+         needing System Events keystroke permissions for the body.
+      2. Activate the terminal app and emit `key code 36` (Return) via
+         System Events so Claude Code's TUI sees a real keypress and
+         submits the input. The native APIs alone leave the text in
+         the input buffer (the TUI's bracketed-paste handling treats
+         the trailing newline as content, not as submit), which causes
+         consecutive injects to concatenate in the buffer.
+
+    Stage 2 briefly steals focus; we capture the previously-frontmost
+    app and restore it at the end so the user's browser doesn't stay
+    buried.
     """
     tty_short = tty.replace("/dev/", "")
     tty_full = "/dev/" + tty_short
@@ -4328,9 +4338,14 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         return payload
 
     if terminal_app == "iTerm2":
-        # iTerm2: find the session by tty, select it, then write text through
-        # iTerm's native session API.
+        # iTerm2: find the session by tty, write the body via the
+        # native session API (no focus needed), then activate iTerm and
+        # emit a real Return keystroke so the TUI submits.
         script = f'''
+        set prevApp to ""
+        try
+          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+        end try
         tell application "iTerm2"
           set foundSession to missing value
           set winCount to count of windows
@@ -4359,15 +4374,35 @@ def inject_input_via_keystroke(tty, terminal_app, text):
           end repeat
           if foundSession is missing value then return "notfound"
           tell foundSession to write text "{text_lit}"
+          activate
         end tell
+        delay 0.1
+        set submitErr to ""
+        try
+          tell application "System Events" to key code 36
+        on error errMsg
+          set submitErr to errMsg
+        end try
+        delay 0.05
+        try
+          if prevApp is not "" and prevApp is not "iTerm2" then
+            tell application prevApp to activate
+          end if
+        end try
+        if submitErr is not "" then return "ok-no-submit:" & submitErr
         return "ok"
         '''
     else:
-        # Terminal.app: find the tab by tty, focus it, then send text through
-        # Terminal's native `do script ... in tab` API.
-        # The reorder is re-asserted AFTER activate to win the race against
-        # macOS restoring a different Terminal window as key.
+        # Terminal.app: find the tab by tty, focus it, send text through
+        # Terminal's native `do script ... in tab` API, then activate
+        # Terminal and emit a real Return keystroke via System Events so
+        # the TUI submits. The reorder is re-asserted after activate to
+        # win the race against macOS restoring a different window as key.
         script = f'''
+        set prevApp to ""
+        try
+          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+        end try
         tell application "Terminal"
           set foundWin to missing value
           set foundTab to missing value
@@ -4398,7 +4433,22 @@ def inject_input_via_keystroke(tty, terminal_app, text):
           end try
           set selected of foundTab to true
           do script "{text_lit}" in foundTab
+          activate
         end tell
+        delay 0.1
+        set submitErr to ""
+        try
+          tell application "System Events" to key code 36
+        on error errMsg
+          set submitErr to errMsg
+        end try
+        delay 0.05
+        try
+          if prevApp is not "" and prevApp is not "Terminal" then
+            tell application prevApp to activate
+          end if
+        end try
+        if submitErr is not "" then return "ok-no-submit:" & submitErr
         return "ok"
         '''
 
@@ -4425,6 +4475,28 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         result_str = (out.stdout or "").strip()
     if out.returncode != 0:
         return failure_payload((out.stderr or "").strip() or "AppleScript failed")
+    if result_str.startswith("ok-no-submit:"):
+        # Body was typed via `do script` / `write text` but the System
+        # Events Return keystroke was rejected — typically because
+        # macOS Accessibility hasn't been granted to osascript. The
+        # text sits in Claude's TUI input buffer; the user has to
+        # press Enter (or grant the permission and retry will start
+        # auto-submitting).
+        detail = result_str.split(":", 1)[1].strip()
+        return {
+            "ok": True,
+            "via": "terminal-control",
+            "tty": tty,
+            "terminal_app": terminal_app,
+            "submitted": False,
+            "warning": (
+                "Text typed but auto-submit was blocked. Grant "
+                "Accessibility to osascript in System Settings > "
+                "Privacy & Security > Accessibility, then retry."
+            ),
+            "code": "macos_keystroke_permission",
+            "detail": detail,
+        }
     if result_str == "notfound":
         return {
             "ok": False,
@@ -4436,7 +4508,13 @@ def inject_input_via_keystroke(tty, terminal_app, text):
                 "hidden, on another Space, or behind a fullscreen app"
             ),
         }
-    return {"ok": True, "tty": tty, "terminal_app": terminal_app, "via": "terminal-control"}
+    return {
+        "ok": True,
+        "tty": tty,
+        "terminal_app": terminal_app,
+        "via": "terminal-control",
+        "submitted": True,
+    }
 
 
 def interrupt_input_via_keystroke(tty, terminal_app):
