@@ -3563,17 +3563,12 @@
     color: var(--text-muted); text-transform: uppercase;
     letter-spacing: 0.5px; font-weight: 600;
   }
-  .sidebar-header-actions #convFolderFilter {
-    padding: 3px 24px 3px 8px; border-radius: 4px;
+  .conv-list-header #convFolderFilter {
+    flex: 0 1 190px; padding: 6px 24px 6px 8px; border-radius: 6px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
-    font-size: 11px; outline: none; max-width: 220px; min-width: 0;
+    font-size: 12px; outline: none; min-width: 86px; max-width: 240px;
   }
-  .conv-list-header #sbRepoPicker {
-    flex-shrink: 0; padding: 3px 20px 3px 6px; border-radius: 4px;
-    border: 1px solid var(--border); background: var(--bg); color: var(--text);
-    font-size: 11px; outline: none; max-width: 130px; min-width: 60px;
-  }
-  .sidebar-header-actions #convFolderFilter.needs-repo-attention {
+  .conv-list-header #convFolderFilter.needs-repo-attention {
     border-color: var(--red);
     box-shadow: 0 0 0 2px rgba(248,81,73,0.18);
   }
@@ -4586,7 +4581,6 @@
     <div class="sidebar-header">
       <a href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Claude Command Center — open the README on GitHub" style="color:inherit;text-decoration:none;">Claude Command Center</a>
       <div class="sidebar-header-actions">
-        <select id="convFolderFilter" title="Filter conversations by folder"></select>
         <button id="historyBtn" class="sh-btn" title="Search past Claude Code conversations across every project on this Mac (powered by the local claude-index). Shortcut: /" aria-label="Search past conversations">&#128269; History</button>
         <button class="conv-kanban-toggle sh-btn" id="convKanbanToggle" title="Toggle Kanban board view" aria-label="Toggle Kanban board view"><span aria-hidden="true">&#9783;</span> Board</button>
       </div>
@@ -4597,7 +4591,7 @@
     </div>
     <div class="conv-list-panel" id="convListPanel">
       <div class="conv-list-header">
-        <select id="sbRepoPicker" title="Switch repo — 'All repos' shows sessions from every project on this machine."></select>
+        <select id="convFolderFilter" title="Filter conversations by folder"></select>
         <div class="search-wrap">
           <input type="text" id="convSearch" class="conv-search-input" placeholder="Search conversations..." autocomplete="off">
           <button type="button" id="convSearchClear" class="conv-search-clear" title="Clear search" aria-label="Clear search">&times;</button>
