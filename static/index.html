@@ -4728,6 +4728,12 @@
             <option value="codex">codex</option>
             <option value="gemini">gemini</option>
           </select>
+          <select id="convInputIssueAction" title="Action to take on this issue" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+            <option value="fix">Fix (session)</option>
+            <option value="completed">Close: completed</option>
+            <option value="not_planned">Close: not planned</option>
+            <option value="duplicate">Close: duplicate #</option>
+          </select>
           <button class="esc-btn" id="convEscBtn" title="Send Esc to terminal — cancels in-flight response (or kills a headless spawn)">Esc</button>
           <button class="send-btn" id="convSendBtn" title="Send to terminal">&gt;</button>
           <span class="tty-label" id="convTtyLabel"></span>
@@ -6291,7 +6297,16 @@
       if (isBacklogIssue) {
         const n = (currentBacklogRow && currentBacklogRow.issue_number) || currentConversation.replace('backlog-issue-', '');
         $convTtyLabel.textContent = '#' + n;
-        $convInput.placeholder = 'Add edit instructions; submit to start session for issue #' + n + '…';
+        const $issueAction = document.getElementById('convInputIssueAction');
+        if ($issueAction) $issueAction.style.display = '';
+        const action = $issueAction ? $issueAction.value : 'fix';
+        if (action === 'fix') {
+          $convInput.placeholder = 'Add instructions; submit to start session for issue #' + n + '…';
+        } else if (action === 'duplicate') {
+          $convInput.placeholder = 'Duplicate of issue # (enter the number)';
+        } else {
+          $convInput.placeholder = 'Optional comment (or submit blank to close immediately)';
+        }
       } else if (isNewSession) {
         $convTtyLabel.textContent = 'new';
         const cwdForPrompt = (typeof getSpawnCwd === 'function' && getSpawnCwd()) || selectedRepoPath();
@@ -6322,6 +6337,8 @@
         const canEsc = hasSession && !isPkood && !isNewSession && !isBacklogIssue && !!liveStatus.live;
         $convEscBtn.style.display = canEsc ? '' : 'none';
       }
+      // Issue action selector: only for backlog issues.
+      { const $ia = document.getElementById('convInputIssueAction'); if ($ia && !isBacklogIssue) $ia.style.display = 'none'; }
       // Engine selector occupies the same slot as Esc but only matters
       // when the input is about to spawn a fresh session. Backlog-issue
       // mode also spawns, but its `/api/sessions/spawn` flow is
@@ -6347,15 +6364,20 @@
     const $input = (_paneEl && _paneEl.querySelector('input[type="text"]')) || $convInput;
     const $sendBtn = (_paneEl && _paneEl.querySelector('.send-btn')) || $convSendBtn;
     const text = ($input && $input.value || '').trim();
-    if (!text) return;
-    // Backlog GH issue: typed text appended to the standard issue preamble,
-    // then spawn a session — same outcome as clicking "Edit & start" on the
-    // GH card and hitting Launch in the modal.
+    // Backlog GH issue: dispatch based on the action selector.
     if ((currentConversation || '').startsWith('backlog-issue-') ||
         conversationsData.some(x => x.id === currentConversation && x.source === 'backlog')) {
-      await spawnFromBacklogIssue(text);
+      const $actionSel = document.getElementById('convInputIssueAction');
+      const action = $actionSel ? $actionSel.value : 'fix';
+      if (action === 'fix') {
+        if (!text) return;
+        await spawnFromBacklogIssue(text);
+      } else {
+        await closeIssueFromInputBar(action, text);
+      }
       return;
     }
+    if (!text) return;
     // New-session mode: input doubles as the prompt for a fresh spawn.
     if (currentConversation === '__new__') {
       await spawnFromInlineInput(text);
@@ -16083,6 +16105,8 @@
     sel.value = getSpawnEngine();
     sel.addEventListener('change', () => setSpawnEngine(sel.value));
   });
+  { const $ia = document.getElementById('convInputIssueAction');
+    if ($ia) $ia.addEventListener('change', () => updateInputBar()); }
   // Probe alternate-engine availability so a user with no CLI install sees the
   // option greyed out instead of getting a 503 mid-spawn. Polled on
   // window focus too — handles "I just installed it; refresh the UI"
@@ -17454,6 +17478,44 @@
     } catch (err) {
       flashRed();
       showOpToast('Spawn failed: ' + (err && err.message || 'network'), 'error');
+    }
+    if ($convSendBtn) $convSendBtn.disabled = false;
+    if ($convInput) $convInput.focus();
+  }
+
+  async function closeIssueFromInputBar(action, text) {
+    const row = conversationsData.find(x => x.id === currentConversation) || {};
+    const issueNum = row.issue_number || (currentConversation || '').replace('backlog-issue-', '');
+    if (!issueNum) return;
+    const conv = row.issue_number ? row : (conversationsData.find(x => x.id === 'backlog-issue-' + issueNum) || {});
+    const repoPath = rowRepoPath(conv) || repoPathForIssueNumber(issueNum);
+    const reason = action === 'not_planned' ? 'not planned' : action; // "not_planned" → "not planned"
+    const body = { reason };
+    if (action === 'duplicate') {
+      const dupNum = text.replace(/[^0-9]/g, '');
+      if (!dupNum) { showOpToast('Enter the duplicate issue number in the text field', 'error'); return; }
+      body.duplicate_of = dupNum;
+    }
+    if ($convSendBtn) $convSendBtn.disabled = true;
+    try {
+      const res = await fetch('/api/issues/' + issueNum + '/close', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(withRepoPath(body, repoPath)),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.ok) {
+        showOpToast('Issue #' + issueNum + ' closed');
+        if ($convInput) $convInput.value = '';
+        const $actionSel = document.getElementById('convInputIssueAction');
+        if ($actionSel) $actionSel.value = 'fix';
+        renderIssueInConvPane(issueNum, repoPath);
+        updateInputBar();
+      } else {
+        showOpToast('Close failed: ' + (data.error || 'HTTP ' + res.status), 'error');
+      }
+    } catch (err) {
+      showOpToast('Close failed: ' + (err && err.message || 'network'), 'error');
     }
     if ($convSendBtn) $convSendBtn.disabled = false;
     if ($convInput) $convInput.focus();
