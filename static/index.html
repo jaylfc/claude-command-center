@@ -4730,6 +4730,8 @@
           </select>
           <select id="convInputIssueAction" title="Action to take on this issue" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
             <option value="fix">Fix (session)</option>
+            <option value="needs_attention">Reply + Needs-Attention</option>
+            <option value="reply_close">Reply + Close</option>
             <option value="completed">Close: completed</option>
             <option value="not_planned">Close: not planned</option>
             <option value="duplicate">Close: duplicate #</option>
@@ -6302,6 +6304,10 @@
         const action = $issueAction ? $issueAction.value : 'fix';
         if (action === 'fix') {
           $convInput.placeholder = 'Add instructions; submit to start session for issue #' + n + '…';
+        } else if (action === 'needs_attention') {
+          $convInput.placeholder = 'Add comment and flag issue #' + n + ' as needs-attention…';
+        } else if (action === 'reply_close') {
+          $convInput.placeholder = 'Add comment and close issue #' + n + '…';
         } else if (action === 'duplicate') {
           $convInput.placeholder = 'Duplicate of issue # (enter the number)';
         } else {
@@ -6372,6 +6378,9 @@
       if (action === 'fix') {
         if (!text) return;
         await spawnFromBacklogIssue(text);
+      } else if (action === 'needs_attention' || action === 'reply_close') {
+        if (!text) return;
+        await replyToIssueFromInputBar(action, text);
       } else {
         await closeIssueFromInputBar(action, text);
       }
@@ -17516,6 +17525,38 @@
       }
     } catch (err) {
       showOpToast('Close failed: ' + (err && err.message || 'network'), 'error');
+    }
+    if ($convSendBtn) $convSendBtn.disabled = false;
+    if ($convInput) $convInput.focus();
+  }
+
+  async function replyToIssueFromInputBar(action, text) {
+    const row = conversationsData.find(x => x.id === currentConversation) || {};
+    const issueNum = row.issue_number || (currentConversation || '').replace('backlog-issue-', '');
+    if (!issueNum) return;
+    const conv = row.issue_number ? row : (conversationsData.find(x => x.id === 'backlog-issue-' + issueNum) || {});
+    const repoPath = rowRepoPath(conv) || repoPathForIssueNumber(issueNum);
+    if ($convSendBtn) $convSendBtn.disabled = true;
+    try {
+      const res = await fetch('/api/issues/' + issueNum + '/reply', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(withRepoPath({ body: text, action }, repoPath)),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.ok) {
+        const label = action === 'needs_attention' ? 'flagged needs-attention' : 'commented + closed';
+        showOpToast('Issue #' + issueNum + ' ' + label);
+        if ($convInput) $convInput.value = '';
+        const $actionSel = document.getElementById('convInputIssueAction');
+        if ($actionSel) $actionSel.value = 'fix';
+        renderIssueInConvPane(issueNum, repoPath);
+        updateInputBar();
+      } else {
+        showOpToast('Reply failed: ' + (data.error || 'HTTP ' + res.status), 'error');
+      }
+    } catch (err) {
+      showOpToast('Reply failed: ' + (err && err.message || 'network'), 'error');
     }
     if ($convSendBtn) $convSendBtn.disabled = false;
     if ($convInput) $convInput.focus();

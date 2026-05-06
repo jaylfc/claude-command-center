@@ -11262,6 +11262,40 @@ def close_issue(issue_number, reason, duplicate_of=None, repo_path=None):
         return result
 
 
+def reply_to_issue(issue_number, body, action, repo_path):
+    """Post a comment on a GH issue, then optionally label or close it.
+
+    action ∈ {'comment', 'needs_attention', 'close'}
+    """
+    repo_path = resolve_repo_path(repo_path)
+    result = {"ok": False}
+    try:
+        if not body or not body.strip():
+            result["error"] = "comment body is required"
+            return result
+        subprocess.run(
+            ["gh", "issue", "comment", str(issue_number), "--body", body.strip()],
+            check=True, capture_output=True, text=True, cwd=str(repo_path),
+        )
+        if action == "needs_attention":
+            subprocess.run(
+                ["gh", "issue", "edit", str(issue_number), "--add-label", "needs-attention"],
+                check=True, capture_output=True, text=True, cwd=str(repo_path),
+            )
+        elif action == "close":
+            subprocess.run(
+                ["gh", "issue", "close", str(issue_number), "--reason", "completed"],
+                check=True, capture_output=True, text=True, cwd=str(repo_path),
+            )
+            remove_in_progress_label(issue_number, repo_path=repo_path)
+        _bust_backlog_issue_cache(repo_path)
+        result["ok"] = True
+        return result
+    except subprocess.CalledProcessError as e:
+        result["error"] = (e.stderr or e.stdout or str(e)).strip()[:300]
+        return result
+
+
 def get_issue_details(issue_number, repo_path):
     """Return the full GitHub issue (title, body, labels, comments, URL)."""
     data = _gh(
@@ -15593,6 +15627,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             try:
                 ctx = require_repo_context(payload, allow_session=False)
                 self.send_json(close_issue(num, reason, duplicate_of, repo_path=ctx["repo_path"]))
+            except RepoContextError as e:
+                self.send_json(e.as_payload(), e.status)
+        elif re.match(r"^/api/issues/\d+/reply$", path):
+            num = path.split("/")[3]
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                payload = {}
+            comment_body = payload.get("body") or ""
+            action = payload.get("action") or "comment"
+            try:
+                ctx = require_repo_context(payload, allow_session=False)
+                self.send_json(reply_to_issue(num, comment_body, action, repo_path=ctx["repo_path"]))
             except RepoContextError as e:
                 self.send_json(e.as_payload(), e.status)
         elif re.match(r"^/api/issues/\d+/summarize-title$", path):
