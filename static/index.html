@@ -4588,6 +4588,11 @@
       </div>
     </div>
 
+    <div class="repo-picker-host" style="padding:6px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;">
+      <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Repo</span>
+      <select id="sbRepoPicker" title="Switch repo — 'All repos' shows sessions from every project on this machine." style="flex:1;padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:11px;outline:none;min-width:0;"></select>
+    </div>
+
     <div class="new-session-panel">
       <button class="new-session-btn" id="sidebarNewBtn" title="Spawn a new Claude session" aria-label="New session"><span class="plus" aria-hidden="true">+</span> New session</button>
     </div>
@@ -7377,7 +7382,7 @@
         loadAttentionList();
         hideLoadingOverlay();
         _markFirstSessionsLoaded();
-        if (archiveMode) renderArchiveList($convSearch.value);
+        renderArchiveList($convSearch.value);
         return;
       }
       const res = await fetch(repoUrl('/api/sessions', repoPath));
@@ -7488,11 +7493,7 @@
         updateSplitInputBar();
         updateSplitToolbar();
       }
-      if (archiveMode) {
-        if (archiveLoaded) renderArchiveList($convSearch.value);
-      } else {
-        renderSidebar(filterConversations($convSearch.value));
-      }
+      if (archiveLoaded) renderArchiveList($convSearch.value);
       loadAttentionList();  // piggy-back on the same refresh cycle
       hideLoadingOverlay();  // first render has happened — reveal the UI
       _markFirstSessionsLoaded();  // unblock archive boot kick (see wireArchiveMode)
@@ -7904,19 +7905,18 @@
   }
   function renderSidebar(convs) {
     if (_renameInProgress) return;
-    // Archive-mode guard: while "All repos" is on, the sidebar renders the
-    // cross-folder archive instead of one concrete repo's session list. Skip
-    // both kanban and list dispatch to keep the archive view from being
-    // clobbered by periodic refreshes. Toggle off to return.
-    if (typeof archiveMode !== 'undefined' && archiveMode) {
-      const $kanbanBoard = document.getElementById('kanbanBoard');
-      const $convList = document.getElementById('convList');
-      if ($kanbanBoard) $kanbanBoard.style.display = 'none';
-      if ($convList) $convList.style.display = '';
-      const $search = document.getElementById('convSearch');
-      try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
-      return;
-    }
+    const $kanbanBoard = document.getElementById('kanbanBoard');
+    const $convList = document.getElementById('convList');
+    if ($kanbanBoard) $kanbanBoard.style.display = 'none';
+    if ($convList) $convList.style.display = '';
+    const $search = document.getElementById('convSearch');
+    try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
+  }
+
+  // Legacy list-view scroll/kanban rendering — kept for reference but no
+  // longer reachable since the sidebar is always in archive mode.
+  function _renderSidebarLegacy(convs) {
+    if (_renameInProgress) return;
     // Preserve scroll across ALL re-renders (board + per-column + list)
     const scrolls = {};
     document.querySelectorAll('.kanban-board, .kanban-board-split, #convList').forEach(el => {
@@ -10371,12 +10371,7 @@
         if (!opt) return;
         const value = opt.getAttribute('data-grouping') === 'time' ? 'time' : 'project';
         try { localStorage.setItem('ccc-ghissues-grouping', value); } catch (_) {}
-        if (typeof archiveMode !== 'undefined' && archiveMode) {
-          const $search = document.getElementById('convSearch');
-          renderArchiveList($search ? $search.value : '');
-        } else if (typeof loadConversationList === 'function') {
-          loadConversationList();
-        }
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
     const $ghIssuesRefresh = $convList.querySelector('[data-role="ghissues-refresh"]');
@@ -10401,12 +10396,7 @@
           if (expanded) localStorage.removeItem(key);
           else localStorage.setItem(key, '1');
         } catch (_) {}
-        if (typeof archiveMode !== 'undefined' && archiveMode) {
-          const $search = document.getElementById('convSearch');
-          renderArchiveList($search ? $search.value : '');
-        } else if (typeof loadConversationList === 'function') {
-          loadConversationList();
-        }
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     });
     // Toggle handler for the Ready to merge section header.
@@ -10453,12 +10443,7 @@
         if (!opt) return;
         const value = opt.getAttribute('data-grouping');
         try { localStorage.setItem('ccc-inprogress-grouping', value); } catch (_) {}
-        if (typeof archiveMode !== 'undefined' && archiveMode) {
-          const $search = document.getElementById('convSearch');
-          renderArchiveList($search ? $search.value : '');
-        } else if (typeof loadConversationList === 'function') {
-          loadConversationList();
-        }
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
     const $windowToggle = $convList.querySelector('[data-role="window-toggle"]');
@@ -10470,12 +10455,7 @@
         const value = opt.getAttribute('data-window');
         if (value !== '1d' && value !== '7d' && value !== 'all') return;
         try { localStorage.setItem('ccc-inprogress-window', value); } catch (_) {}
-        if (typeof archiveMode !== 'undefined' && archiveMode) {
-          const $search = document.getElementById('convSearch');
-          renderArchiveList($search ? $search.value : '');
-        } else if (typeof loadConversationList === 'function') {
-          loadConversationList();
-        }
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
     $convList.querySelectorAll('[data-role="folder-group-toggle"]').forEach(hdr => {
@@ -10524,12 +10504,8 @@
             body: JSON.stringify({ session_id: sid, path: '' }),
           });
         } catch (_) { /* swallow — UI refresh below will surface failure */ }
-        if (typeof archiveMode !== 'undefined' && archiveMode) {
-          await refreshArchiveData();
-          renderArchiveList(document.getElementById('convSearch')?.value || '');
-        } else if (typeof loadConversationList === 'function') {
-          loadConversationList();
-        }
+        await refreshArchiveData();
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     });
     // Drop targets — folder group headers in archive mode. Dropping a
@@ -10564,12 +10540,8 @@
             body: JSON.stringify({ session_id: sid, path: targetPath }),
           });
         } catch (_) { /* swallow */ }
-        if (typeof archiveMode !== 'undefined' && archiveMode) {
-          await refreshArchiveData();
-          renderArchiveList(document.getElementById('convSearch')?.value || '');
-        } else if (typeof loadConversationList === 'function') {
-          loadConversationList();
-        }
+        await refreshArchiveData();
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     });
     // Click on the title element: inactive row titles open the
@@ -10832,11 +10804,9 @@
       if (!src || src === dstId) return;
       const before = el.classList.contains('drop-above');
       el.classList.remove('drop-above', 'drop-below');
-      // Archive mode special-case: when src and dst belong to different
-      // folder buckets, treat the drop as a repo pin instead of a reorder.
-      // Lets the user grab a row from one repo group and drop it onto a
-      // row in another group, not just onto the group header.
-      if (typeof archiveMode !== 'undefined' && archiveMode) {
+      // When src and dst belong to different folder buckets, treat the
+      // drop as a repo pin instead of a reorder.
+      {
         const srcCard = conversationsData.find(c => c.id === src);
         const dstCard = conversationsData.find(c => c.id === dstId);
         if (srcCard && dstCard && dstCard.folder_path
@@ -11041,13 +11011,9 @@
     if (isInlineRenameInProgress()) return;
     if ($convRefreshBtn) $convRefreshBtn.classList.add('spinning');
     conversationsLoaded = false;
-    if (typeof archiveMode !== 'undefined' && archiveMode) {
-      await refreshArchiveData();
-      renderArchiveList($convSearch ? $convSearch.value : '');
-      if (selectedRepoPath()) await loadConversationList();
-    } else {
-      await loadConversationList();
-    }
+    await refreshArchiveData();
+    renderArchiveList($convSearch ? $convSearch.value : '');
+    if (selectedRepoPath()) await loadConversationList();
     setTimeout(() => {
       if ($convRefreshBtn) $convRefreshBtn.classList.remove('spinning');
     }, 400);
@@ -14382,7 +14348,9 @@
         || (c.first_message || '').toLowerCase().includes(q)
         || (c.last_prompt || '').toLowerCase().includes(q)
         || (c.branch || '').toLowerCase().includes(q)
-        || (c.source || '').toLowerCase().includes(q);
+        || (c.source || '').toLowerCase().includes(q)
+        || (c.session_id || '').toLowerCase().includes(q)
+        || (c.id || '').toLowerCase().includes(q);
     });
     const sorted = applyConvSort(filtered);
     return _decorateWithHistoryMatches(sorted, q);
@@ -15324,7 +15292,7 @@
     opt.value = ALL_REPOS_SENTINEL;
     opt.textContent = 'All';
     opt.title = "Browse conversations from every folder you've used with Claude Code.";
-    if (archiveMode) opt.selected = true;
+    opt.selected = true;
     $sbRepoPicker.appendChild(opt);
   }
 
@@ -15416,13 +15384,10 @@
     document.body.classList.toggle('has-repo-rail', folders.length > 0);
   }
 
-  // ── All-repos archive mode ──────────────────────────────────────────────
+  // ── All-repos archive ───────────────────────────────────────────────────
   // Read-only browse of every conversation across every folder under
-  // ~/.claude/projects/. This is now the normal sidebar data source; the
-  // folder dropdown narrows this archive locally instead of switching repos.
-  const _ARCHIVE_MODE_KEY = 'ccc-archive-mode';
-  let archiveMode = true;
-  try { localStorage.setItem(_ARCHIVE_MODE_KEY, '1'); } catch (_) {}
+  // ~/.claude/projects/. The sidebar always renders this view; the folder
+  // dropdown narrows the archive locally instead of switching repos.
   let archiveData = [];
   let archiveLoaded = false;
 
@@ -15474,22 +15439,18 @@
     ghIssuesRefreshing = true;
     const query = document.getElementById('convSearch')?.value || '';
     try {
-      if (archiveMode) renderArchiveList(query);
-      if (archiveMode) {
-        crossRepoIssuesData = await loadCrossRepoIssues();
-        archiveLoaded = true;
-        renderRepoSidebar();
-        renderArchiveList(query);
-      } else {
-        await loadConversationList();
-      }
+      renderArchiveList(query);
+      crossRepoIssuesData = await loadCrossRepoIssues();
+      archiveLoaded = true;
+      renderRepoSidebar();
+      renderArchiveList(query);
       showOpToast('GH issues refreshed');
     } catch (err) {
       showOpToast('Could not refresh GH issues: ' + ((err && err.message) || 'unknown error'), 'error');
-      if (archiveMode) renderArchiveList(query);
+      renderArchiveList(query);
     } finally {
       ghIssuesRefreshing = false;
-      if (archiveMode) renderArchiveList(document.getElementById('convSearch')?.value || query);
+      renderArchiveList(document.getElementById('convSearch')?.value || query);
     }
   }
 
@@ -15511,7 +15472,9 @@
     if (_renameInProgress) return;
     const q = (filter || '').trim().toLowerCase();
     const archiveRows = _archiveRowsWithBacklog();
-    const byFolder = archiveFolderFilter === ARCHIVE_FOLDER_ALL
+    // When a search query is active, bypass the folder filter so UUID/text
+    // search finds sessions from any repo — not just the currently selected one.
+    const byFolder = (q || archiveFolderFilter === ARCHIVE_FOLDER_ALL)
       ? archiveRows
       : archiveRows.filter(c => _archiveFolderValue(c) === archiveFolderFilter);
     let rows = q ? byFolder.filter(c =>
@@ -15721,32 +15684,20 @@
     renderConversationList(conversationsData);
   }
 
-  async function setArchiveMode(on, opts = {}) {
-    archiveMode = true;
+  async function setArchiveMode() {
     try { localStorage.setItem(_ARCHIVE_MODE_KEY, '1'); } catch (_) {}
     updateRepoPickerVisibility();
     const $list = document.getElementById('convList');
     const $kanban = document.getElementById('kanbanBoard');
-
-    if (archiveMode) {
-      // Hide kanban if it was visible; the archive renders into the same
-      // #convList slot. We don't toggle the existing convKanbanToggle's
-      // state — that's user-owned. Just visually hide the board so the
-      // archive list takes the full sidebar.
-      if ($kanban) $kanban.style.display = 'none';
-      if ($list) {
-        $list.style.display = '';
-        $list.innerHTML = '<div class="archive-empty-state">Loading archive…</div>';
-      }
-      await refreshArchiveData();
-      // The user may have toggled off while loading — guard before render.
-      if (archiveMode) renderArchiveList(document.getElementById('convSearch')?.value || '');
-    } else {
-      // Restore: re-trigger the normal session-list load.
-      if (opts.reloadCurrent !== false) {
-        try { await loadConversationList(); } catch (_) {}
-      }
+    // Hide kanban if it was visible; the archive renders into the same
+    // #convList slot.
+    if ($kanban) $kanban.style.display = 'none';
+    if ($list) {
+      $list.style.display = '';
+      $list.innerHTML = '<div class="archive-empty-state">Loading archive…</div>';
     }
+    await refreshArchiveData();
+    renderArchiveList(document.getElementById('convSearch')?.value || '');
   }
 
   (function wireArchiveMode() {
@@ -15759,22 +15710,17 @@
     }
     const $search = document.getElementById('convSearch');
     if ($search) {
-      // Piggyback on existing search input — when in archive mode we
-      // re-render with the filter; when not, leave the existing list-
-      // filter logic alone (which is wired elsewhere via its own listener).
       $search.addEventListener('input', () => {
-        if (archiveMode) renderArchiveList($search.value);
+        renderArchiveList($search.value);
       });
     }
-    // Boot kick: if archive is the saved/default mode, wait for the
-    // first /api/sessions response before kicking the archive walk.
-    // Both endpoints share CPU/subprocess slots in the same Python
-    // process; running the slow one (cross-folder JSONL + git ops,
-    // ~12s on a cold cache) in parallel with /api/sessions made the
-    // overlay linger because /api/sessions itself was getting
-    // starved. Waiting until sessions returns means the selected repo
-    // is interactive in <1s, then the archive populates the sidebar.
-    if (archiveMode) {
+    // Boot kick: wait for the first /api/sessions response before kicking
+    // the archive walk. Both endpoints share CPU/subprocess slots in the
+    // same Python process; running the slow one (cross-folder JSONL + git
+    // ops, ~12s on a cold cache) in parallel with /api/sessions starved it.
+    // Waiting until sessions returns means the selected repo is interactive
+    // in <1s, then the archive populates the sidebar.
+    {
       // Show the placeholder immediately so the sidebar isn't blank
       // during the wait — the actual fetch fires after sessions land.
       const $list = document.getElementById('convList');
@@ -15784,10 +15730,7 @@
         $list.style.display = '';
         $list.innerHTML = '<div class="archive-empty-state">Loading archive&hellip;</div>';
       }
-      _firstSessionsLoaded.then(() => {
-        // The user may have toggled archive off during the wait.
-        if (archiveMode) setArchiveMode(true);
-      });
+      _firstSessionsLoaded.then(() => setArchiveMode());
     }
   })();
 
@@ -15886,7 +15829,7 @@
       const selectedLabel = $sbRepoPicker.options[$sbRepoPicker.selectedIndex]?.textContent || target;
       if (!target) return;
       if (target === ALL_REPOS_SENTINEL) {
-        await setArchiveMode(true);
+        await setArchiveMode();
         return;
       }
       if (target === PICKER_SENTINEL) {
@@ -16737,19 +16680,14 @@
 	    if (activeTab !== 'sessions') return;
 	    if (isInlineRenameInProgress()) return;
 	    if (conversationPaneLoading) return;
-    // In archive mode, refresh /api/conversations/all and re-render —
-    // otherwise new sessions don't appear until the user toggles archive
-    // off and back on. Cheap because _extract_tail_meta is mtime-cached
-    // server-side; only changed JSONLs get re-scanned.
-    if (typeof archiveMode !== 'undefined' && archiveMode) {
-      try {
-        await refreshArchiveData();
-        const $search = document.getElementById('convSearch');
-        renderArchiveList($search ? $search.value : '');
-      } catch (_) { /* best-effort */ }
-      return;
-    }
-    loadConversationList();
+    // Refresh /api/conversations/all and re-render — cheap because
+    // _extract_tail_meta is mtime-cached server-side; only changed
+    // JSONLs get re-scanned.
+    try {
+      await refreshArchiveData();
+      const $search = document.getElementById('convSearch');
+      renderArchiveList($search ? $search.value : '');
+    } catch (_) { /* best-effort */ }
   }, 10000);
 
   // The convToolbar new-session input + Run/pkood toggle were removed —
