@@ -4729,9 +4729,9 @@
             <option value="gemini">gemini</option>
           </select>
           <select id="convInputIssueAction" title="Action to take on this issue" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
-            <option value="fix">Fix (session)</option>
+            <option value="spawn">Fix (session)</option>
             <option value="needs_attention">Reply + Needs-Attention</option>
-            <option value="reply_close">Reply + Close</option>
+            <option value="close">Reply + Close</option>
             <option value="completed">Close: completed</option>
             <option value="not_planned">Close: not planned</option>
             <option value="duplicate">Close: duplicate #</option>
@@ -6272,6 +6272,16 @@
   const $convEscBtn = document.getElementById('convEscBtn');
   const $convTtyLabel = document.getElementById('convTtyLabel');
 
+  function issueInputPlaceholder(issueNum) {
+    const $ia = document.getElementById('convInputIssueAction');
+    const action = ($ia && $ia.value) || 'spawn';
+    if (action === 'needs_attention') return 'Add a GitHub comment; submit to mark issue #' + issueNum + ' Needs-Attention…';
+    if (action === 'close') return 'Add a GitHub comment; submit to close issue #' + issueNum + '…';
+    if (action === 'duplicate') return 'Duplicate of issue # (enter the number)';
+    if (action === 'completed' || action === 'not_planned') return 'Optional comment (or submit blank to close immediately)';
+    return 'Add edit instructions; submit to start session for issue #' + issueNum + '…';
+  }
+
   function updateInputBar() {
     if (!$convInputBar) return;
     const isPkood = currentSession.source === 'pkood';
@@ -6301,18 +6311,7 @@
         $convTtyLabel.textContent = '#' + n;
         const $issueAction = document.getElementById('convInputIssueAction');
         if ($issueAction) $issueAction.style.display = '';
-        const action = $issueAction ? $issueAction.value : 'fix';
-        if (action === 'fix') {
-          $convInput.placeholder = 'Add instructions; submit to start session for issue #' + n + '…';
-        } else if (action === 'needs_attention') {
-          $convInput.placeholder = 'Add comment and flag issue #' + n + ' as needs-attention…';
-        } else if (action === 'reply_close') {
-          $convInput.placeholder = 'Add comment and close issue #' + n + '…';
-        } else if (action === 'duplicate') {
-          $convInput.placeholder = 'Duplicate of issue # (enter the number)';
-        } else {
-          $convInput.placeholder = 'Optional comment (or submit blank to close immediately)';
-        }
+        $convInput.placeholder = issueInputPlaceholder(n);
       } else if (isNewSession) {
         $convTtyLabel.textContent = 'new';
         const cwdForPrompt = (typeof getSpawnCwd === 'function' && getSpawnCwd()) || selectedRepoPath();
@@ -6375,10 +6374,10 @@
         conversationsData.some(x => x.id === currentConversation && x.source === 'backlog')) {
       const $actionSel = document.getElementById('convInputIssueAction');
       const action = $actionSel ? $actionSel.value : 'fix';
-      if (action === 'fix') {
+      if (action === 'spawn') {
         if (!text) return;
         await spawnFromBacklogIssue(text);
-      } else if (action === 'needs_attention' || action === 'reply_close') {
+      } else if (action === 'needs_attention' || action === 'close') {
         if (!text) return;
         await replyToIssueFromInputBar(action, text);
       } else {
@@ -11718,19 +11717,21 @@
       }
       html += '<div class="assistant-text" style="font-size:14px;line-height:1.55;">' + renderIssueMarkdown(issue.body || '') + '</div>';
       const comments = issue.comments || [];
-      html += '<div style="margin-top:28px;padding-top:16px;border-top:1px solid var(--border);">';
-      html += '<div style="font-size:12px;font-weight:600;text-transform:uppercase;color:var(--text-muted);margin-bottom:12px;">Comments (' + comments.length + ')</div>';
+      html += '<div style="margin:24px 0 0;padding-top:16px;border-top:1px solid var(--border);">';
+      html += '<div style="font-size:12px;font-weight:600;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px;">All comments (' + comments.length + ')</div>';
       if (comments.length) {
+        html += '<div style="display:flex;flex-direction:column;gap:10px;">';
         for (const cm of comments) {
           const who = (cm.author && cm.author.login) || '';
           const when = cm.createdAt ? new Date(cm.createdAt).toLocaleString() : '';
-          html += '<div style="margin-bottom:12px;padding:12px;border:1px solid var(--border);border-radius:6px;">';
+          html += '<div style="padding:12px;border:1px solid var(--border);border-radius:6px;">';
           html += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">' + escapeHtml(who) + ' &middot; ' + escapeHtml(when) + '</div>';
           html += '<div class="assistant-text" style="font-size:13px;line-height:1.5;">' + renderIssueMarkdown(cm.body || '') + '</div>';
           html += '</div>';
         }
+        html += '</div>';
       } else {
-        html += '<div style="font-size:13px;color:var(--text-muted);font-style:italic;">No comments yet.</div>';
+        html += '<div style="font-size:13px;color:var(--text-muted);">No comments yet.</div>';
       }
       html += '</div>';
       html += '</div>';
@@ -15455,18 +15456,27 @@
     } catch (_) { return []; }
   }
 
+  let _archiveRefreshPromise = null;
   async function refreshArchiveData() {
-    const [convs, issues] = await Promise.all([
-      loadArchiveAll(),
-      loadCrossRepoIssues(),
-      repoListState.repos.length ? Promise.resolve(null) : loadRepoList().catch(() => null),
-    ]);
-    archiveData = convs;
-    crossRepoIssuesData = issues || [];
-    archiveLoaded = true;
-    renderArchiveFolderFilter();
-    renderRepoSidebar();
-    return archiveData;
+    if (_archiveRefreshPromise) return _archiveRefreshPromise;
+    _archiveRefreshPromise = (async () => {
+      try {
+        const [convs, issues] = await Promise.all([
+          loadArchiveAll(),
+          loadCrossRepoIssues(),
+          repoListState.repos.length ? Promise.resolve(null) : loadRepoList().catch(() => null),
+        ]);
+        archiveData = convs;
+        crossRepoIssuesData = issues || [];
+        archiveLoaded = true;
+        renderArchiveFolderFilter();
+        renderRepoSidebar();
+        return archiveData;
+      } finally {
+        _archiveRefreshPromise = null;
+      }
+    })();
+    return _archiveRefreshPromise;
   }
 
   async function refreshGhIssuesSection() {
@@ -17521,7 +17531,7 @@
         showOpToast('Issue #' + issueNum + ' closed');
         if ($convInput) $convInput.value = '';
         const $actionSel = document.getElementById('convInputIssueAction');
-        if ($actionSel) $actionSel.value = 'fix';
+        if ($actionSel) $actionSel.value = 'spawn';
         renderIssueInConvPane(issueNum, repoPath);
         updateInputBar();
       } else {
@@ -17553,7 +17563,7 @@
         showOpToast('Issue #' + issueNum + ' ' + label);
         if ($convInput) $convInput.value = '';
         const $actionSel = document.getElementById('convInputIssueAction');
-        if ($actionSel) $actionSel.value = 'fix';
+        if ($actionSel) $actionSel.value = 'spawn';
         renderIssueInConvPane(issueNum, repoPath);
         updateInputBar();
       } else {
