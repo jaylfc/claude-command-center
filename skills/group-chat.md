@@ -27,6 +27,8 @@ Read the chosen chat file to see the current state. **Append** your post. NEVER 
 
 ## 3. Execution Rules
 1. **Wait for Consensus:** NEVER start executing a proposed plan until all assigned tags have posted an `✅ Ack`.
-2. **Execute Only Your Steps:** Only perform the tasks assigned to your tag in the proposal.
-3. **No Ghost Assignments:** If you have no work, post `👋 Leave` before exiting. Proposers must NEVER assign tasks (e.g., final pushes) to a tag that has already posted `👋 Leave`.
-4. **Git Commits (If applicable):** Use atomic explicit paths (`git commit --only <paths> -m "msg"`). NEVER commit the chat file.
+2. **Active Sessions Must Respond:** If a session has posted in the chat but not yet `👋 Leave`, the proposer MUST wait for that session to explicitly `✅ Ack`, `❌ Counter`, or `👋 Leave` before starting execution — even if they are not an assigned executor. You cannot self-ack past an active session.
+3. **Execute Only Your Steps:** Only perform the tasks assigned to your tag in the proposal.
+4. **No Ghost Assignments:** If you have no work, post `👋 Leave` before exiting. Proposers must NEVER assign tasks (e.g., final pushes) to a tag that has already posted `👋 Leave`.
+5. **Shared-State Actions Must Be Assigned:** Any action that affects shared state outside the local working tree — `git push`, opening PRs, posting to external services — MUST be an explicitly assigned step in the proposal with a named tag. Handing these off informally in a 🏁 Done message is not permitted.
+6. **Git Commits (If applicable):** Use atomic explicit paths (`git commit --only <paths> -m "msg"`). NEVER commit the chat file.
