@@ -3563,11 +3563,15 @@
     color: var(--text-muted); text-transform: uppercase;
     letter-spacing: 0.5px; font-weight: 600;
   }
-  .sidebar-header-actions #convFolderFilter,
-  .sidebar-header-actions #sbRepoPicker {
+  .sidebar-header-actions #convFolderFilter {
     padding: 3px 24px 3px 8px; border-radius: 4px;
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
     font-size: 11px; outline: none; max-width: 220px; min-width: 0;
+  }
+  .conv-list-header #sbRepoPicker {
+    flex-shrink: 0; padding: 3px 20px 3px 6px; border-radius: 4px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    font-size: 11px; outline: none; max-width: 130px; min-width: 60px;
   }
   .sidebar-header-actions #convFolderFilter.needs-repo-attention {
     border-color: var(--red);
@@ -4588,16 +4592,12 @@
       </div>
     </div>
 
-    <div class="repo-picker-host" style="padding:6px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;">
-      <span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Repo</span>
-      <select id="sbRepoPicker" title="Switch repo — 'All repos' shows sessions from every project on this machine." style="flex:1;padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:11px;outline:none;min-width:0;"></select>
-    </div>
-
     <div class="new-session-panel">
       <button class="new-session-btn" id="sidebarNewBtn" title="Spawn a new Claude session" aria-label="New session"><span class="plus" aria-hidden="true">+</span> New session</button>
     </div>
     <div class="conv-list-panel" id="convListPanel">
       <div class="conv-list-header">
+        <select id="sbRepoPicker" title="Switch repo — 'All repos' shows sessions from every project on this machine."></select>
         <div class="search-wrap">
           <input type="text" id="convSearch" class="conv-search-input" placeholder="Search conversations..." autocomplete="off">
           <button type="button" id="convSearchClear" class="conv-search-clear" title="Clear search" aria-label="Clear search">&times;</button>
