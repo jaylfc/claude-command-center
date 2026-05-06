@@ -14736,6 +14736,41 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store, must-revalidate")
                 self.end_headers()
                 self.wfile.write(body)
+        elif path.startswith("/static/"):
+            # Serve .css and .js assets from the static/ directory.
+            # index.html is intentionally excluded (extension allowlist blocks .html).
+            rel = path[len("/static/"):]
+            # Extension allowlist: only .css and .js are served here.
+            if not (rel.endswith(".css") or rel.endswith(".js")):
+                self.send_json({"error": f"not found: {path}"}, 404)
+                return
+            target = STATIC_DIR / rel
+            try:
+                resolved = target.resolve(strict=False)
+                base = STATIC_DIR.resolve()
+            except OSError as e:
+                self.send_json({"error": str(e)}, 500)
+                return
+            # Prevent path traversal (../../etc/passwd). Check before .is_file().
+            try:
+                resolved.relative_to(base)
+            except ValueError:
+                self.send_json({"error": f"not found: {path}"}, 404)
+                return
+            if not resolved.is_file():
+                self.send_json({"error": f"not found: {path}"}, 404)
+            else:
+                try:
+                    body = resolved.read_bytes()
+                except OSError as e:
+                    self.send_json({"error": str(e)}, 500)
+                    return
+                ct = "application/javascript" if rel.endswith(".js") else "text/css"
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Cache-Control", "no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(body)
         elif path == "/morning":
             try:
                 self.send_html((MORNING_STATIC_DIR / "index.html").read_text())
