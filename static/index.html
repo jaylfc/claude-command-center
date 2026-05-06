@@ -11718,17 +11718,21 @@
       }
       html += '<div class="assistant-text" style="font-size:14px;line-height:1.55;">' + renderIssueMarkdown(issue.body || '') + '</div>';
       const comments = issue.comments || [];
+      html += '<div style="margin-top:28px;padding-top:16px;border-top:1px solid var(--border);">';
+      html += '<div style="font-size:12px;font-weight:600;text-transform:uppercase;color:var(--text-muted);margin-bottom:12px;">Comments (' + comments.length + ')</div>';
       if (comments.length) {
-        html += '<div style="margin-top:24px;font-size:12px;font-weight:600;text-transform:uppercase;color:var(--text-muted);">Comments (' + comments.length + ')</div>';
         for (const cm of comments) {
           const who = (cm.author && cm.author.login) || '';
           const when = cm.createdAt ? new Date(cm.createdAt).toLocaleString() : '';
-          html += '<div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:6px;">';
+          html += '<div style="margin-bottom:12px;padding:12px;border:1px solid var(--border);border-radius:6px;">';
           html += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">' + escapeHtml(who) + ' &middot; ' + escapeHtml(when) + '</div>';
           html += '<div class="assistant-text" style="font-size:13px;line-height:1.5;">' + renderIssueMarkdown(cm.body || '') + '</div>';
           html += '</div>';
         }
+      } else {
+        html += '<div style="font-size:13px;color:var(--text-muted);font-style:italic;">No comments yet.</div>';
       }
+      html += '</div>';
       html += '</div>';
       $view.innerHTML = html;
       $view.scrollTop = 0;
