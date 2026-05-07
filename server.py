@@ -10291,10 +10291,16 @@ def _coordinate_sessions(payload):
     _register_coordination(chat_path)
 
     # Write sidecar JSON so nudge can re-inject participants later.
+    # name_map stored for loop detection: display_name → session_id reverse lookup.
     sidecar_path = chat_path[:-3] + ".json"
     try:
         with open(sidecar_path, "w", encoding="utf-8") as fh:
-            json.dump({"session_ids": session_ids, "topic": topic, "mode": mode}, fh)
+            json.dump({
+                "session_ids": session_ids,
+                "topic": topic,
+                "mode": mode,
+                "name_map": name_map,
+            }, fh)
     except OSError:
         pass  # sidecar failure is non-fatal
 
@@ -10303,7 +10309,7 @@ def _coordinate_sessions(payload):
 
 
 def _group_chat_nudge(path):
-    """Re-inject /group-chat into all participant sessions for a coordination."""
+    """Re-inject /group-chat into participant sessions, skipping the last writer."""
     group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
     try:
         real_path = os.path.realpath(os.path.expanduser(path))
@@ -10320,11 +10326,30 @@ def _group_chat_nudge(path):
     session_ids = meta.get("session_ids") or []
     topic = meta.get("topic", "")
     mode = meta.get("mode", "topic")
+    name_map = meta.get("name_map") or {}  # session_id → display_name
     if not session_ids:
         return {"ok": False, "error": "no session_ids in sidecar"}
+
+    # Detect last writer to avoid nudging them (would create a response loop).
+    exclude_sid = None
+    try:
+        with open(real_path, "r", encoding="utf-8") as fh:
+            tail = fh.read()[-3000:]
+        # Chat entries are headed by "## <timestamp> — <author>"
+        matches = re.findall(r'^##\s+.+?—\s+(.+?)\s*$', tail, re.MULTILINE)
+        if matches:
+            last_author = matches[-1].strip()
+            name_to_sid = {v: k for k, v in name_map.items()}
+            exclude_sid = name_to_sid.get(last_author)
+    except OSError:
+        pass
+
     safe_topic = topic.replace('"', '\\"')
     results = []
     for sid in session_ids:
+        if sid == exclude_sid:
+            results.append({"session_id": sid, "ok": True, "skipped": True})
+            continue
         text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode}'
         r = _inject_text_into_session(sid, text)
         results.append({"session_id": sid, "ok": bool(r.get("ok")), "error": r.get("error", "")})
