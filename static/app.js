@@ -8933,8 +8933,7 @@
           // and back; that state is ephemeral, scoped to this sticky DOM
           // node, and resets every time the user switches conversations.
           sticky.innerHTML = resolveBtn + issueBtn
-            + '<button class="tools-toggle" data-tools-toggle' + (hidden ? ' class="active"' : '') + ' title="Toggle tool-call visibility">'
-            + (hidden ? 'Show tools' : 'Hide tools') + '</button>'
+            + '<button type="button" class="conv-sticky-header__close" data-csh-close title="Hide this panel completely">×</button>'
             + '<div class="csh-row">'
             +   '<div class="csh-col csh-col-ask">'
             +     '<div class="csh-ask-original">'
@@ -9008,15 +9007,13 @@
           // landed; otherwise the fetch handlers will populate them.
           renderSessionTimelineIntoSticky();
           renderSessionWorkspaceIntoSticky();
-          sticky.querySelector('[data-tools-toggle]').addEventListener('click', (e) => {
-            e.stopPropagation();
-            const nowHidden = !$view.classList.contains('hide-tools');
-            $view.classList.toggle('hide-tools', nowHidden);
-            localStorage.setItem('hideToolCalls', nowHidden ? '1' : '0');
-            const btn = e.currentTarget;
-            btn.classList.toggle('active', nowHidden);
-            btn.textContent = nowHidden ? 'Show tools' : 'Hide tools';
-          });
+          const closeBtn = sticky.querySelector('[data-csh-close]');
+          if (closeBtn) {
+            closeBtn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              sticky.style.display = 'none';
+            });
+          }
           const resolveClickBtn = sticky.querySelector('.resolve-btn');
           if (resolveClickBtn) {
             resolveClickBtn.addEventListener('click', async (e) => {
@@ -10422,11 +10419,10 @@
     if (_renameInProgress) return;
     const q = (filter || '').trim().toLowerCase();
     const archiveRows = _archiveRowsWithBacklog();
-    // When a search query is active, bypass the folder filter so UUID/text
-    // search finds sessions from any repo — not just the currently selected one.
-    const byFolder = (q || archiveFolderFilter === ARCHIVE_FOLDER_ALL)
-      ? archiveRows
-      : archiveRows.filter(c => _archiveFolderValue(c) === archiveFolderFilter);
+    // Never filter by folder — the folder picker controls grouping and the
+    // active-chip highlight only. Hiding sessions from other repos breaks
+    // worktree sessions and "by time" cross-repo views.
+    const byFolder = archiveRows;
     let rows = q ? byFolder.filter(c =>
       // session_id + id let users paste a session UUID into the search box
       // and find the conversation directly — useful when CCC tooling, logs
