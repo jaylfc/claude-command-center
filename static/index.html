@@ -1433,6 +1433,12 @@
   }
   .conv-item:hover { background: var(--surface-2); }
   .conv-item.active { background: var(--surface-2); border-left-color: var(--purple); }
+  .conv-item.list-selected { border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+  .coord-toolbar { display:none; position:sticky; bottom:0; z-index:20; background:var(--surface); border-top:1px solid var(--border); padding:8px 12px; gap:8px; align-items:center; font-size:12px; color:var(--text-muted); flex-shrink:0; }
+  .coord-toolbar.visible { display:flex; }
+  .coord-toolbar .coord-count { flex:1; }
+  .coord-toolbar .coord-btn { padding:4px 10px; font-size:12px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer; }
+  .coord-toolbar .coord-clear-btn { padding:4px 8px; font-size:13px; background:transparent; border:1px solid var(--border); color:var(--text-muted); border-radius:4px; cursor:pointer; line-height:1; }
   .conv-item.is-history-match { border-left-color: rgba(120, 168, 255, 0.5); }
   .conv-history-badge {
     display: inline-block; margin-left: 6px; padding: 1px 5px;
@@ -4462,6 +4468,11 @@
       <div class="log-list" id="convList" style="overflow-y:auto;flex:1;min-height:0;max-height:none;">
         <div class="empty-state" style="height:auto;padding:20px;font-size:13px;">Loading...</div>
       </div>
+      <div class="coord-toolbar" id="coordToolbar">
+        <span class="coord-count" id="coordCount"></span>
+        <button class="coord-btn" id="coordBtn">Coordinate&hellip;</button>
+        <button class="coord-clear-btn" id="coordClearBtn" title="Clear selection">&times;</button>
+      </div>
       <div class="kanban-board" id="kanbanBoard" style="display:none;"></div>
     </div>
     <div class="attention-panel collapsed" id="attentionPanel">
@@ -6885,6 +6896,14 @@
   const $kanbanPanel = $kanbanLayout ? $kanbanLayout.querySelector('.kanban-panel') : null;
   const $convPanel = $kanbanLayout ? $kanbanLayout.querySelector('.conv-panel') : null;
   const $cpCloseBtn = document.getElementById('cpCloseBtn');
+  const $coordBtn = document.getElementById('coordBtn');
+  const $coordClearBtn = document.getElementById('coordClearBtn');
+  if ($coordBtn) $coordBtn.addEventListener('click', () => openCoordModal());
+  if ($coordClearBtn) $coordClearBtn.addEventListener('click', () => {
+    selectedListIds.clear();
+    document.querySelectorAll('.conv-item.list-selected').forEach(el => el.classList.remove('list-selected'));
+    updateCoordToolbar();
+  });
   let convPanelOpen = true;
 
   const $kptOpenConvBtn = document.getElementById('kptOpenConvBtn');
@@ -8021,6 +8040,19 @@
 
   // Multi-select state for kanban cards
   let selectedCardIds = new Set();
+  let selectedListIds = new Set();
+
+  function updateCoordToolbar() {
+    const toolbar = document.getElementById('coordToolbar');
+    const countEl = document.getElementById('coordCount');
+    if (!toolbar) return;
+    if (selectedListIds.size >= 2) {
+      toolbar.classList.add('visible');
+      if (countEl) countEl.textContent = selectedListIds.size + ' sessions selected';
+    } else {
+      toolbar.classList.remove('visible');
+    }
+  }
 
   async function moveCardsToColumn(cardIds, targetCol) {
     for (const cardId of cardIds) {
@@ -10358,10 +10390,24 @@
     });
     $convList.querySelectorAll('.conv-item').forEach(el => {
       el.addEventListener('click', (ev) => {
-        // Ignore clicks that started the inline editor, archive button,
-        // or that landed on the title (which now triggers rename instead
-        // of opening the conversation — the pencil's job moved here).
         if (ev.target.closest('[data-role="edit"]') || ev.target.closest('[data-role="archive"]') || ev.target.closest('[data-role="merge"]') || ev.target.closest('[data-role="start"]') || ev.target.closest('[data-role="unpin-repo"]') || ev.target.closest('.conv-title-input') || ev.target.closest('[data-role="title"]')) return;
+        if (ev.metaKey || ev.ctrlKey || ev.shiftKey) {
+          ev.preventDefault();
+          if (selectedListIds.has(el.dataset.id)) {
+            selectedListIds.delete(el.dataset.id);
+            el.classList.remove('list-selected');
+          } else {
+            selectedListIds.add(el.dataset.id);
+            el.classList.add('list-selected');
+          }
+          updateCoordToolbar();
+          return;
+        }
+        if (selectedListIds.size > 0) {
+          document.querySelectorAll('.conv-item.list-selected').forEach(n => n.classList.remove('list-selected'));
+          selectedListIds.clear();
+          updateCoordToolbar();
+        }
         selectConversation(el.dataset.id);
       });
       attachDragHandlers(el);
@@ -10652,6 +10698,10 @@
         }
       });
     });
+    $convList.querySelectorAll('.conv-item').forEach(el => {
+      if (selectedListIds.has(el.dataset.id)) el.classList.add('list-selected');
+    });
+    updateCoordToolbar();
   }
 
   // ── Drag-to-reorder ──
