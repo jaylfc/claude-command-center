@@ -7980,6 +7980,11 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
             cwd_exists = False
         folder_path = pinned or cwd or effective_cwd or ""
         folder_label = Path(folder_path).name if folder_path else "Codex"
+        _wt_worktree_label = None
+        _wt_idx = folder_label.find("-wt-")
+        if _wt_idx > 0:
+            _wt_worktree_label = folder_label[_wt_idx + 4:]
+            folder_label = folder_label[:_wt_idx]
         spawn_info = spawn_by_sid.get(sid) or {}
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
@@ -8003,6 +8008,7 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
             "jsonl_path": str(path),
             "folder_label": folder_label,
             "folder_path": folder_path,
+            "worktree_label": _wt_worktree_label,
             "session_cwd": effective_cwd,
             "session_cwd_exists": cwd_exists,
             "session_cwd_is_worktree": bool(
@@ -8912,6 +8918,11 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
             cwd_exists = False
         folder_path = pinned or cwd or effective_cwd or ""
         folder_label = Path(folder_path).name if folder_path else "Gemini"
+        _wt_worktree_label = None
+        _wt_idx = folder_label.find("-wt-")
+        if _wt_idx > 0:
+            _wt_worktree_label = folder_label[_wt_idx + 4:]
+            folder_label = folder_label[:_wt_idx]
         spawn_info = spawn_by_sid.get(sid) or {}
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
@@ -8941,6 +8952,7 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
             "jsonl_path": str(path),
             "folder_label": folder_label,
             "folder_path": folder_path,
+            "worktree_label": _wt_worktree_label,
             "session_cwd": effective_cwd,
             "session_cwd_exists": cwd_exists,
             "session_cwd_is_worktree": bool(
