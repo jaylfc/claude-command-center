@@ -10542,16 +10542,24 @@
   async function pollGcActive() {
     try {
       const data = await fetch('/api/group-chats/active').then(r => r.json());
+      const prev = _gcActiveChats.length;
       _gcActiveChats = (data.chats || []);
-      if (!$gcActiveBtn) return;
-      if (_gcActiveChats.length === 0) {
-        $gcActiveBtn.style.display = 'none';
-      } else {
-        const n = _gcActiveChats.length;
-        $gcActiveBtn.textContent = n === 1
-          ? '💬 1 active coordination'
-          : `💬 ${n} active coordinations`;
-        $gcActiveBtn.style.display = '';
+      if ($gcActiveBtn) {
+        if (_gcActiveChats.length === 0) {
+          $gcActiveBtn.style.display = 'none';
+        } else {
+          const n = _gcActiveChats.length;
+          $gcActiveBtn.textContent = n === 1
+            ? '💬 1 active coordination'
+            : `💬 ${n} active coordinations`;
+          $gcActiveBtn.style.display = '';
+        }
+      }
+      // Re-render the list whenever the active-chat set changes so the
+      // "In Group Chat" section appears/disappears without waiting for
+      // the next sessions poll.
+      if (_gcActiveChats.length !== prev && typeof renderConversationList === 'function') {
+        renderConversationList();
       }
     } catch (_) {}
   }
