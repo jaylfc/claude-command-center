@@ -9650,6 +9650,70 @@ def list_spawned_sessions():
     return result
 
 
+def _coordinate_sessions(payload):
+    """Create a group-chat file and inject /group-chat into selected sessions."""
+    session_ids = payload.get("session_ids") or []
+    topic = (payload.get("topic") or "").strip()
+    mode = (payload.get("mode") or "topic").strip()
+    sessions_meta = payload.get("sessions_meta") or []
+    include_human = payload.get("include_human", True)
+
+    if not session_ids or not topic:
+        return {"ok": False, "error": "missing session_ids or topic"}
+    if mode not in ("topic", "git"):
+        mode = "topic"
+
+    slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:60]
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    group_chats_dir = os.path.expanduser("~/.claude/group-chats")
+    try:
+        os.makedirs(group_chats_dir, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot create group-chats dir: {exc}"}
+
+    chat_path = os.path.join(group_chats_dir, f"{slug}-{ts}.md")
+
+    name_map = {m["session_id"]: m.get("display_name") or m["session_id"]
+                for m in sessions_meta if m.get("session_id")}
+    participant_names = [name_map.get(sid, sid) for sid in session_ids]
+    if include_human:
+        participant_names.append("human")
+    participants_str = ", ".join(f"`{n}`" for n in participant_names)
+
+    now = datetime.now()
+    day_name = now.strftime("%A")
+    try:
+        tz_name = datetime.now().astimezone().strftime("%Z")
+    except Exception:
+        tz_name = "local"
+    full_ts = now.strftime(f"%Y-%m-%d {day_name} %H:%M:%S") + f" {tz_name}"
+
+    header = (
+        f"# Group Chat — {topic}\n"
+        f"**Started:** {full_ts}\n"
+        f"**Mode:** {mode}\n"
+        f"**Participants:** {participants_str}\n"
+    )
+    try:
+        with open(chat_path, "w", encoding="utf-8") as fh:
+            fh.write(header)
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot write chat file: {exc}"}
+
+    results = []
+    for sid in session_ids:
+        text = f'/group-chat chat={chat_path} topic="{topic}" mode={mode}'
+        inject_result = _inject_text_into_session(sid, text)
+        results.append({
+            "session_id": sid,
+            "ok": bool(inject_result.get("ok")),
+            "error": inject_result.get("error", ""),
+        })
+
+    return {"ok": True, "chat_path": chat_path, "results": results}
+
+
 def _inject_text_into_session(session_id, text):
     """Route `text` to a session using the same fall-through as /api/inject-input:
     terminal-control AppleScript when there's a TTY, FIFO write to a live spawn,
@@ -15804,6 +15868,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing agent_id"})
             else:
                 self.send_json(pkood_kill(agent_id))
+        elif path == "/api/coordinate":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            self.send_json(_coordinate_sessions(payload))
         elif path == "/api/inject-input":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

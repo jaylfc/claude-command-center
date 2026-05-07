@@ -623,6 +623,17 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(meta["model"], "claude-sonnet-4-6")
 
 
+    def test_coordinate_sessions_helper_exists(self):
+        """_coordinate_sessions must exist and reject empty topic."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_coordinate_sessions"))
+        result = server._coordinate_sessions({"session_ids": ["abc"], "topic": ""})
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)
+
+
 class TestHealthcheck(unittest.TestCase):
     def test_healthcheck_returns_structured_result(self):
         """_run_healthcheck must always return a dict with 'checks' and
