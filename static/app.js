@@ -1949,6 +1949,31 @@
   const $kanbanPanel = $kanbanLayout ? $kanbanLayout.querySelector('.kanban-panel') : null;
   const $convPanel = $kanbanLayout ? $kanbanLayout.querySelector('.conv-panel') : null;
   const $cpCloseBtn = document.getElementById('cpCloseBtn');
+  const $coordBtn = document.getElementById('coordBtn');
+  const $coordClearBtn = document.getElementById('coordClearBtn');
+  if ($coordBtn) $coordBtn.addEventListener('click', () => openCoordModal());
+  if ($coordClearBtn) $coordClearBtn.addEventListener('click', () => {
+    selectedListIds.clear();
+    document.querySelectorAll('.conv-item.list-selected').forEach(el => el.classList.remove('list-selected'));
+    updateCoordToolbar();
+  });
+  const $coordModalCancel = document.getElementById('coordModalCancel');
+  const $coordModalStart = document.getElementById('coordModalStart');
+  const $coordModalBackdrop = document.getElementById('coordModalBackdrop');
+  if ($coordModalCancel) $coordModalCancel.addEventListener('click', () => {
+    if ($coordModalBackdrop) $coordModalBackdrop.classList.remove('visible');
+  });
+  if ($coordModalStart) $coordModalStart.addEventListener('click', () => startCoordination());
+  const $coordTopicInput = document.getElementById('coordTopicInput');
+  if ($coordTopicInput) {
+    $coordTopicInput.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') startCoordination();
+      if (ev.key === 'Escape' && $coordModalBackdrop) $coordModalBackdrop.classList.remove('visible');
+    });
+  }
+  if ($coordModalBackdrop) $coordModalBackdrop.addEventListener('click', ev => {
+    if (ev.target === $coordModalBackdrop) $coordModalBackdrop.classList.remove('visible');
+  });
   let convPanelOpen = true;
 
   const $kptOpenConvBtn = document.getElementById('kptOpenConvBtn');
@@ -3080,6 +3105,230 @@
 
   // Multi-select state for kanban cards
   let selectedCardIds = new Set();
+  let selectedListIds = new Set();
+
+  function updateCoordToolbar() {
+    const toolbar = document.getElementById('coordToolbar');
+    const countEl = document.getElementById('coordCount');
+    if (!toolbar) return;
+    if (selectedListIds.size >= 2) {
+      toolbar.classList.add('visible');
+      if (countEl) countEl.textContent = selectedListIds.size + ' sessions selected';
+    } else {
+      toolbar.classList.remove('visible');
+    }
+  }
+
+  function openCoordModal() {
+    if (selectedListIds.size < 2) return;
+    const backdrop = document.getElementById('coordModalBackdrop');
+    const topicInput = document.getElementById('coordTopicInput');
+    const participantsList = document.getElementById('coordParticipantsList');
+    const modeHint = document.getElementById('coordModeHint');
+    const errorEl = document.getElementById('coordModalError');
+    if (!backdrop || !participantsList) return;
+
+    const selectedRows = Array.from(selectedListIds)
+      .map(id => conversationsData.find(c => c.id === id))
+      .filter(Boolean);
+
+    const cwds = selectedRows.map(r => rowRepoPath(r)).filter(Boolean);
+    const allSameRepo = cwds.length === selectedRows.length && cwds.length > 0 && cwds.every(p => p === cwds[0]);
+    const someLackCwd = cwds.length < selectedRows.length;
+    const autoMode = allSameRepo ? 'git' : 'topic';
+    const gitRadio = document.getElementById('coordModeGitRadio');
+    const topicRadio = document.getElementById('coordModeTopicRadio');
+    if (autoMode === 'git' && gitRadio) gitRadio.checked = true;
+    else if (topicRadio) topicRadio.checked = true;
+    if (modeHint) modeHint.textContent = allSameRepo
+      ? 'Auto-detected: all sessions share a repo.'
+      : someLackCwd
+        ? 'Auto-detected: one or more sessions have no repo context.'
+        : 'Auto-detected: sessions span multiple repos.';
+
+    participantsList.innerHTML = selectedRows.map(r => {
+      const sid = r.session_id || r.id;
+      const name = escapeHtml(r.display_name || sid);
+      const cwd = rowRepoPath(r) || r.session_cwd || '';
+      const shortCwd = cwd.length > 40 ? '…' + cwd.slice(-39) : cwd;
+      return '<div class="participant-row">'
+        + '<input type="checkbox" checked data-sid="' + escapeAttr(sid) + '" data-name="' + escapeAttr(r.display_name || sid) + '" data-cwd="' + escapeAttr(cwd) + '">'
+        + '<span class="p-name">' + name + '</span>'
+        + '<span class="p-cwd">' + escapeHtml(shortCwd) + '</span>'
+        + '</div>';
+    }).join('') + '<div class="participant-row">'
+      + '<input type="checkbox" checked id="coordHumanCheck">'
+      + '<span class="p-name">You (human)</span>'
+      + '<span class="p-cwd">posts directly to chat</span>'
+      + '</div>';
+
+    if (errorEl) { errorEl.textContent = ''; errorEl.classList.remove('visible'); }
+    if (topicInput) { topicInput.value = ''; }
+    backdrop.classList.add('visible');
+    setTimeout(() => { if (topicInput) topicInput.focus(); }, 50);
+  }
+
+  async function startCoordination() {
+    const backdrop = document.getElementById('coordModalBackdrop');
+    const topicInput = document.getElementById('coordTopicInput');
+    const errorEl = document.getElementById('coordModalError');
+    const topic = (topicInput ? topicInput.value : '').trim();
+    if (!topic) {
+      if (errorEl) { errorEl.textContent = 'Topic is required.'; errorEl.classList.add('visible'); }
+      if (topicInput) topicInput.focus();
+      return;
+    }
+    const modeEl = document.querySelector('input[name="coordMode"]:checked');
+    const mode = modeEl ? modeEl.value : 'topic';
+    const humanCheckbox = document.getElementById('coordHumanCheck');
+    const includeHuman = humanCheckbox ? humanCheckbox.checked : true;
+
+    const checkedBoxes = Array.from(
+      (document.getElementById('coordParticipantsList') || {querySelectorAll: () => []})
+        .querySelectorAll('input[type="checkbox"][data-sid]')
+    ).filter(cb => cb.checked);
+
+    const sessionIds = checkedBoxes.map(cb => cb.dataset.sid);
+    const sessionsMeta = checkedBoxes.map(cb => ({
+      session_id: cb.dataset.sid,
+      display_name: cb.dataset.name || cb.dataset.sid,
+      cwd: cb.dataset.cwd || '',
+    }));
+
+    if (sessionIds.length < 2) {
+      if (errorEl) { errorEl.textContent = 'Select at least 2 sessions.'; errorEl.classList.add('visible'); }
+      return;
+    }
+
+    const startBtn = document.getElementById('coordModalStart');
+    if (startBtn) startBtn.disabled = true;
+    try {
+      const result = await ccPostJson('/api/coordinate', {
+        session_ids: sessionIds, topic, mode, sessions_meta: sessionsMeta, include_human: includeHuman,
+      });
+      if (!result.ok) {
+        if (errorEl) { errorEl.textContent = result.error || 'Failed to start coordination.'; errorEl.classList.add('visible'); }
+        return;
+      }
+      (result.results || []).forEach(r => {
+        if (!r.ok) showOpToast('Could not reach session — check its terminal (' + (r.error || 'tty not found') + ')', 'error');
+      });
+      if (backdrop) backdrop.classList.remove('visible');
+      selectedListIds.clear();
+      document.querySelectorAll('.conv-item.list-selected').forEach(el => el.classList.remove('list-selected'));
+      updateCoordToolbar();
+      openGroupChatReader(result.chat_path, topic, mode, includeHuman);
+    } catch (err) {
+      if (errorEl) { errorEl.textContent = 'Request failed: ' + err.message; errorEl.classList.add('visible'); }
+    } finally {
+      if (startBtn) startBtn.disabled = false;
+    }
+  }
+
+  let _gcReaderInterval = null;
+  let _gcReaderPath = null;
+  let _gcLastMtime = null;
+  let _gcPollFailCount = 0;
+
+  function openGroupChatReader(chatPath, topic, mode, includeHuman) {
+    _gcReaderPath = chatPath;
+    _gcLastMtime = null;
+    _gcPollFailCount = 0;
+
+    const pane = document.querySelector('.conv-pane');
+    if (!pane) return;
+
+    const topicSafe = escapeHtml(topic);
+    const modeSafe = escapeHtml(mode);
+    pane.innerHTML = '<div class="gc-reader" id="gcReader">'
+      + '<div class="gc-reader-header">'
+        + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
+        + '<span class="gc-mode-badge">' + modeSafe + '</span>'
+        + '<button class="gc-close" id="gcCloseBtn" title="Close reader">&times;</button>'
+      + '</div>'
+      + '<div class="gc-reader-body" id="gcReaderBody">Loading…</div>'
+      + (includeHuman
+        ? '<div class="gc-reader-input-row" id="gcInputRow">'
+            + '<input type="text" id="gcHumanInput" placeholder="Add to chat…" autocomplete="off">'
+            + '<button id="gcSendBtn">Send</button>'
+          + '</div>'
+        : '')
+      + '</div>';
+
+    const closeBtn = document.getElementById('gcCloseBtn');
+    if (closeBtn) closeBtn.addEventListener('click', closeGroupChatReader);
+
+    if (includeHuman) {
+      const gcSendBtn = document.getElementById('gcSendBtn');
+      const gcHumanInput = document.getElementById('gcHumanInput');
+      if (gcSendBtn) gcSendBtn.addEventListener('click', () => sendHumanGcPost());
+      if (gcHumanInput) gcHumanInput.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter') sendHumanGcPost();
+      });
+    }
+
+    if (_gcReaderInterval) clearInterval(_gcReaderInterval);
+    pollGroupChatReader();
+    _gcReaderInterval = setInterval(pollGroupChatReader, 3000);
+  }
+
+  async function pollGroupChatReader() {
+    if (!_gcReaderPath) return;
+    const body = document.getElementById('gcReaderBody');
+    if (!body) return;
+    try {
+      const res = await fetch('/api/group-chat/read?path=' + encodeURIComponent(_gcReaderPath));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      _gcPollFailCount = 0;
+      const errBanner = body.querySelector('.gc-poll-error');
+      if (errBanner) errBanner.remove();
+      if (!data.ok) { body.innerHTML = renderMarkdown(data.error || 'File not found.'); return; }
+      if (data.mtime !== _gcLastMtime) {
+        _gcLastMtime = data.mtime;
+        const atBottom = body.scrollHeight - body.scrollTop <= body.clientHeight + 40;
+        body.innerHTML = renderMarkdown(data.content);
+        if (atBottom) body.scrollTop = body.scrollHeight;
+      }
+    } catch (_err) {
+      _gcPollFailCount++;
+      if (_gcPollFailCount >= 3) {
+        let errBanner = body.querySelector('.gc-poll-error');
+        if (!errBanner) {
+          errBanner = document.createElement('div');
+          errBanner.className = 'gc-poll-error';
+          body.prepend(errBanner);
+        }
+        errBanner.textContent = '⚠ Lost connection to chat file — retrying…';
+      }
+    }
+  }
+
+  async function sendHumanGcPost() {
+    if (!_gcReaderPath) return;
+    const input = document.getElementById('gcHumanInput');
+    const text = input ? input.value.trim() : '';
+    if (!text) return;
+    try {
+      await ccPostJson('/api/group-chat/post', { path: _gcReaderPath, text });
+      if (input) input.value = '';
+      await pollGroupChatReader();
+    } catch (err) {
+      showOpToast('Send failed: ' + err.message, 'error');
+    }
+  }
+
+  function closeGroupChatReader() {
+    if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
+    _gcReaderPath = null;
+    _gcLastMtime = null;
+    _gcPollFailCount = 0;
+    const pane = document.querySelector('.conv-pane');
+    if (pane) pane.innerHTML = '';
+    if (typeof currentConversation === 'string' && currentConversation) {
+      try { selectConversation(currentConversation); } catch (_) {}
+    }
+  }
 
   async function moveCardsToColumn(cardIds, targetCol) {
     for (const cardId of cardIds) {
@@ -5427,6 +5676,23 @@
         // or that landed on the title (which now triggers rename instead
         // of opening the conversation — the pencil's job moved here).
         if (ev.target.closest('[data-role="edit"]') || ev.target.closest('[data-role="archive"]') || ev.target.closest('[data-role="merge"]') || ev.target.closest('[data-role="start"]') || ev.target.closest('[data-role="unpin-repo"]') || ev.target.closest('.conv-title-input') || ev.target.closest('[data-role="title"]')) return;
+        if (ev.metaKey || ev.ctrlKey || ev.shiftKey) {
+          ev.preventDefault();
+          if (selectedListIds.has(el.dataset.id)) {
+            selectedListIds.delete(el.dataset.id);
+            el.classList.remove('list-selected');
+          } else {
+            selectedListIds.add(el.dataset.id);
+            el.classList.add('list-selected');
+          }
+          updateCoordToolbar();
+          return;
+        }
+        if (selectedListIds.size > 0) {
+          document.querySelectorAll('.conv-item.list-selected').forEach(n => n.classList.remove('list-selected'));
+          selectedListIds.clear();
+          updateCoordToolbar();
+        }
         const row = conversationsData.find(c => c.id === el.dataset.id);
         if (row && row.source === 'github_pr') {
           if (row.tail_pr_url) window.open(row.tail_pr_url, '_blank');
@@ -5785,6 +6051,13 @@
       await saveConversationOrder();
       renderSidebar(filterConversations($convSearch.value));
     });
+    const renderedIds = new Set();
+    $convList.querySelectorAll('.conv-item').forEach(el => {
+      if (el.dataset.id) renderedIds.add(el.dataset.id);
+      if (selectedListIds.has(el.dataset.id)) el.classList.add('list-selected');
+    });
+    selectedListIds.forEach(id => { if (!renderedIds.has(id)) selectedListIds.delete(id); });
+    updateCoordToolbar();
   }
 
   async function saveConversationOrder() {

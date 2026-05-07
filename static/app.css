@@ -4363,3 +4363,39 @@
   @media (max-width: 720px) {
     .hsd-body { grid-template-columns: 1fr; grid-template-rows: 50% 50%; }
   }
+
+/* ── Multi-session coordination ─────────────────────────────────────── */
+.conv-item.list-selected { border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.conv-item.active.list-selected { border-left-color: var(--purple); }
+.coord-toolbar { display:none; position:sticky; bottom:0; z-index:20; background:var(--surface); border-top:1px solid var(--border); padding:8px 12px; gap:8px; align-items:center; font-size:12px; color:var(--text-muted); flex-shrink:0; }
+.coord-toolbar.visible { display:flex; }
+.coord-toolbar .coord-count { flex:1; }
+.coord-toolbar .coord-btn { padding:4px 10px; font-size:12px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer; }
+.coord-toolbar .coord-clear-btn { padding:4px 8px; font-size:13px; background:transparent; border:1px solid var(--border); color:var(--text-muted); border-radius:4px; cursor:pointer; line-height:1; }
+.coord-modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:1000; align-items:center; justify-content:center; }
+.coord-modal-backdrop.visible { display:flex; }
+.coord-modal { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:20px; width:420px; max-width:calc(100vw - 32px); box-shadow:0 8px 32px rgba(0,0,0,0.5); display:flex; flex-direction:column; gap:14px; }
+.coord-modal h3 { margin:0; font-size:14px; font-weight:600; color:var(--text); }
+.coord-modal label { font-size:12px; color:var(--text-muted); display:block; margin-bottom:4px; }
+.coord-modal input[type="text"] { width:100%; box-sizing:border-box; padding:6px 8px; background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--text); font-size:13px; }
+.coord-modal .mode-row { display:flex; gap:16px; font-size:13px; }
+.coord-modal .mode-hint { font-size:11px; color:var(--text-muted); margin-top:2px; }
+.coord-modal .participants-list { display:flex; flex-direction:column; gap:6px; max-height:160px; overflow-y:auto; }
+.coord-modal .participant-row { display:flex; align-items:center; gap:8px; font-size:12px; }
+.coord-modal .participant-row .p-name { font-weight:500; color:var(--text); }
+.coord-modal .participant-row .p-cwd { color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:200px; }
+.coord-modal .modal-footer { display:flex; justify-content:flex-end; gap:8px; margin-top:4px; }
+.coord-modal .modal-cancel { padding:6px 14px; background:transparent; border:1px solid var(--border); color:var(--text-muted); border-radius:4px; cursor:pointer; font-size:13px; }
+.coord-modal .modal-start { padding:6px 14px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; }
+.coord-modal .modal-error { font-size:12px; color:var(--red); display:none; }
+.coord-modal .modal-error.visible { display:block; }
+.gc-reader { display:flex; flex-direction:column; height:100%; overflow:hidden; }
+.gc-reader-header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
+.gc-reader-header .gc-topic { font-weight:600; font-size:13px; color:var(--text); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gc-reader-header .gc-mode-badge { font-size:11px; padding:2px 6px; border-radius:10px; background:var(--surface-2); color:var(--text-muted); flex-shrink:0; }
+.gc-reader-header .gc-close { background:transparent; border:none; color:var(--text-muted); cursor:pointer; font-size:16px; padding:2px 6px; line-height:1; }
+.gc-reader-body { flex:1; overflow-y:auto; padding:14px; font-size:13px; line-height:1.55; color:var(--text); }
+.gc-reader-body .gc-poll-error { color:var(--red); font-size:12px; padding:6px 0; }
+.gc-reader-input-row { display:flex; gap:8px; padding:10px 14px; border-top:1px solid var(--border); flex-shrink:0; }
+.gc-reader-input-row input { flex:1; padding:6px 8px; background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--text); font-size:13px; }
+.gc-reader-input-row button { padding:6px 12px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; }

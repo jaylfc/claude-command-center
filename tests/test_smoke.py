@@ -437,15 +437,6 @@ class TestRepoContextHelpers(unittest.TestCase):
                 server._spawned_sessions.extend(orig_sessions)
 
 
-    def test_term_endpoints_registered(self):
-        """Smoke check: /api/term/run and /api/term/cancel branches present in do_POST."""
-        for mod in ("server",):
-            sys.modules.pop(mod, None)
-        import server
-        src = pathlib.Path(server.__file__).read_text()
-        self.assertIn('"/api/term/run"', src)
-        self.assertIn('"/api/term/cancel"', src)
-
     def test_reveal_file_route_registered(self):
         """Smoke check: POST /api/reveal-file branch present in do_POST."""
         for mod in ("server",):
@@ -630,6 +621,37 @@ class TestRepoContextHelpers(unittest.TestCase):
             meta = server._extract_tail_meta(path)
 
         self.assertEqual(meta["model"], "claude-sonnet-4-6")
+
+
+    def test_coordinate_sessions_helper_exists(self):
+        """_coordinate_sessions must exist and reject empty topic."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_coordinate_sessions"))
+        result = server._coordinate_sessions({"session_ids": ["abc"], "topic": ""})
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)
+
+    def test_group_chat_read_helper_exists_and_rejects_traversal(self):
+        """_group_chat_read must exist and block path traversal outside group-chats/."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_group_chat_read"))
+        result, forbidden = server._group_chat_read("/etc/passwd")
+        self.assertIsNone(result)
+        self.assertEqual(forbidden, "forbidden")
+
+    def test_group_chat_post_helper_exists_and_rejects_traversal(self):
+        """_group_chat_post must exist and block writes outside group-chats/."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_group_chat_post"))
+        result = server._group_chat_post("/etc/passwd", "hacked")
+        self.assertFalse(result["ok"])
+        self.assertIn("forbidden", result.get("error", ""))
 
 
 class TestModelPicker(unittest.TestCase):

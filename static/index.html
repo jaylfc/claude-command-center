@@ -267,6 +267,11 @@
       <div class="log-list" id="convList" style="overflow-y:auto;flex:1;min-height:0;max-height:none;">
         <div class="empty-state" style="height:auto;padding:20px;font-size:13px;">Loading...</div>
       </div>
+      <div class="coord-toolbar" id="coordToolbar">
+        <span class="coord-count" id="coordCount"></span>
+        <button class="coord-btn" id="coordBtn">Coordinate&hellip;</button>
+        <button class="coord-clear-btn" id="coordClearBtn" title="Clear selection">&times;</button>
+      </div>
       <div class="kanban-board" id="kanbanBoard" style="display:none;"></div>
     </div>
     <div class="attention-panel collapsed" id="attentionPanel">
@@ -1485,5 +1490,33 @@
   });
 })();
 </script>
+
+<!-- Coordinate sessions modal -->
+<div class="coord-modal-backdrop" id="coordModalBackdrop">
+  <div class="coord-modal" role="dialog" aria-modal="true" aria-labelledby="coordModalTitle">
+    <h3 id="coordModalTitle">Coordinate sessions</h3>
+    <div>
+      <label for="coordTopicInput">Topic</label>
+      <input type="text" id="coordTopicInput" maxlength="120" placeholder="e.g. Redesign the auth flow" autocomplete="off">
+    </div>
+    <div>
+      <label>Mode</label>
+      <div class="mode-row">
+        <label><input type="radio" name="coordMode" id="coordModeTopicRadio" value="topic" checked> Topic coordination</label>
+        <label><input type="radio" name="coordMode" id="coordModeGitRadio" value="git"> Git coordination</label>
+      </div>
+      <div class="mode-hint" id="coordModeHint"></div>
+    </div>
+    <div>
+      <label>Participants</label>
+      <div class="participants-list" id="coordParticipantsList"></div>
+    </div>
+    <div class="modal-error" id="coordModalError"></div>
+    <div class="modal-footer">
+      <button class="modal-cancel" id="coordModalCancel">Cancel</button>
+      <button class="modal-start" id="coordModalStart">Start coordination</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

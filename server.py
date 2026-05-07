@@ -10178,6 +10178,119 @@ def list_spawned_sessions():
     return result
 
 
+def _group_chat_post(path, text):
+    """Append a human entry to a group-chat file."""
+    group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
+    try:
+        real_path = os.path.realpath(os.path.expanduser(path))
+    except Exception:
+        return {"ok": False, "error": "forbidden"}
+    if not real_path.startswith(group_chats_dir + os.sep):
+        return {"ok": False, "error": "forbidden"}
+    now = datetime.now()
+    day_name = now.strftime("%A")
+    try:
+        tz_name = now.astimezone().strftime("%Z")
+    except Exception:
+        tz_name = "local"
+    full_ts = now.strftime(f"%Y-%m-%d {day_name} %H:%M:%S") + f" {tz_name}"
+    entry = f"\n---\n\n## {full_ts} — Human\n\n{text}\n"
+    try:
+        with open(real_path, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+        return {"ok": True}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _group_chat_read(path):
+    """Read a group-chat file. Returns (result_dict, None) or (None, 'forbidden')."""
+    group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
+    try:
+        real_path = os.path.realpath(os.path.expanduser(path))
+    except Exception:
+        return None, "forbidden"
+    if not (real_path.startswith(group_chats_dir + os.sep) or real_path == group_chats_dir):
+        return None, "forbidden"
+    try:
+        stat_result = os.stat(real_path)
+        with open(real_path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+        return {"ok": True, "content": content, "mtime": stat_result.st_mtime}, None
+    except FileNotFoundError:
+        return {"ok": False, "error": "not found"}, None
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}, None
+
+
+def _coordinate_sessions(payload):
+    """Create a group-chat file and inject /group-chat into selected sessions."""
+    session_ids = payload.get("session_ids")
+    if not isinstance(session_ids, list):
+        session_ids = []
+    topic = (payload.get("topic") or "").strip()
+    mode = (payload.get("mode") or "topic").strip()
+    sessions_meta = payload.get("sessions_meta") or []
+    include_human = bool(payload.get("include_human", True))
+
+    if not session_ids or not topic:
+        return {"ok": False, "error": "missing session_ids or topic"}
+    if mode not in ("topic", "git"):
+        mode = "topic"
+
+    slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:60] or "chat"
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    group_chats_dir = os.path.expanduser("~/.claude/group-chats")
+    try:
+        os.makedirs(group_chats_dir, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot create group-chats dir: {exc}"}
+
+    chat_path = os.path.join(group_chats_dir, f"{slug}-{ts}.md")
+
+    name_map = {m["session_id"]: m.get("display_name") or m["session_id"]
+                for m in sessions_meta if isinstance(m, dict) and m.get("session_id")}
+    participant_names = [name_map.get(sid, sid) for sid in session_ids]
+    if include_human:
+        participant_names.append("human")
+    participants_str = ", ".join(f"`{n}`" for n in participant_names)
+
+    now = datetime.now()
+    day_name = now.strftime("%A")
+    try:
+        tz_name = datetime.now().astimezone().strftime("%Z")
+    except Exception:
+        tz_name = "local"
+    full_ts = now.strftime(f"%Y-%m-%d {day_name} %H:%M:%S") + f" {tz_name}"
+
+    header = (
+        f"# Group Chat — {topic}\n"
+        f"**Started:** {full_ts}\n"
+        f"**Mode:** {mode}\n"
+        f"**Participants:** {participants_str}\n"
+    )
+    try:
+        with open(chat_path, "w", encoding="utf-8") as fh:
+            fh.write(header)
+    except OSError as exc:
+        return {"ok": False, "error": f"cannot write chat file: {exc}"}
+
+    safe_topic = topic.replace('"', '\\"')
+    results = []
+    for sid in session_ids:
+        text = f'/group-chat chat="{chat_path}" topic="{safe_topic}" mode={mode}'
+        inject_result = _inject_text_into_session(sid, text)
+        results.append({
+            "session_id": sid,
+            "ok": bool(inject_result.get("ok")),
+            "error": inject_result.get("error", ""),
+        })
+
+    chat_path_tilde = "~/.claude/group-chats/" + f"{slug}-{ts}.md"
+    return {"ok": True, "chat_path": chat_path_tilde, "results": results}
+
+
 def _inject_text_into_session(session_id, text):
     """Route `text` to a session using the same fall-through as /api/inject-input:
     terminal-control AppleScript when there's a TTY, FIFO write to a live spawn,
@@ -15024,6 +15137,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # parallel; warm hits are sub-100ms.
             payload = fetch_cross_repo_issues()
             self.send_json(payload)
+        elif path == "/api/group-chat/read":
+            qs_params = urllib.parse.parse_qs(parsed.query)
+            chat_path = (qs_params.get("path") or [""])[0]
+            if not chat_path:
+                self.send_json({"ok": False, "error": "missing path"})
+                return
+            result, forbidden = _group_chat_read(chat_path)
+            if forbidden:
+                self.send_json({"ok": False, "error": "forbidden"}, 403)
+            else:
+                self.send_json(result)
         elif path == "/api/identity":
             # This server's own identity card. Repo identity is request-level.
             self.send_json({
@@ -16631,6 +16755,31 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing agent_id"})
             else:
                 self.send_json(pkood_kill(agent_id))
+        elif path == "/api/coordinate":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            self.send_json(_coordinate_sessions(payload))
+        elif path == "/api/group-chat/post":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            chat_path = (payload.get("path") or "").strip()
+            text = (payload.get("text") or "").strip()
+            if not chat_path or not text:
+                self.send_json({"ok": False, "error": "missing path or text"})
+                return
+            result = _group_chat_post(chat_path, text)
+            if not result.get("ok") and result.get("error") == "forbidden":
+                self.send_json(result, 403)
+            else:
+                self.send_json(result)
         elif path == "/api/inject-input":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
