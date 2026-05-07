@@ -15285,6 +15285,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # parallel; warm hits are sub-100ms.
             payload = fetch_cross_repo_issues()
             self.send_json(payload)
+        elif path == "/api/group-chats/active":
+            with _coord_lock:
+                chats = [
+                    {"path": p, "last_activity": e["last_activity"]}
+                    for p, e in _active_coordinations.items()
+                ]
+            # Sort most-recently-active first; attach topic from sidecar if available.
+            chats.sort(key=lambda c: c["last_activity"], reverse=True)
+            for c in chats:
+                sidecar = c["path"][:-3] + ".json"
+                try:
+                    with open(sidecar, "r", encoding="utf-8") as fh:
+                        meta = json.load(fh)
+                    c["topic"] = meta.get("topic", "")
+                    c["mode"] = meta.get("mode", "topic")
+                except OSError:
+                    c["topic"] = ""
+                    c["mode"] = "topic"
+                c["path_tilde"] = "~/.claude/group-chats/" + os.path.basename(c["path"])
+            self.send_json({"ok": True, "chats": chats})
         elif path == "/api/group-chat/read":
             qs_params = urllib.parse.parse_qs(parsed.query)
             chat_path = (qs_params.get("path") or [""])[0]

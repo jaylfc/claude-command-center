@@ -10488,6 +10488,34 @@
     loadAttentionList();
     refreshWorktreesBadge();
     pollVercelDeploy();
+    pollGcActive();
+    setInterval(pollGcActive, 15000);
+  }
+
+  const $gcActiveBtn = document.getElementById('gcActiveBtn');
+  let _gcActiveChats = [];
+  async function pollGcActive() {
+    try {
+      const data = await fetch('/api/group-chats/active').then(r => r.json());
+      _gcActiveChats = (data.chats || []);
+      if (!$gcActiveBtn) return;
+      if (_gcActiveChats.length === 0) {
+        $gcActiveBtn.style.display = 'none';
+      } else {
+        const n = _gcActiveChats.length;
+        $gcActiveBtn.textContent = n === 1
+          ? '💬 1 active coordination'
+          : `💬 ${n} active coordinations`;
+        $gcActiveBtn.style.display = '';
+      }
+    } catch (_) {}
+  }
+  if ($gcActiveBtn) {
+    $gcActiveBtn.addEventListener('click', () => {
+      if (!_gcActiveChats.length) return;
+      const c = _gcActiveChats[0];
+      openGroupChatReader(c.path_tilde, c.topic, c.mode, true);
+    });
   }
 
   // ── Sidebar repo picker ──
