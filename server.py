@@ -660,6 +660,32 @@ def _legacy_project_slug(path):
     """
     return "-" + str(path).lstrip("/").replace("/", "-")
 
+_fs_case_cache: dict = {}
+
+def _resolve_dir_case(folder_path: str) -> str:
+    """Return the directory's name using the actual filesystem capitalisation.
+
+    On macOS (case-insensitive, case-preserving) a path stored as
+    'David-library' and the real directory 'david-library' are the same
+    entry.  Python's Path.resolve() does NOT normalise case, so we look up
+    the parent's entries and find the first name that matches case-insensitively.
+    Results are cached per parent directory so bulk session scans stay fast.
+    """
+    try:
+        p = Path(folder_path)
+        parent_str = str(p.parent)
+        if parent_str not in _fs_case_cache:
+            try:
+                _fs_case_cache[parent_str] = {
+                    e.name.lower(): e.name for e in p.parent.iterdir()
+                }
+            except OSError:
+                _fs_case_cache[parent_str] = {}
+        return _fs_case_cache[parent_str].get(p.name.lower(), p.name)
+    except Exception:
+        return Path(folder_path).name
+
+
 def _candidate_conversation_dirs(path):
     """Every ~/.claude/projects/<slug>/ that could hold conversations for
     `path`. Both encoders are tried; only existing dirs are returned.
@@ -1161,12 +1187,12 @@ def find_all_conversations(limit_per_folder=None):
 
         repo_path = known_by_slug.get(slug)
         if repo_path:
-            folder_label = Path(repo_path).name
+            folder_label = _resolve_dir_case(repo_path)
             folder_path = repo_path
         else:
             decoded = _decode_project_slug(slug)
             if decoded:
-                folder_label = decoded.name or slug
+                folder_label = _resolve_dir_case(str(decoded)) or slug
                 folder_path = str(decoded)
             else:
                 folder_label = slug
@@ -7979,7 +8005,7 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
         except OSError:
             cwd_exists = False
         folder_path = pinned or cwd or effective_cwd or ""
-        folder_label = Path(folder_path).name if folder_path else "Codex"
+        folder_label = _resolve_dir_case(folder_path) if folder_path else "Codex"
         _wt_worktree_label = None
         _wt_idx = folder_label.find("-wt-")
         if _wt_idx > 0:
@@ -8917,7 +8943,7 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
         except OSError:
             cwd_exists = False
         folder_path = pinned or cwd or effective_cwd or ""
-        folder_label = Path(folder_path).name if folder_path else "Gemini"
+        folder_label = _resolve_dir_case(folder_path) if folder_path else "Gemini"
         _wt_worktree_label = None
         _wt_idx = folder_label.find("-wt-")
         if _wt_idx > 0:
