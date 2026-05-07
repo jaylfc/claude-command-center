@@ -3933,7 +3933,12 @@
         // was an assistant response (Claude is mid-turn, possibly thinking without tools).
         const sidecarAge = c.sidecar_ts ? (Date.now() / 1000 - c.sidecar_ts) : 9999;
         const midTurn = c.last_event_type === 'assistant';
-        const trulyActive = c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn) ? ' truly-active' : '';
+        const _isKanbanCodex = c.source === 'codex' || c.engine === 'codex';
+        const _isKanbanGemini = c.source === 'gemini' || c.engine === 'gemini';
+        const _kanbanActivityAge = c.sidecar_ts ? (Date.now() / 1000 - c.sidecar_ts) : (c.last_interacted ? (Date.now() / 1000 - c.last_interacted) : 9999);
+        const _codexKanbanWip = _isKanbanCodex && !c.sidecar_status && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60));
+        const _geminiKanbanWip = _isKanbanGemini && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
+        const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip ? ' truly-active' : '';
         const pendingSpawn = c.pending_spawn ? ' pending-spawn' : '';
         const recentlyBorn = isRecentlyBorn(c.session_id) ? ' recently-born' : '';
         const noEditsAttr = hasNoEdits(c) ? ' no-edits' : '';
@@ -5166,12 +5171,11 @@
           + '<span>' + formatSize(c.size) + '</span>'
           + (sourceBadge ? '<span class="sep">&middot;</span>' + sourceBadge : '')
           + '</span>';
-      const rowMetaHtml = (rowSizeHtml || liveToolHtml || signals || branch || engineIcon)
+      const rowMetaHtml = (rowSizeHtml || liveToolHtml || signals || branch)
         ? '<span class="conv-row-meta">'
           + (rowSizeHtml || '<span class="conv-meta-inline"></span>')
           + '<span class="conv-status-slot">' + liveToolHtml + signals + '</span>'
           + '<span class="conv-branch-slot">' + branch + '</span>'
-          + '<span class="conv-engine-slot">' + engineIcon + '</span>'
           + '</span>'
         : '';
 
@@ -5233,6 +5237,7 @@
             + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
             + leftFolderChipHtml
             + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
+            + engineIcon
             + titleFolderChipHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
             + historyBadgeHtml

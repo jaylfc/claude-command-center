@@ -8259,6 +8259,43 @@ def _parse_codex_conversation(thread_id, after_line=0):
     return {"events": events, "last_line": line_num}
 
 
+_pending_resume_queue: dict = {}   # session_id → [text, ...]
+_pending_resume_lock = threading.Lock()
+
+
+def _start_resume_queue_watcher() -> None:
+    """Drain queued prompts to Codex/Gemini sessions once their process finishes."""
+    def _watcher():
+        while True:
+            time.sleep(5)
+            with _pending_resume_lock:
+                queued_sids = list(_pending_resume_queue.keys())
+            for sid in queued_sids:
+                busy = any(
+                    s.get("resumed_sid") == sid and s["proc"].poll() is None
+                    for s in _spawned_sessions
+                    if s.get("engine") in ("codex", "gemini")
+                )
+                if busy:
+                    continue
+                with _pending_resume_lock:
+                    queue = _pending_resume_queue.get(sid, [])
+                    if not queue:
+                        _pending_resume_queue.pop(sid, None)
+                        continue
+                    text = queue.pop(0)
+                    if not queue:
+                        _pending_resume_queue.pop(sid, None)
+                try:
+                    if _is_codex_session(sid):
+                        resume_session_codex(sid, text)
+                    elif _is_gemini_session(sid):
+                        resume_session_gemini(sid, text)
+                except Exception:
+                    pass
+    threading.Thread(target=_watcher, daemon=True, name="resume-queue-watcher").start()
+
+
 def resume_session_codex(session_id, text):
     """Resume a dormant Codex thread with a new prompt via `codex exec resume`."""
     resolved = _resolve_codex_bin()
@@ -8268,11 +8305,13 @@ def resume_session_codex(session_id, text):
         if s.get("engine") == "codex" and s.get("resumed_sid") == session_id:
             try:
                 if s["proc"].poll() is None:
+                    with _pending_resume_lock:
+                        _pending_resume_queue.setdefault(session_id, []).append(text)
                     return {
-                        "ok": False,
-                        "error": "Codex is already running for this thread; wait for it to finish before sending another prompt.",
+                        "ok": True,
+                        "queued": True,
                         "pid": s.get("pid"),
-                        "via": "codex-resume-busy",
+                        "via": "codex-resume-queued",
                     }
             except Exception:
                 pass
@@ -9301,11 +9340,13 @@ def resume_session_gemini(session_id, text):
         if s.get("engine") == "gemini" and s.get("resumed_sid") == session_id:
             try:
                 if s["proc"].poll() is None:
+                    with _pending_resume_lock:
+                        _pending_resume_queue.setdefault(session_id, []).append(text)
                     return {
-                        "ok": False,
-                        "error": "Gemini is already running for this session; wait for it to finish before sending another prompt.",
+                        "ok": True,
+                        "queued": True,
                         "pid": s.get("pid"),
-                        "via": "gemini-resume-busy",
+                        "via": "gemini-resume-queued",
                     }
             except Exception:
                 pass
@@ -18199,6 +18240,7 @@ def main():
     threading.Thread(target=_chuck_imessage_poller, daemon=True).start()
     # Recover in-progress group-chat coordinations and start background watcher.
     _start_coordination_watcher()
+    _start_resume_queue_watcher()
     print()
     try:
         server.serve_forever()
