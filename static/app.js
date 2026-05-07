@@ -5091,15 +5091,12 @@
         const bMax = b[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
         return bMax - aMax;
       });
-      const _groupHtml = _folderEntries.map(([folder, cards]) => {
+      const _renderFolderEntry = ([folder, cards]) => {
         if (cards.length === 1) {
           return _renderRow(cards[0], { folderChipBeforeTitle: true });
         }
         const hue = (cards[0].folder_chip_hue | 0);
         const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
-        // data-folder-path lets the drop handler know which repo to pin
-        // a dropped row to. Empty when the folder couldn't be resolved
-        // (orphan slug); drop is suppressed in that case.
         const dropPath = cards[0].folder_path || '';
         const collapseKey = dropPath || folder;
         const collapsed = _isFolderGroupCollapsed('inprogress', collapseKey);
@@ -5109,7 +5106,12 @@
           + _folderGroupHeaderHtml('inprogress', folder, cards.length, hue, orphan, collapseKey, headerAttrs)
           + cards.map(c => _renderRow(c, { suppressFolderChip: true })).join('')
           + '</div>';
-      }).join('');
+      };
+      // Named groups (2+ sessions) first, single-session orphans below.
+      const _namedGroups = _folderEntries.filter(([, cards]) => cards.length > 1);
+      const _orphanEntries = _folderEntries.filter(([, cards]) => cards.length === 1);
+      const _groupHtml = _namedGroups.map(_renderFolderEntry).join('')
+        + (_orphanEntries.length ? _orphanEntries.map(_renderFolderEntry).join('') : '');
       _activeRowsHtml = _isSpecificFolderFilter
         ? _flatRowsWithSeparators(_visibleSessionConvs, { suppressFolderChip: true })
         : _groupHtml;
