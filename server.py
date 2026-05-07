@@ -9662,7 +9662,7 @@ def _group_chat_post(path, text):
     now = datetime.now()
     day_name = now.strftime("%A")
     try:
-        tz_name = datetime.now().astimezone().strftime("%Z")
+        tz_name = now.astimezone().strftime("%Z")
     except Exception:
         tz_name = "local"
     full_ts = now.strftime(f"%Y-%m-%d {day_name} %H:%M:%S") + f" {tz_name}"
@@ -15947,8 +15947,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             text = (payload.get("text") or "").strip()
             if not chat_path or not text:
                 self.send_json({"ok": False, "error": "missing path or text"})
+                return
+            result = _group_chat_post(chat_path, text)
+            if not result.get("ok") and result.get("error") == "forbidden":
+                self.send_json(result, 403)
             else:
-                self.send_json(_group_chat_post(chat_path, text))
+                self.send_json(result)
         elif path == "/api/inject-input":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
