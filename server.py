@@ -8972,7 +8972,7 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
             elif not _codex_cwd_matches_repo(cwd, repo_path_obj, git_top_cache):
                 continue
         try:
-            st = path.stat()
+            st = Path(path).stat()
         except OSError:
             continue
         modified = tail.get("last_meaningful_ts") or _iso_ts_epoch(data.get("lastUpdated")) or st.st_mtime
