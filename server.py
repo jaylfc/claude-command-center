@@ -14360,21 +14360,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             payload = fetch_cross_repo_issues()
             self.send_json(payload)
         elif path == "/api/group-chat/read":
-            from urllib.parse import urlparse, parse_qs
-            parsed_qs = urlparse(self.path)
-            qs_params = parse_qs(parsed_qs.query)
+            qs_params = urllib.parse.parse_qs(parsed.query)
             chat_path = (qs_params.get("path") or [""])[0]
             if not chat_path:
                 self.send_json({"ok": False, "error": "missing path"})
+                return
+            result, forbidden = _group_chat_read(chat_path)
+            if forbidden:
+                self.send_json({"ok": False, "error": "forbidden"}, 403)
             else:
-                result, forbidden = _group_chat_read(chat_path)
-                if forbidden:
-                    self.send_response(403)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(b'{"ok":false,"error":"forbidden"}')
-                else:
-                    self.send_json(result)
+                self.send_json(result)
         elif path == "/api/identity":
             # This server's own identity card. Repo identity is request-level.
             self.send_json({
