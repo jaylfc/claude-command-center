@@ -10287,6 +10287,9 @@ def _coordinate_sessions(payload):
             "error": inject_result.get("error", ""),
         })
 
+    # Register with background watcher before writing sidecar.
+    _register_coordination(chat_path)
+
     # Write sidecar JSON so nudge can re-inject participants later.
     sidecar_path = chat_path[:-3] + ".json"
     try:
@@ -10326,6 +10329,114 @@ def _group_chat_nudge(path):
         r = _inject_text_into_session(sid, text)
         results.append({"session_id": sid, "ok": bool(r.get("ok")), "error": r.get("error", "")})
     return {"ok": True, "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Background coordination watcher
+# Tracks active group-chat coordinations and nudges participant sessions
+# whenever the chat file changes.  No UI involvement — runs entirely on the
+# server side.
+# ---------------------------------------------------------------------------
+
+_active_coordinations: dict = {}          # chat_path → {mtime, last_nudge, last_activity}
+_coord_lock = threading.Lock()
+
+_COORD_NUDGE_INTERVAL   = 60    # seconds between nudges for the same chat
+_COORD_POLL_INTERVAL    = 30    # watcher thread sleep interval
+_COORD_DEATH_TIMEOUT    = 45 * 60  # 45 min with no file change → drop
+
+
+def _register_coordination(chat_path: str) -> None:
+    """Add a newly-started (or recovered) coordination to the watcher."""
+    try:
+        mtime = os.stat(chat_path).st_mtime
+    except OSError:
+        mtime = time.time()
+    with _coord_lock:
+        _active_coordinations[chat_path] = {
+            "mtime": mtime,
+            "last_nudge": 0.0,
+            "last_activity": time.time(),
+        }
+
+
+def _is_coord_done(chat_path: str) -> bool:
+    """Return True if the chat file signals completion (DONE state)."""
+    try:
+        with open(chat_path, "r", encoding="utf-8") as fh:
+            tail = fh.read()[-2000:]   # only check the tail
+        return "we're done" in tail.lower() or "✅ done" in tail and "step" not in tail.lower().split("✅ done")[-1][:100]
+    except OSError:
+        return False
+
+
+def _coordination_watcher() -> None:
+    """Daemon thread: poll all tracked coordinations, nudge on change, drop on death."""
+    while True:
+        time.sleep(_COORD_POLL_INTERVAL)
+        now = time.time()
+        with _coord_lock:
+            paths = list(_active_coordinations.keys())
+
+        for path in paths:
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                # File deleted — drop it
+                with _coord_lock:
+                    _active_coordinations.pop(path, None)
+                continue
+
+            with _coord_lock:
+                entry = _active_coordinations.get(path)
+                if entry is None:
+                    continue
+
+            changed = mtime != entry["mtime"]
+            idle_seconds = now - entry["last_activity"]
+
+            if changed:
+                entry["mtime"] = mtime
+                entry["last_activity"] = now
+
+            # Drop if done or idle too long
+            if idle_seconds > _COORD_DEATH_TIMEOUT or _is_coord_done(path):
+                with _coord_lock:
+                    _active_coordinations.pop(path, None)
+                continue
+
+            # Nudge if file changed and debounce window passed
+            if changed and (now - entry["last_nudge"]) > _COORD_NUDGE_INTERVAL:
+                entry["last_nudge"] = now
+                with _coord_lock:
+                    _active_coordinations[path] = entry
+                try:
+                    _group_chat_nudge(path)
+                except Exception:
+                    pass
+
+
+def _start_coordination_watcher() -> None:
+    """Recover any in-progress coordinations from disk and start the watcher thread."""
+    group_chats_dir = os.path.expanduser("~/.claude/group-chats")
+    cutoff = time.time() - _COORD_DEATH_TIMEOUT
+    try:
+        for fname in os.listdir(group_chats_dir):
+            if not fname.endswith(".json"):
+                continue
+            sidecar = os.path.join(group_chats_dir, fname)
+            md_path = sidecar[:-5] + ".md"
+            try:
+                if os.stat(md_path).st_mtime < cutoff:
+                    continue   # too old
+                _register_coordination(md_path)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+    t = threading.Thread(target=_coordination_watcher, daemon=True, name="coord-watcher")
+    t.start()
 
 
 def _inject_text_into_session(session_id, text):
@@ -18039,6 +18150,8 @@ def main():
     # Chuck iMessage monitor: polls chat.db every 2 minutes, injects new
     # messages from +17035592946 into the CHUCK session via inject-input.
     threading.Thread(target=_chuck_imessage_poller, daemon=True).start()
+    # Recover in-progress group-chat coordinations and start background watcher.
+    _start_coordination_watcher()
     print()
     try:
         server.serve_forever()
