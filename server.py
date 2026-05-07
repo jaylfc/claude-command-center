@@ -9650,6 +9650,31 @@ def list_spawned_sessions():
     return result
 
 
+def _group_chat_post(path, text):
+    """Append a human entry to a group-chat file."""
+    group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
+    try:
+        real_path = os.path.realpath(os.path.expanduser(path))
+    except Exception:
+        return {"ok": False, "error": "forbidden"}
+    if not real_path.startswith(group_chats_dir + os.sep):
+        return {"ok": False, "error": "forbidden"}
+    now = datetime.now()
+    day_name = now.strftime("%A")
+    try:
+        tz_name = datetime.now().astimezone().strftime("%Z")
+    except Exception:
+        tz_name = "local"
+    full_ts = now.strftime(f"%Y-%m-%d {day_name} %H:%M:%S") + f" {tz_name}"
+    entry = f"\n---\n\n## {full_ts} — Human\n\n{text}\n"
+    try:
+        with open(real_path, "a", encoding="utf-8") as fh:
+            fh.write(entry)
+        return {"ok": True}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _group_chat_read(path):
     """Read a group-chat file. Returns (result_dict, None) or (None, 'forbidden')."""
     group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
@@ -15916,6 +15941,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             self.send_json(_coordinate_sessions(payload))
+        elif path == "/api/group-chat/post":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            chat_path = (payload.get("path") or "").strip()
+            text = (payload.get("text") or "").strip()
+            if not chat_path or not text:
+                self.send_json({"ok": False, "error": "missing path or text"})
+            else:
+                self.send_json(_group_chat_post(chat_path, text))
         elif path == "/api/inject-input":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

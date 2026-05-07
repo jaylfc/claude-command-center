@@ -643,6 +643,16 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(forbidden, "forbidden")
 
+    def test_group_chat_post_helper_exists_and_rejects_traversal(self):
+        """_group_chat_post must exist and block writes outside group-chats/."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_group_chat_post"))
+        result = server._group_chat_post("/etc/passwd", "hacked")
+        self.assertFalse(result["ok"])
+        self.assertIn("forbidden", result.get("error", ""))
+
 
 class TestHealthcheck(unittest.TestCase):
     def test_healthcheck_returns_structured_result(self):
