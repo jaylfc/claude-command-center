@@ -11,11 +11,12 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
 
 import ast
 import base64
 import fcntl
+import hashlib
 import http.server
 import json
 import os
@@ -34,7 +35,7 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Tool's own assets live next to this file. Repos are never process-global:
@@ -508,6 +509,94 @@ def _save_repo_pins(pins):
     tmp.replace(_REPO_PINS_FILE)
 
 
+def _load_session_overrides():
+    """Return {session_id: {model, context_1m, engine, set_at}} or {}."""
+    try:
+        with open(SESSION_OVERRIDES_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_session_overrides(overrides):
+    SESSION_OVERRIDES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SESSION_OVERRIDES_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(overrides, f, indent=2, sort_keys=True)
+    tmp.replace(SESSION_OVERRIDES_FILE)
+
+
+def _get_session_override(session_id):
+    if not session_id:
+        return None
+    entry = _load_session_overrides().get(session_id)
+    if not isinstance(entry, dict):
+        return None
+    return entry
+
+
+def _set_session_override(session_id, model, context_1m, engine):
+    overrides = _load_session_overrides()
+    overrides[session_id] = {
+        "model": str(model),
+        "context_1m": bool(context_1m),
+        "engine": str(engine or "claude"),
+        "set_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _save_session_overrides(overrides)
+
+
+def _clear_session_override(session_id):
+    overrides = _load_session_overrides()
+    if session_id in overrides:
+        del overrides[session_id]
+        _save_session_overrides(overrides)
+
+
+def _short_model_alias(model):
+    """Turn `claude-sonnet-4-6` / `claude-sonnet-4-6[1m]` / `sonnet` into the
+    alias form `/model` accepts: drop the `claude-` prefix and any `[1m]`
+    suffix the caller may have included. Non-Claude model strings pass
+    through unchanged (callers shouldn't be invoking this for them, but
+    being permissive is cheap)."""
+    if not model:
+        return ""
+    alias = model.strip()
+    if alias.lower().startswith("claude-"):
+        alias = alias[len("claude-"):]
+    # Strip any trailing `[1m]`/`[1M]` — the slash command adds it back when
+    # context_1m is true, and we don't want a double suffix.
+    for tail in ("[1m]", "[1M]"):
+        if alias.endswith(tail):
+            alias = alias[: -len(tail)]
+    return alias.strip()
+
+
+def _build_slash_model_command(model, context_1m):
+    """Compose the `/model <alias>[1m]` text injected into a live Claude
+    session. Returns an empty string if model is missing — caller should
+    treat that as a no-op."""
+    alias = _short_model_alias(model)
+    if not alias:
+        return ""
+    if context_1m:
+        return f"/model {alias}[1m]"
+    return f"/model {alias}"
+
+
+def _detect_session_engine(session_id):
+    """Best-effort: codex/gemini are detected by their per-engine session
+    stores; everything else is treated as `claude`."""
+    if not session_id:
+        return "claude"
+    if _is_codex_session(session_id):
+        return "codex"
+    if _is_gemini_session(session_id):
+        return "gemini"
+    return "claude"
+
+
 def _native_pick_folder(prompt_text="Pick a repo folder for Claude Command Center"):
     """Open the OS-native folder chooser and return the selected absolute path.
 
@@ -571,10 +660,85 @@ def _legacy_project_slug(path):
     """
     return "-" + str(path).lstrip("/").replace("/", "-")
 
+_fs_case_cache: dict = {}
+_git_root_cache: dict = {}
+
+def _slug_to_label(slug: str) -> str:
+    """Strip the home-directory prefix and common top-level dirs from a raw
+    project slug so the display label is just the project name.
+
+    e.g.  '-Users-amirfish-Apps-amirfish-com'  →  'amirfish-com'
+          '-Users-amirfish-dev-my-finance-app'  →  'my-finance-app'
+          '-Users-amirfish-agent-workshop'       →  'agent-workshop'
+    """
+    import os as _os
+    home_prefix = "-" + _os.path.expanduser("~").lstrip("/").replace("/", "-") + "-"
+    if not slug.startswith(home_prefix):
+        return slug
+    rest = slug[len(home_prefix):]
+    for _top in ("Apps-", "dev-", "Dev-", "Work-", "Projects-",
+                 "Research-", "Documents-", "Desktop-"):
+        if rest.startswith(_top):
+            rest = rest[len(_top):]
+            break
+    return rest or slug
+
+def _find_git_root(folder_path: str) -> "str | None":
+    """Walk up from folder_path to find the nearest ancestor that is a git
+    repo root (contains a .git file or dir).  Returns the root path string,
+    or None if no git repo is found up to the filesystem root.  Cached."""
+    if not folder_path:
+        return None
+    if folder_path in _git_root_cache:
+        return _git_root_cache[folder_path]
+    p = Path(folder_path)
+    candidate = p if p.is_dir() else p.parent
+    while True:
+        try:
+            if (candidate / ".git").exists():
+                result = str(candidate)
+                _git_root_cache[folder_path] = result
+                return result
+        except OSError:
+            pass
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    _git_root_cache[folder_path] = None
+    return None
+
+
+def _resolve_dir_case(folder_path: str) -> str:
+    """Return the directory's name using the actual filesystem capitalisation.
+
+    On macOS (case-insensitive, case-preserving) a path stored as
+    'David-library' and the real directory 'david-library' are the same
+    entry.  Python's Path.resolve() does NOT normalise case, so we look up
+    the parent's entries and find the first name that matches case-insensitively.
+    Results are cached per parent directory so bulk session scans stay fast.
+    """
+    try:
+        p = Path(folder_path)
+        parent_str = str(p.parent)
+        if parent_str not in _fs_case_cache:
+            try:
+                _fs_case_cache[parent_str] = {
+                    e.name.lower(): e.name for e in p.parent.iterdir()
+                }
+            except OSError:
+                _fs_case_cache[parent_str] = {}
+        return _fs_case_cache[parent_str].get(p.name.lower(), p.name)
+    except Exception:
+        return Path(folder_path).name
+
+
 def _candidate_conversation_dirs(path):
     """Every ~/.claude/projects/<slug>/ that could hold conversations for
     `path`. Both encoders are tried; only existing dirs are returned.
-    Modern slug first so it wins on shared keys (newer is fresher)."""
+    Modern slug first so it wins on shared keys (newer is fresher).
+    Also includes sibling worktree slugs (<slug>-wt-*) so sessions run
+    in a worktree appear under their parent repo."""
     seen = set()
     candidates = []
     root = Path.home() / ".claude" / "projects"
@@ -585,6 +749,11 @@ def _candidate_conversation_dirs(path):
         d = root / slug
         if d.is_dir():
             candidates.append(d)
+        # Include sibling worktree project dirs (<slug>-wt-*)
+        for wt_dir in sorted(root.glob(f"{slug}-wt-*")):
+            if wt_dir.is_dir() and str(wt_dir) not in seen:
+                seen.add(str(wt_dir))
+                candidates.append(wt_dir)
     return candidates
 
 class RepoContextError(ValueError):
@@ -1065,16 +1234,25 @@ def find_all_conversations(limit_per_folder=None):
 
         repo_path = known_by_slug.get(slug)
         if repo_path:
-            folder_label = Path(repo_path).name
+            folder_label = _resolve_dir_case(repo_path)
             folder_path = repo_path
         else:
             decoded = _decode_project_slug(slug)
             if decoded:
-                folder_label = decoded.name or slug
+                folder_label = _resolve_dir_case(str(decoded)) or slug
                 folder_path = str(decoded)
             else:
-                folder_label = slug
+                folder_label = _slug_to_label(slug)
                 folder_path = slug
+
+        # If this is a worktree dir (<parent>-wt-<name>), normalise
+        # folder_label to the parent repo name so sessions group under
+        # the parent, and stash the worktree suffix for the UI badge.
+        _wt_worktree_label = None
+        _wt_idx = folder_label.find("-wt-")
+        if _wt_idx > 0:
+            _wt_worktree_label = folder_label[_wt_idx + 4:]  # e.g. "gemini"
+            folder_label = folder_label[:_wt_idx]             # e.g. "claude-command-center"
 
         try:
             jsonls = []
@@ -1315,6 +1493,11 @@ def find_all_conversations(limit_per_folder=None):
                 # means gh failed and the row stays visible to be safe.
                 "pr_state": None,
                 "is_live": is_live,
+                # When the session lives in a sibling worktree dir (e.g.
+                # "claude-command-center-wt-gemini"), folder_label is
+                # normalised to the parent repo name and this field carries
+                # the suffix so the UI can render a "wt-gemini" badge.
+                "worktree_label": _wt_worktree_label,
                 # Last assistant text — passed through so anyone re-enabling
                 # the subtitle in archive can see it. Currently hidden via
                 # _hideAskHtml flag in the UI shaper.
@@ -1329,6 +1512,18 @@ def find_all_conversations(limit_per_folder=None):
     # renderer's existing Claude session rows.
     try:
         out.extend(find_codex_conversations(
+            include_old=True,
+            repo_only=False,
+            limit=limit_per_folder,
+        ))
+    except Exception:
+        pass
+
+    # Add Gemini sessions to the archive too. They live in ~/.gemini/tmp/
+    # and have their own JSON format, but find_gemini_conversations returns
+    # rows compatible with the archive renderer.
+    try:
+        out.extend(find_gemini_conversations(
             include_old=True,
             repo_only=False,
             limit=limit_per_folder,
@@ -2425,6 +2620,16 @@ NETWORK_CONFIG_FILE = COMMAND_CENTER_STATE_DIR / "network.json"
 # _reattach_spawned_orphans() for the boot-time sweep. Schema is a list of
 # {pid, session_id, cwd, spawned_at, name, log, command_summary}.
 SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
+
+# Per-session model + context override. Set by the click-to-switch picker
+# in the session card (see /api/session/<sid>/model). Schema:
+#   { "<session_id>": {"model": "...", "context_1m": bool,
+#                       "engine": "claude|codex|gemini",
+#                       "set_at": "ISO-8601"} }
+# Sticky: stays until the user changes it again or hits "Reset to default".
+# Read by resume_session_{headless,codex,gemini} so a queued change actually
+# lands on the next ask.
+SESSION_OVERRIDES_FILE = COMMAND_CENTER_STATE_DIR / "session-overrides.json"
 
 # {path: {mtime, custom_title, last_prompt, agent_name, ...}}
 # Persistent across restarts via _CONV_META_CACHE_FILE — without it, every
@@ -4210,15 +4415,23 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
         delay 2.0
         tell application "iTerm2" to activate
         delay 0.3
-        tell application "System Events" to keystroke "/rename {rename_target}"
-        delay 0.25
-        tell application "System Events" to key code 36
+        tell application "System Events"
+          tell process "iTerm2"
+            keystroke "/rename {rename_target}"
+            delay 0.25
+            key code 36
+          end tell
+        end tell
         delay 0.7
         tell application "iTerm2" to activate
         delay 0.2
-        tell application "System Events" to keystroke "/color {color}"
-        delay 0.25
-        tell application "System Events" to key code 36
+        tell application "System Events"
+          tell process "iTerm2"
+            keystroke "/color {color}"
+            delay 0.25
+            key code 36
+          end tell
+        end tell
         return "ok"
         '''
     else:
@@ -4247,18 +4460,26 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
           set frontmost of (first window whose id is winId) to true
         end tell
         delay 0.3
-        tell application "System Events" to keystroke "/rename {rename_target}"
-        delay 0.25
-        tell application "System Events" to key code 36
+        tell application "System Events"
+          tell process "Terminal"
+            keystroke "/rename {rename_target}"
+            delay 0.25
+            key code 36
+          end tell
+        end tell
         delay 0.7
         tell application "Terminal"
           activate
           set frontmost of (first window whose id is winId) to true
         end tell
         delay 0.2
-        tell application "System Events" to keystroke "/color {color}"
-        delay 0.25
-        tell application "System Events" to key code 36
+        tell application "System Events"
+          tell process "Terminal"
+            keystroke "/color {color}"
+            delay 0.25
+            key code 36
+          end tell
+        end tell
         return "ok"
         '''
 
@@ -4376,10 +4597,14 @@ def inject_input_via_keystroke(tty, terminal_app, text):
           tell foundSession to write text "{text_lit}"
           activate
         end tell
-        delay 0.1
+        delay 0.15
         set submitErr to ""
         try
-          tell application "System Events" to key code 36
+          tell application "System Events"
+            tell process "iTerm2"
+              key code 36
+            end tell
+          end tell
         on error errMsg
           set submitErr to errMsg
         end try
@@ -4396,8 +4621,8 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         # Terminal.app: find the tab by tty, focus it, send text through
         # Terminal's native `do script ... in tab` API, then activate
         # Terminal and emit a real Return keystroke via System Events so
-        # the TUI submits. The reorder is re-asserted after activate to
-        # win the race against macOS restoring a different window as key.
+        # the TUI submits. Target "process Terminal" explicitly so the
+        # keystroke reaches the right process even if focus briefly shifts.
         script = f'''
         set prevApp to ""
         try
@@ -4424,21 +4649,19 @@ def inject_input_via_keystroke(tty, terminal_app, text):
             end try
           end repeat
           if foundTab is missing value then return "notfound"
-          set selected of foundTab to true
-          try
-            set index of foundWin to 1
-          end try
-          try
-            set index of foundWin to 1
-          end try
-          set selected of foundTab to true
           do script "{text_lit}" in foundTab
           activate
+          set index of foundWin to 1
+          set selected of foundTab to true
         end tell
-        delay 0.1
+        delay 0.15
         set submitErr to ""
         try
-          tell application "System Events" to key code 36
+          tell application "System Events"
+            tell process "Terminal"
+              key code 36
+            end tell
+          end tell
         on error errMsg
           set submitErr to errMsg
         end try
@@ -4565,7 +4788,9 @@ def interrupt_input_via_keystroke(tty, terminal_app):
         end tell
         delay 0.15
         tell application "System Events"
-          key code 53
+          tell process "iTerm2"
+            key code 53
+          end tell
         end tell
         delay 0.08
         try
@@ -4602,20 +4827,15 @@ def interrupt_input_via_keystroke(tty, terminal_app):
             end try
           end repeat
           if foundTab is missing value then return "notfound"
-          set selected of foundTab to true
-          try
-            set index of foundWin to 1
-          end try
           activate
-          delay 0.25
-          try
-            set index of foundWin to 1
-          end try
+          set index of foundWin to 1
           set selected of foundTab to true
         end tell
-        delay 0.1
+        delay 0.15
         tell application "System Events"
-          key code 53
+          tell process "Terminal"
+            key code 53
+          end tell
         end tell
         delay 0.08
         try
@@ -5119,6 +5339,187 @@ def fetch_cross_repo_issues():
         reverse=True,
     )
     return {"issues": out, "errors": errors, "fetched_at": time.time()}
+
+
+def _gh_pr_status_notes(pr):
+    notes = []
+    if pr.get("isDraft"):
+        notes.append({"kind": "warning", "label": "draft", "title": "Draft PR"})
+    mergeable = (pr.get("mergeable") or "").upper()
+    if mergeable == "CONFLICTING":
+        notes.append({"kind": "danger", "label": "conflicts", "title": "PR has merge conflicts"})
+    elif mergeable in ("UNKNOWN", "BLOCKED"):
+        notes.append({
+            "kind": "warning",
+            "label": mergeable.lower(),
+            "title": f"Mergeability is {mergeable.lower()}",
+        })
+    for check in pr.get("statusCheckRollup") or []:
+        name = (check.get("name") or check.get("workflowName") or "check").strip()
+        conclusion = (check.get("conclusion") or "").upper()
+        if conclusion not in {"FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}:
+            continue
+        if "CLA" in name.upper():
+            label = "CLA failing"
+            title = f"{name} is failing"
+        else:
+            label = "check failed"
+            title = f"{name} failed"
+        notes.append({"kind": "danger", "label": label, "title": title})
+    return notes
+
+
+def fetch_cross_repo_prs():
+    try:
+        repos = list(dict.fromkeys(
+            _load_recent_repos() + _load_custom_repos()
+        ))
+    except Exception:
+        repos = []
+    if not repos:
+        return {"pull_requests": [], "errors": {}, "fetched_at": time.time()}
+
+    out = []
+    errors = {}
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=min(8, len(repos))) as ex:
+        futures = {ex.submit(_open_prs_cached, r): r for r in repos}
+        for f in as_completed(futures):
+            repo = futures[f]
+            try:
+                prs = f.result()
+            except Exception as e:
+                errors[repo] = f"unexpected: {e}"[:200]
+                continue
+            label = Path(repo).name
+            for pr in prs or []:
+                pr["repo_path"] = repo
+                pr["repo_label"] = label
+                pr["status_notes"] = _gh_pr_status_notes(pr)
+                out.append(pr)
+    out.sort(
+        key=lambda p: p.get("updatedAt") or p.get("createdAt") or "",
+        reverse=True,
+    )
+    return {"pull_requests": out, "errors": errors, "fetched_at": time.time()}
+
+
+def _iso_epoch_or_now(ts):
+    if not ts:
+        return time.time()
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return time.time()
+
+
+def _open_pr_archive_row(pr):
+    repo_path = pr.get("repo_path") or ""
+    number = int(pr.get("number") or 0)
+    digest = hashlib.sha1(f"{repo_path}:{number}".encode("utf-8")).hexdigest()
+    synthetic_id = f"00000000-0000-0000-0000-{digest[:12]}"
+    title = pr.get("title") or f"PR #{number}"
+    branch = pr.get("headRefName") or ""
+    mtime = _iso_epoch_or_now(pr.get("updatedAt") or pr.get("createdAt"))
+    return {
+        "id": synthetic_id,
+        "session_id": synthetic_id,
+        "source": "github_pr",
+        "engine": "github",
+        "timestamp": "",
+        "first_message": title,
+        "display_name": f"#{number}: {title}",
+        "name_overridden": False,
+        "mtime": mtime,
+        "size": 0,
+        "is_live": False,
+        "archived": False,
+        "worktree_dirty": False,
+        "has_commit": False,
+        "has_push": True,
+        "has_edit": False,
+        "tail_pr_number": number,
+        "tail_pr_url": pr.get("url") or "",
+        "pr_state": "OPEN",
+        "pr_is_draft": bool(pr.get("isDraft")),
+        "pr_mergeable": pr.get("mergeable") or "",
+        "pr_review_decision": pr.get("reviewDecision") or "",
+        "pr_notes": pr.get("status_notes") or [],
+        "sidecar_status": None,
+        "sidecar_tool": None,
+        "sidecar_file": None,
+        "sidecar_ts": 0,
+        "sidecar_in_flight": False,
+        "sidecar_has_writes": False,
+        "needs_approval": False,
+        "needs_approval_message": "",
+        "session_cwd": repo_path,
+        "session_cwd_exists": Path(repo_path).is_dir() if repo_path else False,
+        "session_cwd_is_worktree": False,
+        "git_branch": branch,
+        "branch": branch,
+        "effective_branch": branch,
+        "effective_kind": None,
+        "folder_label": pr.get("repo_label") or (Path(repo_path).name if repo_path else "GitHub"),
+        "folder_path": repo_path,
+        "slug": _encode_project_slug(repo_path) if repo_path else "github-pr",
+        "pinned_repo": False,
+    }
+
+
+def conversations_with_open_prs(convs):
+    convs = list(convs or [])
+    open_prs = fetch_cross_repo_prs().get("pull_requests") or []
+    pr_by_url = {
+        str(pr.get("url") or ""): pr
+        for pr in open_prs
+        if pr.get("url")
+    }
+    pr_by_key = {}
+    for pr in open_prs:
+        try:
+            n = int(pr.get("number") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        repo_path = pr.get("repo_path") or ""
+        if n and repo_path:
+            pr_by_key[(repo_path, n)] = pr
+
+    seen_urls = {
+        str(c.get("tail_pr_url") or "")
+        for c in convs
+        if c.get("tail_pr_url")
+    }
+    seen_keys = set()
+    for c in convs:
+        try:
+            n = int(c.get("tail_pr_number") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        repo_path = c.get("folder_path") or c.get("session_cwd") or ""
+        if n and repo_path:
+            seen_keys.add((repo_path, n))
+        pr = pr_by_url.get(str(c.get("tail_pr_url") or "")) or pr_by_key.get((repo_path, n))
+        if pr:
+            c["pr_notes"] = pr.get("status_notes") or []
+            c["pr_is_draft"] = bool(pr.get("isDraft"))
+            c["pr_mergeable"] = pr.get("mergeable") or ""
+            c["pr_review_decision"] = pr.get("reviewDecision") or ""
+
+    for pr in open_prs:
+        try:
+            number = int(pr.get("number") or 0)
+        except (TypeError, ValueError):
+            number = 0
+        if not number:
+            continue
+        repo_path = pr.get("repo_path") or ""
+        url = pr.get("url") or ""
+        if (url and url in seen_urls) or ((repo_path, number) in seen_keys):
+            continue
+        convs.append(_open_pr_archive_row(pr))
+    convs.sort(key=lambda c: c.get("mtime") or c.get("modified") or 0, reverse=True)
+    return convs
 
 
 def _bust_backlog_issue_cache(repo_path=None):
@@ -6617,6 +7018,9 @@ def _extract_files_from_conversation(conversation_id):
 
     Cheap to call: single linear pass, no I/O beyond the JSONL read.
     """
+    if _is_gemini_session(conversation_id):
+        return _extract_files_from_gemini_conversation(conversation_id)
+
     filepath = _resolve_conversation_path(conversation_id)
     seen = {}  # target -> {label, target, kind, category, first_line}
     line_num = 0
@@ -6711,7 +7115,81 @@ def _extract_files_from_conversation(conversation_id):
     # Group + sort by first_line ascending within each category.
     groups = {}
     for row in seen.values():
-        cat = row.pop("category")
+        cat = row["category"]
+        groups.setdefault(cat, []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda r: r["first_line"])
+
+    return {"count": len(seen), "truncated": truncated, "groups": groups}
+
+
+def _extract_files_from_gemini_conversation(session_id):
+    """Gemini version of the extractor. Operates on a single JSON object
+    rather than a line-by-line JSONL."""
+    path = _resolve_gemini_chat_path(session_id)
+    data = _load_gemini_chat(path) if path else None
+    if not data:
+        return {"count": 0, "truncated": False, "groups": {}}
+
+    seen = {}
+    truncated = False
+
+    def consider(target, kind, idx):
+        nonlocal truncated
+        if not target or target in seen:
+            return
+        category = _categorize_file_target(target)
+        if not category:
+            return
+        if len(seen) >= _FFC_MAX_ENTRIES:
+            truncated = True
+            return
+        if kind == "url":
+            try:
+                parsed = urllib.parse.urlsplit(target)
+                tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                label = tail or parsed.netloc or target
+            except ValueError:
+                label = target
+        else:
+            label = os.path.basename(target) or target
+        seen[target] = {
+            "label": label,
+            "target": target,
+            "kind": kind,
+            "category": category,
+            "first_line": idx + 1,
+        }
+
+    messages = data.get("messages") or []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+
+        # Surface text (user/assistant)
+        text = _gemini_message_text(msg)
+        if text:
+            for target, kind in _ffc_iter_targets(text):
+                consider(target, kind, idx)
+
+        # Tool calls and results
+        for call in msg.get("toolCalls") or []:
+            if not isinstance(call, dict):
+                continue
+            # Scan arguments
+            for s in _ffc_flatten_strings(call.get("args")):
+                for target, kind in _ffc_iter_targets(s):
+                    consider(target, kind, idx)
+            # Scan results
+            output = _gemini_tool_output(call)
+            if output:
+                for target, kind in _ffc_iter_targets(output):
+                    consider(target, kind, idx)
+
+    # Group + sort by first_line ascending within each category.
+    groups = {}
+    for row in seen.values():
+        cat = row["category"]
         groups.setdefault(cat, []).append(row)
     for rows in groups.values():
         rows.sort(key=lambda r: r["first_line"])
@@ -7574,7 +8052,16 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
         except OSError:
             cwd_exists = False
         folder_path = pinned or cwd or effective_cwd or ""
-        folder_label = Path(folder_path).name if folder_path else "Codex"
+        if folder_path:
+            _git_root = _find_git_root(folder_path)
+            folder_label = _resolve_dir_case(_git_root or folder_path)
+        else:
+            folder_label = "Codex"
+        _wt_worktree_label = None
+        _wt_idx = folder_label.find("-wt-")
+        if _wt_idx > 0:
+            _wt_worktree_label = folder_label[_wt_idx + 4:]
+            folder_label = folder_label[:_wt_idx]
         spawn_info = spawn_by_sid.get(sid) or {}
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
@@ -7598,6 +8085,7 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
             "jsonl_path": str(path),
             "folder_label": folder_label,
             "folder_path": folder_path,
+            "worktree_label": _wt_worktree_label,
             "session_cwd": effective_cwd,
             "session_cwd_exists": cwd_exists,
             "session_cwd_is_worktree": bool(
@@ -7800,7 +8288,11 @@ def resume_session_codex(session_id, text):
     log_dir = repo_log_dir(_git_toplevel_for_existing_dir(cwd) or cwd)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
-    model = os.environ.get("CCC_CODEX_MODEL") or row.get("model") or "gpt-5.5"
+    # Per-session override (set via the click-to-switch picker) wins over
+    # the env-var default and the previous run's recorded model.
+    override = _get_session_override(session_id)
+    override_model = (override or {}).get("model") if override else None
+    model = override_model or os.environ.get("CCC_CODEX_MODEL") or row.get("model") or "gpt-5.5"
     cmd = [
         resolved["bin"], "exec", "resume",
         "--json",
@@ -7895,7 +8387,7 @@ def _extract_codex_usage(session_id):
     except OSError:
         return empty
     if not latest:
-        return empty
+        return {**empty, "override": _get_session_override(session_id)}
     total_input = int(latest.get("input_tokens") or 0)
     cache_read = int(latest.get("cached_input_tokens") or 0)
     total_output = int(latest.get("output_tokens") or 0) + int(latest.get("reasoning_output_tokens") or 0)
@@ -7910,6 +8402,7 @@ def _extract_codex_usage(session_id):
         "model": model,
         "context_limit": context_limit,
         "cost_usd": 0.0,
+        "override": _get_session_override(session_id),
     }
 
 
@@ -8333,6 +8826,14 @@ def _extract_gemini_tail_meta(path):
             detail = _gemini_tool_detail(call)
             meta["pending_tool"] = name
             meta["pending_file"] = detail[:80] if isinstance(detail, str) else None
+
+            # Detect session signals (edit/commit/push) from Gemini tools.
+            # Built-in tools like write_file/replace are edits; shell-based
+            # tools are parsed via _codex_command_signals.
+            if name in ("write_file", "replace", "patch", "edit_file"):
+                meta["has_edit"] = True
+                meta["last_edit_pos"] = pos
+
             cmd = _gemini_tool_command(call)
             if cmd:
                 signals = _codex_command_signals(cmd)
@@ -8493,7 +8994,16 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
         except OSError:
             cwd_exists = False
         folder_path = pinned or cwd or effective_cwd or ""
-        folder_label = Path(folder_path).name if folder_path else "Gemini"
+        if folder_path:
+            _git_root = _find_git_root(folder_path)
+            folder_label = _resolve_dir_case(_git_root or folder_path)
+        else:
+            folder_label = "Gemini"
+        _wt_worktree_label = None
+        _wt_idx = folder_label.find("-wt-")
+        if _wt_idx > 0:
+            _wt_worktree_label = folder_label[_wt_idx + 4:]
+            folder_label = folder_label[:_wt_idx]
         spawn_info = spawn_by_sid.get(sid) or {}
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
@@ -8523,6 +9033,7 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
             "jsonl_path": str(path),
             "folder_label": folder_label,
             "folder_path": folder_path,
+            "worktree_label": _wt_worktree_label,
             "session_cwd": effective_cwd,
             "session_cwd_exists": cwd_exists,
             "session_cwd_is_worktree": bool(
@@ -8721,6 +9232,7 @@ def _extract_gemini_usage(session_id):
         "total_input_tokens": total_in,
         "total_cache_read_tokens": total_cached,
         "model": model,
+        "override": _get_session_override(session_id),
     }
 
 
@@ -8807,7 +9319,13 @@ def resume_session_gemini(session_id, text):
     log_path = log_dir / log_filename
     cmd = [resolved["bin"], "--approval-mode", os.environ.get("CCC_GEMINI_APPROVAL_MODE", "yolo"),
            "--output-format", "stream-json", "--resume", session_id]
-    model = os.environ.get("CCC_GEMINI_MODEL")
+    # Per-session override (set via the click-to-switch picker) wins over
+    # the env-var default. Without an override, fall back to env-var or
+    # let the CLI pick its own default.
+    override = _get_session_override(session_id)
+    model = (override or {}).get("model") if override else None
+    if not model:
+        model = os.environ.get("CCC_GEMINI_MODEL")
     if model:
         cmd.extend(["--model", model])
     cmd.extend(["-p", text])
@@ -9317,6 +9835,16 @@ def resume_session_headless(session_id, text):
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
     ]
+    # Per-session override (set via the click-to-switch picker). Resume
+    # would otherwise inherit the previously-recorded model. The `[1m]`
+    # suffix flips the 1M-context variant when supported.
+    override = _get_session_override(session_id)
+    if override and override.get("model"):
+        alias = _short_model_alias(override["model"])
+        if override.get("context_1m"):
+            alias += "[1m]"
+        if alias:
+            cmd.extend(["--model", alias])
 
     log_fh = open(log_path, "w")
     fifo_path, child_stdin_fd = _make_stdin_fifo(log_path)
@@ -9787,6 +10315,72 @@ def _inject_text_into_session(session_id, text):
             return {"ok": ok, "pid": spawn["pid"], "via": "spawn-fifo"}
         return resume_session_headless(session_id, text)
     return inject_input_via_keystroke(tty, term_app or "Terminal", text)
+
+
+def _set_session_model(session_id, model, context_1m):
+    """Apply a model+context choice to a session.
+
+    Live Claude (TTY or spawned) gets a real `/model <alias>[1m]` slash
+    command injected into the running process. Codex, Gemini, and dormant
+    Claude have no runtime-switch mechanism, so the choice is persisted to
+    the session-overrides sidecar and applied on the next resume.
+
+    Always writes the override regardless — that way a refresh shows the
+    new value even when the inject succeeded, and the next resume picks
+    it up if the live session ends before the user asks again.
+
+    Returns:
+        {"ok": True, "applied": "live"|"queued", "model": ..., "context_1m": ...,
+         "engine": ...}
+    """
+    if not session_id or not model:
+        return {"ok": False, "error": "missing session_id or model"}
+    engine = _detect_session_engine(session_id)
+    _set_session_override(session_id, model, context_1m, engine)
+    payload = {
+        "ok": True,
+        "model": model,
+        "context_1m": bool(context_1m),
+        "engine": engine,
+    }
+    if engine != "claude":
+        # Codex/Gemini: no live-inject path. The next resume_session_<eng>
+        # call reads the override and passes --model to the CLI.
+        payload["applied"] = "queued"
+        return payload
+    # Claude: try to inject /model X[1m] into a live TTY or spawn. If
+    # there is no live process, fall through to queued — the next resume
+    # picks the override up via cmd args.
+    cwd = find_session_cwd(session_id)
+    status = session_live_status(session_id, cwd) or {}
+    tty = status.get("tty")
+    has_tty = bool(tty) and tty != "??"
+    spawn = _find_live_spawn_entry_for_session(session_id) if not has_tty else None
+    if not (status.get("live") and has_tty) and spawn is None:
+        payload["applied"] = "queued"
+        return payload
+    slash = _build_slash_model_command(model, context_1m)
+    if not slash:
+        payload["applied"] = "queued"
+        return payload
+    if has_tty and status.get("live"):
+        result = inject_input_via_keystroke(tty, status.get("terminal_app") or "Terminal", slash)
+        if result.get("ok"):
+            payload["applied"] = "live"
+            payload["via"] = "tty-keystroke"
+            return payload
+        payload["applied"] = "queued"
+        payload["inject_error"] = result.get("error")
+        return payload
+    if spawn is not None:
+        ok = _write_stream_json_user_message(spawn, slash)
+        payload["applied"] = "live" if ok else "queued"
+        payload["via"] = "spawn-fifo"
+        if not ok:
+            payload["inject_error"] = "FIFO write failed"
+        return payload
+    payload["applied"] = "queued"
+    return payload
 
 
 def _interrupt_session(session_id):
@@ -11092,6 +11686,40 @@ def close_issue(issue_number, reason, duplicate_of=None, repo_path=None):
         return result
 
 
+def reply_to_issue(issue_number, body, action, repo_path):
+    """Post a comment on a GH issue, then optionally label or close it.
+
+    action ∈ {'comment', 'needs_attention', 'close'}
+    """
+    repo_path = resolve_repo_path(repo_path)
+    result = {"ok": False}
+    try:
+        if not body or not body.strip():
+            result["error"] = "comment body is required"
+            return result
+        subprocess.run(
+            ["gh", "issue", "comment", str(issue_number), "--body", body.strip()],
+            check=True, capture_output=True, text=True, cwd=str(repo_path),
+        )
+        if action == "needs_attention":
+            subprocess.run(
+                ["gh", "issue", "edit", str(issue_number), "--add-label", "needs-attention"],
+                check=True, capture_output=True, text=True, cwd=str(repo_path),
+            )
+        elif action == "close":
+            subprocess.run(
+                ["gh", "issue", "close", str(issue_number), "--reason", "completed"],
+                check=True, capture_output=True, text=True, cwd=str(repo_path),
+            )
+            remove_in_progress_label(issue_number, repo_path=repo_path)
+        _bust_backlog_issue_cache(repo_path)
+        result["ok"] = True
+        return result
+    except subprocess.CalledProcessError as e:
+        result["error"] = (e.stderr or e.stdout or str(e)).strip()[:300]
+        return result
+
+
 def get_issue_details(issue_number, repo_path):
     """Return the full GitHub issue (title, body, labels, comments, URL)."""
     data = _gh(
@@ -11338,7 +11966,7 @@ def _normalize_spawn_event(ev):
         summary = params.get("description") or params.get("command") or ""
         return {
             "type": "assistant_block",
-            "message_id": ev.get("tool_id") or "gemini-tool",
+            "message_id": "gemini-stream",
             "blocks": [{
                 "type": "tool_use",
                 "name": ev.get("tool_name") or "tool",
@@ -11826,7 +12454,7 @@ _OPEN_PRS_TTL = 30.0
 def _open_prs_cached(repo_top):
     """Return open PRs for a repo via `gh pr list`, cached for 30s.
 
-    Each entry: {number, title, headRefName, isDraft, url}. Empty list on
+    Each entry includes PR metadata plus status checks. Empty list on
     any failure (no `gh`, no GitHub remote, no auth, network blip) — the
     worktrees modal must keep working without GitHub access.
     """
@@ -11840,8 +12468,8 @@ def _open_prs_cached(repo_top):
     try:
         r = subprocess.run(
             ["gh", "pr", "list", "--state", "open", "--limit", "100",
-             "--json", "number,title,headRefName,isDraft,url"],
-            cwd=repo_top, capture_output=True, text=True, timeout=4,
+             "--json", "number,title,headRefName,isDraft,url,updatedAt,createdAt,statusCheckRollup,mergeable,reviewDecision"],
+            cwd=repo_top, capture_output=True, text=True, timeout=8,
         )
         if r.returncode == 0 and r.stdout.strip():
             data = json.loads(r.stdout)
@@ -11853,6 +12481,11 @@ def _open_prs_cached(repo_top):
                         "headRefName": p.get("headRefName") or "",
                         "isDraft": bool(p.get("isDraft")),
                         "url": p.get("url") or "",
+                        "updatedAt": p.get("updatedAt") or "",
+                        "createdAt": p.get("createdAt") or "",
+                        "statusCheckRollup": p.get("statusCheckRollup") or [],
+                        "mergeable": p.get("mergeable") or "",
+                        "reviewDecision": p.get("reviewDecision") or "",
                     }
                     for p in data if p.get("number")
                 ]
@@ -12379,14 +13012,21 @@ def extract_session_usage(session_id):
         "total_cache_read_tokens": 0,
         "model": "",
         "context_limit": 0,
+        "compact_count": 0,
+        "engine": "claude",
+        "override": _get_session_override(session_id),
         "cost_usd": 0.0,
         "cost_breakdown_usd": {"input": 0.0, "cache_creation": 0.0,
                                "cache_read": 0.0, "output": 0.0},
     }
     if _is_codex_session(session_id):
-        return _extract_codex_usage(session_id)
+        result = _extract_codex_usage(session_id)
+        result.setdefault("engine", "codex")
+        return result
     if _is_gemini_session(session_id):
-        return _extract_gemini_usage(session_id)
+        result = _extract_gemini_usage(session_id)
+        result.setdefault("engine", "gemini")
+        return result
     desktop_meta = _load_desktop_app_metadata().get(session_id) or {}
     if not PROJECTS_ROOT.is_dir():
         return {**empty, "model": desktop_meta.get("model") or ""}
@@ -12410,6 +13050,12 @@ def extract_session_usage(session_id):
     model = desktop_meta.get("model") or ""
     diagnostic_latest = 0
     diagnostic_peak = 0
+    # `/compact` (manual or auto) emits a `{type: system, subtype: compact_boundary}`
+    # event. Pre-compact assistant turns no longer contribute to the live
+    # context window, so reset both latest and peak whenever we cross a
+    # boundary — the displayed numbers reflect only the post-most-recent-
+    # compact segment, which matches what the user sees in the TUI.
+    compact_count = 0
     try:
         with open(jsonl, "r") as f:
             for line in f:
@@ -12419,6 +13065,13 @@ def extract_session_usage(session_id):
                 try:
                     ev = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "system" and ev.get("subtype") == "compact_boundary":
+                    latest = 0
+                    peak = 0
+                    diagnostic_latest = 0
+                    diagnostic_peak = 0
+                    compact_count += 1
                     continue
                 if ev.get("type") != "assistant":
                     continue
@@ -12479,6 +13132,7 @@ def extract_session_usage(session_id):
     cost_out = total_out * rate_out / 1_000_000
     cost_total = cost_in + cost_cw + cost_cr + cost_out
 
+    override = _get_session_override(session_id)
     return {
         "latest_input_tokens": latest,
         "peak_input_tokens": peak,
@@ -12488,6 +13142,9 @@ def extract_session_usage(session_id):
         "total_cache_read_tokens": total_cr,
         "model": model,
         "context_limit": limit,
+        "compact_count": compact_count,
+        "engine": "claude",
+        "override": override,
         "cost_usd": round(cost_total, 4),
         "cost_breakdown_usd": {
             "input": round(cost_in, 4),
@@ -12500,10 +13157,24 @@ def extract_session_usage(session_id):
 
 # ---------------------------------------------------------------------------
 # Conversation history search — read-only window onto the separate `claude-index`
-# tool. CCC never writes to ~/.claude-index/index.db; the FTS5 mirror there has
-# triggers that keep itself in sync, and an accidental write here would corrupt
-# them. We open with `mode=ro` so even a stray INSERT raises.
+# tool. CCC drives the indexer in-process via the bundled _history_index
+# package; the on-disk file lives at ~/.claude-index/index.db so a parallel
+# standalone claude-index install can coexist on the same data.
 # ---------------------------------------------------------------------------
+
+# Vendored indexer (see _history_index/). Lazy-imported per-call where
+# semantic search is requested so a fresh CCC install without
+# sqlite-vec / Ollama still loads the rest of the server cleanly.
+try:
+    from _history_index import db as _hi_db
+    from _history_index import search as _hi_search
+    from _history_index.manager import indexer as _hi_indexer
+    _HI_AVAILABLE = True
+except Exception:
+    _HI_AVAILABLE = False
+    _hi_db = None  # type: ignore
+    _hi_search = None  # type: ignore
+    _hi_indexer = None  # type: ignore
 
 _HISTORY_INDEX_PATH = Path.home() / ".claude-index" / "index.db"
 _history_conn = None
@@ -12616,12 +13287,29 @@ def _open_history_index():
         except sqlite3.OperationalError:
             return None
         conn.row_factory = sqlite3.Row
+        # Best-effort load of sqlite-vec on this read-only handle so semantic
+        # search can use it. Silent no-op if the extension isn't installed —
+        # the read path then degrades to BM25 only, which is the correct
+        # behavior for users without semantic set up.
+        if _hi_db is not None:
+            try:
+                _hi_db._try_load_vec(conn)
+            except Exception:
+                pass
         _history_conn = conn
         return conn
 
 
-def search_conversation_history(query, limit=20, cwd_like=None, since=None):
-    """BM25-ranked FTS5 search over the indexed conversation history.
+def search_conversation_history(query, limit=20, cwd_like=None, since=None, semantic=False):
+    """Search the indexed conversation history.
+
+    semantic=False (default): BM25 over FTS5 with auto OR-rewrite. Results
+        get _source='bm25'.
+    semantic=True: hybrid retrieval via the vendored _history_index.search —
+        top-K BM25 ∪ top-K vec, fused via Reciprocal Rank Fusion. Each result
+        is tagged _source ∈ {'bm25', 'vec', 'fused'} so the UI can
+        differentiate ('history' vs 'semantic history' badge). Falls back
+        to BM25 transparently if sqlite-vec or Ollama is unavailable.
 
     Returns a dict {results: [...]} on success, or
     {error: str, results: []} when the index is missing or a query is
@@ -12632,10 +13320,43 @@ def search_conversation_history(query, limit=20, cwd_like=None, since=None):
         return {
             "error": (
                 "Conversation index not found at ~/.claude-index/index.db. "
-                "Install and run the claude-index tool to build it."
+                "Click the History toggle to build it."
             ),
             "results": [],
         }
+    try:
+        limit = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 20
+
+    # Semantic path — delegate to the vendored search, which handles RRF +
+    # _source tagging + graceful BM25 fallback when vec/Ollama is missing.
+    if semantic and _hi_search is not None:
+        try:
+            rows = _hi_search.search(
+                conn,
+                query,
+                limit=limit,
+                cwd_like=cwd_like,
+                since=since,
+                semantic=True,
+            )
+        except sqlite3.OperationalError as e:
+            return {"error": f"search failed: {e}", "results": []}
+        results = []
+        for row in rows:
+            d = dict(row) if not isinstance(row, dict) else row
+            # The vendored BM25 wraps highlights in «» (claude-index CLI
+            # convention); CCC's UI expects <mark>. Translate.
+            sn = d.get("snippet") or ""
+            sn = sn.replace("«", "<mark>").replace("»", "</mark>")
+            if sn:
+                sn = _clean_history_snippet(sn)
+            d["snippet"] = sn
+            results.append(d)
+        return {"results": results}
+
+    # Lexical path — CCC's existing BM25 SQL with the snippet cleaner.
     fts_query = _rewrite_history_query(query)
     if not fts_query:
         return {"results": []}
@@ -12648,10 +13369,6 @@ def search_conversation_history(query, limit=20, cwd_like=None, since=None):
     if threshold is not None:
         where.append("m.ts_unix >= ?")
         params.append(threshold)
-    try:
-        limit = max(1, min(int(limit), 100))
-    except (TypeError, ValueError):
-        limit = 20
     sql = f"""
         SELECT m.uuid, m.session_id, m.type, m.cwd, m.git_branch,
                m.timestamp, m.ts_unix,
@@ -12676,6 +13393,7 @@ def search_conversation_history(query, limit=20, cwd_like=None, since=None):
     for r in results:
         if r.get("snippet"):
             r["snippet"] = _clean_history_snippet(r["snippet"])
+        r["_source"] = "bm25"
     return {"results": results}
 
 
@@ -14245,6 +14963,41 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store, must-revalidate")
                 self.end_headers()
                 self.wfile.write(body)
+        elif path.startswith("/static/"):
+            # Serve .css and .js assets from the static/ directory.
+            # index.html is intentionally excluded (extension allowlist blocks .html).
+            rel = path[len("/static/"):]
+            # Extension allowlist: only .css and .js are served here.
+            if not (rel.endswith(".css") or rel.endswith(".js")):
+                self.send_json({"error": f"not found: {path}"}, 404)
+                return
+            target = STATIC_DIR / rel
+            try:
+                resolved = target.resolve(strict=False)
+                base = STATIC_DIR.resolve()
+            except OSError as e:
+                self.send_json({"error": str(e)}, 500)
+                return
+            # Prevent path traversal (../../etc/passwd). Check before .is_file().
+            try:
+                resolved.relative_to(base)
+            except ValueError:
+                self.send_json({"error": f"not found: {path}"}, 404)
+                return
+            if not resolved.is_file():
+                self.send_json({"error": f"not found: {path}"}, 404)
+            else:
+                try:
+                    body = resolved.read_bytes()
+                except OSError as e:
+                    self.send_json({"error": str(e)}, 500)
+                    return
+                ct = "application/javascript" if rel.endswith(".js") else "text/css"
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Cache-Control", "no-store, must-revalidate")
+                self.end_headers()
+                self.wfile.write(body)
         elif path == "/morning":
             try:
                 self.send_html((MORNING_STATIC_DIR / "index.html").read_text())
@@ -14272,9 +15025,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/version":
             self.send_json({"version": __version__})
         elif path == "/api/search-history":
-            # Read-only window onto ~/.claude-index/index.db built by the
-            # separate claude-index tool. Returns BM25-ranked matches with
-            # <mark>-highlighted snippets. q empty → empty result.
+            # Read window onto ~/.claude-index/index.db, populated by the
+            # bundled _history_index indexer. Returns BM25-ranked matches
+            # with <mark>-highlighted snippets, plus a per-result _source
+            # tag (bm25 | vec | fused) for the UI badge.
+            #
+            # semantic=1 turns on hybrid retrieval (BM25 ∪ vec, fused via
+            # RRF). Falls back to BM25 when sqlite-vec / Ollama is missing.
             qs = urllib.parse.parse_qs(parsed.query)
             q = (qs.get("q", [""])[0] or "").strip()
             if not q:
@@ -14283,9 +15040,30 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 cwd_like = (qs.get("cwd", [""])[0] or "").strip() or None
                 since = (qs.get("since", [""])[0] or "").strip() or None
                 limit_raw = (qs.get("limit", ["20"])[0] or "20").strip()
+                semantic_raw = (qs.get("semantic", ["0"])[0] or "0").strip().lower()
+                semantic = semantic_raw in ("1", "true", "yes", "on")
                 self.send_json(search_conversation_history(
                     q, limit=limit_raw, cwd_like=cwd_like, since=since,
+                    semantic=semantic,
                 ))
+        elif path == "/api/history/status":
+            # Lay-of-the-land for the topbar pill: is the index file there,
+            # is an ingest currently running, what's the freshness of the
+            # latest indexed message, do we have semantic embeddings?
+            if _hi_indexer is None:
+                self.send_json({
+                    "exists": False,
+                    "indexing": False,
+                    "embedding": False,
+                    "message_count": 0,
+                    "latest_message_unix": None,
+                    "semantic": {"available": False},
+                    "available": False,  # bundled indexer didn't import
+                })
+            else:
+                st = _hi_indexer.status()
+                st["available"] = True
+                self.send_json(st)
         elif path == "/api/history-message":
             qs = urllib.parse.parse_qs(parsed.query)
             uuid = (qs.get("uuid", [""])[0] or "").strip()
@@ -14347,7 +15125,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # chrono. Read-only browse, no peer registry consulted. The UI's
             # "All repos" mode renders from this. Slow on cold scan; the
             # caller is expected to show a loading state.
-            convs = find_all_conversations()
+            convs = conversations_with_open_prs(find_all_conversations())
             self.send_json({"conversations": convs, "count": len(convs)})
         elif path == "/api/issues/all":
             # Cross-repo GH issues: walk recent ∪ pinned repos in parallel,
@@ -14439,6 +15217,31 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # and auto_verify_closed_issues can fire immediately.
             _bust_issue_state_cache()
             self.send_json({"ok": True})
+            return
+        if path == "/api/history/setup" or path == "/api/history/ingest":
+            # First-click OOBE: kick a background ingest of all known JSONL
+            # transcripts. /api/history/setup is called from the OOBE prompt;
+            # /api/history/ingest is the same operation as a manual re-trigger.
+            # Both are no-ops while one is already running. Drops the cached
+            # read connection so the next search picks up the freshly created
+            # index file instead of a stale "missing" sentinel.
+            global _history_conn
+            if _hi_indexer is None:
+                self.send_json({"error": "bundled indexer unavailable"}, 500)
+                return
+            started = _hi_indexer.start_ingest(with_embed=True)
+            with _history_conn_lock:
+                if _history_conn is not None:
+                    try:
+                        _history_conn.close()
+                    except Exception:
+                        pass
+                    _history_conn = None
+            self.send_json({
+                "ok": True,
+                "started": started,
+                "already_running": not started,
+            })
             return
         if path == "/api/network-config":
             # SECURITY: localhost-only — even if the user has allowlisted a
@@ -15301,6 +16104,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(close_issue(num, reason, duplicate_of, repo_path=ctx["repo_path"]))
             except RepoContextError as e:
                 self.send_json(e.as_payload(), e.status)
+        elif re.match(r"^/api/issues/\d+/reply$", path):
+            num = path.split("/")[3]
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                payload = {}
+            comment_body = payload.get("body") or ""
+            action = payload.get("action") or "comment"
+            try:
+                ctx = require_repo_context(payload, allow_session=False)
+                self.send_json(reply_to_issue(num, comment_body, action, repo_path=ctx["repo_path"]))
+            except RepoContextError as e:
+                self.send_json(e.as_payload(), e.status)
         elif re.match(r"^/api/issues/\d+/summarize-title$", path):
             num = path.split("/")[3]
             try:
@@ -15492,8 +16310,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             try:
                 ctx = repo_from_session(sid)
             except RepoContextError as e:
-                self.send_json(e.as_payload(), e.status)
-                return
+                repo_payload = payload.get("repo_path") or payload.get("cwd")
+                if repo_payload:
+                    try:
+                        repo_path = resolve_repo_path(repo_payload)
+                        ctx = {"repo_path": repo_path, "cwd": repo_path}
+                    except RepoContextError as e2:
+                        self.send_json(e2.as_payload(), e2.status)
+                        return
+                else:
+                    self.send_json(e.as_payload(), e.status)
+                    return
             try:
                 state_cwd = session_cwd or ctx["cwd"]
                 state_out = subprocess.run(
@@ -15970,6 +16797,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 # whether the keystroke injection itself ends up succeeding.
                 _record_interaction(sid)
                 self.send_json(_inject_text_into_session(sid, text))
+        elif re.match(r"^/api/session/[a-zA-Z0-9-]+/model/clear$", path):
+            sid = path.split("/")[3]
+            _clear_session_override(sid)
+            _record_interaction(sid)
+            self.send_json({"ok": True, "session_id": sid, "cleared": True})
+        elif re.match(r"^/api/session/[a-zA-Z0-9-]+/model$", path):
+            sid = path.split("/")[3]
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            model = (payload.get("model") or "").strip()
+            context_1m = bool(payload.get("context_1m", False))
+            if not model:
+                self.send_json({"ok": False, "error": "model is required"}, 400)
+            else:
+                _record_interaction(sid)
+                self.send_json(_set_session_model(sid, model, context_1m))
         elif path == "/api/inject-esc":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
@@ -17042,33 +17889,34 @@ def write_port_file(bind_host):
     return url
 
 
-def install_orchestration_skill():
-    """Install (or refresh) the ccc-orchestration skill into
-    ~/.claude/skills/ccc-orchestration/SKILL.md so any Claude Code session
-    on this machine can discover the CCC HTTP API. Idempotent — only
-    writes when the source differs from the destination. Skipped entirely
-    when CCC_SKIP_SKILL_INSTALL=1."""
+def _install_skill(name: str):
+    """Install (or refresh) a bundled skill into ~/.claude/skills/<name>/SKILL.md.
+    Idempotent — only writes when the source differs from the destination."""
     import shutil
-    if os.environ.get("CCC_SKIP_SKILL_INSTALL", "").strip().lower() in ("1", "true", "yes", "on"):
-        print("  [skill] install skipped (CCC_SKIP_SKILL_INSTALL=1)")
-        return
-    src = CCC_ROOT / "skills" / "ccc-orchestration.md"
+    src = CCC_ROOT / "skills" / f"{name}.md"
     if not src.exists():
-        # Source skill not bundled with this checkout (very minimal install /
-        # broken package). Stay silent rather than spamming a stack trace.
-        print(f"  [skill] source not found at {src}; skipping install")
+        print(f"  [skill] source not found at {src}; skipping")
         return
-    dst_dir = Path.home() / ".claude" / "skills" / "ccc-orchestration"
+    dst_dir = Path.home() / ".claude" / "skills" / name
     dst = dst_dir / "SKILL.md"
     try:
         dst_dir.mkdir(parents=True, exist_ok=True)
         if dst.exists() and dst.read_bytes() == src.read_bytes():
-            print(f"  [skill] ccc-orchestration already up to date at {dst}")
+            print(f"  [skill] {name} already up to date")
             return
         shutil.copy2(src, dst)
-        print(f"  [skill] installed ccc-orchestration -> {dst}")
+        print(f"  [skill] installed {name} -> {dst}")
     except OSError as e:
-        print(f"  [skill] could not install ccc-orchestration ({e})")
+        print(f"  [skill] could not install {name} ({e})")
+
+
+def install_orchestration_skill():
+    """Install all bundled CCC skills. Skipped when CCC_SKIP_SKILL_INSTALL=1."""
+    if os.environ.get("CCC_SKIP_SKILL_INSTALL", "").strip().lower() in ("1", "true", "yes", "on"):
+        print("  [skill] install skipped (CCC_SKIP_SKILL_INSTALL=1)")
+        return
+    _install_skill("ccc-orchestration")
+    _install_skill("group-chat")
 
 
 def main():
@@ -17135,6 +17983,9 @@ def main():
     # whose JSONL has been quiet for >24h. Catches abandoned-but-not-archived
     # sessions and forgotten cron agents that the archive-time kill misses.
     threading.Thread(target=_idle_reaper_loop, daemon=True).start()
+    # Chuck iMessage monitor: polls chat.db every 2 minutes, injects new
+    # messages from +17035592946 into the CHUCK session via inject-input.
+    threading.Thread(target=_chuck_imessage_poller, daemon=True).start()
     print()
     try:
         server.serve_forever()
@@ -17145,6 +17996,119 @@ def main():
         except Exception:
             pass
         server.server_close()
+
+
+# ── Chuck iMessage Poller ─────────────────────────────────────────────────────
+_CHUCK_PHONE = "+17035592946"
+_CHUCK_SESSION_ID = "b1216dcf-99b2-48bf-85af-cb0ecea4f1ca"
+_CHUCK_LAST_SEEN_FILE = Path("/tmp/chuck-loop-last-seen.txt")
+_IMESSAGE_DB = Path.home() / "Library" / "Messages" / "chat.db"
+_CHUCK_POLL_INTERVAL = 120  # seconds
+_APPLE_EPOCH_OFFSET = 978307200  # seconds between Unix epoch and Apple epoch (2001-01-01)
+
+
+def _chuck_read_last_seen() -> int:
+    try:
+        return int(_CHUCK_LAST_SEEN_FILE.read_text().strip())
+    except Exception:
+        return int(time.time()) - 3600
+
+
+def _chuck_write_last_seen(ts: int) -> None:
+    try:
+        _CHUCK_LAST_SEEN_FILE.write_text(str(ts))
+    except Exception:
+        pass
+
+
+def _chuck_fetch_new_messages(since_unix: int):
+    """Return list of (unix_ts, is_from_me, text) tuples newer than since_unix."""
+    if not _IMESSAGE_DB.exists():
+        return []
+    apple_ns = (since_unix - _APPLE_EPOCH_OFFSET) * 1_000_000_000
+    try:
+        conn = sqlite3.connect(str(_IMESSAGE_DB), check_same_thread=False, timeout=5)
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT m.date / 1000000000 + ? AS unix_ts,
+                   m.is_from_me,
+                   m.text
+            FROM message m
+            JOIN handle h ON m.handle_id = h.rowid
+            WHERE h.id = ?
+              AND m.date > ?
+              AND m.text IS NOT NULL
+            ORDER BY m.date ASC
+            """,
+            (_APPLE_EPOCH_OFFSET, _CHUCK_PHONE, apple_ns),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def _chuck_inject(text: str) -> None:
+    """Inject text into the CHUCK session via the local CCC inject-input API."""
+    try:
+        payload = json.dumps({"session_id": _CHUCK_SESSION_ID, "text": text}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{PORT}/api/inject-input",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
+def _chuck_is_quiet_hours() -> bool:
+    """Return True between 10pm and 7am US/Eastern."""
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ["python3", "-c",
+             "from datetime import datetime; import zoneinfo; "
+             "h=datetime.now(zoneinfo.ZoneInfo('America/New_York')).hour; "
+             "print('1' if h>=22 or h<7 else '0')"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout.strip() == "1"
+    except Exception:
+        return False
+
+
+def _chuck_imessage_poller() -> None:
+    """Background daemon thread: poll chat.db, inject new Chuck messages into CHUCK session."""
+    # Stagger startup so the server is fully bound before first inject attempt.
+    time.sleep(15)
+    while True:
+        try:
+            if not _chuck_is_quiet_hours():
+                last_seen = _chuck_read_last_seen()
+                rows = _chuck_fetch_new_messages(last_seen)
+                if rows:
+                    chuck_msgs = [(ts, txt) for ts, is_from_me, txt in rows if not is_from_me]
+                    if chuck_msgs:
+                        lines = []
+                        for ts, txt in chuck_msgs:
+                            dt = datetime.fromtimestamp(ts).strftime("%H:%M")
+                            lines.append(f"[{dt}] CHUCK: {txt}")
+                        inject_text = (
+                            "[chuck-loop] New message(s) from Chuck:\n\n"
+                            + "\n".join(lines)
+                            + "\n\nReview and decide how to proceed per the loop rules."
+                        )
+                        _chuck_inject(inject_text)
+                    # Bump last-seen to the newest message timestamp regardless of direction.
+                    newest_ts = max(ts for ts, _, _ in rows)
+                    _chuck_write_last_seen(newest_ts + 1)
+        except Exception:
+            pass
+        time.sleep(_CHUCK_POLL_INTERVAL)
 
 
 if __name__ == "__main__":
