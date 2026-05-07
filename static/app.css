@@ -1959,24 +1959,24 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
+    padding: 1px 5px;
+    border-radius: 4px;
     flex: 0 0 auto;
     font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
-    font-size: 6px;
+    font-size: 10px;
     font-weight: 700;
-    line-height: 1;
+    line-height: 1.4;
+    letter-spacing: 0.02em;
   }
   .conv-engine-icon.codex {
-    color: #79c0ff;
-    background: rgba(88, 166, 255, 0.10);
-    border: 1px solid rgba(88, 166, 255, 0.42);
+    color: #3dd68c;
+    background: rgba(61, 214, 140, 0.12);
+    border: 1px solid rgba(61, 214, 140, 0.45);
   }
   .conv-engine-icon.gemini {
-    color: #7aa2ff;
-    background: rgba(122, 162, 255, 0.10);
-    border: 1px solid rgba(122, 162, 255, 0.42);
+    color: #c084fc;
+    background: rgba(192, 132, 252, 0.12);
+    border: 1px solid rgba(192, 132, 252, 0.45);
   }
   .conv-signal {
     font-size: 10px; padding: 1px 5px; border-radius: 3px;
