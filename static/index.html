@@ -1457,6 +1457,16 @@
   .coord-modal .modal-start { padding:6px 14px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; }
   .coord-modal .modal-error { font-size:12px; color:var(--red); display:none; }
   .coord-modal .modal-error.visible { display:block; }
+  .gc-reader { display:flex; flex-direction:column; height:100%; overflow:hidden; }
+  .gc-reader-header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .gc-reader-header .gc-topic { font-weight:600; font-size:13px; color:var(--text); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .gc-reader-header .gc-mode-badge { font-size:11px; padding:2px 6px; border-radius:10px; background:var(--surface-2); color:var(--text-muted); flex-shrink:0; }
+  .gc-reader-header .gc-close { background:transparent; border:none; color:var(--text-muted); cursor:pointer; font-size:16px; padding:2px 6px; line-height:1; }
+  .gc-reader-body { flex:1; overflow-y:auto; padding:14px; font-size:13px; line-height:1.55; color:var(--text); white-space:pre-wrap; font-family:monospace; }
+  .gc-reader-body .gc-poll-error { color:var(--red); font-size:12px; padding:6px 0; }
+  .gc-reader-input-row { display:flex; gap:8px; padding:10px 14px; border-top:1px solid var(--border); flex-shrink:0; }
+  .gc-reader-input-row input { flex:1; padding:6px 8px; background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--text); font-size:13px; }
+  .gc-reader-input-row button { padding:6px 12px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; }
   .conv-item.is-history-match { border-left-color: rgba(120, 168, 255, 0.5); }
   .conv-history-badge {
     display: inline-block; margin-left: 6px; padding: 1px 5px;
@@ -8189,6 +8199,111 @@
       if (errorEl) { errorEl.textContent = 'Request failed: ' + err.message; errorEl.classList.add('visible'); }
     } finally {
       if (startBtn) startBtn.disabled = false;
+    }
+  }
+
+  let _gcReaderInterval = null;
+  let _gcReaderPath = null;
+  let _gcLastMtime = null;
+  let _gcPollFailCount = 0;
+
+  function openGroupChatReader(chatPath, topic, mode, includeHuman) {
+    _gcReaderPath = chatPath;
+    _gcLastMtime = null;
+    _gcPollFailCount = 0;
+
+    const pane = document.querySelector('.conv-pane');
+    if (!pane) return;
+
+    const topicSafe = escapeHtml(topic);
+    const modeSafe = escapeHtml(mode);
+    pane.innerHTML = '<div class="gc-reader" id="gcReader">'
+      + '<div class="gc-reader-header">'
+        + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
+        + '<span class="gc-mode-badge">' + modeSafe + '</span>'
+        + '<button class="gc-close" id="gcCloseBtn" title="Close reader">&times;</button>'
+      + '</div>'
+      + '<div class="gc-reader-body" id="gcReaderBody">Loading…</div>'
+      + (includeHuman
+        ? '<div class="gc-reader-input-row" id="gcInputRow">'
+            + '<input type="text" id="gcHumanInput" placeholder="Add to chat…" autocomplete="off">'
+            + '<button id="gcSendBtn">Send</button>'
+          + '</div>'
+        : '')
+      + '</div>';
+
+    const closeBtn = document.getElementById('gcCloseBtn');
+    if (closeBtn) closeBtn.addEventListener('click', closeGroupChatReader);
+
+    if (includeHuman) {
+      const gcSendBtn = document.getElementById('gcSendBtn');
+      const gcHumanInput = document.getElementById('gcHumanInput');
+      if (gcSendBtn) gcSendBtn.addEventListener('click', () => sendHumanGcPost());
+      if (gcHumanInput) gcHumanInput.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter') sendHumanGcPost();
+      });
+    }
+
+    if (_gcReaderInterval) clearInterval(_gcReaderInterval);
+    pollGroupChatReader();
+    _gcReaderInterval = setInterval(pollGroupChatReader, 3000);
+  }
+
+  async function pollGroupChatReader() {
+    if (!_gcReaderPath) return;
+    const body = document.getElementById('gcReaderBody');
+    if (!body) { closeGroupChatReader(); return; }
+    try {
+      const res = await fetch('/api/group-chat/read?path=' + encodeURIComponent(_gcReaderPath));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      _gcPollFailCount = 0;
+      const errBanner = body.querySelector('.gc-poll-error');
+      if (errBanner) errBanner.remove();
+      if (!data.ok) { body.textContent = data.error || 'File not found.'; return; }
+      if (data.mtime !== _gcLastMtime) {
+        _gcLastMtime = data.mtime;
+        const atBottom = body.scrollHeight - body.scrollTop <= body.clientHeight + 40;
+        body.textContent = data.content;
+        if (atBottom) body.scrollTop = body.scrollHeight;
+      }
+    } catch (_err) {
+      _gcPollFailCount++;
+      if (_gcPollFailCount >= 3) {
+        let errBanner = body.querySelector('.gc-poll-error');
+        if (!errBanner) {
+          errBanner = document.createElement('div');
+          errBanner.className = 'gc-poll-error';
+          body.prepend(errBanner);
+        }
+        errBanner.textContent = '⚠ Lost connection to chat file — retrying…';
+      }
+    }
+  }
+
+  async function sendHumanGcPost() {
+    if (!_gcReaderPath) return;
+    const input = document.getElementById('gcHumanInput');
+    const text = input ? input.value.trim() : '';
+    if (!text) return;
+    try {
+      await ccPostJson('/api/group-chat/post', { path: _gcReaderPath, text });
+      if (input) input.value = '';
+      await pollGroupChatReader();
+    } catch (err) {
+      showOpToast('Send failed: ' + err.message, 'error');
+    }
+  }
+
+  function closeGroupChatReader() {
+    if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
+    _gcReaderPath = null;
+    _gcLastMtime = null;
+    _gcPollFailCount = 0;
+    const pane = document.querySelector('.conv-pane');
+    if (pane) pane.innerHTML = '';
+    if (typeof currentConversation === 'string' && currentConversation) {
+      try { selectConversation(currentConversation); } catch (_) {}
     }
   }
 
