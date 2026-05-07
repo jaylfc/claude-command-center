@@ -663,7 +663,9 @@ def _legacy_project_slug(path):
 def _candidate_conversation_dirs(path):
     """Every ~/.claude/projects/<slug>/ that could hold conversations for
     `path`. Both encoders are tried; only existing dirs are returned.
-    Modern slug first so it wins on shared keys (newer is fresher)."""
+    Modern slug first so it wins on shared keys (newer is fresher).
+    Also includes sibling worktree slugs (<slug>-wt-*) so sessions run
+    in a worktree appear under their parent repo."""
     seen = set()
     candidates = []
     root = Path.home() / ".claude" / "projects"
@@ -674,6 +676,11 @@ def _candidate_conversation_dirs(path):
         d = root / slug
         if d.is_dir():
             candidates.append(d)
+        # Include sibling worktree project dirs (<slug>-wt-*)
+        for wt_dir in sorted(root.glob(f"{slug}-wt-*")):
+            if wt_dir.is_dir() and str(wt_dir) not in seen:
+                seen.add(str(wt_dir))
+                candidates.append(wt_dir)
     return candidates
 
 class RepoContextError(ValueError):
