@@ -11026,40 +11026,6 @@
     conversationsData = applyConvSort(_applyOptimisticTouches(shaped));
 
     renderConversationList(conversationsData);
-
-    // Inject "In Group Chat" header at the very top whenever a coordination
-    // is active — done here (after renderConversationList) so it's guaranteed
-    // to appear on every archive render, independent of _gcActiveChats timing.
-    if (_gcActiveChats.length > 0) {
-      const _gcFirst = _gcActiveChats[0];
-      const _gcTopic = _gcFirst.topic || '';
-      const _gcTopicLabel = _gcTopic ? ' — ' + escapeHtml(_gcTopic.slice(0, 40)) : '';
-      const _gcCount = _gcFirst.session_ids ? _gcFirst.session_ids.length : '';
-      const _gcHeaderHtml =
-        '<div class="conv-ingroupchat-section" data-role="ingroupchat-section">'
-        + '<div class="conv-ingroupchat-header" data-role="ingroupchat-open"'
-        +   ' data-gc-path="' + escapeHtml(_gcFirst.path_tilde || '') + '"'
-        +   ' data-gc-topic="' + escapeHtml(_gcFirst.topic || '') + '"'
-        +   ' data-gc-mode="' + escapeHtml(_gcFirst.mode || 'topic') + '"'
-        +   ' title="Click to open group chat reader" style="cursor:pointer;">'
-        +   '<span class="conv-ingroupchat-icon">💬</span>'
-        +   '<span class="conv-ingroupchat-label">In Group Chat</span>'
-        +   '<span class="conv-ingroupchat-topic">' + _gcTopicLabel + '</span>'
-        +   (_gcCount ? '<span class="conv-ingroupchat-count">' + _gcCount + '</span>' : '')
-        + '</div>'
-        + '</div>';
-      $list.innerHTML = _gcHeaderHtml + $list.innerHTML;
-      // Re-attach click handler for the header.
-      const $gcOpen = $list.querySelector('[data-role="ingroupchat-open"]');
-      if ($gcOpen) {
-        $gcOpen.addEventListener('click', () => {
-          const path = $gcOpen.dataset.gcPath;
-          const topic = $gcOpen.dataset.gcTopic || '';
-          const mode = $gcOpen.dataset.gcMode || 'topic';
-          if (path) openGroupChatReader(path, topic, mode, true);
-        });
-      }
-    }
   }
 
   async function setArchiveMode() {
