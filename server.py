@@ -10620,27 +10620,51 @@ def _group_chat_nudge(path):
     if not session_ids:
         return {"ok": False, "error": "no session_ids in sidecar"}
 
-    # Detect last writer to avoid nudging them (would create a response loop).
-    # Tag format from the skill: "## <ts> — <8-hex>: <name> <emoji>" (new)
-    # or "## <ts> — <8-hex> <emoji>" (old). Either way the 8-char hash is
-    # the first thing after the dash, so capture that and match by sid
-    # prefix — a previous version captured the full "<hash>: <name> <emoji>"
-    # tail and looked it up in name_map by display_name, which always
-    # missed because the map's values are bare names without emoji.
+    # Decide who to nudge based on what the LAST author was:
+    #   • Last author is an agent → exclude that agent (don't nudge them
+    #     to respond to themselves), ping everyone else.
+    #   • Last author is the Human → ping ONLY the agent who wrote
+    #     immediately before the Human, since the Human's message is
+    #     almost always a reply to that specific agent. Pinging everyone
+    #     would have N-1 sessions waste a turn introducing themselves to
+    #     a question that wasn't for them.
+    #   • Last author is the Human and there's no prior agent →
+    #     fall back to pinging everyone (fresh-thread case).
+    # Tag formats supported:
+    #   "## <ts> — <8-hex>: <name> <emoji>" (current)
+    #   "## <ts> — <8-hex> <emoji>" (legacy)
+    #   "## <ts> — Human" (human posts via the reader's input bar)
     exclude_sid = None
+    only_sid = None
     try:
         with open(real_path, "r", encoding="utf-8") as fh:
             tail = fh.read()[-3000:]
-        matches = re.findall(
-            r'^##\s+.+?—\s+([0-9a-fA-F]{8})\b',
-            tail, re.MULTILINE,
+        # Capture each author header. Group 1 is the agent hash if any,
+        # group 2 catches Human posts. Iterate to keep order.
+        author_pat = re.compile(
+            r'^##\s+.+?—\s+(?:([0-9a-fA-F]{8})\b|(Human)\b)',
+            re.MULTILINE,
         )
-        if matches:
-            last_hash = matches[-1].lower()
-            for sid in session_ids:
-                if sid.lower().startswith(last_hash):
-                    exclude_sid = sid
-                    break
+        authors = [(m.group(1) or m.group(2)) for m in author_pat.finditer(tail)]
+        # Strip trailing repeats of the same author (an agent reposting
+        # without a new question shouldn't shift the targeting).
+        if authors:
+            last = authors[-1]
+            if last == "Human":
+                # Find the most recent non-Human author before this turn.
+                prior = next((a for a in reversed(authors[:-1]) if a != "Human"), None)
+                if prior:
+                    last_hash = prior.lower()
+                    for sid in session_ids:
+                        if sid.lower().startswith(last_hash):
+                            only_sid = sid
+                            break
+            else:
+                last_hash = last.lower()
+                for sid in session_ids:
+                    if sid.lower().startswith(last_hash):
+                        exclude_sid = sid
+                        break
     except OSError:
         pass
 
@@ -10648,8 +10672,13 @@ def _group_chat_nudge(path):
     results = []
     pinged_labels = []
     for sid in session_ids:
+        # only_sid wins when set — Human just replied and we want to
+        # nudge only the specific agent the reply is most likely for.
+        if only_sid is not None and sid != only_sid:
+            results.append({"session_id": sid, "ok": True, "skipped": "not addressed"})
+            continue
         if sid == exclude_sid:
-            results.append({"session_id": sid, "ok": True, "skipped": True})
+            results.append({"session_id": sid, "ok": True, "skipped": "last writer"})
             continue
         text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
         r = _inject_text_into_session(sid, text)
