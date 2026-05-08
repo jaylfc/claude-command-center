@@ -1710,7 +1710,7 @@
     s = escapeHtml(s);
     // Inline code `x` (also make paths inside code clickable)
     s = s.replace(/`([^`]+)`/g, (m, inner) => {
-      if (/^(https?:\/\/\S+|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/.test(inner)) {
+      if (/^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/.test(inner)) {
         return '<code class="md-code">' + linkifyPath(inner) + '</code>';
       }
       return '<code class="md-code">' + inner + '</code>';
@@ -1727,8 +1727,8 @@
     // Bare http(s) URLs
     s = s.replace(/(^|[\s(])((?:https?:\/\/)[^\s<>"')]+)/g,
       (m, pre, url) => pre + '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>');
-    // Bare file paths (relative like docs/foo/bar.md or absolute /Users/...)
-    s = s.replace(/(^|[\s(])((?:\/|(?:[\w.\-]+\/)+)[\w.\-/]+\.(?:md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))\b/g,
+    // Bare file paths (relative like docs/foo/bar.md, absolute /Users/..., or ~/...)
+    s = s.replace(/(^|[\s(])((?:~\/|\/|(?:[\w.\-]+\/)+)[\w.\-/]+\.(?:md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))\b/g,
       (m, pre, p) => pre + '<a role="button" tabindex="0" class="path-link" data-path="' + p + '">' + p + '</a>');
     return s;
   }

@@ -173,7 +173,11 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
         add_session_root(cwd)
 
     candidates = []
-    if os.path.isabs(target):
+    # Treat `~/...` as absolute too — Path.expanduser() resolves it against
+    # $HOME the same way the shell would. Without this, tilde paths fall to
+    # the relative branch and get joined onto session/repo roots, which never
+    # exists on disk.
+    if os.path.isabs(target) or target.startswith("~/") or target == "~":
         candidates.append(Path(target).expanduser())
     else:
         for root in session_roots:
