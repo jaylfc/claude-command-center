@@ -10809,21 +10809,30 @@ def _coordination_watcher() -> None:
                     _active_coordinations.pop(path, None)
                 continue
 
+            # Atomic check-and-claim of the nudge slot: hold _coord_lock
+            # across the read of last_nudge AND the write that claims it.
+            # Without this, two watcher ticks (or any other concurrent
+            # caller) could both read the same old last_nudge, both decide
+            # the debounce window had passed, and both fire — producing
+            # duplicate `pinged …` log lines at the exact same second.
+            fire_nudge = False
+            should_drop = False
             with _coord_lock:
                 entry = _active_coordinations.get(path)
                 if entry is None:
                     continue
+                changed = mtime != entry["mtime"]
+                idle_seconds = now - entry["last_activity"]
+                if changed:
+                    entry["mtime"] = mtime
+                    entry["last_activity"] = now
+                if idle_seconds > _COORD_DEATH_TIMEOUT or _is_coord_done(path):
+                    should_drop = True
+                elif changed and (now - entry["last_nudge"]) > _COORD_NUDGE_INTERVAL:
+                    entry["last_nudge"] = now
+                    fire_nudge = True
 
-            changed = mtime != entry["mtime"]
-            idle_seconds = now - entry["last_activity"]
-
-            if changed:
-                entry["mtime"] = mtime
-                entry["last_activity"] = now
-
-            # Drop if done or idle too long. Stamp closed_at so the UI can
-            # show "closed Xh ago" and sort closed rows chronologically.
-            if idle_seconds > _COORD_DEATH_TIMEOUT or _is_coord_done(path):
+            if should_drop:
                 with _coord_lock:
                     _active_coordinations.pop(path, None)
                 try:
@@ -10832,14 +10841,25 @@ def _coordination_watcher() -> None:
                     pass
                 continue
 
-            # Nudge if file changed and debounce window passed
-            if changed and (now - entry["last_nudge"]) > _COORD_NUDGE_INTERVAL:
-                entry["last_nudge"] = now
-                with _coord_lock:
-                    _active_coordinations[path] = entry
+            if fire_nudge:
                 try:
                     _group_chat_nudge(path)
                 except Exception:
+                    pass
+                # Defensive baseline bump: re-stat the file after the
+                # nudge wrote its `pinged` log and align entry["mtime"]
+                # to that. Without this, the next watcher tick can see
+                # the post-nudge mtime as a "change" relative to the
+                # pre-nudge baseline and re-fire — exactly the loop we
+                # claimed to have stopped via _group_chat_log_system's
+                # in-line bump. Belt + suspenders.
+                try:
+                    post_mtime = os.stat(path).st_mtime
+                    with _coord_lock:
+                        e2 = _active_coordinations.get(path)
+                        if e2 is not None:
+                            e2["mtime"] = post_mtime
+                except OSError:
                     pass
 
 
