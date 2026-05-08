@@ -2529,10 +2529,9 @@
 
   /* ── Split Kanban Layout (Tasks 6-9) ── */
   #kanbanLayout {
-    /* 100vh minus the fixed .ccc-topbar (33px via body padding-top). Using bare
-       100vh here overflows the body's content-box by 33px; body's overflow:hidden
-       then clips the bottom of the split view, hiding the chat input row. */
-    display: none; height: calc(100vh - 33px); overflow: hidden;
+    /* Topbar was merged into #convToolbar (no longer a separate fixed row),
+       so the body has no padding-top — kanban can take the full viewport. */
+    display: none; height: 100vh; overflow: hidden;
   }
   #kanbanLayout.active { display: flex; }
   body.kanban-split .sidebar { display: none !important; }
@@ -3236,22 +3235,17 @@
    * stretch full-height. The fixed positioning sidesteps that.
    * Side-nav (52px, also fixed) sits to the left, so we offset accordingly.
    * Body padding-top below makes room for the topbar. */
+  /* The .ccc-topbar lives inside the main toolbar (#convToolbar) — it was
+     originally a separate fixed-position row above the sidebar/main, but
+     was merged into the toolbar to recover ~33px of vertical space.
+     `margin-left: auto` on the wrapper (set inline in HTML) pushes it to
+     the right side of the toolbar. */
   .ccc-topbar {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
     display: flex; align-items: center; gap: 10px;
-    padding: 5px 12px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
     font-size: 11px;
     box-sizing: border-box;
-    min-height: 32px;
   }
-  body { padding-top: 33px; box-sizing: border-box; }
-  /* When the optional Morning side-nav is present, it injects its own
-     `body { padding-left: 52px }` rule. We add a body class flag from the
-     features-probe so the topbar shifts to make room without a layout
-     race. (Without morning, topbar starts at left:0.) */
-  body.has-side-nav .ccc-topbar { left: 52px; }
+  body { box-sizing: border-box; }
 
   /* ── Multi-repo rail — left-edge icon column ──────────────────────────
    * Persistent vertical strip with one circular icon per known repo.
@@ -3266,14 +3260,11 @@
     display: flex; flex-direction: column;
     align-items: center;
     padding: 8px 0; gap: 6px;
-    z-index: 99;  /* topbar is 100 — rail tucks under so the topbar
-                     spans full width above it (with our left: 48px shift) */
+    z-index: 99;
     overflow-y: auto;
     box-sizing: border-box;
   }
   body.has-repo-rail { padding-left: 48px; }
-  body.has-repo-rail .ccc-topbar { left: 48px; }
-  body.has-repo-rail.has-side-nav .ccc-topbar { left: 100px; }  /* both sidenavs */
   .ccc-repo-rail .rail-btn {
     width: 32px; height: 32px;
     border-radius: 50%;

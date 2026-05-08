@@ -217,34 +217,6 @@
        waste 48px when there's nothing to show. -->
   <aside id="ccRepoSidebar" class="ccc-repo-rail" role="navigation" aria-label="Repos"></aside>
 
-  <!-- Layout-agnostic top bar — visible in BOTH list and kanban-split modes
-       so the most-important controls (which repo we're watching + the
-       setup banner) never disappear when the user toggles views. -->
-  <div class="ccc-topbar" id="cccTopbar">
-    <button type="button" id="updPill" class="upd-pill" title="A new release is available on GitHub. Click to review and update.">
-      <span class="upd-pill-dot"></span>
-      <span id="updPillText">Update available</span>
-    </button>
-    <button type="button" id="bugReportLink" class="bug-link" title="Report a bug or request a feature. Files a GitHub issue against amirfish1/claude-command-center.">
-      &#9873; Report a bug
-    </button>
-    <button id="kptWorktreesBtn" class="topbar-btn" title="Show all worktrees of this repo, with an indicator for those that have uncommitted changes." aria-label="Show worktrees">&#127807; Worktrees</button>
-    <button id="statsBtn" class="topbar-btn" title="Usage stats — sessions, messages, tokens, streaks across every Claude Code transcript on this machine." aria-label="Show usage stats">&#128202; Stats</button>
-    <button id="gcActiveBtn" class="topbar-btn" style="display:none;" title="Active group-chat coordinations — click to open the most recent one" aria-label="Active group chats"></button>
-    <button id="termToggleBtn" class="topbar-btn" title="Open the in-UI terminal panel — run quick shell commands (git status, npm test, ./script.sh) without leaving the page. One-shot per command, no interactive TTY (no vim/top)." aria-label="Toggle terminal panel">&#9000; Terminal</button>
-    <a class="topbar-btn sh-btn-deploy" id="deployPill" target="_blank" rel="noopener" title="Vercel deploy — loading…" aria-label="Vercel deploy status"><span class="deploy-dot" id="deployDot"></span><span class="deploy-label" id="deployStateLabel">Vercel</span></a>
-    <!-- History-index status pill. Three signals: indexing-in-progress (spinner),
-         freshness (timestamp of latest indexed message), and semantic state
-         (whether embeddings exist + how fresh). Click to manually trigger an
-         ingest. Hidden until /api/history/status returns. -->
-    <div id="historyStatusPill" class="topbar-btn hi-status-pill" style="display:none;" title="" role="button" tabindex="0">
-      <span class="hi-pill-icon" id="hiPillIcon">&#128218;</span>
-      <span class="hi-pill-label" id="hiPillLabel">History</span>
-      <span class="hi-pill-sem" id="hiPillSem" style="display:none;" title="Semantic embeddings present">&#10024;</span>
-    </div>
-    <div id="setupBanner" class="ccc-setup-banner"></div>
-  </div>
-
   <div class="sidebar">
     <div class="sidebar-header">
       <a href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Claude Command Center — open the README on GitHub" style="color:inherit;text-decoration:none;">Claude Command Center</a>
@@ -345,7 +317,29 @@
         <span class="live-badge-label">live</span>
       </span>
       <span class="status" id="convStatus"></span>
-      <div class="font-size-controls" style="margin-left:auto;">
+      <!-- Global controls (formerly the standalone .ccc-topbar row above —
+           merged into the main toolbar to recover ~33px of vertical space). -->
+      <div class="ccc-topbar" id="cccTopbar" style="margin-left:auto;">
+        <button type="button" id="updPill" class="upd-pill" title="A new release is available on GitHub. Click to review and update.">
+          <span class="upd-pill-dot"></span>
+          <span id="updPillText">Update available</span>
+        </button>
+        <button type="button" id="bugReportLink" class="bug-link" title="Report a bug or request a feature. Files a GitHub issue against amirfish1/claude-command-center.">
+          &#9873; Report a bug
+        </button>
+        <button id="kptWorktreesBtn" class="topbar-btn" title="Show all worktrees of this repo, with an indicator for those that have uncommitted changes." aria-label="Show worktrees">&#127807; Worktrees</button>
+        <button id="statsBtn" class="topbar-btn" title="Usage stats — sessions, messages, tokens, streaks across every Claude Code transcript on this machine." aria-label="Show usage stats">&#128202; Stats</button>
+        <button id="gcActiveBtn" class="topbar-btn" style="display:none;" title="Active group-chat coordinations — click to open the most recent one" aria-label="Active group chats"></button>
+        <button id="termToggleBtn" class="topbar-btn" title="Open the in-UI terminal panel — run quick shell commands (git status, npm test, ./script.sh) without leaving the page. One-shot per command, no interactive TTY (no vim/top)." aria-label="Toggle terminal panel">&#9000; Terminal</button>
+        <a class="topbar-btn sh-btn-deploy" id="deployPill" target="_blank" rel="noopener" title="Vercel deploy — loading…" aria-label="Vercel deploy status"><span class="deploy-dot" id="deployDot"></span><span class="deploy-label" id="deployStateLabel">Vercel</span></a>
+        <div id="historyStatusPill" class="topbar-btn hi-status-pill" style="display:none;" title="" role="button" tabindex="0">
+          <span class="hi-pill-icon" id="hiPillIcon">&#128218;</span>
+          <span class="hi-pill-label" id="hiPillLabel">History</span>
+          <span class="hi-pill-sem" id="hiPillSem" style="display:none;" title="Semantic embeddings present">&#10024;</span>
+        </div>
+        <div id="setupBanner" class="ccc-setup-banner"></div>
+      </div>
+      <div class="font-size-controls">
         <button class="font-size-btn" id="fontMinus" title="Decrease font size">A-</button>
         <button class="font-size-btn" id="fontPlus" title="Increase font size">A+</button>
       </div>
