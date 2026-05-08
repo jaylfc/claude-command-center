@@ -872,6 +872,28 @@ def _git_toplevel_for_existing_dir(path):
     return None
 
 
+def _nearest_marked_repo_dir(path):
+    """Return the closest existing ancestor that CCC can treat as a repo root.
+
+    Non-git project folders are supported when they carry a `.claude/`
+    marker. This matters for plain asset/project directories where sessions
+    are launched from a subfolder rather than the marker-bearing root.
+    """
+    try:
+        p = Path(path).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if not p.is_dir():
+        return None
+    for candidate in (p, *p.parents):
+        try:
+            if (candidate / ".git").exists() or (candidate / ".claude").is_dir():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
 def resolve_repo_path(value):
     """Validate and canonicalize one concrete repo path.
 
@@ -934,7 +956,7 @@ def _resolve_cwd_context(value):
     # in. The repo_path-must-look-like-a-repo gate in resolve_repo_path()
     # still applies, so a non-git cwd has to live inside a known-repo entry
     # or have a .claude dir to pass validation.
-    repo_top = _git_toplevel_for_existing_dir(cwd) or str(cwd)
+    repo_top = _git_toplevel_for_existing_dir(cwd) or _nearest_marked_repo_dir(cwd) or str(cwd)
     return {"repo_path": resolve_repo_path(repo_top), "cwd": str(cwd)}
 
 
@@ -1313,6 +1335,8 @@ def find_all_conversations(limit_per_folder=None):
 
             if _is_generated_helper_session(first_message):
                 continue
+            if session_cwd:
+                session_cwd = _resolve_session_cwd(session_id, session_cwd)
 
             # Tool-call inference — match what extract_session_workspace
             # does for active sessions. The JSONL's first-event cwd /
@@ -2595,6 +2619,7 @@ def extract_session_id(path):
 
 # Cache of session_id -> cwd so we don't rescan ~/.claude/projects on every request
 _session_cwd_cache = {}
+_session_cwd_relocation_cache = {}
 _session_cwd_cache_mtime = 0
 
 SESSIONS_REGISTRY = Path.home() / ".claude" / "sessions"  # per-pid {sessionId, cwd, ...}
@@ -4986,6 +5011,196 @@ def focus_terminal_by_tty(tty, terminal_app):
     return {"ok": True, "terminal_app": terminal_app}
 
 
+_CWD_RELOCATION_PRUNE_DIRS = {
+    ".git", ".hg", ".svn", ".claude", ".codex", "__pycache__",
+    "node_modules", ".next", "dist", "build", ".venv", "venv",
+}
+
+
+def _path_is_within(child, parent):
+    try:
+        c = Path(child).expanduser().resolve()
+        p = Path(parent).expanduser().resolve()
+        return c == p or p in c.parents
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _relocation_search_roots(session_id, missing_cwd):
+    roots = []
+    seen = set()
+
+    def add(raw):
+        if not raw:
+            return
+        try:
+            p = Path(raw).expanduser().resolve()
+        except (OSError, ValueError, RuntimeError):
+            return
+        if not p.is_dir():
+            return
+        # Avoid accidental whole-home scans; repo pins / marked ancestors give
+        # us enough locality for moved project folders.
+        try:
+            if p == Path.home().resolve() or p == Path("/"):
+                return
+        except OSError:
+            return
+        s = str(p)
+        if s not in seen:
+            seen.add(s)
+            roots.append(p)
+
+    try:
+        pin = _load_repo_pins().get(session_id)
+    except Exception:
+        pin = None
+    add(pin)
+
+    try:
+        cwd_path = Path(missing_cwd).expanduser()
+        existing = None
+        for candidate in (cwd_path, *cwd_path.parents):
+            if candidate.is_dir():
+                existing = candidate
+                break
+        if existing:
+            cur = existing
+            for _ in range(4):
+                add(cur)
+                parent = cur.parent
+                if parent == cur:
+                    break
+                cur = parent
+    except (OSError, ValueError, RuntimeError):
+        pass
+
+    try:
+        for repo in _known_repo_paths():
+            if _path_is_within(missing_cwd, repo):
+                add(repo)
+    except Exception:
+        pass
+
+    return roots
+
+
+def _relocate_missing_session_cwd(session_id, cwd):
+    """Best-effort repair for transcripts whose recorded cwd was moved.
+
+    Claude transcripts are immutable history, so a folder reorg can leave old
+    `cwd` values pointing at a path that no longer exists. For display and
+    repo-context purposes, use the transcript's own absolute tool paths as
+    evidence: find a same-named directory under nearby project roots where
+    those relative files now exist.
+    """
+    raw = str(cwd or "").strip()
+    if not session_id or not raw:
+        return None
+    cache_key = (session_id, raw)
+    if cache_key in _session_cwd_relocation_cache:
+        return _session_cwd_relocation_cache[cache_key]
+
+    try:
+        cwd_path = Path(raw).expanduser()
+        if cwd_path.is_dir():
+            result = str(cwd_path.resolve())
+            _session_cwd_relocation_cache[cache_key] = result
+            return result
+    except (OSError, ValueError, RuntimeError):
+        _session_cwd_relocation_cache[cache_key] = None
+        return None
+
+    basename = cwd_path.name
+    if not basename:
+        _session_cwd_relocation_cache[cache_key] = None
+        return None
+
+    try:
+        file_paths, _cd_targets = _scan_session_tool_paths(session_id)
+    except Exception:
+        file_paths = []
+    prefix = raw.rstrip("/") + "/"
+    rel_paths = []
+    rel_seen = set()
+    for fp in file_paths:
+        if not isinstance(fp, str) or not fp.startswith(prefix):
+            continue
+        rel = fp[len(prefix):].lstrip("/")
+        if not rel or rel in rel_seen:
+            continue
+        rel_seen.add(rel)
+        rel_paths.append(rel)
+        if len(rel_paths) >= 25:
+            break
+
+    roots = _relocation_search_roots(session_id, raw)
+    best = []
+    candidate_seen = set()
+    for root in roots:
+        visited = 0
+        try:
+            for dirpath, dirnames, _filenames in os.walk(root):
+                visited += 1
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in _CWD_RELOCATION_PRUNE_DIRS and not d.startswith(".")
+                ]
+                if visited > 8000:
+                    break
+                p = Path(dirpath)
+                if p.name != basename:
+                    continue
+                try:
+                    p_key = str(p.resolve())
+                except OSError:
+                    p_key = str(p)
+                if p_key in candidate_seen:
+                    continue
+                candidate_seen.add(p_key)
+                score = 1 if not rel_paths else 0
+                for rel in rel_paths:
+                    try:
+                        if (p / rel).exists():
+                            score += 1
+                    except OSError:
+                        continue
+                if score > 0:
+                    best.append((score, len(p.parts), p))
+        except OSError:
+            continue
+
+    if not best:
+        _session_cwd_relocation_cache[cache_key] = None
+        return None
+    best.sort(key=lambda item: (-item[0], item[1], str(item[2])))
+    top_score = best[0][0]
+    top = [p for score, _depth, p in best if score == top_score]
+    if len(top) > 1 and rel_paths:
+        # Multiple equally-supported targets means the transcript evidence is
+        # ambiguous; keep the historical cwd rather than guessing wrong.
+        _session_cwd_relocation_cache[cache_key] = None
+        return None
+    try:
+        result = str(top[0].resolve())
+    except OSError:
+        result = str(top[0])
+    _session_cwd_relocation_cache[cache_key] = result
+    return result
+
+
+def _resolve_session_cwd(session_id, cwd):
+    if not cwd:
+        return cwd
+    try:
+        p = Path(cwd).expanduser()
+        if p.is_dir():
+            return str(p.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return cwd
+    return _relocate_missing_session_cwd(session_id, cwd) or cwd
+
+
 def find_session_cwd(session_id):
     """Locate the .jsonl for a session_id across ~/.claude/projects/*/ and return its cwd.
 
@@ -5007,12 +5222,14 @@ def find_session_cwd(session_id):
             except Exception:
                 pass
         if cwd:
+            cwd = _resolve_session_cwd(session_id, cwd)
             _session_cwd_cache[session_id] = cwd
             return cwd
     gemini_path = _resolve_gemini_chat_path(session_id)
     if gemini_path:
         cwd = _gemini_project_root_for_chat(gemini_path)
         if cwd:
+            cwd = _resolve_session_cwd(session_id, cwd)
             _session_cwd_cache[session_id] = cwd
             return cwd
     if not PROJECTS_ROOT.is_dir():
@@ -5040,6 +5257,7 @@ def find_session_cwd(session_id):
                         continue
                     cwd = ev.get("cwd")
                     if cwd:
+                        cwd = _resolve_session_cwd(session_id, cwd)
                         _session_cwd_cache[session_id] = cwd
                         return cwd
         except (OSError, UnicodeDecodeError):
@@ -5068,6 +5286,7 @@ def find_session_cwd(session_id):
                             continue
                         cwd = ev.get("cwd")
                         if cwd:
+                            cwd = _resolve_session_cwd(session_id, cwd)
                             _session_cwd_cache[session_id] = cwd
                             return cwd
             except (OSError, UnicodeDecodeError):
@@ -6248,17 +6467,17 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
         sid = session_id or conv_id
         if _PROFILE:
             _t0 = time.perf_counter()
-            cwd = head_cwd or find_session_cwd(sid)
+            cwd = _resolve_session_cwd(sid, head_cwd) if head_cwd else find_session_cwd(sid)
             if head_cwd:
-                _session_cwd_cache[sid] = head_cwd
+                _session_cwd_cache[sid] = cwd
             _t_cwd += time.perf_counter() - _t0; _n_cwd += 1
             _t0 = time.perf_counter()
             tail_meta = _extract_tail_meta(f)
             _t_tail += time.perf_counter() - _t0; _n_tail += 1
         else:
-            cwd = head_cwd or find_session_cwd(sid)
+            cwd = _resolve_session_cwd(sid, head_cwd) if head_cwd else find_session_cwd(sid)
             if head_cwd:
-                _session_cwd_cache[sid] = head_cwd
+                _session_cwd_cache[sid] = cwd
             tail_meta = _extract_tail_meta(f)
         override = name_overrides.get(sid) or name_overrides.get(conv_id)
         # Display value priority: side-car override > jsonl > None.

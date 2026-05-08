@@ -144,6 +144,60 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(ctx["repo_path"], str(self.repo))
         self.assertEqual(ctx["cwd"], str(self.repo))
 
+    def test_session_cwd_relocates_after_folder_move(self):
+        sid = "00000000-0000-4000-8000-000000000100"
+        old_cwd = self.repo / "old folder" / "app"
+        new_cwd = self.repo / "code" / "old-folder" / "app"
+        moved_file = new_cwd / "src" / "main.py"
+        moved_file.parent.mkdir(parents=True)
+        moved_file.write_text("print('ok')\n", encoding="utf-8")
+
+        transcript = self.server._canonical_conversation_path(str(self.repo), sid)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(
+            json.dumps({
+                "type": "user",
+                "timestamp": "2026-05-04T00:00:00.000Z",
+                "cwd": str(old_cwd),
+                "sessionId": sid,
+                "gitBranch": "main",
+                "message": {"role": "user", "content": "read src/main.py"},
+            }) + "\n" +
+            json.dumps({
+                "type": "assistant",
+                "timestamp": "2026-05-04T00:00:01.000Z",
+                "sessionId": sid,
+                "message": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {"file_path": str(old_cwd / "src" / "main.py")},
+                    }],
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(self.server.find_session_cwd(sid), str(new_cwd))
+        ctx = self.server.repo_from_session(sid)
+        self.assertEqual(ctx["repo_path"], str(self.repo))
+        self.assertEqual(ctx["cwd"], str(new_cwd))
+        row = next(r for r in self.server.find_conversations(str(self.repo))
+                   if r["session_id"] == sid)
+        self.assertEqual(row["session_cwd"], str(new_cwd))
+        self.assertTrue(row["session_cwd_exists"])
+
+    def test_cwd_context_uses_nearest_claude_marker_parent(self):
+        project = pathlib.Path(self.tmp_home, "plain-project").resolve()
+        cwd = project / "nested" / "tool"
+        cwd.mkdir(parents=True)
+        (project / ".claude").mkdir()
+
+        ctx = self.server._resolve_cwd_context(str(cwd))
+        self.assertEqual(ctx["repo_path"], str(project))
+        self.assertEqual(ctx["cwd"], str(cwd))
+
     def test_repo_required_endpoint_and_switch_compatibility(self):
         httpd = self.server.http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0),
