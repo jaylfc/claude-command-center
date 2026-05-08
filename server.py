@@ -10579,6 +10579,21 @@ def _coordinate_sessions(payload):
     except OSError:
         pass  # sidecar failure is non-fatal
 
+    # System log line for the chat creation. Includes the initial
+    # participants if there were any so the chat reads as a self-
+    # contained timeline.
+    if session_ids:
+        added_labels = [f"`{name_map.get(s) or s}` ({s[:8]})" for s in session_ids]
+        _group_chat_log_system(
+            chat_path,
+            f"created chat with topic `{topic}` and added {', '.join(added_labels)}",
+        )
+    else:
+        _group_chat_log_system(
+            chat_path,
+            f"created empty chat with topic `{topic}`",
+        )
+
     chat_path_tilde = "~/.claude/group-chats/" + f"{slug}-{ts}.md"
     return {"ok": True, "chat_path": chat_path_tilde, "results": results}
 
@@ -10621,6 +10636,7 @@ def _group_chat_nudge(path):
 
     safe_topic = topic.replace('"', '\\"')
     results = []
+    pinged_labels = []
     for sid in session_ids:
         if sid == exclude_sid:
             results.append({"session_id": sid, "ok": True, "skipped": True})
@@ -10628,6 +10644,18 @@ def _group_chat_nudge(path):
         text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode}'
         r = _inject_text_into_session(sid, text)
         results.append({"session_id": sid, "ok": bool(r.get("ok")), "error": r.get("error", "")})
+        if r.get("ok"):
+            label = name_map.get(sid) or sid
+            pinged_labels.append(f"`{label}` ({sid[:8]})")
+    if pinged_labels:
+        # Log AFTER the inject so the baseline-mtime bump doesn't race
+        # with the inject's own potential file changes. The bump prevents
+        # the watcher from seeing this admin write as a real activity tick
+        # — without it, the watcher would re-fire a nudge after the
+        # debounce window, this function would log it again, and the
+        # chat would gain a "pinged" line every minute even when nothing
+        # else is happening.
+        _group_chat_log_system(real_path, f"pinged {', '.join(pinged_labels)}")
     return {"ok": True, "results": results}
 
 
@@ -10936,9 +10964,48 @@ def _group_chat_set_archived(raw_path: str, archived: bool) -> dict:
     if not _update_group_chat_sidecar(real_path, **fields):
         return {"ok": False, "error": "could not update sidecar"}
     if archived:
+        # Log BEFORE the watcher pop so the baseline-mtime bump inside
+        # _group_chat_log_system can still find the entry. After the pop
+        # the bump becomes a harmless no-op for already-removed paths.
+        _group_chat_log_system(real_path, "archived chat")
         with _coord_lock:
             _active_coordinations.pop(real_path, None)
+    else:
+        _group_chat_log_system(real_path, "unarchived chat")
     return {"ok": True}
+
+
+def _group_chat_log_system(real_path: str, message: str) -> None:
+    """Append a `> _<ts> — system: <message>_` line to the chat file and
+    advance the watcher's baseline mtime so this administrative write
+    isn't treated as participant activity. Without the baseline bump
+    the watcher would see the system write, fire a nudge after the
+    debounce window, write its own "pinged" line in turn, and loop —
+    spamming the chat with system entries roughly once per minute.
+    """
+    if not real_path or not message:
+        return
+    try:
+        # datetime.now() is naive — strftime("%Z") returns an empty string
+        # for naive datetimes, leaving a stray "  — system" double-space.
+        # astimezone() attaches the local tz so %Z renders "PDT" / "UTC".
+        ts = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        ts = ""
+    line = f"> _{ts} — system: {message}_\n\n"
+    try:
+        with open(real_path, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError:
+        return
+    try:
+        new_mtime = os.stat(real_path).st_mtime
+    except OSError:
+        return
+    with _coord_lock:
+        entry = _active_coordinations.get(real_path)
+        if entry is not None:
+            entry["mtime"] = new_mtime
 
 
 def _group_chat_remove_participant(raw_path: str, session_id: str) -> dict:
@@ -10971,6 +11038,9 @@ def _group_chat_remove_participant(raw_path: str, session_id: str) -> dict:
         real_path, session_ids=session_ids, name_map=name_map
     ):
         return {"ok": False, "error": "could not update sidecar"}
+
+    removed_label = sidecar.get("name_map", {}).get(sid) or sid
+    _group_chat_log_system(real_path, f"removed `{removed_label}` ({sid[:8]})")
 
     return {"ok": True, "session_id": sid, "was_participant": True}
 
@@ -11018,6 +11088,8 @@ def _group_chat_add_participant(raw_path: str, session_id: str, display_name: st
         safe_topic = topic.replace('"', '\\"')
         text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode}'
         inject_result = _inject_text_into_session(sid, text)
+        added_label = name_map.get(sid) or display_name or sid
+        _group_chat_log_system(real_path, f"added `{added_label}` ({sid[:8]})")
 
     return {
         "ok": True,
