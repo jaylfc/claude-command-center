@@ -11,16 +11,28 @@ Coordinate with parallel sessions via a dedicated file per discussion, located i
 - **Identity:** Generate or retrieve your tag (e.g., hash of `$CLAUDE_SESSION_ID`, stored in `~/.claude/group-chat/sessions/<hash>.tag`).
 
 ## 2. Joining — Don't Leave a Quiet Chat
-**Read this before you decide to leave.** You were explicitly invited to this chat by the user (or by another session). You do not get to bail because the chat looks quiet. Specifically:
+**Read this before you decide to leave.** You were explicitly invited to this chat by the user. You do not get to evaluate whether the topic is "real," "actionable," or "meaningful." The user added you for a reason that may not yet be in writing. **You wait.** The default behavior is: post one neutral check-in and stop.
 
-- **The header has a topic.** The first lines of the chat file are `# Group Chat — <topic>`, `**Started:**`, `**Mode:**`, `**Participants:**`. That topic line **is** the topic. Do not say "no topic" or "empty chat" when a topic line is present.
-- **Waiting is the default.** If you arrive and find only the header (no posts yet) or only your own prior posts, your job is to **wait**, not to leave. Other participants may not have woken up yet.
-- **Introduce yourself once.** On your first arrival, post a single `💬` message acknowledging the topic — e.g., "On the topic of `<X>`: standing by, waiting for others." Then stop and exit this skill cycle. You will be re-injected when the file changes or when another session posts.
-- **You may post `👋 Leave` in any of these cases — never before:**
-  1. **Work resolved:** you've engaged with the topic (at least one substantive `💬`/`📝`/`▶`/`🏁`), there's been two-way activity from another participant, and the work is plainly done or you have nothing further to contribute.
-  2. **Real-meeting timeout:** like a meeting where nobody shows up — if **10 minutes** have elapsed since the most recent post by anyone (your own posts count) AND no other participant has engaged with the topic, you may post `👋 Leave`. Compare timestamps in the chat file (and the header `**Started:**` if there are no posts yet) against the current time before deciding.
-  3. **Plainly the wrong room:** if the chat header's topic is clearly outside your context and no one has addressed you, post one `💬` saying so, wait one re-injection cycle, then `👋 Leave`.
-- **Never post a `👋` body that says "empty, leaving" on first read.** That is the failure mode this section exists to prevent. If less than 10 minutes have passed since the chat was started or last touched, you stay.
+### Hard rules
+
+1. **One post per skill invocation. Then exit.** When this skill runs, you append at most one line to the chat file and return. You do not post again in the same cycle. Posting `💬 standing by` and `👋 Leave` back-to-back at the same timestamp is the bug we are fixing — never do that.
+
+2. **Don't evaluate the topic.** The header may carry a placeholder ("Empty test chat", "Untitled"), an unfinished topic, or something outside your usual context. None of that justifies leaving. The user is going to add the real topic later, or another participant will. Your job until then is to be present.
+
+3. **First arrival → one `💬`, then exit.** If you don't find a prior post from your own tag, post a single `💬` saying you're present and waiting. Use neutral language: `Standing by.` or `Joining; waiting for activity.` Do **not** write any of these:
+   - "no topic" / "no real topic" / "topic is empty"
+   - "no other active participants" / "nothing to coordinate"
+   - "leaving — ping me later" / "available again if anyone joins"
+   - any reasoning about whether to leave — you don't decide that on first read
+   Then stop. The watcher will re-inject you when the file changes or when 30s passes.
+
+4. **Re-arrival with no new content → exit silently.** If you find your own prior `💬` and no new posts from anyone else, post nothing and exit. Don't introduce yourself again. Repeat-introductions from the same tag are the symptom of the loop this skill is preventing.
+
+5. **`👋 Leave` is allowed ONLY in these cases:**
+   - **Work resolved:** you've already engaged with the topic (at least one substantive `💬`/`📝`/`▶`/`🏁` from you AND another participant), and the work is plainly done.
+   - **10-minute real-meeting timeout:** at least **10 minutes** have elapsed since the most recent post by *anyone* (or since the header `**Started:**` time if there are no posts yet), AND no participant other than you has substantively engaged with the topic. Compare timestamps in the chat against the current time before deciding. Less than 10 minutes since last activity means you stay.
+
+   No other case justifies `👋 Leave`. Not "topic seems empty." Not "I have no work." Not "the previous session left." If you're not sure whether a case applies, default to staying.
 
 ## 3. Interact (Append Only)
 Read the chosen chat file to see the current state. **Append** your post. NEVER edit existing lines. 
