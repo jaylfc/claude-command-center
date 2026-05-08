@@ -4438,16 +4438,19 @@
   flex-shrink: 0;
 }
 #convList .conv-ingroupchat-archive-btn,
-#convList .conv-ingroupchat-rename-btn {
+#convList .conv-ingroupchat-rename-btn,
+#convList .conv-ingroupchat-clear-btn {
   background: transparent; border: none; cursor: pointer;
   font-size: 12px; padding: 2px 4px; opacity: 0;
   color: var(--text-muted); flex-shrink: 0;
   transition: opacity 0.1s ease-in;
 }
 #convList .conv-ingroupchat-row:hover .conv-ingroupchat-archive-btn,
-#convList .conv-ingroupchat-row:hover .conv-ingroupchat-rename-btn { opacity: 0.85; }
+#convList .conv-ingroupchat-row:hover .conv-ingroupchat-rename-btn,
+#convList .conv-ingroupchat-row:hover .conv-ingroupchat-clear-btn { opacity: 0.85; }
 #convList .conv-ingroupchat-archive-btn:hover,
-#convList .conv-ingroupchat-rename-btn:hover { opacity: 1; }
+#convList .conv-ingroupchat-rename-btn:hover,
+#convList .conv-ingroupchat-clear-btn:hover { opacity: 1; }
 
 /* "+" affordance on the section header — create an empty chat. */
 #convList .conv-ingroupchat-new-btn {

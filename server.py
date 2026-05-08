@@ -11018,6 +11018,72 @@ def _group_chat_log_system(real_path: str, message: str) -> None:
             entry["mtime"] = new_mtime
 
 
+def _group_chat_clear(raw_path: str) -> dict:
+    """Wipe message history from a chat: rewrite the .md with a fresh
+    header (topic / Started / Mode / Participants), append a system
+    log line marking the clear, then nudge all participants so they
+    wake up and read the now-empty chat with a clean slate.
+
+    Doesn't touch the sidecar — `session_ids` and `name_map` are
+    preserved. Use Archive (📦) if you want to actually retire the
+    chat; Clear is the equivalent of erasing the whiteboard with
+    everyone still in the room.
+    """
+    real_path = _resolve_group_chat_path(raw_path)
+    if not real_path:
+        return {"ok": False, "error": "forbidden"}
+    if not os.path.exists(real_path):
+        return {"ok": False, "error": "not found"}
+
+    sidecar = _load_group_chat_sidecar(real_path)
+    topic = sidecar.get("topic") or ""
+    mode = sidecar.get("mode") or "topic"
+    name_map = sidecar.get("name_map") or {}
+    session_ids = sidecar.get("session_ids") or []
+    participant_names = [name_map.get(sid) or sid for sid in session_ids]
+    participants_str = ", ".join(f"`{n}`" for n in participant_names) or "`human`"
+
+    # Count existing messages so the system log can record what was wiped.
+    prior_count = _group_chat_message_count(real_path)
+
+    now = datetime.now().astimezone()
+    full_ts = now.strftime("%Y-%m-%d %A %H:%M:%S %Z")
+    header = (
+        f"# Group Chat — {topic}\n"
+        f"**Started:** {full_ts}\n"
+        f"**Mode:** {mode}\n"
+        f"**Participants:** {participants_str}\n"
+    )
+    try:
+        with open(real_path, "w", encoding="utf-8") as fh:
+            fh.write(header)
+    except OSError as exc:
+        return {"ok": False, "error": f"could not rewrite chat: {exc}"}
+
+    # Update the watcher's baseline mtime so the clear write doesn't
+    # double-fire a nudge (the explicit nudge below covers it).
+    try:
+        new_mtime = os.stat(real_path).st_mtime
+        with _coord_lock:
+            entry = _active_coordinations.get(real_path)
+            if entry is not None:
+                entry["mtime"] = new_mtime
+    except OSError:
+        pass
+
+    _group_chat_log_system(
+        real_path, f"cleared chat content (wiped {prior_count} messages)"
+    )
+
+    # Explicitly nudge so participants re-engage immediately. The skill
+    # will see only the header + system log lines (no `##` posts), so its
+    # exclude-last-writer logic returns no match and everyone is pinged.
+    _register_coordination(real_path)
+    nudge = _group_chat_nudge(real_path)
+
+    return {"ok": True, "wiped": prior_count, "nudge": nudge}
+
+
 def _group_chat_rename(raw_path: str, new_topic: str) -> dict:
     """Rename a chat by updating the sidecar's `topic` field. The chat
     file's header line is left as-is (rewriting it would require parsing
@@ -17732,6 +17798,28 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing path or session_id"})
                 return
             result = _group_chat_add_participant(chat_path, session_id, display_name)
+            if result.get("error") == "forbidden":
+                self.send_json(result, 403)
+            elif result.get("error") == "not found":
+                self.send_json(result, 404)
+            else:
+                self.send_json(result)
+        elif path == "/api/group-chats/clear":
+            # Wipe message history from a chat (header + sidecar preserved)
+            # and re-nudge participants so they re-engage with the fresh
+            # whiteboard. Use case: a participant got stuck in a no-op
+            # loop and a clean slate kicks the conversation forward.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            chat_path = (payload.get("path") or "").strip()
+            if not chat_path:
+                self.send_json({"ok": False, "error": "missing path"})
+                return
+            result = _group_chat_clear(chat_path)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":

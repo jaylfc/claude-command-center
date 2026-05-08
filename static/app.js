@@ -5752,6 +5752,11 @@
           +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
           +     ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
           +     ' title="Rename this group chat">✏️</button>'
+          +   '<button type="button" class="conv-ingroupchat-clear-btn"'
+          +     ' data-role="ingroupchat-clear"'
+          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+          +     ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
+          +     ' title="Clear chat content (header + participants kept; participants re-engaged)">🧹</button>'
           +   '<button type="button" class="conv-ingroupchat-archive-btn"'
           +     ' data-role="ingroupchat-archive"'
           +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
@@ -5806,6 +5811,7 @@
       row.addEventListener('click', (ev) => {
         if (ev.target.closest('[data-role="ingroupchat-archive"]')) return;
         if (ev.target.closest('[data-role="ingroupchat-rename"]')) return;
+        if (ev.target.closest('[data-role="ingroupchat-clear"]')) return;
         const path = row.dataset.gcPath;
         const topic = row.dataset.gcTopic || '';
         const mode = row.dataset.gcMode || 'topic';
@@ -5827,6 +5833,15 @@
         const path = btn.dataset.gcPath;
         const currentTopic = btn.dataset.gcTopic || '';
         if (path) renameGroupChat(path, currentTopic);
+      });
+    });
+    $convList.querySelectorAll('[data-role="ingroupchat-clear"]').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const path = btn.dataset.gcPath;
+        const topic = btn.dataset.gcTopic || '';
+        if (path) clearGroupChat(path, topic);
       });
     });
     // Drop target: drag a conv-list row onto a chat row to add the
@@ -11037,6 +11052,29 @@
       }
     } catch (err) {
       showOpToast?.('Could not create chat: ' + ((err && err.message) || 'network error'), 'error');
+    }
+  }
+
+  async function clearGroupChat(chatPath, topic) {
+    if (!chatPath) return;
+    const label = topic ? `"${topic}"` : 'this chat';
+    if (!confirm(`Clear all messages from ${label}?\n\nThe header and participants will be kept; everyone will be re-pinged with a fresh whiteboard. This is not undoable.`)) return;
+    try {
+      const res = await fetch('/api/group-chats/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: chatPath }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data || !data.ok) {
+        showOpToast?.('Could not clear: ' + ((data && data.error) || 'unknown'), 'error');
+        return;
+      }
+      try { await pollGcActive(); } catch (_) {}
+      const wiped = data.wiped ?? 0;
+      showOpToast?.(`Cleared ${wiped} message${wiped === 1 ? '' : 's'} — participants re-pinged`);
+    } catch (err) {
+      showOpToast?.('Could not clear: ' + ((err && err.message) || 'network error'), 'error');
     }
   }
 
