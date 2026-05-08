@@ -10621,16 +10621,26 @@ def _group_chat_nudge(path):
         return {"ok": False, "error": "no session_ids in sidecar"}
 
     # Detect last writer to avoid nudging them (would create a response loop).
+    # Tag format from the skill: "## <ts> — <8-hex>: <name> <emoji>" (new)
+    # or "## <ts> — <8-hex> <emoji>" (old). Either way the 8-char hash is
+    # the first thing after the dash, so capture that and match by sid
+    # prefix — a previous version captured the full "<hash>: <name> <emoji>"
+    # tail and looked it up in name_map by display_name, which always
+    # missed because the map's values are bare names without emoji.
     exclude_sid = None
     try:
         with open(real_path, "r", encoding="utf-8") as fh:
             tail = fh.read()[-3000:]
-        # Chat entries are headed by "## <timestamp> — <author>"
-        matches = re.findall(r'^##\s+.+?—\s+(.+?)\s*$', tail, re.MULTILINE)
+        matches = re.findall(
+            r'^##\s+.+?—\s+([0-9a-fA-F]{8})\b',
+            tail, re.MULTILINE,
+        )
         if matches:
-            last_author = matches[-1].strip()
-            name_to_sid = {v: k for k, v in name_map.items()}
-            exclude_sid = name_to_sid.get(last_author)
+            last_hash = matches[-1].lower()
+            for sid in session_ids:
+                if sid.lower().startswith(last_hash):
+                    exclude_sid = sid
+                    break
     except OSError:
         pass
 
