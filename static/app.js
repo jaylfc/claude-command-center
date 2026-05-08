@@ -3235,6 +3235,13 @@
   let _gcLastMtime = null;
   let _gcPollFailCount = 0;
   let _gcLastNudgeTime = 0;
+  // The reader replaces the pane's full innerHTML, blowing away
+  // #conversationsView / #convInputBar etc. Stash the original markup
+  // here so selectConversation can restore the pane's structure when
+  // the user clicks another conv (otherwise the conv renderer can't
+  // find #conversationsView and silently no-ops).
+  let _gcReaderPaneOriginalHtml = null;
+  let _gcReaderPaneEl = null;
 
   function openGroupChatReader(chatPath, topic, mode, includeHuman) {
     _gcReaderPath = chatPath;
@@ -3244,12 +3251,18 @@
 
     const pane = document.querySelector('.conv-pane');
     if (!pane) return;
+    // Stash the pane's original markup before we overwrite it. We only
+    // capture on the FIRST open — re-opening a reader while one is already
+    // mounted would otherwise overwrite the stash with reader markup.
+    if (_gcReaderPaneEl !== pane || _gcReaderPaneOriginalHtml === null) {
+      _gcReaderPaneOriginalHtml = pane.innerHTML;
+      _gcReaderPaneEl = pane;
+    }
 
     const topicSafe = escapeHtml(topic);
     const modeSafe = escapeHtml(mode);
     pane.innerHTML = '<div class="gc-reader" id="gcReader">'
       + '<div class="gc-reader-header">'
-        + '<button class="gc-close" id="gcCloseBtn" title="Close group chat reader">← Back</button>'
         + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
         + '<span class="gc-mode-badge">' + modeSafe + '</span>'
       + '</div>'
@@ -3261,9 +3274,6 @@
           + '</div>'
         : '')
       + '</div>';
-
-    const closeBtn = document.getElementById('gcCloseBtn');
-    if (closeBtn) closeBtn.addEventListener('click', closeGroupChatReader);
 
     if (includeHuman) {
       const gcSendBtn = document.getElementById('gcSendBtn');
@@ -5640,9 +5650,13 @@
     // user hits the per-row Archive button. Rows are per-chat (one per
     // group chat) — clicking a row opens the reader for that chat. Each
     // row also gets an Archive button that POSTs to /api/group-chats/archive.
+    // Always render the section header — even when there are no chats —
+    // so the user has a persistent affordance for creating a new empty
+    // chat (the "+" button on the header). The rows only render when
+    // there's at least one chat to show.
     let _inGroupChatHtml = '';
-    if (_gcActiveChats.length > 0) {
-      const _gcRows = _gcActiveChats.map(chat => {
+    {
+      const _gcRows = (_gcActiveChats || []).map(chat => {
         const isClosed = chat.status === 'closed';
         const topicLabel = chat.topic ? escapeHtml(chat.topic.slice(0, 80)) : '(untitled)';
         const partCount = (chat.session_ids || []).length;
@@ -5669,14 +5683,16 @@
           +     ' title="Archive this group chat">📦</button>'
           + '</div>';
       }).join('');
+      const _gcCount = (_gcActiveChats || []).length;
       _inGroupChatHtml =
-        '<div class="conv-ingroupchat-section" data-role="ingroupchat-section">'
+        '<div class="conv-ingroupchat-section' + (_gcCount === 0 ? ' is-empty' : '') + '" data-role="ingroupchat-section">'
         + '<div class="conv-ingroupchat-header">'
         +   '<span class="conv-ingroupchat-icon">💬</span>'
         +   '<span class="conv-ingroupchat-label">In Group Chat</span>'
-        +   '<span class="conv-ingroupchat-count">' + _gcActiveChats.length + '</span>'
+        +   (_gcCount ? '<span class="conv-ingroupchat-count">' + _gcCount + '</span>' : '')
+        +   '<button type="button" class="conv-ingroupchat-new-btn" data-role="ingroupchat-new" title="Create a new empty group chat — drag sessions in afterwards" aria-label="New group chat">+</button>'
         + '</div>'
-        + '<div class="conv-ingroupchat-list">' + _gcRows + '</div>'
+        + (_gcCount ? '<div class="conv-ingroupchat-list">' + _gcRows + '</div>' : '')
         + '</div>';
     }
     // Order: In Group Chat (live) → GH Issues (to start) → Ready to merge
@@ -5726,6 +5742,51 @@
         if (path) archiveGroupChat(path);
       });
     });
+    // Drop target: drag a conv-list row onto a chat row to add the
+    // session as a participant. Conv rows already carry data-session-id
+    // and dispatch dragstart via attachDragHandlers (drag-to-reorder),
+    // so we just listen for dragover/drop here. dropEffect must match
+    // the source's effectAllowed='move' — otherwise the browser silently
+    // refuses the drop.
+    $convList.querySelectorAll('[data-role="ingroupchat-row"]').forEach(row => {
+      row.addEventListener('dragover', (ev) => {
+        if (!dragSourceId) return;
+        ev.preventDefault();
+        try { ev.dataTransfer.dropEffect = 'move'; } catch (_) {}
+        row.classList.add('gc-drop-target');
+      });
+      row.addEventListener('dragleave', () => {
+        row.classList.remove('gc-drop-target');
+      });
+      row.addEventListener('drop', (ev) => {
+        ev.preventDefault();
+        row.classList.remove('gc-drop-target');
+        const path = row.dataset.gcPath;
+        if (!path || !dragSourceId) return;
+        const draggedConv = (conversationsData || []).find(c => c.id === dragSourceId);
+        // Backlog rows are draggable for kanban purposes but they don't
+        // represent real Claude sessions — adding their fake session_id
+        // to a chat would just create a dead participant. Reject those.
+        if (draggedConv && (draggedConv.source === 'backlog' || draggedConv.source === 'github_pr')) {
+          showOpToast?.('Drag a real session row, not a backlog/issue card', 'error');
+          return;
+        }
+        const sid = (draggedConv && (draggedConv.session_id || draggedConv.id)) || dragSourceId;
+        const displayName = draggedConv ? (draggedConv.display_name || '') : '';
+        addSessionToGroupChat(path, sid, displayName);
+      });
+    });
+    // "+" button on the section header — opens an empty chat. Defined
+    // alongside the other ingroupchat handlers so we don't fan out
+    // listener wiring across functions.
+    const $newChatBtn = $convList.querySelector('[data-role="ingroupchat-new"]');
+    if ($newChatBtn) {
+      $newChatBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        createEmptyGroupChat();
+      });
+    }
     // Toggle handler for the GH Issues section header.
     const $ghIssuesToggle = $convList.querySelector('[data-role="ghissues-toggle"]');
     if ($ghIssuesToggle) {
@@ -7230,6 +7291,23 @@
     stopConvStream(paneId);
     stopSpawnStream();
     stopCodexLogPoller();
+    // If a group chat reader was active, tear it down so its 3s polling
+    // stops and the pane is restored to its original markup before the
+    // conv renderer tries to find #conversationsView. The reader used to
+    // require a "← Back" click; clicking another row now just switches.
+    if (_gcReaderInterval || _gcReaderPath || _gcReaderPaneOriginalHtml !== null) {
+      try {
+        if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
+        _gcReaderPath = null;
+        _gcLastMtime = null;
+        _gcPollFailCount = 0;
+        if (_gcReaderPaneEl && _gcReaderPaneOriginalHtml !== null) {
+          _gcReaderPaneEl.innerHTML = _gcReaderPaneOriginalHtml;
+        }
+        _gcReaderPaneOriginalHtml = null;
+        _gcReaderPaneEl = null;
+      } catch (_) {}
+    }
     mobileShowForCurrentMode();
     currentConversation = id;
     // Remember which card was last opened so we can re-open it on the
@@ -10760,6 +10838,66 @@
       showOpToast?.('Group chat archived');
     } catch (err) {
       showOpToast?.('Could not archive group chat: ' + ((err && err.message) || 'network error'), 'error');
+    }
+  }
+
+  async function addSessionToGroupChat(chatPath, sessionId, displayName) {
+    if (!chatPath || !sessionId) return;
+    try {
+      const res = await fetch('/api/group-chats/add-participant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: chatPath, session_id: sessionId, display_name: displayName || '',
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data || !data.ok) {
+        showOpToast?.('Could not add session: ' + ((data && data.error) || 'unknown'), 'error');
+        return;
+      }
+      try { await pollGcActive(); } catch (_) {}
+      if (data.already_participant) {
+        showOpToast?.('Already in this chat');
+      } else {
+        showOpToast?.('Session added to chat');
+      }
+    } catch (err) {
+      showOpToast?.('Could not add session: ' + ((err && err.message) || 'network error'), 'error');
+    }
+  }
+
+  async function createEmptyGroupChat() {
+    // Minimal v1 flow: prompt for the topic, POST to /api/coordinate
+    // with no session_ids and include_human=true so the human can drive
+    // the chat solo. Sessions can be drag-dropped in afterward via the
+    // add-participant endpoint.
+    let topic = '';
+    try { topic = (window.prompt('Topic for the new group chat:') || '').trim(); } catch (_) {}
+    if (!topic) return;
+    try {
+      const res = await fetch('/api/coordinate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_ids: [], topic, mode: 'topic',
+          sessions_meta: [], include_human: true,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data || !data.ok) {
+        showOpToast?.('Could not create chat: ' + ((data && data.error) || 'unknown'), 'error');
+        return;
+      }
+      try { await pollGcActive(); } catch (_) {}
+      showOpToast?.('Empty group chat created — drag sessions in to add them');
+      // Open the reader for the freshly-created chat so the user
+      // immediately sees their input strip.
+      if (data.chat_path) {
+        try { openGroupChatReader(data.chat_path, topic, 'topic', true); } catch (_) {}
+      }
+    } catch (err) {
+      showOpToast?.('Could not create chat: ' + ((err && err.message) || 'network error'), 'error');
     }
   }
 

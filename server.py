@@ -10500,10 +10500,13 @@ def _coordinate_sessions(payload):
     sessions_meta = payload.get("sessions_meta") or []
     include_human = bool(payload.get("include_human", True))
 
-    if not session_ids or not topic:
-        return {"ok": False, "error": "missing session_ids or topic"}
+    if not topic:
+        return {"ok": False, "error": "missing topic"}
     if mode not in ("topic", "git"):
         mode = "topic"
+    # session_ids can be empty — the chat file + sidecar are still created
+    # so the user can drag sessions in later or post into it as a solo room.
+    # The /group-chat injection loop below is a no-op for an empty list.
 
     slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:60] or "chat"
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -10932,6 +10935,58 @@ def _group_chat_set_archived(raw_path: str, archived: bool) -> dict:
         with _coord_lock:
             _active_coordinations.pop(real_path, None)
     return {"ok": True}
+
+
+def _group_chat_add_participant(raw_path: str, session_id: str, display_name: str = "") -> dict:
+    """Add a session to an existing chat: append to sidecar's session_ids /
+    name_map, then inject /group-chat into the session so it joins live.
+    Idempotent — re-adding an existing participant is a no-op success.
+    """
+    real_path = _resolve_group_chat_path(raw_path)
+    if not real_path:
+        return {"ok": False, "error": "forbidden"}
+    if not os.path.exists(real_path):
+        return {"ok": False, "error": "not found"}
+    sid = (session_id or "").strip()
+    if not sid:
+        return {"ok": False, "error": "missing session_id"}
+
+    sidecar = _load_group_chat_sidecar(real_path)
+    session_ids = list(sidecar.get("session_ids") or [])
+    name_map = dict(sidecar.get("name_map") or {})
+    topic = sidecar.get("topic") or ""
+    mode = sidecar.get("mode") or "topic"
+
+    already = sid in session_ids
+    if not already:
+        session_ids.append(sid)
+    if display_name and not name_map.get(sid):
+        name_map[sid] = display_name
+    elif sid not in name_map:
+        name_map[sid] = sid  # fall back to bare sid for the loop-detection map
+
+    if not _update_group_chat_sidecar(
+        real_path, session_ids=session_ids, name_map=name_map
+    ):
+        return {"ok": False, "error": "could not update sidecar"}
+
+    # If the chat had been dropped from the watcher (idle timeout, etc),
+    # bring it back in — adding a participant means the user expects it
+    # to be live again.
+    _register_coordination(real_path)
+
+    inject_result = {"ok": True, "skipped": "already a participant"}
+    if not already:
+        safe_topic = topic.replace('"', '\\"')
+        text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode}'
+        inject_result = _inject_text_into_session(sid, text)
+
+    return {
+        "ok": True,
+        "session_id": sid,
+        "already_participant": already,
+        "inject": inject_result,
+    }
 
 
 def _inject_text_into_session(session_id, text):
@@ -17503,6 +17558,29 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing path"})
                 return
             result = _group_chat_set_archived(chat_path, False)
+            if result.get("error") == "forbidden":
+                self.send_json(result, 403)
+            elif result.get("error") == "not found":
+                self.send_json(result, 404)
+            else:
+                self.send_json(result)
+        elif path == "/api/group-chats/add-participant":
+            # Drag-and-drop a session row onto a group-chat row in the
+            # sidebar — adds the session to the chat's sidecar and
+            # injects /group-chat into the session so it joins live.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            chat_path = (payload.get("path") or "").strip()
+            session_id = (payload.get("session_id") or "").strip()
+            display_name = (payload.get("display_name") or "").strip()
+            if not chat_path or not session_id:
+                self.send_json({"ok": False, "error": "missing path or session_id"})
+                return
+            result = _group_chat_add_participant(chat_path, session_id, display_name)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":
