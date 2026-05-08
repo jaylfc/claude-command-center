@@ -5719,15 +5719,45 @@
         // or not). The short 8-char hash is shown alongside each name so
         // the user can map the "— 25ea49ae 👋" markers in the chat
         // messages back to a participant in this list.
+        const partMeta = chat.participant_meta || {};
+        // Hashes (8-char) we'd be waiting on if a nudge fired right
+        // now — used to flag the participants whose response is most
+        // expected.
+        const waitingSet = new Set((chat.waiting_on_hashes || []).map(h => String(h).toLowerCase()));
         const partListHtml = partSids.map(sid => {
           const display = nameMap[sid] || sid;
           const trimmed = display.length > 60 ? display.slice(0, 57) + '…' : display;
           const shortHash = String(sid).slice(0, 8);
+          const m = partMeta[sid] || {};
+          // "Last activity" chip — uses session transcript mtime so
+          // it tracks what the main conversation list shows.
+          // last_activity from the API is unix SECONDS (file mtime),
+          // but timeAgo expects MILLISECONDS — multiply.
+          const lastActChip = m.last_activity
+            ? '<span class="conv-ingroupchat-participant-when" title="Last activity in this session">'
+                + escapeHtml(timeAgo(m.last_activity * 1000))
+              + '</span>'
+            : '';
+          // WIP chip — same yellow look as the main list. The label
+          // prefers the active tool name, falls back to "WIP".
+          const wipChip = m.wip
+            ? '<span class="conv-signal activity-working" title="' + escapeHtml(m.pending_tool || 'Agent is working') + '">'
+                + escapeHtml(m.pending_tool || 'WIP')
+              + '</span>'
+            : '';
+          // "Waiting" chip — flags the participant the watcher would
+          // ping next. Suppressed for closed chats (no nudge happens).
+          const waitingChip = (!isClosed && waitingSet.has(shortHash.toLowerCase()))
+            ? '<span class="conv-ingroupchat-waiting-chip" title="The next nudge would target this participant">waiting</span>'
+            : '';
           return '<div class="conv-ingroupchat-participant" data-role="ingroupchat-participant"'
             + ' data-session-id="' + escapeHtml(sid) + '"'
             + ' title="' + escapeHtml(display) + ' — click to open this session">'
             +   '<span class="conv-ingroupchat-participant-bullet">↳</span>'
             +   '<span class="conv-ingroupchat-participant-name">' + escapeHtml(trimmed) + '</span>'
+            +   wipChip
+            +   waitingChip
+            +   lastActChip
             +   '<span class="conv-ingroupchat-participant-hash" title="Session ID prefix used in chat message headers">' + escapeHtml(shortHash) + '</span>'
             +   '<button type="button" class="conv-ingroupchat-participant-remove"'
             +     ' data-role="ingroupchat-participant-remove"'
@@ -5736,6 +5766,44 @@
             +     ' title="Remove this session from the chat">×</button>'
             + '</div>';
         }).join('');
+        // Chat-row meta line: file mtime + who-wrote-last + waiting-on
+        // hint. Lets the user see at a glance whether the chat is
+        // moving and whose turn the orchestrator considers it.
+        // last_mtime from the API is unix SECONDS — convert to ms.
+        const chatAge = chat.last_mtime
+          ? '<span class="conv-ingroupchat-row-when" title="Last update to chat file">'
+              + escapeHtml(timeAgo(chat.last_mtime * 1000))
+            + '</span>'
+          : '';
+        let chatWaitingHint = '';
+        if (!isClosed) {
+          const waitingShortHashes = (chat.waiting_on_hashes || [])
+            .map(h => String(h).slice(0, 8).toLowerCase());
+          if (waitingShortHashes.length) {
+            const waitingNames = waitingShortHashes
+              .map(h => {
+                const fullSid = partSids.find(s => s.toLowerCase().startsWith(h));
+                return fullSid ? (nameMap[fullSid] || h) : h;
+              })
+              .map(n => n.length > 24 ? n.slice(0, 23) + '…' : n);
+            const lastAuthor = chat.last_author_hash;
+            const lastAuthorIsHuman = chat.last_author_is_human;
+            let summary;
+            if (lastAuthorIsHuman) {
+              summary = `Human → waiting on ${waitingNames.join(', ')}`;
+            } else if (lastAuthor) {
+              const lastFullSid = partSids.find(s => s.toLowerCase().startsWith(lastAuthor));
+              const lastName = lastFullSid ? (nameMap[lastFullSid] || lastAuthor) : lastAuthor;
+              const lastTrim = lastName.length > 18 ? lastName.slice(0, 17) + '…' : lastName;
+              summary = `${lastTrim} → waiting on ${waitingNames.join(', ')}`;
+            }
+            if (summary) {
+              chatWaitingHint = '<div class="conv-ingroupchat-row-waiting" title="Last writer → who the orchestrator will nudge next">'
+                + escapeHtml(summary)
+                + '</div>';
+            }
+          }
+        }
         return '<div class="conv-ingroupchat-chat' + (isClosed ? ' conv-ingroupchat-chat-closed' : '') + '">'
           + '<div class="conv-ingroupchat-row' + (isClosed ? ' conv-ingroupchat-row-closed' : '') + '"'
           +   ' data-role="ingroupchat-row"'
@@ -5747,6 +5815,7 @@
           +   '<span class="conv-ingroupchat-row-topic">' + topicLabel + '</span>'
           +   closedPill
           +   partLabel
+          +   chatAge
           +   '<button type="button" class="conv-ingroupchat-rename-btn"'
           +     ' data-role="ingroupchat-rename"'
           +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
@@ -5762,6 +5831,7 @@
           +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
           +     ' title="Archive this group chat">📦</button>'
           + '</div>'
+          + chatWaitingHint
           + (partListHtml ? '<div class="conv-ingroupchat-participants">' + partListHtml + '</div>' : '')
           + '</div>';
       }).join('');

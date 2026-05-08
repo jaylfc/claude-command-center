@@ -10935,6 +10935,104 @@ def _start_coordination_watcher() -> None:
     t.start()
 
 
+def _group_chat_participant_meta(session_id: str) -> dict:
+    """Cheap-ish status snapshot for one participant of a group chat.
+
+    Returns {last_activity, is_live, wip, pending_tool, sidecar_status,
+    needs_approval}. Used by the sidebar's indented participants list to
+    show whether each session is active, what tool is running, etc. —
+    the same chips the main conversation list uses, scoped to one row.
+
+    Cheap because it only reads the per-session sidecar JSON files
+    (small) and stats the transcript file. No git probes, no jsonl
+    parsing.
+    """
+    meta = {
+        "last_activity": 0,
+        "is_live": False,
+        "wip": False,
+        "pending_tool": None,
+        "sidecar_status": None,
+        "needs_approval": False,
+    }
+    if not session_id:
+        return meta
+    try:
+        cwd = find_session_cwd(session_id)
+    except Exception:
+        cwd = None
+    # Live status (cheap: ps grep + sidecar file presence).
+    try:
+        status = session_live_status(session_id, cwd) or {}
+    except Exception:
+        status = {}
+    meta["is_live"] = bool(status.get("live"))
+    # Transcript mtime — best proxy for "last activity" without
+    # jsonl-scanning the full transcript.
+    try:
+        if cwd:
+            jsonl = _canonical_conversation_path(cwd, session_id)
+            if jsonl and jsonl.exists():
+                meta["last_activity"] = jsonl.stat().st_mtime
+    except (OSError, ValueError):
+        pass
+    # Sidecar fields — only meaningful when live.
+    if meta["is_live"]:
+        sc = _read_sidecar_state(session_id) or {}
+        inflight = _read_in_flight_state(session_id) or {}
+        notif = _read_notification_state(session_id) or {}
+        meta["sidecar_status"] = sc.get("status") if sc else None
+        meta["pending_tool"] = (inflight or sc).get("tool")
+        meta["wip"] = bool(
+            sc and sc.get("status") == "active"
+            and (inflight or sc.get("tool"))
+        )
+        meta["needs_approval"] = bool(notif)
+    return meta
+
+
+def _group_chat_compute_waiting(real_path: str, session_ids: list, name_map: dict) -> dict:
+    """Inspect the chat tail and return who we're 'waiting on' for the row
+    summary. Mirrors the nudge-targeting logic so the sidebar's hint
+    matches what the watcher would actually do on the next tick.
+
+    Returns {last_author_hash, last_author_is_human, waiting_on_hashes}.
+    waiting_on_hashes is the list of 8-char prefixes that would be pinged
+    if a nudge fired right now.
+    """
+    out = {"last_author_hash": None, "last_author_is_human": False, "waiting_on_hashes": []}
+    try:
+        with open(real_path, "r", encoding="utf-8") as fh:
+            tail = fh.read()[-12000:]
+    except OSError:
+        return out
+    pat = re.compile(
+        r'^##\s+.+?—\s+(?:([0-9a-fA-F]{8})\b|(Human)\b)',
+        re.MULTILINE,
+    )
+    authors = [(m.group(1) or m.group(2)) for m in pat.finditer(tail)]
+    if not authors:
+        return out
+    last = authors[-1]
+    if last == "Human":
+        out["last_author_is_human"] = True
+        prior = next((a for a in reversed(authors[:-1]) if a != "Human"), None)
+        if prior:
+            out["last_author_hash"] = prior.lower()
+            # Waiting on the agent the human likely addressed.
+            out["waiting_on_hashes"] = [prior.lower()]
+    else:
+        out["last_author_hash"] = last.lower()
+        # Waiting on everyone EXCEPT the last writer.
+        last_lower = last.lower()
+        out["waiting_on_hashes"] = [
+            sid[:8].lower()
+            for sid in (session_ids or [])
+            if not sid.lower().startswith(last_lower)
+        ]
+    return out
+
+
 def _list_group_chats(include_archived: bool = False, only_archived: bool = False) -> list:
     """Scan ~/.claude/group-chats/ and build a list of chat entries.
 
@@ -10985,16 +11083,26 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
         if status == "closed" and not closed_at:
             closed_at = stat.st_mtime
         last_activity = (active_meta.get(md_path) or {}).get("last_activity") or stat.st_mtime
+        sids = meta.get("session_ids") or []
+        nm = meta.get("name_map") or {}
+        # Per-participant status snapshot (live, last activity, WIP).
+        # Keyed by full session_id so the UI can match it against the
+        # name_map / participants list it already renders.
+        participant_meta = {sid: _group_chat_participant_meta(sid) for sid in sids}
+        # "Who are we waiting for" hint for the chat row, mirroring the
+        # nudge-targeting logic so the sidebar's summary matches what
+        # the watcher would actually do.
+        waiting = _group_chat_compute_waiting(md_path, sids, nm)
         out.append({
             "path": md_path,
             "path_tilde": "~/.claude/group-chats/" + os.path.basename(md_path),
             "topic": meta.get("topic", ""),
             "mode": meta.get("mode", "topic"),
-            "session_ids": meta.get("session_ids") or [],
+            "session_ids": sids,
             # name_map (session_id → display_name) lets the UI render
             # the participant list under each chat row without an extra
             # round-trip per session.
-            "name_map": meta.get("name_map") or {},
+            "name_map": nm,
             "status": status,
             "started_at": meta.get("started_at"),
             "closed_at": closed_at,
@@ -11002,6 +11110,10 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
             "last_mtime": stat.st_mtime,
             "last_activity": last_activity,
             "message_count": _group_chat_message_count(md_path),
+            "participant_meta": participant_meta,
+            "last_author_hash": waiting["last_author_hash"],
+            "last_author_is_human": waiting["last_author_is_human"],
+            "waiting_on_hashes": waiting["waiting_on_hashes"],
         })
     out.sort(key=lambda c: c["last_mtime"], reverse=True)
     return out
