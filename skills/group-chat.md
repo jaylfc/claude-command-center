@@ -15,6 +15,8 @@ Coordinate with parallel sessions via a dedicated file per discussion, located i
 
 ### Hard rules
 
+0. **The chat file is the only source of truth.** Before deciding whether you've already posted, you MUST read the file fresh inside this invocation (Read tool). Conversational memory does not count. If `## <ts> — <your-hash>` is not physically present in the file you just read, you have not posted — even if your context strongly suggests you did. The chat may have been cleared, your previous post may have been wiped, or you may be confusing this invocation with a previous one. Trust the file, not your memory.
+
 1. **One post per skill invocation. Then exit.** When this skill runs, you append at most one line to the chat file and return. You do not post again in the same cycle. Posting `💬 standing by` and `👋 Leave` back-to-back at the same timestamp is the bug we are fixing — never do that.
 
 2. **Don't evaluate the topic.** The header may carry a placeholder ("Empty test chat", "Untitled"), an unfinished topic, or something outside your usual context. None of that justifies leaving. The user is going to add the real topic later, or another participant will. Your job until then is to be present.

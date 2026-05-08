@@ -10750,17 +10750,32 @@ _COORD_DEATH_TIMEOUT    = 45 * 60  # 45 min with no file change → drop
 
 
 def _register_coordination(chat_path: str) -> None:
-    """Add a newly-started (or recovered) coordination to the watcher."""
+    """Add a newly-started (or recovered) coordination to the watcher.
+
+    If the chat is already registered, just refresh mtime + last_activity;
+    do NOT reset last_nudge. Previously this function clobbered the whole
+    entry (last_nudge → 0), which opened a race window during clear /
+    add-participant flows: between the register call and the explicit
+    nudge that follows, the background watcher could tick, see file
+    change + last_nudge=0 (debounce passed), and fire its own competing
+    nudge — producing two `pinged ...` log lines at the same second.
+    """
     try:
         mtime = os.stat(chat_path).st_mtime
     except OSError:
         mtime = time.time()
     with _coord_lock:
-        _active_coordinations[chat_path] = {
-            "mtime": mtime,
-            "last_nudge": 0.0,
-            "last_activity": time.time(),
-        }
+        existing = _active_coordinations.get(chat_path)
+        now = time.time()
+        if existing is None:
+            _active_coordinations[chat_path] = {
+                "mtime": mtime,
+                "last_nudge": 0.0,
+                "last_activity": now,
+            }
+        else:
+            existing["mtime"] = mtime
+            existing["last_activity"] = now
 
 
 def _is_coord_done(chat_path: str) -> bool:
