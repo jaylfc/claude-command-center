@@ -3235,13 +3235,11 @@
   let _gcLastMtime = null;
   let _gcPollFailCount = 0;
   let _gcLastNudgeTime = 0;
-  // The reader replaces the pane's full innerHTML, blowing away
-  // #conversationsView / #convInputBar etc. Stash the original markup
-  // here so selectConversation can restore the pane's structure when
-  // the user clicks another conv (otherwise the conv renderer can't
-  // find #conversationsView and silently no-ops).
-  let _gcReaderPaneOriginalHtml = null;
-  let _gcReaderPaneEl = null;
+  // Reader is rendered INTO #conversationsView (not replacing the pane),
+  // so the surrounding #convInputBar / #convInputContext element refs
+  // captured at boot stay live. We only hide those bars while the reader
+  // is mounted; the cleanup re-shows them.
+  let _gcReaderHiddenInputBar = false;
 
   function openGroupChatReader(chatPath, topic, mode, includeHuman) {
     _gcReaderPath = chatPath;
@@ -3249,19 +3247,12 @@
     _gcPollFailCount = 0;
     _gcLastNudgeTime = 0;
 
-    const pane = document.querySelector('.conv-pane');
-    if (!pane) return;
-    // Stash the pane's original markup before we overwrite it. We only
-    // capture on the FIRST open — re-opening a reader while one is already
-    // mounted would otherwise overwrite the stash with reader markup.
-    if (_gcReaderPaneEl !== pane || _gcReaderPaneOriginalHtml === null) {
-      _gcReaderPaneOriginalHtml = pane.innerHTML;
-      _gcReaderPaneEl = pane;
-    }
+    const view = document.getElementById('conversationsView');
+    if (!view) return;
 
     const topicSafe = escapeHtml(topic);
     const modeSafe = escapeHtml(mode);
-    pane.innerHTML = '<div class="gc-reader" id="gcReader">'
+    view.innerHTML = '<div class="gc-reader" id="gcReader">'
       + '<div class="gc-reader-header">'
         + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
         + '<span class="gc-mode-badge">' + modeSafe + '</span>'
@@ -3274,6 +3265,14 @@
           + '</div>'
         : '')
       + '</div>';
+    // Hide the standard send-to-terminal input bar while the reader is
+    // mounted — the reader has its own #gcInputRow and the standard one
+    // would be confusing duplicate UI.
+    const inputBar = document.getElementById('convInputBar');
+    const inputCtx = document.getElementById('convInputContext');
+    if (inputBar) inputBar.style.display = 'none';
+    if (inputCtx) inputCtx.style.display = 'none';
+    _gcReaderHiddenInputBar = true;
 
     if (includeHuman) {
       const gcSendBtn = document.getElementById('gcSendBtn');
@@ -3287,6 +3286,35 @@
     if (_gcReaderInterval) clearInterval(_gcReaderInterval);
     pollGroupChatReader();
     _gcReaderInterval = setInterval(pollGroupChatReader, 3000);
+  }
+
+  // The /group-chat skill stamps each message with the session's first
+  // 8 chars (e.g. "— 25ea49ae 👋"). Expand those into "name — hash" using
+  // the name_map of any active chat with a matching participant. Falls
+  // through unchanged when no match (truncated logs, archived chats not
+  // in _gcActiveChats, etc.).
+  function _gcExpandHashIds(text) {
+    if (!text || !_gcActiveChats || !_gcActiveChats.length) return text;
+    const byShort = {};
+    for (const chat of _gcActiveChats) {
+      const nm = chat.name_map || {};
+      for (const fullSid of Object.keys(nm)) {
+        const short = String(fullSid).slice(0, 8).toLowerCase();
+        if (short && !byShort[short]) byShort[short] = nm[fullSid];
+      }
+    }
+    if (!Object.keys(byShort).length) return text;
+    // Match the chat-message author marker: " — <8 hex chars>" preceded
+    // by something other than a hex char (so we don't gobble parts of
+    // longer ids). Case-insensitive — UUIDs are usually lowercase but
+    // be defensive.
+    return text.replace(
+      /(\s—\s)([0-9a-fA-F]{8})\b/g,
+      (m, dash, hash) => {
+        const name = byShort[hash.toLowerCase()];
+        return name ? `${dash}${name} (${hash})` : m;
+      }
+    );
   }
 
   async function pollGroupChatReader() {
@@ -3305,7 +3333,7 @@
         const isFirstLoad = _gcLastMtime === null;
         _gcLastMtime = data.mtime;
         const atBottom = body.scrollHeight - body.scrollTop <= body.clientHeight + 40;
-        body.innerHTML = renderMarkdown(data.content);
+        body.innerHTML = renderMarkdown(_gcExpandHashIds(data.content));
         if (atBottom) body.scrollTop = body.scrollHeight;
         // Nudge all participants when content changes (but not on first load, and debounced to 15s).
         if (!isFirstLoad) {
@@ -3349,8 +3377,16 @@
     _gcReaderPath = null;
     _gcLastMtime = null;
     _gcPollFailCount = 0;
-    const pane = document.querySelector('.conv-pane');
-    if (pane) pane.innerHTML = '';
+    // Restore the standard input bar (mirror what the selectConversation
+    // teardown does). Caller is expected to either selectConversation
+    // afterwards or live with an empty conversations view.
+    if (_gcReaderHiddenInputBar) {
+      const inputBar = document.getElementById('convInputBar');
+      const inputCtx = document.getElementById('convInputContext');
+      if (inputBar) inputBar.style.display = '';
+      if (inputCtx) inputCtx.style.display = '';
+      _gcReaderHiddenInputBar = false;
+    }
     if (typeof currentConversation === 'string' && currentConversation) {
       try { selectConversation(currentConversation); } catch (_) {}
     }
@@ -5680,15 +5716,19 @@
         // Indented participant list under the chat row. Click to jump
         // to that session in the conv pane (selectConversation handles
         // the GC-reader teardown so it works whether the reader is open
-        // or not).
+        // or not). The short 8-char hash is shown alongside each name so
+        // the user can map the "— 25ea49ae 👋" markers in the chat
+        // messages back to a participant in this list.
         const partListHtml = partSids.map(sid => {
           const display = nameMap[sid] || sid;
           const trimmed = display.length > 60 ? display.slice(0, 57) + '…' : display;
+          const shortHash = String(sid).slice(0, 8);
           return '<div class="conv-ingroupchat-participant" data-role="ingroupchat-participant"'
             + ' data-session-id="' + escapeHtml(sid) + '"'
             + ' title="' + escapeHtml(display) + ' — click to open this session">'
             +   '<span class="conv-ingroupchat-participant-bullet">↳</span>'
             +   '<span class="conv-ingroupchat-participant-name">' + escapeHtml(trimmed) + '</span>'
+            +   '<span class="conv-ingroupchat-participant-hash" title="Session ID prefix used in chat message headers">' + escapeHtml(shortHash) + '</span>'
             + '</div>';
         }).join('');
         return '<div class="conv-ingroupchat-chat' + (isClosed ? ' conv-ingroupchat-chat-closed' : '') + '">'
@@ -7341,20 +7381,22 @@
     stopSpawnStream();
     stopCodexLogPoller();
     // If a group chat reader was active, tear it down so its 3s polling
-    // stops and the pane is restored to its original markup before the
-    // conv renderer tries to find #conversationsView. The reader used to
-    // require a "← Back" click; clicking another row now just switches.
-    if (_gcReaderInterval || _gcReaderPath || _gcReaderPaneOriginalHtml !== null) {
+    // stops and the standard input bar is restored. The reader was
+    // rendered INTO #conversationsView so the surrounding pane structure
+    // is intact — selectConversation will repopulate the view normally.
+    if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
       try {
         if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
         _gcReaderPath = null;
         _gcLastMtime = null;
         _gcPollFailCount = 0;
-        if (_gcReaderPaneEl && _gcReaderPaneOriginalHtml !== null) {
-          _gcReaderPaneEl.innerHTML = _gcReaderPaneOriginalHtml;
+        if (_gcReaderHiddenInputBar) {
+          const inputBar = document.getElementById('convInputBar');
+          const inputCtx = document.getElementById('convInputContext');
+          if (inputBar) inputBar.style.display = '';
+          if (inputCtx) inputCtx.style.display = '';
+          _gcReaderHiddenInputBar = false;
         }
-        _gcReaderPaneOriginalHtml = null;
-        _gcReaderPaneEl = null;
       } catch (_) {}
     }
     mobileShowForCurrentMode();

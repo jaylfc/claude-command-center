@@ -4490,6 +4490,12 @@
 }
 #convList .conv-ingroupchat-participant-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1 1 auto; min-width: 0;
+}
+#convList .conv-ingroupchat-participant-hash {
+  font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+  font-size: 10px; opacity: 0.55;
+  flex-shrink: 0; padding: 0 4px;
 }
 #convList .conv-ingroupchat-chat-closed .conv-ingroupchat-participant {
   opacity: 0.55;
