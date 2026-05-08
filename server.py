@@ -10638,33 +10638,43 @@ def _group_chat_nudge(path):
     only_sid = None
     try:
         with open(real_path, "r", encoding="utf-8") as fh:
-            tail = fh.read()[-3000:]
-        # Capture each author header. Group 1 is the agent hash if any,
-        # group 2 catches Human posts. Iterate to keep order.
+            content = fh.read()
+        # Read the LAST 12K of bytes — long enough to span tens of system
+        # `pinged` lines plus the most recent participant post(s). The old
+        # 3K window was too small once the chat got busy: with one nudge
+        # logged per minute, the trailing window quickly becomes 100%
+        # system noise, the author regex finds nothing, exclude_sid
+        # stays None, and the nudge falls through to ping-everyone — a
+        # self-perpetuating loop with no real activity behind it.
+        tail = content[-12000:]
         author_pat = re.compile(
             r'^##\s+.+?—\s+(?:([0-9a-fA-F]{8})\b|(Human)\b)',
             re.MULTILINE,
         )
         authors = [(m.group(1) or m.group(2)) for m in author_pat.finditer(tail)]
-        # Strip trailing repeats of the same author (an agent reposting
-        # without a new question shouldn't shift the targeting).
-        if authors:
-            last = authors[-1]
-            if last == "Human":
-                # Find the most recent non-Human author before this turn.
-                prior = next((a for a in reversed(authors[:-1]) if a != "Human"), None)
-                if prior:
-                    last_hash = prior.lower()
-                    for sid in session_ids:
-                        if sid.lower().startswith(last_hash):
-                            only_sid = sid
-                            break
-            else:
-                last_hash = last.lower()
+        if not authors:
+            # No author has posted in the recent window — only system
+            # nudges. Don't fire; there's nothing for participants to
+            # respond to and another ping just feeds the loop. This is
+            # the dominant case when a chat goes quiet for an extended
+            # period; the watcher's idle-timeout will eventually drop it.
+            return {"ok": True, "results": [], "skipped": "no recent author"}
+        last = authors[-1]
+        if last == "Human":
+            # Find the most recent non-Human author before this turn.
+            prior = next((a for a in reversed(authors[:-1]) if a != "Human"), None)
+            if prior:
+                last_hash = prior.lower()
                 for sid in session_ids:
                     if sid.lower().startswith(last_hash):
-                        exclude_sid = sid
+                        only_sid = sid
                         break
+        else:
+            last_hash = last.lower()
+            for sid in session_ids:
+                if sid.lower().startswith(last_hash):
+                    exclude_sid = sid
+                    break
     except OSError:
         pass
 
