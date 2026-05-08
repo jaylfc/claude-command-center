@@ -40,6 +40,13 @@ venv/
 # Local-only — see GROUP_CHAT.md itself for the convention.
 /GROUP_CHAT.md
 
+# Local mirror of multi-session coordination chats. The canonical store is
+# ~/.claude/group-chats/; anything dropped at repo root is a stray.
+/group-chats/
+
+# Local debug dumps from session/registry inspection — never source.
+/sessions_debug.json
+
 # Pre-publish workspace — audit reports, archive prep, etc.
 /oss-prep/
 
