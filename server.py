@@ -10864,7 +10864,14 @@ def _coordination_watcher() -> None:
 
 
 def _start_coordination_watcher() -> None:
-    """Recover any in-progress coordinations from disk and start the watcher thread."""
+    """Recover any in-progress coordinations from disk and start the watcher thread.
+
+    Skip chats whose sidecar has `archived: true` — those have been
+    explicitly retired by the user and must not be re-registered. Without
+    this filter, a server restart silently un-archives chats from the
+    watcher's perspective and resumes nudging participants of chats the
+    user thought were closed for good.
+    """
     group_chats_dir = os.path.expanduser("~/.claude/group-chats")
     cutoff = time.time() - _COORD_DEATH_TIMEOUT
     try:
@@ -10876,6 +10883,9 @@ def _start_coordination_watcher() -> None:
             try:
                 if os.stat(md_path).st_mtime < cutoff:
                     continue   # too old
+                meta = _load_group_chat_sidecar(md_path)
+                if meta.get("archived"):
+                    continue   # explicitly retired — don't resurrect
                 _register_coordination(md_path)
             except OSError:
                 continue
