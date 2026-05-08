@@ -3196,8 +3196,8 @@
       cwd: cb.dataset.cwd || '',
     }));
 
-    if (sessionIds.length < 2) {
-      if (errorEl) { errorEl.textContent = 'Select at least 2 sessions.'; errorEl.classList.add('visible'); }
+    if (sessionIds.length < 1) {
+      if (errorEl) { errorEl.textContent = 'Select at least 1 session.'; errorEl.classList.add('visible'); }
       return;
     }
 
@@ -3218,6 +3218,10 @@
       selectedListIds.clear();
       document.querySelectorAll('.conv-item.list-selected').forEach(el => el.classList.remove('list-selected'));
       updateCoordToolbar();
+      // Refresh the active-coordinations cache + sidebar header immediately
+      // so the "In Group Chat" section appears right after creation rather
+      // than waiting up to 15s for the next pollGcActive tick.
+      try { pollGcActive(); } catch (_) {}
       openGroupChatReader(result.chat_path, topic, mode, includeHuman);
     } catch (err) {
       if (errorEl) { errorEl.textContent = 'Request failed: ' + err.message; errorEl.classList.add('visible'); }
@@ -10542,8 +10546,13 @@
   async function pollGcActive() {
     try {
       const data = await fetch('/api/group-chats/active').then(r => r.json());
-      const prev = _gcActiveChats.length;
+      // Compare by path-set, not just length — a brand-new chat with the
+      // same count as before (rare, but possible if one ended in the same
+      // tick) would otherwise skip the re-render and the header would
+      // never refresh until the next archive poll.
+      const prevKey = _gcActiveChats.map(c => c.path || c.path_tilde || '').sort().join('|');
       _gcActiveChats = (data.chats || []);
+      const nextKey = _gcActiveChats.map(c => c.path || c.path_tilde || '').sort().join('|');
       if ($gcActiveBtn) {
         if (_gcActiveChats.length === 0) {
           $gcActiveBtn.style.display = 'none';
@@ -10558,7 +10567,7 @@
       // Re-render the list whenever the active-chat set changes so the
       // "In Group Chat" header appears/disappears without waiting for
       // the next archive poll.
-      if (_gcActiveChats.length !== prev) {
+      if (nextKey !== prevKey) {
         const $s = document.getElementById('convSearch');
         renderArchiveList($s ? $s.value : '');
       }
