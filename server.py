@@ -10549,7 +10549,7 @@ def _coordinate_sessions(payload):
     safe_topic = topic.replace('"', '\\"')
     results = []
     for sid in session_ids:
-        text = f'/group-chat chat="{chat_path}" topic="{safe_topic}" mode={mode}'
+        text = f'/group-chat chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
         inject_result = _inject_text_into_session(sid, text)
         results.append({
             "session_id": sid,
@@ -10651,7 +10651,7 @@ def _group_chat_nudge(path):
         if sid == exclude_sid:
             results.append({"session_id": sid, "ok": True, "skipped": True})
             continue
-        text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode}'
+        text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
         r = _inject_text_into_session(sid, text)
         results.append({"session_id": sid, "ok": bool(r.get("ok")), "error": r.get("error", "")})
         if r.get("ok"):
@@ -11208,7 +11208,7 @@ def _group_chat_add_participant(raw_path: str, session_id: str, display_name: st
     inject_result = {"ok": True, "skipped": "already a participant"}
     if not already:
         safe_topic = topic.replace('"', '\\"')
-        text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode}'
+        text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
         inject_result = _inject_text_into_session(sid, text)
         added_label = name_map.get(sid) or display_name or sid
         _group_chat_log_system(real_path, f"added `{added_label}` ({sid[:8]})")

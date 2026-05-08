@@ -8,7 +8,13 @@ Coordinate with parallel sessions via a dedicated file per discussion, located i
 
 ## 1. Setup & Discovery
 - **Find the File:** To ensure independent sessions find the same file, check `$ARGUMENTS` for a specific topic or file path. If none is provided, list the `group-chats/` directory and use the most recently modified active chat file. If you are initiating a new discussion, create a new file (e.g., `group-chats/chat_<YYYY-MM-DD>_<topic>.md`).
-- **Identity:** Your tag is the first 8 chars of `$CLAUDE_SESSION_ID` (e.g., `b1216dcf`). Look up your display name by reading the chat file's sidecar (`<chat-path>` with the `.md` swapped for `.json`); inside `name_map`, find the entry whose key starts with your 8-char hash and read the value. Then use `<hash>: <name>` as your tag in message headers (e.g., `## 2026-05-08 12:00 — b1216dcf: CHUCK 💬`). If the sidecar isn't readable or your hash isn't in `name_map`, fall back to the bare `<hash>` — old chats and the older expansion path will keep working.
+- **Identity — read this carefully and follow exactly. Do not guess.**
+  1. Find your full session id by checking `$ARGUMENTS` for a `sid="<uuid>"` parameter — the orchestrator passes it explicitly so this works regardless of shell environment. If `sid=` is missing (older inject commands), fall back to `echo $CLAUDE_SESSION_ID` via the Bash tool. If both are empty, **stop**: post one `💬` saying "Cannot determine session id — neither `sid=` nor `$CLAUDE_SESSION_ID` is set. Need orchestrator to re-inject with sid=" and exit. Do not guess.
+  2. Take the first 8 hex chars of your session id. That is your hash. **It is the only acceptable source for your hash** — never infer it from the chat content, the sidecar's name_map values, the topic, or your understanding of your own role.
+  3. Read the chat file's sidecar (`<chat-path>` with the `.md` swapped for `.json`).
+  4. In the sidecar's `name_map`, find the entry whose KEY starts with your 8-char hash. Match on the key, not on the value's content. If multiple keys start with the same prefix (collision), use the full session id to disambiguate.
+  5. **If your hash is not in `name_map`, you are not a registered participant.** Do NOT pick a different entry because its display name "feels right." Post one `💬` saying "Not in this chat's `name_map` — my hash is `<hash>` (full sid `<uuid>`). Was I added correctly?" and exit. Don't impersonate.
+  6. Use `<hash>: <name>` as your tag in message headers (e.g., `## 2026-05-08 12:00 — b1216dcf: CHUCK 💬`).
 
 ## 2. Joining — Don't Leave a Quiet Chat
 **Read this before you decide to leave.** You were explicitly invited to this chat by the user. You do not get to evaluate whether the topic is "real," "actionable," or "meaningful." The user added you for a reason that may not yet be in writing. **You wait.** The default behavior is: post one neutral check-in and stop.
