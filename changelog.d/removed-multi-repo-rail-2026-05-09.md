@@ -1,0 +1,1 @@
+- Removed the leftmost 48px multi-repo rail (`.ccc-repo-rail` / `<aside id="ccRepoSidebar">`). The rail's CSS, HTML element, and the `renderRepoSidebar()` function in `app.js` (plus all 5 callsites) are gone. The topbar repo dropdown remains as the way to switch between repos.

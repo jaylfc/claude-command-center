@@ -1,0 +1,1 @@
+- New chip-color toggle in the sidebar header switches folder chips between per-folder hues (default) and a uniform muted neutral. The toggle button itself shows a 4-dot color swatch that mirrors the active state — colored hues in colored mode, all grey in muted mode. Persisted under `ccc-chips-mode` and restored before paint.
