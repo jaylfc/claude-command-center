@@ -1,0 +1,1 @@
+- Dismissible PWA install banner surfaced in tab mode with platform-specific copy (Chrome/Edge get a one-click Install button wired to `beforeinstallprompt`; macOS Safari and iOS Safari get the right manual-install instructions). 14-day dismissal via `localStorage`; auto-hides if the app is installed mid-session.

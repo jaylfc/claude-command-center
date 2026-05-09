@@ -4,23 +4,74 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230d1117'/><text x='32' y='48' text-anchor='middle' font-family='-apple-system,Helvetica,Arial,sans-serif' font-size='44' font-weight='700' fill='%23d97757'>%E2%8C%98</text></svg>">
+<!-- Installable-app metadata. The manifest + service worker turn CCC into a
+     PWA so users can "Add to Dock" (Safari) or "Install app" (Chrome/Edge)
+     and run it in its own window without browser chrome. The CSS
+     `@media (display-mode: standalone)` rules lean into that mode with a
+     more focused look; the regular browser experience is unchanged. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0d1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="CCC">
+<link rel="apple-touch-icon" href="/static/icon.svg">
+<!-- Inter, loaded for the standalone-mode "Omnara look" font upgrade. The
+     base UI keeps `-apple-system` (SF Pro) when not in standalone — only
+     the @media (display-mode: standalone) block in app.css opts into
+     Inter. Preconnect lets the font fetch start in parallel with app.css.
+     `display=swap` means the system font paints first, then Inter swaps
+     in on load — no FOIT, just a brief FOUT. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 <title>Claude Command Center</title>
 <link rel="stylesheet" href="/static/app.css">
 <!-- Optional Morning side-nav. Loaded conditionally based on the feature
      flag so installs without the morning plugin don't get a 404 in the
      console + a stranded 52px left gutter. The /api/features endpoint is
-     always available and returns {morning: false} when the plugin is absent. -->
+     always available and returns {morning: false} when the plugin is absent.
+
+     Skipped entirely when running as an installed PWA (display-mode:
+     standalone or window-controls-overlay). The standalone window opts
+     into a focused single-pane look; the leftmost rail of repo letter
+     avatars is browser-mode-only chrome. Hiding via CSS alone wasn't
+     enough because side-nav.js dynamically injects `body { padding-left:
+     52px }` after we paint, which shifts the layout regardless of
+     `display: none` on the rail itself. The right fix is to never load
+     the script in standalone mode. -->
 <script>
-  fetch('/api/features').then(r => r.json()).then(f => {
-    if (!f || !f.morning) return;
-    document.body.classList.add('has-side-nav');  // CSS shifts topbar 52px right
-    const s = document.createElement('script');
-    s.src = '/static/morning/side-nav.js';
-    document.head.appendChild(s);
-  }).catch(() => {});
+  (function () {
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      window.matchMedia('(display-mode: window-controls-overlay)').matches ||
+      window.matchMedia('(display-mode: minimal-ui)').matches ||
+      window.navigator.standalone === true;  // legacy iOS Safari flag
+    if (isStandalone) return;
+    fetch('/api/features').then(r => r.json()).then(f => {
+      if (!f || !f.morning) return;
+      document.body.classList.add('has-side-nav');  // CSS shifts topbar 52px right
+      const s = document.createElement('script');
+      s.src = '/static/morning/side-nav.js';
+      document.head.appendChild(s);
+    }).catch(() => {});
+  })();
 </script>
 </head>
 <body>
+  <!-- PWA install banner (tab-mode only). Hidden by default; surfaced after
+       a short delay if the page is NOT running standalone, with copy
+       tailored to the current platform. Dismissal is persisted for 14
+       days in localStorage so it doesn't nag declined visitors. The
+       Install button is wired to a stashed `beforeinstallprompt` event
+       on Chrome/Edge; Safari (mac) and iOS get instruction text only. -->
+  <div id="pwaInstallBanner" class="pwa-install-banner" hidden role="dialog" aria-live="polite" aria-label="Install CCC as a standalone app">
+    <button class="pwa-install-banner__close" id="pwaInstallClose" type="button" aria-label="Dismiss install banner">&times;</button>
+    <div class="pwa-install-banner__title">Install Claude Command Center</div>
+    <div class="pwa-install-banner__body" id="pwaInstallBody"></div>
+    <div class="pwa-install-banner__actions">
+      <button id="pwaInstallBtn" class="pwa-install-banner__cta" type="button" hidden>Install</button>
+    </div>
+  </div>
   <!-- FOIT guard: read the persisted layout choice synchronously and apply
        the body class BEFORE any layout paint. Without this, the sidebar
        briefly renders for kanban-split users (whose sidebar is display:none)
@@ -207,22 +258,45 @@
               '<div class="ccc-loading-detail">Scanning Claude Code transcripts across every folder. Faster on subsequent loads.</div>';
           }
         }
+        // Status-position class restore — has to run before first paint so
+        // the layout doesn't flash from "top strip" to "right rail".
+        // Persisted as `ccc-status-pos` ('top' | 'right'); default 'top'.
+        try {
+          const pos = localStorage.getItem('ccc-status-pos');
+          if (pos === 'right') document.body.classList.add('status-pos-right');
+        } catch (_) {}
+        // Chip color mode — same FOIT-guard reasoning. Persisted as
+        // `ccc-chips-mode` ('color' default, 'muted' alt).
+        try {
+          const m = localStorage.getItem('ccc-chips-mode');
+          if (m === 'muted') document.body.classList.add('chips-muted');
+        } catch (_) {}
       } catch (_) {}
     })();
   </script>
 
-  <!-- Multi-repo rail — vertical icon strip on the left edge. Populated by
-       renderRepoSidebar() from archiveData. Empty until the archive loads;
-       body.has-repo-rail is toggled by the renderer so the layout doesn't
-       waste 48px when there's nothing to show. -->
-  <aside id="ccRepoSidebar" class="ccc-repo-rail" role="navigation" aria-label="Repos"></aside>
-
   <div class="sidebar">
     <div class="sidebar-header">
       <a href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Claude Command Center — open the README on GitHub" style="color:inherit;text-decoration:none;">Claude Command Center</a>
+      <!-- Top-left alerts strip. Hosts always-visible app-level signals
+           (Update pill, History-stale alert if indexing >24h behind, etc.)
+           Items are populated at boot by JS that re-parents nodes from
+           `.ccc-topbar`. Empty by default; collapses via :empty rule. -->
+      <div class="sidebar-top-alerts" id="sidebarTopAlerts" data-role="top-alerts"></div>
       <div class="sidebar-header-actions">
         <button id="historyBtn" class="sh-btn" title="Search past Claude Code conversations across every project on this Mac (powered by the local claude-index). Shortcut: /" aria-label="Search past conversations">&#128269; History</button>
         <button class="conv-kanban-toggle sh-btn" id="convKanbanToggle" title="Toggle Kanban board view" aria-label="Toggle Kanban board view"><span aria-hidden="true">&#9783;</span> Board</button>
+        <!-- Status position toggle. Two states: top (status strip above the
+             input — default) and right (status moved into a 260px right
+             rail beside the conversation pane). Persisted under
+             `ccc-status-pos`; the body class is restored on page load
+             before first paint to avoid a layout flash. -->
+        <button id="statusPosToggle" class="sh-btn" title="Move status (branch / context / cost / model) between the strip above the input and a right-side rail" aria-label="Toggle status position"><span aria-hidden="true" id="statusPosIcon">&#9707;</span></button>
+        <!-- Folder chip color toggle. Two states: color (per-folder hue —
+             default) and muted (uniform neutral). Persisted under
+             `ccc-chips-mode`. The body class `chips-muted` flips the
+             palette via CSS so no chip needs to re-render. -->
+        <button id="chipsColorToggle" class="sh-btn" title="Toggle colored / muted folder chips" aria-label="Toggle folder chip colors"><span aria-hidden="true" id="chipsColorIcon">&#9899;</span></button>
       </div>
     </div>
 
@@ -259,6 +333,12 @@
       <div class="attention-list" id="attentionList"></div>
     </div>
 
+    <!-- Global app-level actions (History indexing pill, Stats, Report a bug,
+         Worktrees). Populated at boot by JS that moves these buttons here
+         from `.ccc-topbar` in the conversation toolbar — they aren't
+         conversation-scoped, so they don't belong above a single conv pane. -->
+    <div class="sidebar-global-actions" id="sidebarGlobalActions" data-role="global-actions"></div>
+
     <!-- Bottom-mounted settings strip, Claude-Desktop-style -->
     <div class="sidebar-footer">
       <div class="sidebar-footer-spacer"></div>
@@ -287,6 +367,12 @@
               </div>
             </details>
           </div>
+          <div class="pop-divider"></div>
+          <!-- Slot for app-level actions moved out of the conv toolbar
+               (Terminal panel toggle, History indexing status, Worktrees,
+               Stats, Report a bug, Font A-/A+). Populated at boot by JS;
+               the items get the .pop-item style via the menu wrapper. -->
+          <div class="settings-menu-slot" id="settingsMenuSlot" data-role="settings-menu-slot"></div>
           <div class="pop-divider"></div>
           <button class="pop-item" type="button" id="networkAccessBtn"><span class="pop-icon">⇄</span><span>Network access…</span></button>
           <a class="pop-item" href="https://github.com/amirfish1/claude-command-center#readme" target="_blank" rel="noopener"><span class="pop-icon">?</span><span>Get help</span></a>
@@ -378,8 +464,16 @@
           </label>
           <span class="wp-usage" data-usage></span>
         </div>
+        <!-- Right-side status rail. Always visible — hosts session-level
+             actions (Launch terminal, Terminal panel toggle, Vercel deploy
+             status) at the top, and (when toggled) the sticky-header's
+             Original ask + Session activity below them. Buttons are moved
+             in by JS at boot from `.ccc-topbar`. -->
+        <aside class="status-rail" id="statusRail" aria-label="Session status rail">
+          <div class="rail-actions" id="railActions" data-role="rail-actions"></div>
+        </aside>
         <div class="conv-input-bar" id="convInputBar">
-          <input type="text" id="convInput" placeholder="Send to terminal..." autocomplete="off">
+          <textarea id="convInput" rows="1" placeholder="Send to terminal..." autocomplete="off" spellcheck="false"></textarea>
           <!-- Engine picker for new-session mode. Occupies the same slot as
                the Esc button (mutually exclusive — Esc only appears for live
                sessions, this only for `__new__`). updateInputBar() toggles
@@ -398,8 +492,18 @@
             <option value="duplicate">Close: duplicate #</option>
           </select>
           <button class="esc-btn" id="convEscBtn" title="Send Esc to terminal — cancels in-flight response (or kills a headless spawn)">Esc</button>
-          <button class="send-btn" id="convSendBtn" title="Send to terminal">&gt;</button>
+          <button class="send-btn" id="convSendBtn" title="Send to terminal" aria-label="Send to terminal">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 19 L12 5 M6 11 L12 5 L18 11"></path>
+            </svg>
+          </button>
+        </div>
+        <!-- Footer hint row beneath the input card — tty label on the left,
+             keyboard-shortcut hint on the right. Kept out of the input row
+             itself so the row stays uncluttered. -->
+        <div class="conv-input-hint" id="convInputHint">
           <span class="tty-label" id="convTtyLabel"></span>
+          <span class="conv-input-kbd"><kbd>⏎</kbd> send &nbsp;·&nbsp; <kbd>⇧⏎</kbd> newline</span>
         </div>
       </div>
     </div>
@@ -816,10 +920,6 @@
     font-size: 12px;
   }
   body.has-side-nav #termPanel { left: 52px; }
-  /* Multirepo PR's left rail is 48px wide at z-index 99; tuck the panel
-     behind it on the left so the rail's repo dots stay clickable. */
-  body.has-repo-rail #termPanel { left: 48px; }
-  body.has-repo-rail.has-side-nav #termPanel { left: 100px; }
   #termPanel.open { display: flex; }
   #termPanel .term-header {
     display: flex; align-items: center; gap: 8px;
@@ -1511,6 +1611,152 @@
     e.preventDefault();
     openDrawer();
   });
+})();
+</script>
+
+<!-- Register the PWA service worker so Chrome/Edge expose the "Install app"
+     affordance and Safari users can "Add to Dock". Registration is fire-and-
+     forget — failures (sandboxed contexts, file://) are silently ignored
+     because CCC works fine without the SW; it just doesn't show as
+     installable. Deferred behind `load` so it never competes with the
+     initial render. -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+    });
+  }
+</script>
+
+<!-- PWA install nudge. Tab-mode only — never shows when already installed.
+     Per-platform copy: Chrome/Edge get a one-click Install button wired to
+     the stashed `beforeinstallprompt` event; Safari (mac) and iOS Safari
+     get instruction text since neither browser exposes the install API.
+     Dismissal persists in localStorage for 14 days so it doesn't nag
+     visitors who declined; auto-hides if the app is installed mid-session.
+  -->
+<script>
+(function() {
+  const $banner = document.getElementById('pwaInstallBanner');
+  const $body   = document.getElementById('pwaInstallBody');
+  const $btn    = document.getElementById('pwaInstallBtn');
+  const $close  = document.getElementById('pwaInstallClose');
+  if (!$banner || !$body || !$btn || !$close) return;
+
+  const DISMISS_KEY = 'ccc-pwa-install-dismissed';
+  const RENAG_AFTER_MS = 14 * 24 * 3600 * 1000;
+  let deferred = null;
+
+  // Standalone detection covers all known PWA modes plus the legacy iOS
+  // Safari `navigator.standalone` flag. If any matches, the user already
+  // installed — don't nag.
+  function isStandalone() {
+    return window.matchMedia('(display-mode: standalone)').matches
+        || window.matchMedia('(display-mode: window-controls-overlay)').matches
+        || window.matchMedia('(display-mode: minimal-ui)').matches
+        || window.navigator.standalone === true;
+  }
+  if (isStandalone()) return;
+
+  // Honor previous dismissal for 14 days. After that the banner re-appears
+  // on the next non-standalone visit — long enough not to be annoying,
+  // short enough to catch users who forgot.
+  try {
+    const last = parseInt(localStorage.getItem(DISMISS_KEY) || '0', 10);
+    if (last && (Date.now() - last) < RENAG_AFTER_MS) return;
+  } catch (_) {}
+
+  // Platform sniff — only used to pick the right copy. Browsers don't all
+  // expose the same install affordance, so we tailor the instructions:
+  //   • iOS Safari   → Share sheet → Add to Home Screen
+  //   • macOS Safari → File menu → Add to Dock…
+  //   • Chrome/Edge  → click the Install button (uses beforeinstallprompt)
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  const isSafari = /^((?!chrome|android|edg|crios|fxios).)*safari/i.test(ua) && !isIOS;
+  const isChromiumLike = /Chrome|CriOS|Edg/.test(ua) && !isSafari;
+
+  if (isIOS) {
+    $body.innerHTML = 'Tap the <strong>Share</strong> icon, then <strong>Add to Home Screen</strong>. CCC opens in its own window — no tab bar, native feel.';
+  } else if (isSafari) {
+    $body.innerHTML = 'In Safari\'s menu bar, choose <strong>File → Add to Dock…</strong> CCC opens in its own window with no browser chrome.';
+    // Safari has no install API; turn the button into a "Show me" link
+    // that re-states the menu path with a small visual cue.
+    $btn.hidden = false;
+    $btn.textContent = 'How to install';
+  } else if (isChromiumLike) {
+    $body.innerHTML = 'Install CCC as a focused dashboard window — no browser chrome, dock icon, faster context switches.';
+    // Show the button immediately so the banner always has a click target,
+    // even before `beforeinstallprompt` fires (it can take a few seconds,
+    // or never fire if the engagement heuristic isn't met). Click handler
+    // below falls back to manual-install instructions when the event
+    // hasn't been stashed yet.
+    $btn.hidden = false;
+    $btn.textContent = 'Install';
+  } else {
+    $body.innerHTML = 'Look for "Install app" in your browser menu — CCC will open in its own window.';
+    $btn.hidden = false;
+    $btn.textContent = 'How to install';
+  }
+
+  // Stash the install event so the user-gesture click can call .prompt()
+  // later. Without preventDefault the browser may show its own mini-infobar.
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    deferred = e;
+    $btn.hidden = false;
+    $btn.textContent = 'Install';
+  });
+
+  function showManualInstructions() {
+    let msg;
+    if (isIOS) {
+      msg = 'Tap the Share icon at the bottom of the screen, scroll down, then tap "Add to Home Screen".';
+    } else if (isSafari) {
+      msg = 'In Safari\'s menu bar (top of the screen), choose File → Add to Dock…';
+    } else if (isChromiumLike) {
+      msg = 'Click the install icon in the address bar (looks like a screen with a down-arrow), or open the browser menu and choose "Install Claude Command Center".';
+    } else {
+      msg = 'Open your browser menu and look for "Install app" or "Add to Home Screen".';
+    }
+    // Use a simple alert for now — keeps the install path obvious without
+    // a custom modal. Could swap for an inline expanding panel later.
+    window.alert(msg);
+  }
+
+  $btn.addEventListener('click', async function () {
+    if (deferred) {
+      try {
+        deferred.prompt();
+        const choice = await deferred.userChoice;
+        if (choice && choice.outcome === 'accepted') {
+          $banner.hidden = true;
+        }
+      } catch (_) { /* user cancelled */ }
+      deferred = null;
+      return;
+    }
+    // No stashed event — fall back to manual instructions for the
+    // platform. This is the "engagement heuristic not yet met" path on
+    // Chrome/Edge, plus the only path on Safari (mac + iOS).
+    showManualInstructions();
+  });
+
+  $close.addEventListener('click', function () {
+    $banner.hidden = true;
+    try { localStorage.setItem(DISMISS_KEY, String(Date.now())); } catch (_) {}
+  });
+
+  // If install completes mid-session, hide the banner immediately.
+  window.addEventListener('appinstalled', function () {
+    $banner.hidden = true;
+    try { localStorage.removeItem(DISMISS_KEY); } catch (_) {}
+  });
+
+  // Show after a short delay so it doesn't compete with first paint.
+  // 2.5s is long enough for the page to settle, short enough to catch
+  // the user before they get distracted.
+  setTimeout(function () { $banner.hidden = false; }, 2500);
 })();
 </script>
 

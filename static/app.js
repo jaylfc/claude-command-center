@@ -970,11 +970,21 @@
   function setCopyableSessionId(el, sid) {
     if (!el) return;
     const value = sid || '';
-    el.textContent = value;
     if (value) {
+      // Render as a proper labeled affordance: "Session 2f1b1e0e 📋".
+      // The short prefix is enough to disambiguate visually; clicking
+      // anywhere on the row copies the full UUID. Easier to scan than
+      // a 36-character hex string, and the copy icon gives an obvious
+      // affordance hint.
+      const shortId = value.slice(0, 8);
+      el.innerHTML =
+        '<span class="sid-label">Session</span>' +
+        '<code class="sid-short">' + shortId + '</code>' +
+        '<span class="sid-copy" aria-hidden="true">&#128203;</span>';
       el.dataset.copySessionId = value;
-      el.title = 'Click to copy session ID';
+      el.title = value + ' — click to copy full ID';
     } else {
+      el.textContent = '';
       delete el.dataset.copySessionId;
       el.title = '';
     }
@@ -1391,9 +1401,40 @@
 
   if ($convEscBtn) $convEscBtn.addEventListener('click', sendEscToTerminal);
   if ($convSendBtn) $convSendBtn.addEventListener('click', () => sendToTerminal('p1'));
-  if ($convInput) $convInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); sendToTerminal(); }
-  });
+  // Textarea autosize: grow up to ~10 rows then scroll. Reset to one row
+  // on every input so deletions shrink the box too. Mirrors Omnara's
+  // behavior — typing more than one line expands the composer in place.
+  function _autosizeConvInput() {
+    if (!$convInput || $convInput.tagName !== 'TEXTAREA') return;
+    $convInput.style.height = 'auto';
+    const max = 240;  // ~10 rows at our current font/line-height
+    $convInput.style.height = Math.min($convInput.scrollHeight, max) + 'px';
+  }
+  if ($convInput) {
+    $convInput.addEventListener('input', _autosizeConvInput);
+    $convInput.addEventListener('keydown', (e) => {
+      // Enter sends, Shift+Enter inserts a newline. Same as Claude Desktop,
+      // Slack, the kanban variant of CCC, and Omnara.
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendToTerminal();
+      }
+    });
+    // Various callsites do `$convInput.value = ''` to clear after send;
+    // hook the value setter so the textarea auto-shrinks back to 1 row
+    // on each clear without having to touch every callsite.
+    if ($convInput.tagName === 'TEXTAREA') {
+      const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+      if (desc && desc.set && desc.get) {
+        Object.defineProperty($convInput, 'value', {
+          configurable: true,
+          get() { return desc.get.call(this); },
+          set(v) { desc.set.call(this, v); _autosizeConvInput(); },
+        });
+      }
+    }
+    _autosizeConvInput();
+  }
 
   for (const btn of allResumeButtons()) btn.addEventListener('click', copyResumeCommand);
   for (const btn of allJumpButtons()) btn.addEventListener('click', jumpToTerminal);
@@ -1608,6 +1649,72 @@
         const level = h[1].length;
         out.push('<h' + level + ' class="md-h">' + renderInline(h[2]) + '</h' + level + '>');
         i++;
+        continue;
+      }
+      // Pseudo-header heuristic: a line that is ENTIRELY `**…**` (bold from
+      // first non-space to last) is the model's idiomatic "soft header" —
+      // models trained on chat output frequently emit `**Section title**`
+      // on its own line instead of `## Section title`. Render those as h3
+      // so they get the same visual weight as a markdown header. Optionally
+      // followed by a leading emoji + space *outside* the bold (e.g.
+      // `📨 **Suggested send-out**`) — capture that prefix too.
+      const pseudo = line.match(/^\s*((?:[^\sA-Za-z0-9*_]+(?:\s+))?)\*\*([^*]+?)\*\*\s*:?\s*$/);
+      if (pseudo) {
+        const prefix = pseudo[1] || '';
+        const inner = pseudo[2];
+        out.push('<h3 class="md-h md-h-pseudo">' + escapeHtml(prefix) + renderInline(inner) + '</h3>');
+        i++;
+        continue;
+      }
+      // Blockquote: consecutive lines starting with `>`. Empty `>` lines
+      // are rendered as paragraph breaks inside the quote so multi-paragraph
+      // quotes (suggested-message blocks etc.) read as proper structure.
+      if (/^\s*>\s?/.test(line)) {
+        const inner = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+          inner.push(lines[i].replace(/^\s*>\s?/, ''));
+          i++;
+        }
+        let html = '<blockquote>';
+        let buf = [];
+        const flushPara = () => {
+          if (!buf.length) return;
+          html += '<p>' + buf.map(l => renderInline(l)).join('<br>') + '</p>';
+          buf = [];
+        };
+        for (const l of inner) {
+          if (l.trim() === '') flushPara();
+          else buf.push(l);
+        }
+        flushPara();
+        html += '</blockquote>';
+        out.push(html);
+        continue;
+      }
+      // Numbered list: consecutive `N. text` lines.
+      if (/^\s*\d+\.\s+/.test(line)) {
+        let html = '<ol>';
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          const item = lines[i].replace(/^\s*\d+\.\s+/, '');
+          html += '<li>' + renderInline(item) + '</li>';
+          i++;
+        }
+        html += '</ol>';
+        out.push(html);
+        continue;
+      }
+      // Bulleted list: consecutive `- text` or `* text` lines. The `\s+`
+      // after the marker is what distinguishes a bullet from inline `*bold*`
+      // (bold has no space) or a `---` rule (no space, multiple chars).
+      if (/^\s*[-*]\s+/.test(line)) {
+        let html = '<ul>';
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+          const item = lines[i].replace(/^\s*[-*]\s+/, '');
+          html += '<li>' + renderInline(item) + '</li>';
+          i++;
+        }
+        html += '</ul>';
+        out.push(html);
         continue;
       }
       // Regular text line (preserve as-is with <br>)
@@ -2836,13 +2943,16 @@
   })();
 
   function relativeTime(ts) {
+    // Compact format à la Omnara: just the number + unit, no "ago" word.
+    // Saves ~30% of the row's right-side real estate which lets the time
+    // sit cleanly in the same slot as the hover-revealed action buttons.
     const nowSec = Date.now() / 1000;
     const diff = Math.max(0, nowSec - ts);
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-    if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
-    return Math.floor(diff / 604800) + 'w ago';
+    if (diff < 60) return 'now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h';
+    if (diff < 604800) return Math.floor(diff / 86400) + 'd';
+    return Math.floor(diff / 604800) + 'w';
   }
 
   // ── Unified render dispatcher: list vs kanban ──
@@ -3281,8 +3391,12 @@
       + '<div class="gc-reader-body" id="gcReaderBody">Loading…</div>'
       + (includeHuman
         ? '<div class="gc-reader-input-row" id="gcInputRow">'
-            + '<input type="text" id="gcHumanInput" placeholder="Add to chat…" autocomplete="off">'
-            + '<button id="gcSendBtn">Send</button>'
+            + '<textarea id="gcHumanInput" rows="1" placeholder="Add to chat…" autocomplete="off" spellcheck="false"></textarea>'
+            + '<button id="gcSendBtn" class="gc-send-btn" type="button" title="Send (Enter)" aria-label="Send to group chat">'
+              + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                + '<path d="M12 19 L12 5 M6 11 L12 5 L18 11"></path>'
+              + '</svg>'
+            + '</button>'
           + '</div>'
         : '')
       + '</div>';
@@ -3299,9 +3413,34 @@
       const gcSendBtn = document.getElementById('gcSendBtn');
       const gcHumanInput = document.getElementById('gcHumanInput');
       if (gcSendBtn) gcSendBtn.addEventListener('click', () => sendHumanGcPost());
-      if (gcHumanInput) gcHumanInput.addEventListener('keydown', ev => {
-        if (ev.key === 'Enter') sendHumanGcPost();
-      });
+      if (gcHumanInput) {
+        // Mirror the convo input: Enter sends, Shift+Enter inserts a
+        // newline. Same convention as Claude Desktop / Slack / Omnara.
+        gcHumanInput.addEventListener('keydown', ev => {
+          if (ev.key === 'Enter' && !ev.shiftKey) {
+            ev.preventDefault();
+            sendHumanGcPost();
+          }
+        });
+        // Textarea autosize — grow as the user types up to a 10-row cap,
+        // then scroll internally. Same shape as the conv input.
+        const _autosizeGc = () => {
+          gcHumanInput.style.height = 'auto';
+          const max = 240;
+          gcHumanInput.style.height = Math.min(gcHumanInput.scrollHeight, max) + 'px';
+        };
+        gcHumanInput.addEventListener('input', _autosizeGc);
+        // Snap back to one row after `value = ''` clears post-send.
+        const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+        if (desc && desc.get && desc.set) {
+          Object.defineProperty(gcHumanInput, 'value', {
+            configurable: true,
+            get() { return desc.get.call(this); },
+            set(v) { desc.set.call(this, v); _autosizeGc(); },
+          });
+        }
+        _autosizeGc();
+      }
     }
 
     if (_gcReaderInterval) clearInterval(_gcReaderInterval);
@@ -5320,7 +5459,6 @@
           + '<div class="conv-main-row">'
             + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
             + leftFolderChipHtml
-            + '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
             + engineIcon
             + titleFolderChipHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
@@ -5328,7 +5466,15 @@
             + worktreeBadgeHtml
             + pinnedHtml
             + rowMetaHtml
-            + '<span class="conv-row-actions">' + mergeBtn + startBtn + archiveBtn + '</span>'
+            // Right-edge slot — Omnara-style. Shows the time at rest;
+            // swaps to action buttons (merge / start / archive) on hover.
+            // Both share the same screen real estate, so the row stays
+            // narrow and there's no per-row layout shift between hover
+            // states (CSS uses `position: absolute` for one of them).
+            + '<span class="conv-row-end">'
+            +   '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
+            +   '<span class="conv-row-actions">' + mergeBtn + startBtn + archiveBtn + '</span>'
+            + '</span>'
           + '</div>'
         + '</div>'
         + ask
@@ -5376,21 +5522,30 @@
       catch (_) { return 'project'; }
     })();
     const _shouldGroupByFolder = _hasFolderChips && _ipGrouping === 'project';
-    const _flatRowsWithSeparators = (cards, opts = {}) => cards.map((c, i, arr) => {
-      let separator = '';
-      if (i > 0) {
-        const newer = (arr[i - 1] && arr[i - 1].modified) || 0;
-        const older = (c.modified) || 0;
-        if (newer && older && (newer - older) >= GAP_SEPARATOR_S) {
-          separator = '<div class="conv-gap-separator">'
-            + '<span class="conv-gap-line"></span>'
-            + '<span class="conv-gap-label">' + escapeHtml(_gapLabel(newer, older)) + '</span>'
-            + '<span class="conv-gap-line"></span>'
-            + '</div>';
+    const _flatRowsWithSeparators = (cards, opts = {}) => {
+      // Only render the FIRST gap separator. The list naturally fans out
+      // from "things from the last few hours" → "older" — that one
+      // boundary is the useful one. Beyond it, every-other-row gap markers
+      // ("18H GAP", "12H GAP", etc.) are noise that pushes content down
+      // without adding signal.
+      let _gapShown = false;
+      return cards.map((c, i, arr) => {
+        let separator = '';
+        if (i > 0 && !_gapShown) {
+          const newer = (arr[i - 1] && arr[i - 1].modified) || 0;
+          const older = (c.modified) || 0;
+          if (newer && older && (newer - older) >= GAP_SEPARATOR_S) {
+            separator = '<div class="conv-gap-separator">'
+              + '<span class="conv-gap-line"></span>'
+              + '<span class="conv-gap-label">' + escapeHtml(_gapLabel(newer, older)) + '</span>'
+              + '<span class="conv-gap-line"></span>'
+              + '</div>';
+            _gapShown = true;
+          }
         }
-      }
-      return separator + _renderRow(c, opts);
-    }).join('');
+        return separator + _renderRow(c, opts);
+      }).join('');
+    };
     const _folderGroupStorageKey = (section, key) =>
       'ccc-folder-group-collapsed:' + section + ':' + String(key || '').slice(0, 180);
     const _isFolderGroupCollapsed = (section, key) => {
@@ -5856,9 +6011,17 @@
           + '</div>';
       }).join('');
       const _gcCount = (_gcActiveChats || []).length;
+      // Collapsed by default — most sessions don't have an active group
+      // chat, so the section just adds noise above the GH issues / Ready to
+      // merge / In progress sections that the user actually scans for.
+      // Persisted under `ccc-ingroupchat-collapsed`, mirroring the Archived
+      // section pattern. Default '1' (collapsed) when the key is absent.
+      const _igcCollapsed = localStorage.getItem('ccc-ingroupchat-collapsed') !== '0';
+      const _igcArrow = _igcCollapsed ? '▸' : '▾';
       _inGroupChatHtml =
-        '<div class="conv-ingroupchat-section' + (_gcCount === 0 ? ' is-empty' : '') + '" data-role="ingroupchat-section">'
-        + '<div class="conv-ingroupchat-header">'
+        '<div class="conv-ingroupchat-section' + (_gcCount === 0 ? ' is-empty' : '') + (_igcCollapsed ? ' collapsed' : '') + '" data-role="ingroupchat-section">'
+        + '<div class="conv-ingroupchat-header" data-role="ingroupchat-toggle" aria-expanded="' + (!_igcCollapsed) + '">'
+        +   '<span class="conv-ingroupchat-arrow">' + _igcArrow + '</span>'
         +   '<span class="conv-ingroupchat-icon">💬</span>'
         +   '<span class="conv-ingroupchat-label">In Group Chat</span>'
         +   (_gcCount ? '<span class="conv-ingroupchat-count">' + _gcCount + '</span>' : '')
@@ -5882,6 +6045,25 @@
         const arrowEl = $archivedToggle.querySelector('.conv-archived-arrow');
         if (arrowEl) arrowEl.textContent = wasCollapsed ? '▸' : '▾';
         $archivedToggle.setAttribute('aria-expanded', String(!wasCollapsed));
+      });
+    }
+
+    // Toggle handler for the "In Group Chat" section header. Mirrors the
+    // Archived pattern. The "+" new-chat button is a sibling element inside
+    // the header; clicks on it must NOT trigger collapse, so we early-out
+    // when the target sits under [data-role="ingroupchat-new"].
+    const $igcToggle = $convList.querySelector('[data-role="ingroupchat-toggle"]');
+    if ($igcToggle) {
+      $igcToggle.addEventListener('click', (ev) => {
+        if (ev.target.closest('[data-role="ingroupchat-new"]')) return;
+        ev.stopPropagation();
+        const section = $igcToggle.closest('[data-role="ingroupchat-section"]');
+        if (!section) return;
+        const wasCollapsed = section.classList.toggle('collapsed');
+        localStorage.setItem('ccc-ingroupchat-collapsed', wasCollapsed ? '1' : '0');
+        const arrowEl = $igcToggle.querySelector('.conv-ingroupchat-arrow');
+        if (arrowEl) arrowEl.textContent = wasCollapsed ? '▸' : '▾';
+        $igcToggle.setAttribute('aria-expanded', String(!wasCollapsed));
       });
     }
     // Click handler for archived group chat rows — open the reader.
@@ -7402,6 +7584,52 @@
       $view.innerHTML = html;
       $view.scrollTop = 0;
       wireIssueCloseButtons($view, issueNum, concreteRepo);
+
+      // Issue-view layout: route the issue header + close actions into the
+      // right rail, hide the redundant inline copies in the body, and tag
+      // the body so CSS can hide pieces irrelevant to issues (the
+      // workspace context strip — branch / cwd / cost — doesn't apply).
+      document.body.classList.add('is-issue-view');
+      const $rail = document.getElementById('statusRail');
+      const $railActions = document.getElementById('railActions');
+      // Move the Close-as-* buttons to the rail — these are the actions
+      // the user actually takes on an issue, so they belong with other
+      // session-level actions, not buried at the top of the body.
+      const $closeActions = $view.querySelector('#issueCloseActions');
+      if ($closeActions && $railActions) {
+        $railActions.appendChild($closeActions);
+      }
+      // Replace the rail's "Original ask" slot with an issue-header
+      // (title + #N + GitHub link). The previous session's original-ask
+      // (if any) was a stale leak; we wipe it. The reconciler in
+      // `_applyStatusRailLayout` treats whatever node is in the rail as
+      // the live one, so this synthetic .csh-ask-original is stable.
+      if ($rail) {
+        $rail.querySelectorAll('.csh-ask-original').forEach(n => n.remove());
+        const $issueHeader = document.createElement('div');
+        $issueHeader.className = 'csh-ask-original is-issue-header';
+        const titleSafe = escapeHtml(issueTitle);
+        const numSafe = escapeHtml(String(issueNum));
+        const urlSafe = escapeHtml(url || '');
+        let inner =
+          '<div class="label">Issue</div>' +
+          '<div class="user-msg">' +
+            '<div class="ask-first">' + titleSafe + ' <span class="issue-num">#' + numSafe + '</span></div>';
+        if (urlSafe) {
+          inner += '<a class="ask-rest" href="' + urlSafe + '" target="_blank" rel="noopener">Open on GitHub &#x2197;</a>';
+        }
+        inner += '</div>';
+        $issueHeader.innerHTML = inner;
+        $rail.insertBefore($issueHeader, $rail.firstChild);
+      }
+      // Strip the now-duplicated title + GH-link from the body. They live
+      // in the rail; keeping them in the body too would just be noise.
+      const $bodyHeader = $view.querySelector('h1');
+      if ($bodyHeader) {
+        const $bodyHeaderRow = $bodyHeader.closest('div[style*="justify-content"]');
+        if ($bodyHeaderRow) $bodyHeaderRow.remove();
+        else $bodyHeader.remove();
+      }
     } catch (e) {
       $view.innerHTML = '<div class="empty-state" style="padding:40px;color:var(--red);">Failed to load issue: ' + escapeHtml(String(e && e.message || e)) + '</div>';
     }
@@ -7553,6 +7781,19 @@
       await renderIssueInConvPane(selectedRow.issue_number, rowRepoPath(selectedRow), selectedRow.id);
       return;
     }
+    // Leaving issue view — drop the body class and clear the synthetic
+    // issue-header from the rail so the next conv's original-ask is
+    // reconciled cleanly by `_applyStatusRailLayout`.
+    document.body.classList.remove('is-issue-view');
+    const _rail = document.getElementById('statusRail');
+    if (_rail) {
+      _rail.querySelectorAll('.csh-ask-original.is-issue-header').forEach(n => n.remove());
+    }
+    // Also pull #issueCloseActions out of the rail if it's still there
+    // (left over from the previous issue view) — its parent issue body
+    // is gone now, so the buttons would no-op anyway.
+    const _ica = document.getElementById('issueCloseActions');
+    if (_ica) _ica.remove();
     const $view = getConvView();
     $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Loading...</div>';
     const loadToken = ++conversationPaneLoadToken;
@@ -7834,7 +8075,15 @@
 
   function ffcEnsurePill(stickyEl, data) {
     if (!stickyEl) return;
-    let pill = stickyEl.querySelector('.ffc-pill');
+    // The pill lives inside `.csh-col-activity`. In right-rail mode that
+    // column has been moved out of the sticky into `#statusRail`, so a
+    // sticky-scoped query misses it and we'd fall back to inserting the
+    // pill at the top of the sticky (showing as a stray "Files" panel
+    // above earlier-ask). Search the document so the pill follows the
+    // activity column wherever it currently lives.
+    const activity = document.querySelector('.csh-col-activity');
+    let pill = (activity && activity.querySelector('.ffc-pill'))
+            || stickyEl.querySelector('.ffc-pill');
     const hasFiles = data && data.count > 0;
     if (!hasFiles) {
       if (pill) pill.hidden = true;
@@ -7851,7 +8100,10 @@
         const cached = cur ? _ffcCache.get(cur) : null;
         if (cached && typeof openFfcModal === 'function') openFfcModal(cached);
       });
-      const host = stickyEl.querySelector('.csh-col-activity') || stickyEl;
+    }
+    // Always reparent to the live activity column (handles toggle moves).
+    const host = activity || stickyEl;
+    if (pill.parentElement !== host) {
       host.insertBefore(pill, host.firstChild || null);
     }
     pill.hidden = false;
@@ -8607,6 +8859,11 @@
     const timeline = actCol.querySelector('[data-timeline]');
     const activityHasContent = !!(timeline && timeline.querySelector('.stl-row'));
     earlier.style.display = earlierHasText ? '' : 'none';
+    // Tag the sticky so right-rail-mode CSS can hide the whole panel when
+    // there's no earlier-ask to show. In right-rail mode the original-ask
+    // and activity have been moved into the side rail, so an empty earlier
+    // means the sticky has nothing useful left at the top.
+    sticky.classList.toggle('is-earlier-empty', !earlierHasText);
     if (earlierHasText && !activityHasContent) {
       if (earlier.parentNode !== actCol) actCol.appendChild(earlier);
       actCol.style.display = '';
@@ -8808,7 +9065,18 @@
         parts.push('<span class="wp-cotenants" title="' + co + ' other live session(s) editing the same cwd">⚠ ' + co + ' other session' + (co === 1 ? '' : 's') + ' here</span>');
       }
     }
-    parts.push('<span class="wp-path" title="' + escapeHtml(pillPath) + '">' + escapeHtml(tilde) + '</span>');
+    // Dedupe: in a worktree the branch name (e.g. `worktree-pwa-sidebar-
+    // restructure`) usually contains the last path segment (e.g. `pwa-
+    // sidebar-restructure`), so showing the full path right after the
+    // branch label repeats the same information twice. Hide the path when
+    // its tail is already encoded in the branch — keep the title attribute
+    // on the kind chip so the full path is still recoverable on hover.
+    const _pathTail = (pillPath || '').split('/').pop() || '';
+    const _branchSubsumes = pillBranch && _pathTail
+      && pillBranch.toLowerCase().includes(_pathTail.toLowerCase());
+    if (!_branchSubsumes) {
+      parts.push('<span class="wp-path" title="' + escapeHtml(pillPath) + '">' + escapeHtml(tilde) + '</span>');
+    }
 
     // Sibling-worktrees pill removed — topbar Worktrees button is the
     // single entry point. Per-session repetition was just noise.
@@ -9740,6 +10008,11 @@
             +   '<span class="conv-sticky-header__collapse-icon">▴</span>'
             + '</button>';
           $view.insertBefore(sticky, $view.firstChild);
+          // Apply the right-rail layout if it's active. The sticky was
+          // just built with everything inside .csh-row; in right-rail
+          // mode the original-ask and activity nodes need to be moved
+          // into #statusRail. Idempotent — safe to call when not active.
+          _applyStatusRailLayout();
           // Wire the chevron toggle. Two states:
           //   default (170px) → click → expanded (50vh)
           //   expanded (50vh) → click → default (170px)
@@ -10369,6 +10642,68 @@
     });
   }
 
+  // ── Status-rail layout ────────────────────────────────────────────────
+  // The right-rail toggle moves `.csh-ask-original` (Original ask) and
+  // `.csh-col-activity` (Session activity) out of the sticky-header's
+  // `.csh-row` and into `#statusRail` on the right side of the conv-pane.
+  // Earlier-ask stays at the top in both modes.
+  //
+  // Reconciler — runs on every relevant event (sticky rebuild, toggle
+  // click, DOMContentLoaded) and is idempotent. The "live" node is the
+  // one inside the current sticky if present (the renderer just rebuilt
+  // it), else the one already mounted in the rail. Any other duplicates
+  // are stale leftovers from a prior conversation's sticky-header rebuild
+  // and get removed — without that step the rail accumulates one entry
+  // per conversation visited.
+  function _applyStatusRailLayout() {
+    const sticky = document.querySelector('.conv-sticky-header');
+    const rail = document.getElementById('statusRail');
+    if (!rail) return;
+    const inRail = document.body.classList.contains('status-pos-right');
+
+    // Sticky-side fresh nodes (post-rebuild) always win as the source of
+    // truth. Rail-side nodes are the fallback for the toggle-without-
+    // rebuild path.
+    const stickyOrig = sticky ? sticky.querySelector('.csh-ask-original') : null;
+    const stickyAct = sticky ? sticky.querySelector('.csh-col-activity') : null;
+    const liveOrig = stickyOrig || rail.querySelector('.csh-ask-original');
+    const liveAct = stickyAct || rail.querySelector('.csh-col-activity');
+
+    // Drop every other copy in the document — these are orphans left
+    // over from previous conversations whose sticky was rebuilt while
+    // we were in rail mode.
+    document.querySelectorAll('.csh-ask-original').forEach(n => { if (n !== liveOrig) n.remove(); });
+    document.querySelectorAll('.csh-col-activity').forEach(n => { if (n !== liveAct) n.remove(); });
+
+    // Place the live nodes in the target slot for the current mode.
+    if (inRail) {
+      // Per user direction the Original ask is the FIRST item in the rail
+      // — above the rail-actions buttons. Insert before #railActions if
+      // it exists; otherwise append (rail still contains other things).
+      // Activity column goes after rail-actions (below the buttons).
+      const railActions = rail.querySelector('#railActions');
+      if (liveOrig) {
+        if (railActions && liveOrig !== railActions) {
+          rail.insertBefore(liveOrig, railActions);
+        } else {
+          rail.appendChild(liveOrig);
+        }
+      }
+      if (liveAct) rail.appendChild(liveAct);
+    } else if (sticky) {
+      const askCol = sticky.querySelector('.csh-col-ask');
+      const row = sticky.querySelector('.csh-row');
+      if (liveOrig && askCol) {
+        const earlier = askCol.querySelector('.csh-ask-earlier');
+        if (earlier) askCol.insertBefore(liveOrig, earlier);
+        else askCol.appendChild(liveOrig);
+      }
+      if (liveAct && row) {
+        row.appendChild(liveAct);
+      }
+    }
+  }
+
   // Wire pill click + start polling once on first JS load.
   document.addEventListener('DOMContentLoaded', () => {
     const $pill = document.getElementById('historyStatusPill');
@@ -10379,6 +10714,222 @@
       });
     }
     _hiStartPolling();
+
+    // Status-position toggle. Two states: top (default) and right (260px
+    // rail beside the conversation pane). Body class is restored before
+    // paint by the inline script in index.html; here we only wire the
+    // click handler, keep the icon glyph in sync, and run the DOM mover
+    // so the layout reflects the persisted state on first load.
+    const $statusToggle = document.getElementById('statusPosToggle');
+    const $statusIcon = document.getElementById('statusPosIcon');
+    const _syncStatusIcon = () => {
+      if (!$statusIcon) return;
+      const isRight = document.body.classList.contains('status-pos-right');
+      // Lucide-style "panel" icon — a small SVG that reads more clearly
+      // than the previous ▤/▥ unicode glyphs. Two variants: panel-right
+      // (active = right rail visible) and panel-top (active = top mode).
+      const svgPanelRight = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>';
+      const svgPanelTop = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>';
+      $statusIcon.innerHTML = isRight ? svgPanelRight : svgPanelTop;
+      if ($statusToggle) {
+        $statusToggle.setAttribute('aria-pressed', String(isRight));
+        $statusToggle.title = isRight
+          ? 'Original ask + Session activity are in the right rail. Click to move them back above the conversation.'
+          : 'Original ask + Session activity are above the conversation. Click to move them into a 260px right rail.';
+      }
+    };
+    if ($statusToggle) {
+      $statusToggle.addEventListener('click', () => {
+        const next = !document.body.classList.contains('status-pos-right');
+        document.body.classList.toggle('status-pos-right', next);
+        try { localStorage.setItem('ccc-status-pos', next ? 'right' : 'top'); } catch (_) {}
+        _syncStatusIcon();
+        _applyStatusRailLayout();
+        if (typeof window._cccApplyToolbarRailLayout === 'function') {
+          window._cccApplyToolbarRailLayout();
+        }
+      });
+    }
+    // Chip color toggle — flips body.chips-muted, persists, no re-render
+    // needed (CSS handles the palette swap).
+    const $chipsToggle = document.getElementById('chipsColorToggle');
+    const $chipsIcon = document.getElementById('chipsColorIcon');
+    const _syncChipsIcon = () => {
+      if (!$chipsIcon) return;
+      const muted = document.body.classList.contains('chips-muted');
+      // 4-dot swatch icon. In colored mode the dots have distinct hues so
+      // the toggle visually mirrors what it controls; in muted mode the
+      // same dots collapse to a uniform grey. State is unambiguous at
+      // a glance — no need to read the tooltip or sample a chip.
+      const dotColors = muted
+        ? ['var(--text-muted)', 'var(--text-muted)', 'var(--text-muted)', 'var(--text-muted)']
+        // Saturated-but-not-loud hues. Match the rough palette used by
+        // the per-folder chips (orange / green / blue / purple) so the
+        // icon previews what the chips will look like.
+        : ['#d29922', '#3fb950', '#58a6ff', '#bc8cff'];
+      $chipsIcon.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">' +
+          '<circle cx="4"  cy="4"  r="2.4" fill="' + dotColors[0] + '"/>' +
+          '<circle cx="12" cy="4"  r="2.4" fill="' + dotColors[1] + '"/>' +
+          '<circle cx="4"  cy="12" r="2.4" fill="' + dotColors[2] + '"/>' +
+          '<circle cx="12" cy="12" r="2.4" fill="' + dotColors[3] + '"/>' +
+        '</svg>';
+      if ($chipsToggle) {
+        $chipsToggle.setAttribute('aria-pressed', String(muted));
+        $chipsToggle.title = muted
+          ? 'Folder chips are muted. Click to colorize them per-folder.'
+          : 'Folder chips are colored per-folder. Click to mute them.';
+      }
+    };
+    if ($chipsToggle) {
+      $chipsToggle.addEventListener('click', () => {
+        const next = !document.body.classList.contains('chips-muted');
+        document.body.classList.toggle('chips-muted', next);
+        try { localStorage.setItem('ccc-chips-mode', next ? 'muted' : 'color'); } catch (_) {}
+        _syncChipsIcon();
+      });
+    }
+    _syncChipsIcon();
+    _syncStatusIcon();
+    _applyStatusRailLayout();
+
+    // #1 — Collapse the conv toolbar when it has no visible content.
+    // After moving everything out (rail / sidebar / settings menu), the
+    // remaining children are #convStatus (a status span, usually empty)
+    // and #cccTopbar (now empty). Watch for any visible width/height in
+    // the children and toggle `.is-empty` accordingly so the bar's
+    // 12px+12px padding + 1px border don't eat ~25px of dead space.
+    const $convToolbar = document.getElementById('convToolbar');
+    function _refreshToolbarEmptiness() {
+      if (!$convToolbar) return;
+      let hasVisibleContent = false;
+      for (const c of $convToolbar.children) {
+        const r = c.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          // Treat empty containers (cccTopbar with no kids) as invisible
+          // even if their flex layout reports >0 size.
+          if (c.children.length > 0) {
+            // recurse one level: any visible grandchild?
+            for (const cc of c.children) {
+              const rr = cc.getBoundingClientRect();
+              if (rr.width > 0 && rr.height > 0) { hasVisibleContent = true; break; }
+            }
+            if (hasVisibleContent) break;
+          } else if ((c.textContent || '').trim()) {
+            hasVisibleContent = true; break;
+          }
+        }
+      }
+      $convToolbar.classList.toggle('is-empty', !hasVisibleContent);
+    }
+    _refreshToolbarEmptiness();
+    // Re-check when DOM mutations could change visibility (state-driven
+    // toolbar buttons appearing/disappearing). Cheap — only fires on
+    // actual mutation.
+    if (window.MutationObserver && $convToolbar) {
+      const mo = new MutationObserver(_refreshToolbarEmptiness);
+      mo.observe($convToolbar, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'hidden'] });
+    }
+
+    // Toolbar reorganization. Two flavors of move:
+    //  1) Permanent: global (not conversation-scoped) buttons go to the
+    //     left sidebar's `sidebarGlobalActions` and stay there in both
+    //     modes. They aren't tied to the rail at all.
+    //  2) Conditional: session-level buttons live in the right rail when
+    //     `status-pos-right` is on, and back in their original toolbar
+    //     slots when in top mode (so the rail can be removed entirely
+    //     for mobile / narrow windows).
+    //
+    // We capture each conditional element's original parent at boot,
+    // before any moves, so we can put them back exactly where they came
+    // from when the user toggles back to top mode.
+    const $sidebarActions = document.getElementById('sidebarGlobalActions');
+    const $railActions = document.getElementById('railActions');
+    const $toolbar = document.getElementById('convToolbar');
+
+    // PERMANENT moves — these items have a single home regardless of the
+    // status-pos toggle. Per user spec:
+    //   • Top-left alerts (#sidebarTopAlerts): Update pill (notification,
+    //     should always be visible until the user acts on it).
+    //   • Settings menu (#settingsMenuSlot): Terminal panel toggle, History
+    //     indexing status, Worktrees, Stats, Report a bug, Font A-/A+.
+    //     These are infrequent-use or "set and forget" — burying them
+    //     in the gear menu reclaims rail space.
+    const $topAlerts = document.getElementById('sidebarTopAlerts');
+    const $settingsSlot = document.getElementById('settingsMenuSlot');
+    const _moveToHome = (id, host) => {
+      const el = document.getElementById(id);
+      if (el && host && el.parentElement !== host) host.appendChild(el);
+    };
+    if ($topAlerts) {
+      _moveToHome('updPill', $topAlerts);
+    }
+    if ($settingsSlot) {
+      _moveToHome('termToggleBtn',     $settingsSlot);
+      _moveToHome('historyStatusPill', $settingsSlot);
+      _moveToHome('kptWorktreesBtn',   $settingsSlot);
+      _moveToHome('statsBtn',          $settingsSlot);
+      _moveToHome('bugReportLink',     $settingsSlot);
+      if ($toolbar) {
+        const fontCtrls = $toolbar.querySelector('.font-size-controls');
+        if (fontCtrls) $settingsSlot.appendChild(fontCtrls);
+      }
+    }
+
+    // CONDITIONAL set (toggle-aware): rail in right-mode, original toolbar
+    // slot in top-mode. Trimmed to just the genuinely session-scoped
+    // items now that the global ones moved to settings menu.
+    const _railSet = [];
+    const _captureRailEl = (el) => {
+      if (!el) return;
+      _railSet.push({
+        el,
+        origParent: el.parentElement,
+        origNext: el.nextSibling,
+      });
+    };
+    // #8 — Order the rail by frequency-of-use:
+    //   1. Live signal (visual anchor — "is this session active?")
+    //   2. Launch terminal (frequent action)
+    //   3. Vercel deploy status
+    //   4. Close & announce (rarer)
+    //   5. Jump / Pkood-kill (state-conditional)
+    //   6. Footer cluster: Session ID + overflow menu
+    _captureRailEl(document.getElementById('liveBadgeConv'));
+    _captureRailEl(document.getElementById('launchWrapConv'));
+    _captureRailEl(document.getElementById('deployPill'));
+    _captureRailEl(document.getElementById('announceBtnConv'));
+    _captureRailEl(document.getElementById('jumpBtnConv'));
+    _captureRailEl(document.getElementById('pkoodKillBtn'));
+    _captureRailEl(document.getElementById('mobileBackBtn'));
+    if ($toolbar) {
+      _captureRailEl(document.getElementById('convSessionId'));
+      _captureRailEl($toolbar.querySelector('.conv-overflow-wrap'));
+    }
+
+    // Apply current layout based on body class. Idempotent — safe to
+    // call repeatedly. Also called by the toggle click handler.
+    function _applyToolbarRailLayout() {
+      const inRail = document.body.classList.contains('status-pos-right');
+      for (const item of _railSet) {
+        const target = inRail ? $railActions : item.origParent;
+        if (!target || !item.el) continue;
+        if (item.el.parentElement === target) continue;
+        if (inRail) {
+          target.appendChild(item.el);
+        } else {
+          // Re-insert at the original position relative to its sibling.
+          if (item.origNext && item.origNext.parentElement === target) {
+            target.insertBefore(item.el, item.origNext);
+          } else {
+            target.appendChild(item.el);
+          }
+        }
+      }
+    }
+    // Expose so the toggle click handler can re-fire it.
+    window._cccApplyToolbarRailLayout = _applyToolbarRailLayout;
+    _applyToolbarRailLayout();
   });
 
   updateConversationSearchClear();
@@ -10969,7 +11520,6 @@
     archiveFolderFilter = value || ARCHIVE_FOLDER_ALL;
     try { localStorage.setItem(ARCHIVE_FOLDER_FILTER_KEY, archiveFolderFilter); } catch (_) {}
     renderArchiveFolderFilter();
-    renderRepoSidebar();
     updateRepoPickerVisibility();
     if (opts.render !== false) {
       renderArchiveList(document.getElementById('convSearch')?.value || '');
@@ -11316,40 +11866,6 @@
     _syncRepoPickerSelection();
   }
 
-  // ── Repo sidebar (vertical icon rail) ──────────────────────────────────
-  // Same data as the folder filter, different presentation: persistent left
-  // strip with one circle per folder. Clicks filter archive rows locally.
-  // Hidden when nothing to show by toggling body.has-repo-rail.
-  function _railInitial(label, path) {
-    const src = String(label || path || '?').replace(/[^A-Za-z0-9]+/g, ' ').trim();
-    return src.charAt(0).toUpperCase() || '?';
-  }
-
-  function renderRepoSidebar() {
-    const $rail = document.getElementById('ccRepoSidebar');
-    if (!$rail) return;
-    const folders = _archiveFolderOptions();
-    $rail.innerHTML = '';
-
-    for (const folder of folders) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      const isActive = archiveFolderFilter === folder.value;
-      btn.className = 'rail-btn' + (isActive ? ' is-active' : '');
-      btn.textContent = _railInitial(folder.label, folder.path);
-      btn.title = `${folder.label}\n${folder.path}`;
-      btn.dataset.path = folder.value;
-      if (isActive) {
-        btn.setAttribute('aria-current', 'true');
-      }
-      btn.addEventListener('click', () => setArchiveFolderFilter(folder.value));
-      $rail.appendChild(btn);
-    }
-
-    // Toggle layout class only when there's something to show.
-    document.body.classList.toggle('has-repo-rail', folders.length > 0);
-  }
-
   // ── All-repos archive ───────────────────────────────────────────────────
   // Read-only browse of every conversation across every folder under
   // ~/.claude/projects/. The sidebar always renders this view; the folder
@@ -11386,9 +11902,73 @@
     } catch (_) { return []; }
   }
 
+  // Render the archive-load progress checklist into #convList. Replaces
+  // the bare "Loading archive…" placeholder with a per-stage list (folders
+  // → transcripts → infer → worktrees → codex → pr_states), each stage
+  // showing one of {pending ○, running ●, done ✓, error !, skipped –}.
+  // Glyphs are unicode so we don't need a sprite sheet.
+  function _renderArchiveLoadingStages(snapshot) {
+    const $list = document.getElementById('convList');
+    if (!$list) return;
+    // Don't overwrite a populated list — only swap when we're still in
+    // the placeholder state. Once renderArchiveList() runs with real
+    // data, this poll's job is done.
+    const isPlaceholder = $list.querySelector('.archive-empty-state, .archive-loading-stages');
+    if (!isPlaceholder) return;
+    const steps = (snapshot && snapshot.steps) || [];
+    if (!steps.length) return;
+    const glyphFor = (state) => {
+      if (state === 'done')    return '<span class="als-glyph als-done">✓</span>';
+      if (state === 'running') return '<span class="als-glyph als-running">●</span>';
+      if (state === 'error')   return '<span class="als-glyph als-error">!</span>';
+      if (state === 'skipped') return '<span class="als-glyph als-skipped">–</span>';
+      return '<span class="als-glyph als-pending">○</span>';
+    };
+    const escAls = (s) => String(s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    let html = '<div class="archive-loading-stages">';
+    html += '<div class="als-title">' + escAls(snapshot.title || 'Loading archive…') + '</div>';
+    for (const s of steps) {
+      const det = s.detail || '';
+      const count = (typeof s.count === 'number' && typeof s.total === 'number')
+        ? ' <span class="als-count">' + s.count + ' / ' + s.total + '</span>'
+        : '';
+      html += '<div class="als-row als-state-' + escAls(s.state || 'pending') + '">'
+        +    glyphFor(s.state)
+        +    '<span class="als-label">' + escAls(s.label) + '</span>'
+        +    count
+        +    (det ? '<div class="als-detail">' + escAls(det) + '</div>' : '')
+        +    '</div>';
+    }
+    html += '</div>';
+    $list.innerHTML = html;
+  }
+
+  let _archiveProgressPollId = null;
+  function _startArchiveProgressPoll() {
+    if (_archiveProgressPollId) return;
+    const tick = async () => {
+      try {
+        const r = await fetch('/api/archive/loading-status');
+        if (!r.ok) return;
+        const snap = await r.json();
+        _renderArchiveLoadingStages(snap);
+        if (!snap.active) _stopArchiveProgressPoll();
+      } catch (_) { /* polling is best-effort; ignore */ }
+    };
+    tick();  // immediate first paint
+    _archiveProgressPollId = setInterval(tick, 250);
+  }
+  function _stopArchiveProgressPoll() {
+    if (_archiveProgressPollId) {
+      clearInterval(_archiveProgressPollId);
+      _archiveProgressPollId = null;
+    }
+  }
+
   let _archiveRefreshPromise = null;
   async function refreshArchiveData() {
     if (_archiveRefreshPromise) return _archiveRefreshPromise;
+    _startArchiveProgressPoll();
     _archiveRefreshPromise = (async () => {
       try {
         const [convs, issues] = await Promise.all([
@@ -11404,10 +11984,10 @@
         crossRepoIssuesData = issues || [];
         archiveLoaded = true;
         renderArchiveFolderFilter();
-        renderRepoSidebar();
         return archiveData;
       } finally {
         _archiveRefreshPromise = null;
+        _stopArchiveProgressPoll();
       }
     })();
     return _archiveRefreshPromise;
@@ -11421,7 +12001,6 @@
       renderArchiveList(query);
       crossRepoIssuesData = await loadCrossRepoIssues();
       archiveLoaded = true;
-      renderRepoSidebar();
       renderArchiveList(query);
       showOpToast('GH issues refreshed');
     } catch (err) {
@@ -11784,7 +12363,6 @@
       try {
         await Promise.all([loadPeerRegistry(), loadRepoList()]);
         renderPeerPickerSelect();
-        renderRepoSidebar();
       } catch (e) { /* picker is best-effort — failure shouldn't break the page */ }
     })();
 
@@ -11798,7 +12376,6 @@
       _peerPollId = setInterval(async () => {
         await loadPeerRegistry();
         renderPeerPickerSelect();
-        renderRepoSidebar();
       }, 10000);
     };
     const _peerStopPoll = () => {
@@ -11810,7 +12387,6 @@
       if (document.visibilityState === 'visible') {
         Promise.all([loadPeerRegistry(), loadRepoList()]).then(() => {
           renderPeerPickerSelect();
-          renderRepoSidebar();
         });
         _peerStartPoll();
       } else {

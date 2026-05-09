@@ -1,0 +1,1 @@
+- Group-chat reader's input box now matches the conversation input: autosizing textarea (Enter sends, Shift+Enter newline, grows up to ~10 rows then scrolls), single rounded card with focus-within ring, round arrow-icon send button. Was a single-line input + rectangular "Send" button.

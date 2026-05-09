@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 
 import ast
 import base64
@@ -396,6 +396,116 @@ def _session_load_fail(err):
         _SESSION_LOAD_STATUS.update({
             "active": False,
             "title": "Session load failed",
+            "message": str(err)[:160],
+            "phase": "error",
+            "updated_at": time.time(),
+        })
+
+
+# ── Archive-load progress (mirrors session-load) ──────────────────────────
+#
+# The archive view fires /api/conversations/all on every page load, which
+# does an 8-stage scan: list folders, read JSONL headers, infer effective
+# repos, extract tail meta, probe worktree dirty state, scan codex/gemini
+# stores, prime PR states (gh CLI fan-out), refresh cross-repo PRs.
+# On a cold cache with many folders this is the 5-15s wait the user sees
+# behind the generic "Loading archive…" spinner. The progress channel here
+# lets the frontend render a stage checklist instead.
+_ARCHIVE_LOAD_STATUS_LOCK = threading.Lock()
+_ARCHIVE_LOAD_STATUS = {
+    "active": False,
+    "title": "Loading archive",
+    "message": "Waiting for the next scan.",
+    "phase": "idle",
+    "started_at": 0,
+    "updated_at": 0,
+    "steps": {},
+    "order": [],
+}
+
+
+def _archive_load_snapshot():
+    with _ARCHIVE_LOAD_STATUS_LOCK:
+        order = list(_ARCHIVE_LOAD_STATUS.get("order") or [])
+        steps_by_key = dict(_ARCHIVE_LOAD_STATUS.get("steps") or {})
+        steps = [dict(steps_by_key[k]) for k in order if k in steps_by_key]
+        return {
+            "active": bool(_ARCHIVE_LOAD_STATUS.get("active")),
+            "title": _ARCHIVE_LOAD_STATUS.get("title") or "Loading archive",
+            "message": _ARCHIVE_LOAD_STATUS.get("message") or "",
+            "phase": _ARCHIVE_LOAD_STATUS.get("phase") or "idle",
+            "started_at": _ARCHIVE_LOAD_STATUS.get("started_at") or 0,
+            "updated_at": _ARCHIVE_LOAD_STATUS.get("updated_at") or 0,
+            "steps": steps,
+        }
+
+
+def _archive_load_begin():
+    now = time.time()
+    steps = {
+        "folders":     {"key": "folders",     "label": "Scanning project folders",        "state": "pending", "detail": "Listing ~/.claude/projects/."},
+        "transcripts": {"key": "transcripts", "label": "Reading conversation transcripts", "state": "pending", "detail": "Parsing JSONL headers."},
+        "infer":       {"key": "infer",       "label": "Inferring active branches",        "state": "pending", "detail": "Walking recent sessions."},
+        "worktrees":   {"key": "worktrees",   "label": "Checking worktree status",         "state": "pending", "detail": "git status per recent worktree."},
+        "codex":       {"key": "codex",       "label": "Codex / Gemini conversations",     "state": "pending", "detail": "Scanning sibling stores."},
+        "pr_states":   {"key": "pr_states",   "label": "Refreshing pull-request status",   "state": "pending", "detail": "gh pr view per known PR."},
+        "issues":      {"key": "issues",      "label": "Refreshing GitHub issues",         "state": "pending", "detail": "gh issue list per repo."},
+        "group_chats": {"key": "group_chats", "label": "Cross-repo group chats",           "state": "pending", "detail": "Reading sidecars."},
+    }
+    with _ARCHIVE_LOAD_STATUS_LOCK:
+        _ARCHIVE_LOAD_STATUS.update({
+            "active": True,
+            "title": "Loading archive",
+            "message": "Scanning sources by stage.",
+            "phase": "running",
+            "started_at": now,
+            "updated_at": now,
+            "steps": steps,
+            "order": ["folders", "transcripts", "infer", "worktrees", "codex", "pr_states", "issues", "group_chats"],
+        })
+
+
+def _archive_load_set_step(key, *, label=None, state=None, detail=None, count=_LOAD_MISSING, total=_LOAD_MISSING):
+    now = time.time()
+    with _ARCHIVE_LOAD_STATUS_LOCK:
+        steps = _ARCHIVE_LOAD_STATUS.setdefault("steps", {})
+        order = _ARCHIVE_LOAD_STATUS.setdefault("order", [])
+        if key not in steps:
+            steps[key] = {"key": key, "label": label or key, "state": "pending", "detail": ""}
+            order.append(key)
+        step = steps[key]
+        if label is not None:
+            step["label"] = label
+        if state is not None:
+            step["state"] = state
+        if detail is not None:
+            step["detail"] = detail
+        if count is not _LOAD_MISSING:
+            step["count"] = count
+        if total is not _LOAD_MISSING:
+            step["total"] = total
+        _ARCHIVE_LOAD_STATUS["updated_at"] = now
+
+
+def _archive_load_complete(rows):
+    total = len(rows or [])
+    _archive_load_set_step("group_chats", state="done")
+    with _ARCHIVE_LOAD_STATUS_LOCK:
+        _ARCHIVE_LOAD_STATUS.update({
+            "active": False,
+            "title": "Archive loaded",
+            "message": f"{total} conversations ready.",
+            "phase": "done",
+            "updated_at": time.time(),
+        })
+
+
+def _archive_load_fail(err):
+    _archive_load_set_step("folders", state="error", detail=str(err)[:160])
+    with _ARCHIVE_LOAD_STATUS_LOCK:
+        _ARCHIVE_LOAD_STATUS.update({
+            "active": False,
+            "title": "Archive load failed",
             "message": str(err)[:160],
             "phase": "error",
             "updated_at": time.time(),
@@ -15701,6 +15811,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(info)
         elif path == "/api/loading-status":
             self.send_json(_session_load_snapshot())
+        elif path == "/api/archive/loading-status":
+            # Same shape as /api/loading-status but for the archive scan
+            # behind /api/conversations/all. Polled by the frontend at
+            # ~250ms while the archive is loading so the user sees a
+            # vertical stage list (folders → transcripts → infer …) instead
+            # of the opaque "Loading archive…" spinner.
+            self.send_json(_archive_load_snapshot())
         elif path == "/api/sessions":
             qs = urllib.parse.parse_qs(parsed.query)
             include_old = qs.get("include_old", ["0"])[0] in ("1", "true")
@@ -16075,11 +16192,27 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
         elif path.startswith("/static/"):
-            # Serve .css and .js assets from the static/ directory.
+            # Serve allow-listed assets from the static/ directory.
             # index.html is intentionally excluded (extension allowlist blocks .html).
+            # .svg and .webmanifest are allowed so the PWA install path
+            # (manifest + icons referenced from index.html) works without
+            # carving out separate top-level routes.
             rel = path[len("/static/"):]
-            # Extension allowlist: only .css and .js are served here.
-            if not (rel.endswith(".css") or rel.endswith(".js")):
+            # Extension allowlist + Content-Type map. Adding a type here is
+            # the only place to do it — keep the mapping authoritative so we
+            # don't end up with served-but-mistyped responses.
+            static_ct_map = {
+                ".css": "text/css",
+                ".js": "application/javascript",
+                ".svg": "image/svg+xml",
+                ".webmanifest": "application/manifest+json",
+            }
+            ext = ""
+            for candidate in static_ct_map:
+                if rel.endswith(candidate):
+                    ext = candidate
+                    break
+            if not ext:
                 self.send_json({"error": f"not found: {path}"}, 404)
                 return
             target = STATIC_DIR / rel
@@ -16103,12 +16236,45 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 except OSError as e:
                     self.send_json({"error": str(e)}, 500)
                     return
-                ct = "application/javascript" if rel.endswith(".js") else "text/css"
+                ct = static_ct_map[ext]
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header("Cache-Control", "no-store, must-revalidate")
                 self.end_headers()
                 self.wfile.write(body)
+        elif path == "/sw.js":
+            # Service workers are scoped by the URL they're served from, so
+            # this MUST live at the origin root, not under /static/. Without
+            # root scope, the SW can only control /static/* and the install
+            # criterion (a fetch handler covering the start_url) doesn't fire.
+            try:
+                body = (STATIC_DIR / "sw.js").read_bytes()
+            except OSError as e:
+                self.send_json({"error": "sw.js missing", "detail": str(e)}, 500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            # Some browsers require this header to allow root-scope SW
+            # registration when the SW file is itself served from root.
+            # Belt-and-suspenders: we already serve from root.
+            self.send_header("Service-Worker-Allowed", "/")
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/manifest.webmanifest":
+            # Serve the PWA manifest at a stable top-level URL too. Browsers
+            # accept it under /static/, but a root-level URL is the convention
+            # most install-prompt heuristics look for first.
+            try:
+                body = (STATIC_DIR / "manifest.webmanifest").read_bytes()
+            except OSError as e:
+                self.send_json({"error": "manifest missing", "detail": str(e)}, 500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/manifest+json")
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/morning":
             try:
                 self.send_html((MORNING_STATIC_DIR / "index.html").read_text())
@@ -16236,8 +16402,41 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # chrono. Read-only browse, no peer registry consulted. The UI's
             # "All repos" mode renders from this. Slow on cold scan; the
             # caller is expected to show a loading state.
-            convs = conversations_with_open_prs(find_all_conversations())
-            self.send_json({"conversations": convs, "count": len(convs)})
+            #
+            # Progress channel: stages are tagged as we enter/leave each phase
+            # so the frontend's stage-list overlay can show movement. Coarse-
+            # grained for now (folders + transcripts + infer + worktrees +
+            # codex are lumped under find_all_conversations; pr_states is
+            # tracked separately around conversations_with_open_prs). Issues
+            # and group-chats run via different endpoints — they're not in
+            # this channel.
+            _archive_load_begin()
+            try:
+                _archive_load_set_step("folders",     state="running")
+                _archive_load_set_step("transcripts", state="running")
+                _archive_load_set_step("infer",       state="running")
+                _archive_load_set_step("worktrees",   state="running")
+                _archive_load_set_step("codex",       state="running")
+                raw_convs = find_all_conversations()
+                count = len(raw_convs or [])
+                _archive_load_set_step("folders",     state="done")
+                _archive_load_set_step("transcripts", state="done", count=count, total=count, detail=f"{count} conversations parsed.")
+                _archive_load_set_step("infer",       state="done")
+                _archive_load_set_step("worktrees",   state="done")
+                _archive_load_set_step("codex",       state="done")
+                _archive_load_set_step("pr_states",   state="running", detail="gh pr view per known PR URL.")
+                convs = conversations_with_open_prs(raw_convs)
+                _archive_load_set_step("pr_states",   state="done")
+                # Issues / group-chats run via separate endpoints; mark them
+                # skipped here so the stage list renders complete (○/✓ only
+                # applies to stages this endpoint actually owns).
+                _archive_load_set_step("issues",      state="skipped", detail="Loaded by /api/issues/all.")
+                _archive_load_set_step("group_chats", state="skipped", detail="Loaded by /api/group-chats/archived.")
+                _archive_load_complete(convs)
+                self.send_json({"conversations": convs, "count": len(convs)})
+            except Exception as e:
+                _archive_load_fail(e)
+                raise
         elif path == "/api/issues/all":
             # Cross-repo GH issues: walk recent ∪ pinned repos in parallel,
             # run `gh issue list` per repo with a 5-min per-repo cache,
