@@ -1020,7 +1020,7 @@
     // Leaving new-session mode (sid set) drops the .is-new-session class
     // so the spawn-cwd picker hides and the workspace pill returns. The
     // class is set in enterNewSessionMode(); this is the symmetric clear.
-    if (sid) {
+    if (sid || currentConversation !== '__new__') {
       const _cic = document.getElementById('convInputContext');
       if (_cic) _cic.classList.remove('is-new-session');
     }
@@ -2351,6 +2351,45 @@
   // Pending spawn placeholders (optimistic UI) — keyed by pid.
   const pendingSpawns = new Map();
 
+  function renderPendingSpawnConversation(card, paneId) {
+    const $view = getConvViewForPane(paneId || activePaneId()) || $conversationsView;
+    if (!$view || !card) return;
+    const prompt = (card.first_message || card.prompt || card.display_name || '').trim();
+    const engineLabel = card.source === 'codex' ? 'Codex'
+      : card.source === 'gemini' ? 'Gemini'
+      : card.source === 'pkood' ? 'pkood'
+      : 'Claude';
+    const cwd = card.spawn_cwd || card.repo_path || card.folder_path || card.cwd || '';
+    const cwdLabel = cwd ? (_pathLeaf(cwd) || cwd) : '';
+    const meta = [engineLabel + ' session', cwdLabel].filter(Boolean).join(' · ');
+    const promptHtml = prompt
+      ? linkifyPastedImages(escapeHtml(prompt))
+      : escapeHtml(card.display_name || 'New session');
+    $view.innerHTML = '<div class="event user_text pending">'
+      + '<span class="label">User</span>'
+      + '<div class="user-msg" data-raw-text="' + escapeHtml(prompt || card.display_name || 'New session') + '">' + promptHtml + '</div>'
+      + (meta ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">' + escapeHtml(meta) + '</div>' : '')
+      + '</div>';
+    showOptimisticAgentIndicator($view);
+    $view.scrollTop = $view.scrollHeight;
+  }
+
+  function adoptPendingSpawnPid(tempPid, realPid, logPath) {
+    if (!tempPid || !realPid) return null;
+    const placeholder = pendingSpawns.get(tempPid)
+      || conversationsData.find(x => x && x.id === 'spawning-' + tempPid);
+    if (!placeholder) return null;
+    placeholder.spawn_pid = realPid;
+    if ((placeholder.source === 'codex' || placeholder.source === 'gemini') && logPath) {
+      placeholder.agent_log_path = logPath;
+      if (placeholder.source === 'codex') placeholder.codex_log_path = logPath;
+    }
+    pendingSpawns.delete(tempPid);
+    pendingSpawns.set(realPid, placeholder);
+    renderSidebar(filterConversations($convSearch.value));
+    return placeholder;
+  }
+
   function insertPendingSpawnCard(pid, subject, sourceOrEngine, logPath, meta) {
     if (!pid) return;
     const id = 'spawning-' + pid;
@@ -2407,10 +2446,15 @@
     // as a fallback if the CLI exits before creating a thread.
     if (source !== 'codex' && source !== 'gemini') {
       setTimeout(() => {
-        if (pendingSpawns.has(pid)) {
-          pendingSpawns.delete(pid);
-          delete columnOverrides[id];
-          conversationsData = conversationsData.filter(x => x.id !== id);
+        const direct = pendingSpawns.has(pid) ? [pid, pendingSpawns.get(pid)] : null;
+        const adopted = direct || Array.from(pendingSpawns.entries()).find(([, c]) => c && c.id === id);
+        if (adopted) {
+          const staleKey = adopted[0];
+          const stale = adopted[1];
+          const staleId = (stale && stale.id) || id;
+          pendingSpawns.delete(staleKey);
+          delete columnOverrides[staleId];
+          conversationsData = conversationsData.filter(x => x.id !== staleId);
           renderSidebar(filterConversations($convSearch.value));
         }
       }, 30000);
@@ -2486,12 +2530,14 @@
       // transition so we can carry the right-pane selection over in place
       // (handled below, after the session-id maps are rebuilt).
       let _selectionSwap = null;
-      const realPids = new Set(fresh.filter(c => c.spawn_pid).map(c => c.spawn_pid));
+      const realPids = new Set(fresh.filter(c => c.spawn_pid).map(c => String(c.spawn_pid)));
       for (const pid of Array.from(pendingSpawns.keys())) {
-        if (realPids.has(pid)) {
-          const placeholderId = 'spawning-' + pid;
-          const placeholderCol = columnOverrides[placeholderId];
-          const realCard = fresh.find(c => c.spawn_pid === pid);
+        if (realPids.has(String(pid))) {
+          const placeholder = pendingSpawns.get(pid);
+          const defaultPlaceholderId = 'spawning-' + pid;
+          const placeholderId = (placeholder && placeholder.id) || defaultPlaceholderId;
+          const placeholderCol = columnOverrides[placeholderId] || columnOverrides[defaultPlaceholderId];
+          const realCard = fresh.find(c => String(c.spawn_pid) === String(pid));
           if (realCard && realCard.session_id) {
             _firstSeenSessions.set(realCard.session_id, Date.now());
             if (placeholderCol && !realCard.verified && !realCard.archived) {
@@ -2505,6 +2551,7 @@
             }
           }
           delete columnOverrides[placeholderId];
+          delete columnOverrides[defaultPlaceholderId];
           pendingSpawns.delete(pid);
         }
       }
@@ -3215,8 +3262,13 @@
 
   function _removePendingSpawnCard(pid) {
     if (!pid) return;
-    const id = 'spawning-' + pid;
-    pendingSpawns.delete(pid);
+    const fallbackId = 'spawning-' + pid;
+    const direct = pendingSpawns.has(pid) ? [pid, pendingSpawns.get(pid)] : null;
+    const adopted = direct || Array.from(pendingSpawns.entries()).find(([, c]) => c && c.id === fallbackId);
+    const key = adopted ? adopted[0] : pid;
+    const card = adopted ? adopted[1] : null;
+    const id = (card && card.id) || fallbackId;
+    pendingSpawns.delete(key);
     delete columnOverrides[id];
     conversationsData = conversationsData.filter(x => x && x.id !== id);
     try { localStorage.setItem('ccc-column-overrides', JSON.stringify(columnOverrides)); } catch (_) {}
@@ -7858,7 +7910,7 @@
     }
     // Update split panel session ID display
     if ($cpSessionId) {
-      const sid = sessionIdByConv[id] || '';
+      const sid = selectedRow && selectedRow.pending_spawn ? '' : (sessionIdByConv[id] || '');
       setCopyableSessionId($cpSessionId, sid);
     }
     const paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId}"]`);
@@ -7866,8 +7918,18 @@
       paneEl.classList.toggle('is-codex-session', source === 'codex');
       paneEl.classList.toggle('is-gemini-session', source === 'gemini');
     }
+    const isPendingSpawn = !!(selectedConv && selectedConv.pending_spawn);
     if (source === 'backlog') {
       setCurrentSession(null, null, null, false, null);
+    } else if (isPendingSpawn) {
+      setCurrentSession(
+        source,
+        null,
+        sessionCwdByConv[id] || selectedConv.spawn_cwd || selectedConv.cwd,
+        sessionCwdExistsByConv[id],
+        sessionSpawnPidByConv[id],
+        rowRepoPath(selectedConv) || selectedConv.spawn_cwd || selectedRepoPath()
+      );
     } else {
       setCurrentSession(
         source,
@@ -7911,7 +7973,7 @@
         stopPkoodTailPoller();
         if ($pkoodKillBtn) $pkoodKillBtn.style.display = 'none';
         await fetchConversationEvents(paneId);
-        if (source !== 'backlog') startConvStream(paneId);
+        if (source !== 'backlog' && !isPendingSpawn) startConvStream(paneId);
         // Block-level streaming from the spawn log — only succeeds if the
         // backend finds a CCC-spawned headless process for this session.
         // No-op for externally launched, IDE-launched, or pkood sessions.
@@ -8710,17 +8772,24 @@
         return;
       }
     }
-    // Codex placeholders use the spawn log only until the real ~/.codex
-    // thread row appears in /api/sessions.
+    // Pending spawn placeholders render the submitted prompt immediately.
+    // Fire-and-watch engines switch to their spawn log once the POST returns
+    // a real pid; Claude placeholders stay on the optimistic "Sending..." pane
+    // until /api/sessions swaps in the durable transcript row.
     if (id.startsWith('spawning-')) {
       const c = (conversationsData || []).find(x => x.id === id);
-      if (c && (c.source === 'codex' || c.source === 'gemini')) {
+      if (!c) return;
+      if (c && (c.source === 'codex' || c.source === 'gemini') && typeof c.spawn_pid === 'number') {
         await loadCodexLog(c);
         stopCodexLogPoller();
         codexLogPoller = setInterval(() => {
           if (currentConversation !== id) { stopCodexLogPoller(); return; }
           loadCodexLog(c);
         }, 1500);
+        return;
+      }
+      if (c && c.pending_spawn) {
+        renderPendingSpawnConversation(c, fetchPaneId);
         return;
       }
     }
@@ -13333,6 +13402,20 @@
     const useWorktree = !!($nsmWorktree && $nsmWorktree.checked);
     $nsmSubmit.disabled = true;
     $nsmSubmit.textContent = 'Launching...';
+    const cardSource = engine === 'codex' ? 'codex'
+                     : engine === 'gemini' ? 'gemini'
+                     : 'interactive';
+    const tempPid = 'tmp-' + Date.now();
+    closeNewSessionModal();
+    insertPendingSpawnCard(tempPid, effectiveSubject, cardSource, null, {
+      first_message: body,
+      repo_path: repoPath,
+      folder_path: repoPath,
+      spawn_cwd: repoPath,
+      cwd: repoPath,
+      session_cwd: repoPath,
+      session_cwd_exists: true,
+    });
     try {
       const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
                      : engine === 'gemini' ? '/api/sessions/spawn-gemini'
@@ -13346,20 +13429,27 @@
       });
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
-        closeNewSessionModal();
-        const cardSource = engine === 'codex' ? 'codex'
-                         : engine === 'gemini' ? 'gemini'
-                         : 'interactive';
-        insertPendingSpawnCard(data.pid, effectiveSubject, cardSource);
+        const placeholder = adoptPendingSpawnPid(tempPid, data.pid, data.log);
+        if (placeholder && (engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+          selectConversation(placeholder.id);
+        }
         // Tight poll schedule so the real card replaces the placeholder fast.
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
         setTimeout(refreshConversationList, 3000);
       } else {
+        _removePendingSpawnCard(tempPid);
+        if ($nsm) $nsm.style.display = 'flex';
+        $nsmBody.value = body;
+        if ($nsm) $nsm.dataset.repoPath = repoPath;
         _showNsmError('Spawn failed — status ' + res.status + '\n' + JSON.stringify(data, null, 2));
         console.error('[New session] spawn failed', data);
       }
     } catch (err) {
+      _removePendingSpawnCard(tempPid);
+      if ($nsm) $nsm.style.display = 'flex';
+      $nsmBody.value = body;
+      if ($nsm) $nsm.dataset.repoPath = repoPath;
       _showNsmError('Request error: ' + (err && err.message || 'network') + '\n' + (err && err.stack || ''));
       console.error('[New session] submit error', err);
     }
@@ -14313,7 +14403,15 @@
       });
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
-        insertPendingSpawnCard(data.pid, subject, false);
+        insertPendingSpawnCard(data.pid, subject, false, null, {
+          first_message: body,
+          repo_path: repoPath,
+          folder_path: repoPath,
+          spawn_cwd: repoPath,
+          cwd: repoPath,
+          session_cwd: repoPath,
+          session_cwd_exists: true,
+        });
         if ($convInput) $convInput.value = '';
         // Mirror kanban-start-btn: tell GitHub the issue is being worked on.
         fetch('/api/issues/' + issueNum + '/mark-in-progress', {
@@ -14321,13 +14419,6 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(withRepoPath({}, repoPath)),
         }).catch(() => {});
-        const $view = getConvView();
-        if ($view) {
-          $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
-            + '<div style="font-size:15px;color:var(--text);">Spawning session for issue #' + escapeHtml(String(issueNum)) + '…</div>'
-            + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">It will appear in the sidebar in a moment — click it to follow along.</div>'
-            + '</div>';
-        }
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
         setTimeout(refreshConversationList, 3000);
@@ -14439,6 +14530,30 @@
       $convInput.style.borderColor = 'var(--red)';
       setTimeout(() => { $convInput.style.borderColor = ''; }, 1500);
     };
+    const cardSource = engine === 'codex' ? 'codex'
+      : engine === 'gemini' ? 'gemini'
+      : 'interactive';
+    const tempPid = 'tmp-' + Date.now();
+    insertPendingSpawnCard(tempPid, subject, cardSource, null, {
+      first_message: body,
+      repo_path: repoPath,
+      folder_path: repoPath,
+      spawn_cwd: repoPath,
+      cwd: repoPath,
+      session_cwd: repoPath,
+      session_cwd_exists: true,
+    });
+    if ($convInput) $convInput.value = '';
+    const restoreDraftAfterFailure = () => {
+      _removePendingSpawnCard(tempPid);
+      enterNewSessionMode();
+      setTimeout(() => {
+        if (!$convInput) return;
+        $convInput.value = body;
+        $convInput.dispatchEvent(new Event('input', { bubbles: true }));
+        $convInput.focus();
+      }, 60);
+    };
     try {
       const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
                      : engine === 'gemini' ? '/api/sessions/spawn-gemini'
@@ -14454,33 +14569,24 @@
       });
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
-        insertPendingSpawnCard(data.pid, subject, engine === 'codex' ? 'codex' : (engine === 'gemini' ? 'gemini' : 'interactive'), data.log);
-        if ($convInput) $convInput.value = '';
-        // Fire-and-watch engines need the right pane to switch to the new
-        // placeholder so the spawn-log poller (`/api/sessions/spawned/<pid>/log`)
-        // kicks in. Without this the pane stays on the "Spawning new session…"
-        // empty state and the user can't see the agent running. Mirrors the
-        // kanban-toolbar dispatch path.
-        if ((engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
-          selectConversation('spawning-' + data.pid);
-        } else {
-          const $view = getConvView();
-          if ($view) {
-            $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
-              + '<div style="font-size:15px;color:var(--text);">Spawning new session…</div>'
-              + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">It will appear in the sidebar in a moment — click it to follow along.</div>'
-              + '</div>';
-          }
+        const placeholder = adoptPendingSpawnPid(tempPid, data.pid, data.log);
+        // Fire-and-watch engines can stream their spawn log once the real pid
+        // is known. Re-select the same placeholder id so fetchConversationEvents
+        // starts the log poller without making the user click the sidebar row.
+        if (placeholder && (engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+          selectConversation(placeholder.id);
         }
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
         setTimeout(refreshConversationList, 3000);
       } else {
+        restoreDraftAfterFailure();
         flashRed();
         showOpToast('Spawn failed: ' + (data.error || 'HTTP ' + res.status), 'error');
         console.error('[New session] spawn failed', data);
       }
     } catch (err) {
+      restoreDraftAfterFailure();
       flashRed();
       showOpToast('Spawn failed: ' + (err && err.message || 'network'), 'error');
       console.error('[New session] submit error', err);
