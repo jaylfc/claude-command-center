@@ -13938,6 +13938,101 @@
     } catch (_) { /* silent — the pill just stays hidden */ }
   })();
 
+  // ── Manual server restart ─────────────────────────────────────
+  // Settings menu → POST /api/restart → wait for the same port to answer.
+  const $restartServerBtn = document.getElementById('restartServerBtn');
+  const $restartServerLabel = document.getElementById('restartServerLabel');
+  let restartServerPort = '';
+
+  function restartServerSetPort(port) {
+    const clean = String(port || '').replace(/[^\d]/g, '');
+    restartServerPort = clean;
+    if ($restartServerLabel) {
+      $restartServerLabel.textContent = 'Restart server' + (clean ? ' (:' + clean + ')' : '');
+    }
+    if ($restartServerBtn) {
+      $restartServerBtn.title = clean
+        ? 'Restart the Claude Command Center server on :' + clean
+        : 'Restart the Claude Command Center server';
+    }
+  }
+
+  function restartServerShowOverlay(title, detail) {
+    const $overlay = document.getElementById('cccLoadingOverlay');
+    const $label = document.getElementById('cccLoadingLabel');
+    if (!$overlay) return;
+    $overlay.classList.remove('fade-out', 'gone');
+    if ($label) {
+      $label.innerHTML =
+        '<strong>' + title + '</strong>' +
+        '<div class="ccc-loading-detail">' + detail + '</div>';
+    }
+  }
+
+  async function restartServerRefreshPort() {
+    restartServerSetPort(window.location.port || '');
+    try {
+      const r = await fetch('/api/identity', { cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data && data.port) restartServerSetPort(data.port);
+    } catch (_) { /* location.port fallback is good enough */ }
+  }
+
+  async function restartServerRun() {
+    if (!$restartServerBtn) return;
+    if ($settingsPopover) {
+      $settingsPopover.classList.remove('open');
+      if ($settingsBtn) $settingsBtn.setAttribute('aria-expanded', 'false');
+    }
+    $restartServerBtn.disabled = true;
+    restartServerShowOverlay(
+      'Restarting&hellip;',
+      'Waiting for the server' + (restartServerPort ? ' on :' + restartServerPort : '') + ' to bind again.'
+    );
+    try { sessionStorage.setItem('ccc-restarting', '1'); } catch (_) {}
+
+    let postError = null;
+    try {
+      const r = await fetch('/api/restart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await r.json().catch(() => ({}));
+      if (data && data.port) restartServerSetPort(data.port);
+      if (!r.ok || !data.ok) {
+        postError = new Error((data && data.error) || ('restart failed (' + r.status + ')'));
+      }
+    } catch (_) {
+      // The socket can drop while execvp replaces the process; poll below.
+    }
+
+    if (postError) {
+      try { sessionStorage.removeItem('ccc-restarting'); } catch (_) {}
+      const $overlay = document.getElementById('cccLoadingOverlay');
+      if ($overlay) $overlay.classList.add('fade-out', 'gone');
+      $restartServerBtn.disabled = false;
+      showOpToast('Restart failed: ' + postError.message, 'error');
+      return;
+    }
+
+    const ok = await updWaitForServer(30);
+    if (ok) {
+      location.reload();
+    } else {
+      try { sessionStorage.removeItem('ccc-restarting'); } catch (_) {}
+      const $overlay = document.getElementById('cccLoadingOverlay');
+      if ($overlay) $overlay.classList.add('fade-out', 'gone');
+      $restartServerBtn.disabled = false;
+      showOpToast("Server didn't come back within 30s - try reloading manually", 'error');
+    }
+  }
+
+  if ($restartServerBtn) {
+    restartServerRefreshPort();
+    $restartServerBtn.addEventListener('click', restartServerRun);
+  }
+
   // ── In-app bug reporting ────────────────────────────────────────
   // Topbar link → modal → POST /api/bug-report → server shells out
   // to `gh issue create`. On gh failure the handler returns the
@@ -14360,9 +14455,12 @@
     }
   });
 
-  // If we just finished restarting after a self-update, briefly acknowledge.
+  // If we just finished restarting, briefly acknowledge the trigger.
   try {
-    if (sessionStorage.getItem('ccc-updating')) {
+    if (sessionStorage.getItem('ccc-restarting')) {
+      sessionStorage.removeItem('ccc-restarting');
+      showOpToast('Server restarted', 'ok');
+    } else if (sessionStorage.getItem('ccc-updating')) {
       sessionStorage.removeItem('ccc-updating');
       showOpToast('Updated to the latest version', 'ok');
     }

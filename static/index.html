@@ -244,6 +244,11 @@
           if (window.cccSetLoadingStatus) {
             window.cccSetLoadingStatus(window.cccLoadingTitleOverride, 'Rescanning sources with the new version.');
           }
+        } else if (sessionStorage.getItem('ccc-restarting')) {
+          window.cccLoadingTitleOverride = 'Restart complete, reconnecting';
+          if (window.cccSetLoadingStatus) {
+            window.cccSetLoadingStatus(window.cccLoadingTitleOverride, 'Rescanning sources after the server restart.');
+          }
         }
         // Archive-default boot: the slow request on cold scan is
         // /api/conversations/all (cross-folder JSONL walk + git ops),
@@ -256,7 +261,8 @@
         try { localStorage.setItem('ccc-archive-mode', '1'); } catch (_) {}
         if (_archiveDefault
             && !sessionStorage.getItem('ccc-switching-to')
-            && !sessionStorage.getItem('ccc-updating')) {
+            && !sessionStorage.getItem('ccc-updating')
+            && !sessionStorage.getItem('ccc-restarting')) {
           const $label3 = document.getElementById('cccLoadingLabel');
           if ($label3) {
             $label3.innerHTML =
@@ -381,6 +387,7 @@
           <div class="settings-menu-slot" id="settingsMenuSlot" data-role="settings-menu-slot"></div>
           <div class="pop-divider"></div>
           <button class="pop-item" type="button" id="networkAccessBtn"><span class="pop-icon">⇄</span><span>Network access…</span></button>
+          <button class="pop-item" type="button" id="restartServerBtn"><span class="pop-icon">&#8635;</span><span id="restartServerLabel">Restart server</span></button>
           <a class="pop-item" href="https://github.com/amirfish1/claude-command-center#readme" target="_blank" rel="noopener"><span class="pop-icon">?</span><span>Get help</span></a>
         </div>
       </div>

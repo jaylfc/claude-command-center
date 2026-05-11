@@ -1,0 +1,1 @@
+- Added a settings menu action to restart the Claude Command Center server in place, labeled with the current port.

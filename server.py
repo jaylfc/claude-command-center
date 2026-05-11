@@ -17171,6 +17171,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "already_running": not started,
             })
             return
+        if path == "/api/restart":
+            # Manual in-place restart from the settings menu. Same-origin
+            # POST checking above is the security boundary, matching update.
+            self.send_json({"ok": True, "restart": True, "port": PORT})
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            _schedule_restart()
+            return
         if path == "/api/network-config":
             # SECURITY: localhost-only — even if the user has allowlisted a
             # tailnet origin, that peer must NOT be able to expand its own
