@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "3.3.1"
+__version__ = "3.3.2"
 
 import ast
 import base64
@@ -1152,6 +1152,37 @@ def require_repo_context(payload=None, query=None, *, allow_session=True):
     except Exception:
         pass
     return ctx
+
+
+def _spawn_repo_context(cwd=None, repo_path=None):
+    """Resolve spawn cwd/repo context, registering a typed folder if needed.
+
+    Normal repo-scoped endpoints keep the stricter known-repo gate. Spawning is
+    the one place where an existing folder typed into the UI should become a
+    usable workspace without a separate "add repo" round trip.
+    """
+    payload = {"cwd": cwd, "repo_path": repo_path}
+    try:
+        return require_repo_context(payload, allow_session=False)
+    except RepoContextError as e:
+        if e.code != "repo_not_allowed":
+            raise
+
+    raw = cwd or repo_path
+    if not raw:
+        raise RepoContextError("repo_required", "cwd or repo_path is required")
+    try:
+        p = Path(str(raw)).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError) as err:
+        raise RepoContextError("invalid_cwd", f"could not resolve cwd: {err}", path=str(raw))
+    if not p.is_dir():
+        raise RepoContextError("invalid_cwd", f"cwd is not a directory: {p}", path=str(p))
+    try:
+        resolved = _append_custom_repo(str(p))
+    except ValueError as err:
+        raise RepoContextError("invalid_cwd", str(err), path=str(p))
+    _record_recent_repo(resolved)
+    return {"repo_path": resolved, "cwd": str(p)}
 
 
 # Archive view delegates all per-session JSONL inspection to the
@@ -9888,7 +9919,7 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
     resolved = _resolve_gemini_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
-    ctx = require_repo_context({"cwd": cwd, "repo_path": repo_path}, allow_session=False)
+    ctx = _spawn_repo_context(cwd=cwd, repo_path=repo_path)
     spawn_cwd = ctx["cwd"]
     session_name = _slugify(name or prompt) or "unnamed"
     timestamp = time.strftime("%Y%m%dT%H%M%S")
@@ -9957,7 +9988,7 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
       `worktree_path` / `worktree_branch` so the UI can show them.
     """
     prompt = _strip_ccc_session_state_instruction(prompt)
-    ctx = require_repo_context({"cwd": cwd, "repo_path": repo_path}, allow_session=False)
+    ctx = _spawn_repo_context(cwd=cwd, repo_path=repo_path)
     spawn_cwd = ctx["cwd"]
     repo_for_logs = ctx["repo_path"]
     # Always slugify — name may come from firstSentence(body) and contain
@@ -10091,7 +10122,7 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None):
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
     bin_path = resolved["bin"]
-    ctx = require_repo_context({"cwd": cwd, "repo_path": repo_path}, allow_session=False)
+    ctx = _spawn_repo_context(cwd=cwd, repo_path=repo_path)
     spawn_cwd = ctx["cwd"]
 
     session_name = _slugify(name or prompt)

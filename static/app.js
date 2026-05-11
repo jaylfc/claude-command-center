@@ -1216,7 +1216,7 @@
       } else if (isNewSession) {
         $convTtyLabel.textContent = 'new';
         const cwdForPrompt = (typeof getSpawnCwd === 'function' && getSpawnCwd()) || selectedRepoPath();
-        const repoLabel = selectedRepoLabel() || _pathLeaf(cwdForPrompt);
+        const repoLabel = (typeof spawnCwdLabel === 'function' && spawnCwdLabel(cwdForPrompt)) || _pathLeaf(cwdForPrompt);
         $convInput.placeholder = repoLabel
           ? 'Type a prompt to start a new session in ' + repoLabel + '…'
           : 'Pick a folder before starting a new session…';
@@ -14377,14 +14377,38 @@
   }
 
   // ── Spawn cwd picker (new-session mode) ──────────────────────────────
-  // Populates a folder dropdown above the input box so the user picks
+  // Populates a path input above the input box so the user picks or types
   // exactly where the new session will land. This is the explicit repo
   // context for All-repos mode.
   const SPAWN_CWD_KEY = 'ccc-spawn-cwd';
 
+  function normalizeSpawnCwdPath(value) {
+    return String(value || '').trim();
+  }
+
+  function findSpawnCwdRepo(path) {
+    const wanted = normalizeSpawnCwdPath(path);
+    if (!wanted || !repoListState || !Array.isArray(repoListState.repos)) return null;
+    return repoListState.repos.find(r => r && r.path === wanted) || null;
+  }
+
+  function spawnCwdLabel(path) {
+    const wanted = normalizeSpawnCwdPath(path);
+    if (!wanted) return '';
+    const match = findSpawnCwdRepo(wanted);
+    return (match && (match.label || match.path)) || _pathLeaf(wanted) || wanted;
+  }
+
   function populateSpawnCwdPicker() {
     const sel = document.getElementById('spawnCwdPicker');
     if (!sel) return;
+    let list = document.getElementById('spawnCwdOptions');
+    if (!list && sel.tagName !== 'SELECT') {
+      list = document.createElement('datalist');
+      list.id = 'spawnCwdOptions';
+      sel.setAttribute('list', list.id);
+      sel.insertAdjacentElement('afterend', list);
+    }
 
     // Source list: known repos (recent ∪ pinned). Reuse the dropdown's
     // own option-builder for label disambiguation but strip the "All"
@@ -14414,42 +14438,41 @@
     //   2. Active folder filter, if it's a specific folder (not "All")
     //   3. First known repo option
     let saved = '';
-    try { saved = localStorage.getItem(SPAWN_CWD_KEY) || ''; } catch (_) {}
-    let defaultPath = saved;
-    if (!defaultPath || !options.some(o => (o.value || o.path) === defaultPath)) {
-      const filterVal = (typeof archiveFolderFilter !== 'undefined' && typeof ARCHIVE_FOLDER_ALL !== 'undefined' && archiveFolderFilter !== ARCHIVE_FOLDER_ALL)
-        ? archiveFolderFilter : '';
-      defaultPath = filterVal
-        || (options[0] && (options[0].value || options[0].path))
-        || '';
-    }
+    try { saved = normalizeSpawnCwdPath(localStorage.getItem(SPAWN_CWD_KEY) || ''); } catch (_) {}
+    const filterVal = (typeof archiveFolderFilter !== 'undefined' && typeof ARCHIVE_FOLDER_ALL !== 'undefined' && archiveFolderFilter !== ARCHIVE_FOLDER_ALL)
+      ? archiveFolderFilter : '';
+    const defaultPath = saved
+      || filterVal
+      || (options[0] && (options[0].value || options[0].path))
+      || '';
 
-    const prevValue = sel.value;
-    sel.innerHTML = '';
+    const prevValue = normalizeSpawnCwdPath(sel.value);
+    const optionHost = sel.tagName === 'SELECT' ? sel : list;
+    if (optionHost) optionHost.innerHTML = '';
     for (const opt of options) {
       const o = document.createElement('option');
       o.value = opt.value || opt.path;
+      o.label = opt.label || opt.value || opt.path;
       o.textContent = opt.label || opt.value || opt.path;
       o.title = opt.path || o.value;
-      sel.appendChild(o);
+      if (optionHost) optionHost.appendChild(o);
     }
-    if (prevValue && options.some(o => (o.value || o.path) === prevValue)) {
-      sel.value = prevValue;
-    } else if (defaultPath && options.some(o => (o.value || o.path) === defaultPath)) {
-      sel.value = defaultPath;
-    }
+    sel.value = prevValue || defaultPath;
   }
 
   // Persist the user's choice the moment they change it.
-  document.addEventListener('change', (ev) => {
+  function persistSpawnCwdPickerValue(ev) {
     if (ev.target && ev.target.id === 'spawnCwdPicker') {
-      try { localStorage.setItem(SPAWN_CWD_KEY, ev.target.value || ''); } catch (_) {}
+      try { localStorage.setItem(SPAWN_CWD_KEY, normalizeSpawnCwdPath(ev.target.value)); } catch (_) {}
+      if (currentConversation === '__new__') updateInputBar();
     }
-  });
+  }
+  document.addEventListener('change', persistSpawnCwdPickerValue);
+  document.addEventListener('input', persistSpawnCwdPickerValue);
 
   function getSpawnCwd() {
     const sel = document.getElementById('spawnCwdPicker');
-    return (sel && sel.value) || '';
+    return normalizeSpawnCwdPath(sel && sel.value);
   }
 
   function enterNewSessionMode() {
@@ -14472,7 +14495,7 @@
     if ($view) {
       const spawnEngine = getSpawnEngine();
       const engineLabel = spawnEngine === 'codex' ? 'Codex' : (spawnEngine === 'gemini' ? 'Gemini' : 'Claude');
-      const repoLabel = selectedRepoLabel() || _pathLeaf(spawnCwd) || spawnCwd || 'pick a folder below';
+      const repoLabel = spawnCwdLabel(spawnCwd) || 'pick a folder below';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
         + '<div style="font-size:12px;color:var(--text-muted);">Repo: <span style="color:var(--text);">' + escapeHtml(repoLabel) + '</span></div>'
@@ -14633,9 +14656,12 @@
     const prompt = body;
     const engine = getSpawnEngine();
     const spawnCwd = (typeof getSpawnCwd === 'function') ? getSpawnCwd() : '';
-    const repoPath = spawnCwd || selectedRepoPath();
-    if (!repoPath) {
-      showOpToast('New session needs a folder. Pick one from the cwd dropdown first.', 'error');
+    const launchCwd = spawnCwd || selectedRepoPath();
+    const knownRepo = findSpawnCwdRepo(launchCwd);
+    const repoPath = knownRepo ? knownRepo.path : (spawnCwd ? '' : selectedRepoPath());
+    const displayPath = repoPath || launchCwd;
+    if (!launchCwd) {
+      showOpToast('New session needs a folder. Pick one from the cwd field first.', 'error');
       populateSpawnCwdPicker();
       const sel = document.getElementById('spawnCwdPicker');
       if (sel) {
@@ -14655,11 +14681,11 @@
     const tempPid = 'tmp-' + Date.now();
     insertPendingSpawnCard(tempPid, subject, cardSource, null, {
       first_message: body,
-      repo_path: repoPath,
-      folder_path: repoPath,
-      spawn_cwd: repoPath,
-      cwd: repoPath,
-      session_cwd: repoPath,
+      repo_path: displayPath,
+      folder_path: displayPath,
+      spawn_cwd: launchCwd,
+      cwd: launchCwd,
+      session_cwd: launchCwd,
       session_cwd_exists: true,
     });
     if ($convInput) $convInput.value = '';
@@ -14679,9 +14705,9 @@
                      : '/api/sessions/spawn';
       const $inlineWorktree = document.getElementById('inlineWorktreeToggle');
       const useWorktree = !!($inlineWorktree && $inlineWorktree.checked);
-      const spawnBody = engine === 'codex'
-        ? { prompt, name: subject, repo_path: repoPath, cwd: repoPath }
-        : { prompt, name: subject, repo_path: repoPath, cwd: repoPath, worktree: useWorktree };
+      const spawnBody = { prompt, name: subject, cwd: launchCwd };
+      if (repoPath) spawnBody.repo_path = repoPath;
+      if (engine !== 'codex') spawnBody.worktree = useWorktree;
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(spawnBody),

@@ -202,6 +202,31 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(result.get("code"), "claude_unavailable")
         popen.assert_not_called()
 
+    def test_spawn_session_accepts_unregistered_plain_cwd(self):
+        scratch = pathlib.Path(self.tmp_home, "scratch-space").resolve()
+        scratch.mkdir()
+        with mock.patch.object(
+            self.server,
+            "_resolve_claude_bin",
+            return_value={
+                "available": False,
+                "bin": None,
+                "code": "claude_unavailable",
+                "reason": "Claude Code CLI not found",
+            },
+        ), mock.patch.object(
+            self.server, "_git_toplevel_for_existing_dir", return_value=None
+        ), mock.patch.object(self.server.subprocess, "Popen") as popen:
+            result = self.server.spawn_session(
+                "do the thing",
+                name="do the thing",
+                cwd=str(scratch),
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("code"), "claude_unavailable")
+        self.assertIn(str(scratch), self.server._load_custom_repos())
+        popen.assert_not_called()
+
     def test_unknown_repo_path_is_rejected(self):
         unknown = pathlib.Path(self.tmp_home, "not-a-repo").resolve()
         unknown.mkdir()

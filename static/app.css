@@ -1267,7 +1267,7 @@
     color: var(--text-muted); text-transform: uppercase;
     font-size: 10px; letter-spacing: 0.05em; font-weight: 600;
   }
-  .conv-input-context .spawn-cwd-row select.spawn-cwd-picker {
+  .conv-input-context .spawn-cwd-row .spawn-cwd-picker {
     background: var(--bg);
     color: var(--text);
     border: 1px solid var(--border);
@@ -1277,9 +1277,10 @@
     font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
     cursor: pointer;
     max-width: 360px;
+    min-width: 220px;
   }
-  .conv-input-context .spawn-cwd-row select.spawn-cwd-picker:hover { border-color: var(--accent); }
-  .conv-input-context .spawn-cwd-row select.spawn-cwd-picker:focus { outline: none; border-color: var(--accent); }
+  .conv-input-context .spawn-cwd-row .spawn-cwd-picker:hover { border-color: var(--accent); }
+  .conv-input-context .spawn-cwd-row .spawn-cwd-picker:focus { outline: none; border-color: var(--accent); }
   .conv-input-context .wp-path {
     margin-left: auto;
     font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
