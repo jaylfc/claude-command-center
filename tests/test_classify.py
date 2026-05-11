@@ -31,6 +31,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = Path(PROJECT_ROOT) / "tests" / "fixtures" / "mock_session.jsonl"
 MOCK_SESSION_ID = "00000000-mock-4000-8000-000000000001"
 CODEX_SESSION_ID = "11111111-1111-4111-8111-111111111111"
+CODEX_TRAILER_SESSION_ID = "22222222-2222-4222-8222-222222222222"
 
 sys.path.insert(0, PROJECT_ROOT)
 
@@ -528,6 +529,45 @@ class TestCodexConversationAdapter(unittest.TestCase):
             "\n".join(json.dumps(line) for line in lines) + "\n",
             encoding="utf-8",
         )
+        cls.trailer_prompt = (
+            "please inspect app_node toast\n\n"
+            "Before your final reply, end with a block formatted EXACTLY like this "
+            "(the Claude Command Center dashboard parses it):\n"
+            "<session-state>\n"
+            "DID: <one sentence>\n"
+            "INSIGHT: <one sentence>\n"
+            "NEXT_STEP_USER: <one sentence>\n"
+            "</session-state>"
+        )
+        cls.trailer_rollout = (
+            rollout_dir / f"rollout-2026-05-02T00-01-00-{CODEX_TRAILER_SESSION_ID}.jsonl"
+        )
+        trailer_lines = [
+            {
+                "timestamp": "2026-05-02T00:01:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": CODEX_TRAILER_SESSION_ID,
+                    "timestamp": "2026-05-02T00:01:00.000Z",
+                    "cwd": str(cls.fake_repo),
+                    "source": "exec",
+                    "model": "gpt-5.5",
+                },
+            },
+            {
+                "timestamp": "2026-05-02T00:01:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": cls.trailer_prompt,
+                    "images": [],
+                },
+            },
+        ]
+        cls.trailer_rollout.write_text(
+            "\n".join(json.dumps(line) for line in trailer_lines) + "\n",
+            encoding="utf-8",
+        )
 
         db_path = codex_dir / "state_5.sqlite"
         con = sqlite3.connect(db_path)
@@ -586,6 +626,36 @@ class TestCodexConversationAdapter(unittest.TestCase):
                     "main",
                 ),
             )
+            con.execute(
+                """
+                INSERT INTO threads (
+                    id, rollout_path, created_at, updated_at, source,
+                    model_provider, cwd, title, sandbox_policy, approval_mode,
+                    tokens_used, has_user_event, archived, cli_version,
+                    first_user_message, model, reasoning_effort, git_branch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    CODEX_TRAILER_SESSION_ID,
+                    str(cls.trailer_rollout),
+                    1777680060,
+                    1777680061,
+                    "exec",
+                    "openai",
+                    str(cls.fake_repo),
+                    "",
+                    "danger-full-access",
+                    "never",
+                    0,
+                    1,
+                    0,
+                    "0.test",
+                    cls.trailer_prompt,
+                    "gpt-5.5",
+                    "medium",
+                    "main",
+                ),
+            )
             con.commit()
         finally:
             con.close()
@@ -622,6 +692,18 @@ class TestCodexConversationAdapter(unittest.TestCase):
         self.assertEqual(card["folder_path"], str(self.fake_repo))
         self.assertEqual(card["session_cwd"], str(self.fake_worktree))
         self.assertTrue(card["session_cwd_is_worktree"])
+
+    def test_codex_session_state_instruction_is_not_title_text(self):
+        cards = self.server.find_codex_conversations(str(self.fake_repo))
+        card = next(c for c in cards if c["session_id"] == CODEX_TRAILER_SESSION_ID)
+        self.assertEqual(card["display_name"], "please inspect app_node toast")
+        self.assertEqual(card["first_message"], "please inspect app_node toast")
+        self.assertNotIn("Before your final reply", card["display_name"])
+        self.assertNotIn("<session-state>", card["first_message"])
+
+        parsed = self.server.parse_conversation(CODEX_TRAILER_SESSION_ID)
+        user_event = next(ev for ev in parsed["events"] if ev["type"] == "user_text")
+        self.assertEqual(user_event["text"], "please inspect app_node toast")
 
     def test_codex_rollout_parses_into_conversation_events(self):
         parsed = self.server.parse_conversation(CODEX_SESSION_ID)

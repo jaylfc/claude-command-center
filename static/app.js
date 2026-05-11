@@ -13606,27 +13606,37 @@
       el.dispatchEvent(new Event('input', { bubbles: true }));
     }
   }
+  function getClipboardImageFile(ev) {
+    const dt = ev.clipboardData;
+    if (!dt) return null;
+    const items = dt.items || [];
+    for (const it of items) {
+      if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+        const file = it.getAsFile();
+        if (file) return file;
+      }
+    }
+    const files = dt.files || [];
+    for (const file of files) {
+      if (file && file.type && file.type.startsWith('image/')) return file;
+    }
+    return null;
+  }
   function attachImagePaste(el) {
     if (!el || el._imgPasteBound) return;
     el._imgPasteBound = true;
     el.addEventListener('paste', async (ev) => {
-      const items = ev.clipboardData && ev.clipboardData.items;
-      if (!items) return;
-      for (const it of items) {
-        if (it.kind === 'file' && it.type.startsWith('image/')) {
-          ev.preventDefault();
-          const blob = it.getAsFile();
-          const placeholder = ' [uploading image...] ';
-          insertAtCursor(el, placeholder);
-          try {
-            const p = await uploadPastedImage(blob);
-            el.value = el.value.replace(placeholder, ' ' + p + ' ');
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-          } catch (e) {
-            el.value = el.value.replace(placeholder, ' [upload failed: ' + e.message + '] ');
-          }
-          return;
-        }
+      const blob = getClipboardImageFile(ev);
+      if (!blob) return;
+      ev.preventDefault();
+      const placeholder = ' [uploading image...] ';
+      insertAtCursor(el, placeholder);
+      try {
+        const p = await uploadPastedImage(blob);
+        el.value = el.value.replace(placeholder, ' ' + p + ' ');
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch (e) {
+        el.value = el.value.replace(placeholder, ' [upload failed: ' + e.message + '] ');
       }
     });
   }

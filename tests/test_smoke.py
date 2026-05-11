@@ -179,6 +179,17 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertTrue(result["ok"])
         inject.assert_called_once_with("/dev/ttys001", "Terminal", "follow up")
 
+    def test_terminal_inject_timeout_has_actionable_macos_error(self):
+        timeout = subprocess.TimeoutExpired(cmd=["osascript", "-e", "secret"], timeout=5)
+        with mock.patch.object(self.server.subprocess, "run", side_effect=timeout):
+            result = self.server.inject_input_via_keystroke("/dev/ttys001", "Terminal", "hello")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "macos_automation_timeout")
+        self.assertIn("app_mode_loader", result["error"])
+        self.assertIn("app_node", result["error"])
+        self.assertNotIn("secret", result["error"])
+
     def test_spawn_session_preflights_missing_claude_cli(self):
         with mock.patch.object(
             self.server,

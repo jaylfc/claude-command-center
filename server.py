@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "3.3.2"
+__version__ = "3.3.3"
 
 import ast
 import base64
@@ -1358,7 +1358,7 @@ def _extract_user_prompt_text(ev):
     text = _extract_text_from_content(msg.get("content", ""))
     if _is_transcript_control_text(text):
         return ""
-    return text
+    return _strip_ccc_session_state_instruction(text).strip()
 
 
 def _is_generated_helper_session(first_message):
@@ -2916,8 +2916,8 @@ SESSION_OVERRIDES_FILE = COMMAND_CENTER_STATE_DIR / "session-overrides.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 6
-_CONV_META_COMPAT_SCHEMA_VERSIONS = {5, 6}
+_CONV_META_SCHEMA_VERSION = 7
+_CONV_META_COMPAT_SCHEMA_VERSIONS = {7}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -4825,7 +4825,7 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         return s.replace("\\", "\\\\").replace('"', '\\"')
     text_lit = as_lit(text)
 
-    def failure_payload(raw_error):
+    def failure_payload(raw_error, *, timed_out=False):
         detail = (raw_error or "").strip()
         low = detail.lower()
         payload = {
@@ -4835,7 +4835,20 @@ def inject_input_via_keystroke(tty, terminal_app, text):
             "terminal_app": terminal_app,
             "error": detail or "AppleScript failed",
         }
-        if "not allowed to send keystrokes" in low or ("system events" in low and "1002" in low):
+        if timed_out or ("osascript" in low and "timed out" in low):
+            payload.update({
+                "code": "macos_automation_timeout",
+                "error": (
+                    f"macOS did not finish the CCC terminal-control request to "
+                    f"{terminal_app}. If a permission dialog mentions "
+                    "app_mode_loader, app_node, Python, or osascript, click "
+                    "Allow; then grant the app running CCC Automation and "
+                    "Accessibility access for Terminal and System Events if "
+                    "macOS asks again."
+                ),
+                "detail": detail,
+            })
+        elif "not allowed to send keystrokes" in low or ("system events" in low and "1002" in low):
             payload.update({
                 "code": "macos_keystroke_permission",
                 "error": (
@@ -4980,15 +4993,23 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         '''
 
     def _run():
+        timeout_s = 5
         try:
             return subprocess.run(
                 ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=timeout_s,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        except subprocess.TimeoutExpired:
+            return failure_payload(
+                f"osascript timed out after {timeout_s}s while controlling {terminal_app}",
+                timed_out=True,
+            )
+        except FileNotFoundError as e:
             return e
 
     out = _run()
+    if isinstance(out, dict):
+        return out
     if isinstance(out, Exception):
         return failure_payload(str(out))
     result_str = (out.stdout or "").strip()
@@ -4997,6 +5018,8 @@ def inject_input_via_keystroke(tty, terminal_app, text):
     if result_str == "notfound":
         time.sleep(0.2)
         out = _run()
+        if isinstance(out, dict):
+            return out
         if isinstance(out, Exception):
             return failure_payload(str(out))
         result_str = (out.stdout or "").strip()
@@ -8321,7 +8344,9 @@ def _extract_codex_tail_meta(path):
                     continue
                 if ev_type == "event_msg":
                     if ptype == "user_message":
-                        text = (payload.get("message") or "").strip()
+                        text = _strip_ccc_session_state_instruction(
+                            payload.get("message") or ""
+                        ).strip()
                         if text:
                             meta["first_message"] = meta["first_message"] or text
                             meta["last_prompt"] = text
@@ -8528,12 +8553,16 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
             continue
         if not include_old and max_rows > 0 and len(out) >= max_rows:
             continue
-        first_message = (
-            (row.get("first_user_message") or "").strip()
-            or (tail.get("first_message") or "").strip()
-            or ""
-        )
-        title = (row.get("title") or "").strip()
+        row_first_message = _strip_ccc_session_state_instruction(
+            row.get("first_user_message") or ""
+        ).strip()
+        tail_first_message = _strip_ccc_session_state_instruction(
+            tail.get("first_message") or ""
+        ).strip()
+        first_message = row_first_message or tail_first_message
+        title = _strip_ccc_session_state_instruction(
+            (row.get("title") or "").strip()
+        ).strip()
         display_name = (
             name_overrides.get(sid)
             or (row.get("agent_nickname") or "").strip()
@@ -8669,7 +8698,7 @@ def _parse_codex_event(ev, line_num, token_usage=None):
     ts = _codex_event_timestamp(ev)
     if ev_type == "event_msg":
         if ptype == "user_message":
-            text = payload.get("message") or ""
+            text = _strip_ccc_session_state_instruction(payload.get("message") or "")
             images = []
             if text or images:
                 return {"line": line_num, "ts": ts, "type": "user_text", "text": text, "images": images}
