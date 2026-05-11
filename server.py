@@ -1302,6 +1302,33 @@ _GENERATED_HELPER_SESSION_PREFIXES = (
     "Produce a concise 4-8 word title for the GitHub issue below",
 )
 
+_TRANSCRIPT_CONTROL_PREFIXES = (
+    "<system-reminder>",
+    "<command-",
+    "<local-command",
+)
+
+
+def _is_transcript_control_text(text):
+    """Return True for Claude Code bookkeeping stored as user transcript text."""
+    return bool((text or "").lstrip().startswith(_TRANSCRIPT_CONTROL_PREFIXES))
+
+
+def _extract_user_prompt_text(ev):
+    """Extract user-visible prompt text from a JSONL event.
+
+    Claude Code records slash/local-command bookkeeping as user messages in
+    the transcript. Those rows are useful for replay, but they should not be
+    treated as the session's title/original ask in CCC.
+    """
+    if ev.get("type") != "user" or ev.get("isMeta"):
+        return ""
+    msg = _safe_parse_message(ev.get("message", {}))
+    text = _extract_text_from_content(msg.get("content", ""))
+    if _is_transcript_control_text(text):
+        return ""
+    return text
+
 
 def _is_generated_helper_session(first_message):
     """Return True for CCC's own throwaway utility prompts."""
@@ -1434,15 +1461,10 @@ def find_all_conversations(limit_per_folder=None):
                             ev = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        if not first_message and ev.get("type") == "user":
-                            msg = (ev.get("message") or {}).get("content")
-                            if isinstance(msg, str):
-                                first_message = msg.strip()
-                            elif isinstance(msg, list):
-                                for part in msg:
-                                    if isinstance(part, dict) and part.get("type") == "text":
-                                        first_message = (part.get("text") or "").strip()
-                                        break
+                        if not first_message:
+                            text = _extract_user_prompt_text(ev)
+                            if text:
+                                first_message = text
                         if not git_branch:
                             git_branch = ev.get("gitBranch") or ev.get("git_branch")
                         if not timestamp:
@@ -3882,18 +3904,8 @@ def _extract_first_message(session_id):
                     ev = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if ev.get("type") != "user":
-                    continue
-                content = ev.get("message", {}).get("content", "")
-                if isinstance(content, str):
-                    text = content
-                elif isinstance(content, list):
-                    parts = [b.get("text", "") for b in content if b.get("type") == "text"]
-                    text = "\n".join(parts)
-                else:
-                    text = ""
-                text = text.strip()
-                if text and not text.startswith("<system-reminder>") and not text.startswith("<command-") and not text.startswith("<local-command"):
+                text = _extract_user_prompt_text(ev)
+                if text:
                     return text[:1500]
     except OSError:
         pass
@@ -6677,9 +6689,8 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
                         if not git_branch:
                             git_branch = ev.get("gitBranch", "")
                         if not first_message:
-                            msg = _safe_parse_message(ev.get("message", {}))
-                            text = _extract_text_from_content(msg.get("content", ""))
-                            if text and not text.lstrip().startswith("<command-name>"):
+                            text = _extract_user_prompt_text(ev)
+                            if text:
                                 first_message = text
 
                     if ev_type == "assistant" and not session_id:
@@ -7667,7 +7678,7 @@ def _parse_conversation_event(ev, line_num):
         msg = _safe_parse_message(ev.get("message", {}))
         content = msg.get("content", "")
         text = _extract_text_from_content(content)
-        if text and text.lstrip().startswith("<command-name>"):
+        if _is_transcript_control_text(text):
             return None
         images = _extract_images_from_content(content)
         if text or images:

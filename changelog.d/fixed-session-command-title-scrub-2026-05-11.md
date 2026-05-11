@@ -1,0 +1,1 @@
+- Fixed session titles that showed Claude Code local-command wrapper text instead of the first real user prompt.
