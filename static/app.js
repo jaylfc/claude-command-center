@@ -14489,6 +14489,7 @@
   // exactly where the new session will land. This is the explicit repo
   // context for All-repos mode.
   const SPAWN_CWD_KEY = 'ccc-spawn-cwd';
+  let spawnCwdOptions = [];
 
   function normalizeSpawnCwdPath(value) {
     return String(value || '').trim();
@@ -14510,13 +14511,6 @@
   function populateSpawnCwdPicker() {
     const sel = document.getElementById('spawnCwdPicker');
     if (!sel) return;
-    let list = document.getElementById('spawnCwdOptions');
-    if (!list && sel.tagName !== 'SELECT') {
-      list = document.createElement('datalist');
-      list.id = 'spawnCwdOptions';
-      sel.setAttribute('list', list.id);
-      sel.insertAdjacentElement('afterend', list);
-    }
 
     // Source list: known repos (recent ∪ pinned). Reuse the dropdown's
     // own option-builder for label disambiguation but strip the "All"
@@ -14540,6 +14534,11 @@
       seen.add(key);
       return true;
     });
+    spawnCwdOptions = options.map(o => ({
+      value: o.value || o.path,
+      path: o.path || o.value,
+      label: o.label || o.value || o.path,
+    })).filter(o => o.value);
 
     // Default selection priority:
     //   1. User's last spawn cwd (localStorage)
@@ -14555,28 +14554,127 @@
       || '';
 
     const prevValue = normalizeSpawnCwdPath(sel.value);
-    const optionHost = sel.tagName === 'SELECT' ? sel : list;
-    if (optionHost) optionHost.innerHTML = '';
-    for (const opt of options) {
-      const o = document.createElement('option');
-      o.value = opt.value || opt.path;
-      o.label = opt.label || opt.value || opt.path;
-      o.textContent = opt.label || opt.value || opt.path;
-      o.title = opt.path || o.value;
-      if (optionHost) optionHost.appendChild(o);
-    }
     sel.value = prevValue || defaultPath;
+    if (isSpawnCwdMenuOpen()) renderSpawnCwdMenu('');
+  }
+
+  function isSpawnCwdMenuOpen() {
+    const menu = document.getElementById('spawnCwdMenu');
+    return !!(menu && menu.classList.contains('open'));
+  }
+
+  function setSpawnCwdMenuOpen(open) {
+    const menu = document.getElementById('spawnCwdMenu');
+    const btn = document.getElementById('spawnCwdMenuBtn');
+    if (!menu) return;
+    menu.classList.toggle('open', !!open);
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  function renderSpawnCwdMenu(filterText) {
+    const menu = document.getElementById('spawnCwdMenu');
+    if (!menu) return;
+    const q = normalizeSpawnCwdPath(filterText).toLowerCase();
+    const matches = spawnCwdOptions
+      .filter(opt => {
+        if (!q) return true;
+        return String(opt.label || '').toLowerCase().includes(q)
+          || String(opt.value || '').toLowerCase().includes(q);
+      })
+      .slice(0, 60);
+    menu.innerHTML = '';
+    if (!matches.length) {
+      const empty = document.createElement('div');
+      empty.className = 'spawn-cwd-menu-empty';
+      empty.textContent = 'No matching folders';
+      menu.appendChild(empty);
+      return;
+    }
+    for (const opt of matches) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'spawn-cwd-option';
+      item.setAttribute('role', 'option');
+      item.dataset.value = opt.value;
+      const label = document.createElement('span');
+      label.className = 'spawn-cwd-option-label';
+      label.textContent = opt.label || opt.value;
+      const path = document.createElement('span');
+      path.className = 'spawn-cwd-option-path';
+      path.textContent = opt.value;
+      item.appendChild(label);
+      item.appendChild(path);
+      item.addEventListener('click', () => {
+        const input = document.getElementById('spawnCwdPicker');
+        if (input) {
+          input.value = opt.value;
+          persistSpawnCwdPickerValue({ target: input });
+          input.focus();
+        }
+        setSpawnCwdMenuOpen(false);
+      });
+      menu.appendChild(item);
+    }
+  }
+
+  function openSpawnCwdMenu(filterText) {
+    if (!spawnCwdOptions.length) populateSpawnCwdPicker();
+    setSpawnCwdMenuOpen(true);
+    renderSpawnCwdMenu(filterText || '');
+  }
+
+  function closeSpawnCwdMenu() {
+    setSpawnCwdMenuOpen(false);
+  }
+
+  function updateNewSessionCwdNotice() {
+    if (currentConversation !== '__new__') return;
+    const notice = document.getElementById('newSessionCwdNotice');
+    if (!notice) return;
+    const cwd = getSpawnCwd();
+    notice.textContent = spawnCwdLabel(cwd) || 'pick a folder below';
+    notice.title = cwd || '';
   }
 
   // Persist the user's choice the moment they change it.
   function persistSpawnCwdPickerValue(ev) {
     if (ev.target && ev.target.id === 'spawnCwdPicker') {
       try { localStorage.setItem(SPAWN_CWD_KEY, normalizeSpawnCwdPath(ev.target.value)); } catch (_) {}
+      if (isSpawnCwdMenuOpen()) renderSpawnCwdMenu(ev.target.value);
+      updateNewSessionCwdNotice();
       if (currentConversation === '__new__') updateInputBar();
     }
   }
   document.addEventListener('change', persistSpawnCwdPickerValue);
   document.addEventListener('input', persistSpawnCwdPickerValue);
+
+  {
+    const spawnCwdBtn = document.getElementById('spawnCwdMenuBtn');
+    const spawnCwdInput = document.getElementById('spawnCwdPicker');
+    if (spawnCwdBtn) {
+      spawnCwdBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (isSpawnCwdMenuOpen()) closeSpawnCwdMenu();
+        else openSpawnCwdMenu('');
+      });
+    }
+    if (spawnCwdInput) {
+      spawnCwdInput.addEventListener('keydown', (ev) => {
+        if (ev.key === 'ArrowDown') {
+          ev.preventDefault();
+          openSpawnCwdMenu('');
+        } else if (ev.key === 'Escape') {
+          closeSpawnCwdMenu();
+        }
+      });
+    }
+    document.addEventListener('click', (ev) => {
+      const row = document.querySelector('.spawn-cwd-row');
+      if (row && row.contains(ev.target)) return;
+      closeSpawnCwdMenu();
+    });
+  }
 
   function getSpawnCwd() {
     const sel = document.getElementById('spawnCwdPicker');
@@ -14606,7 +14704,7 @@
       const repoLabel = spawnCwdLabel(spawnCwd) || 'pick a folder below';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
-        + '<div style="font-size:12px;color:var(--text-muted);">Repo: <span style="color:var(--text);">' + escapeHtml(repoLabel) + '</span></div>'
+        + '<div style="font-size:12px;color:var(--text-muted);">CWD: <span id="newSessionCwdNotice" style="color:var(--text);" title="' + escapeAttr(spawnCwd) + '">' + escapeHtml(repoLabel) + '</span></div>'
         + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.</div>'
         + '</div>';
     }

@@ -1,0 +1,1 @@
+- Fixed the new-session CWD chooser so its folder suggestions open from an explicit dropdown button while still accepting typed paths, and kept the new-session pane notice in sync with the selected CWD.
