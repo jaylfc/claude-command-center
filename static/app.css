@@ -1951,11 +1951,10 @@
     gap: 0;
   }
   .conv-folder-group .conv-item.is-grouped-row {
-    /* Match Omnara-style row height (~36px). Side-by-side comparison with
-       Omnara: 5px verticals were still too tight; ~9–10px brings the row
-       to ~36px which matches the comparison screenshots. */
-    padding-top: 9px;
-    padding-bottom: 9px;
+    /* Grouped project lists need to stay dense; the folder header already
+       provides the visual break, so rows should not carry extra air. */
+    padding-top: 4px;
+    padding-bottom: 4px;
     border-radius: 4px;
   }
   .conv-folder-group .conv-item.is-grouped-row .conv-title {
@@ -3581,14 +3580,14 @@
     grid-template-columns: var(--conv-dot-col) var(--conv-time-col) auto auto minmax(0, 1fr);
     column-gap: 3px;
     align-items: center;
-    padding: 5px 10px 2px;
+    padding: 2px 10px 1px;
     font-size: 11px;
     color: var(--text-muted);
     cursor: pointer;
     border-radius: 4px;
     border-left: 3px solid transparent;
     user-select: none;
-    margin-top: 6px;
+    margin-top: 3px;
     border-top: 1px solid rgba(139,148,158,0.12);
   }
   .conv-folder-group-header:first-child { margin-top: 0; border-top: none; }
@@ -3596,8 +3595,8 @@
   /* Separator before a standalone (ungrouped) session that follows a group */
   .conv-folder-group + .conv-item,
   .conv-item + .conv-folder-group {
-    margin-top: 6px;
-    padding-top: 6px;
+    margin-top: 3px;
+    padding-top: 3px;
     border-top: 1px solid rgba(139,148,158,0.12);
   }
   .conv-folder-group-arrow {
@@ -3623,8 +3622,8 @@
   .conv-folder-group-chip.is-orphan { opacity: 0.55; font-style: italic; }
   .conv-folder-group + .conv-folder-group {
     border-top: 1px solid var(--border);
-    margin-top: 5px;
-    padding-top: 3px;
+    margin-top: 2px;
+    padding-top: 2px;
   }
   .conv-folder-group-count {
     grid-column: 4;

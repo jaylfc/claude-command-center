@@ -1,0 +1,1 @@
+- Tightened the by-project conversation list spacing so grouped rows and project headers show more sessions without the oversized vertical gaps.
