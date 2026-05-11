@@ -1,0 +1,1 @@
+- Stop CCC's session-state reminder from being typed into terminal injections, while keeping Claude spawns on the hidden system-prompt path and rendering command-center pasted image paths inline.

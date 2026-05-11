@@ -50,7 +50,7 @@ cd claude-command-center
 # Try it — runs in the foreground until Ctrl-C / terminal close
 ./run.sh
 
-# Keep it — install as a launchd agent that starts at login
+# Keep it — install as a per-user launchd agent that starts now and at login
 ./run.sh --install-service
 ```
 
@@ -58,9 +58,14 @@ Open [http://localhost:8090](http://localhost:8090), then pick a repo from
 the repo dropdown before starting repo-scoped actions.
 
 `--install-service` writes `~/Library/LaunchAgents/com.github.claude-command-center.plist`
-and bakes in whatever `PORT` / `CCC_*` env vars were set when you ran it.
-Re-run it to update config; remove with `./run.sh --uninstall-service`. Service
-logs go to `~/.claude/command-center/logs/service.{out,err}.log`.
+and registers it in your per-user launchd domain so CCC starts immediately,
+restarts if it exits, and starts again at macOS login. It bakes in whatever
+`PORT` / `CCC_*` env vars were set when you ran it. Re-run it to update config;
+check with `./run.sh --service-status`; remove with `./run.sh --uninstall-service`.
+Service logs go to `~/.claude/command-center/logs/service.{out,err}.log`.
+Normal CCC app updates keep using the same checkout path; re-run
+`./run.sh --install-service` only when you want to change baked-in env vars or
+pick up a release that changes the launchd plist itself.
 
 First launch (foreground or service) copies two hook scripts into
 `~/.claude/command-center/hooks/` and registers them in
@@ -184,6 +189,7 @@ For more depth: [`docs/architecture.md`](docs/architecture.md),
 | Env var | Default | Purpose |
 |---|---|---|
 | `PORT` | `8090` | HTTP port |
+| `CCC_CLAUDE_BIN` | *(auto)* | Absolute path to the Claude Code CLI when a launchd service cannot see your shell PATH. Set it before `./run.sh --install-service` to bake it into the agent. |
 | `CCC_BIND_HOST` | `127.0.0.1` | Interface to bind. Set to `0.0.0.0` to expose on the LAN — **no auth, see [`SECURITY.md`](SECURITY.md)** |
 | `CCC_ALLOWED_ORIGIN` | *(empty)* | Comma-separated origins (e.g. `http://my-mac.tailnet.ts.net:8090`) added to the same-origin POST allowlist. Use with `CCC_BIND_HOST=0.0.0.0` to reach the UI from another device on a trusted network (Tailscale / VPN) — **no auth, see [`SECURITY.md`](SECURITY.md)** |
 | `CCC_TRUST_TAILNET` | *(off)* | When set (`1`/`true`/`yes`/`on`), CCC shells out to `tailscale status --json` at startup and adds the local node's MagicDNS hostname + Tailscale IPs to the allowlist automatically. Same trust caveat as `CCC_ALLOWED_ORIGIN`. |

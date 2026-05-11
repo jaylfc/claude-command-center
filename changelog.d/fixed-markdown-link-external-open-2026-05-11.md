@@ -1,0 +1,1 @@
+- Markdown file links in transcripts now open with the system `open` handler instead of only revealing the file in Finder.

@@ -9,6 +9,7 @@ import os
 import pathlib
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -84,6 +85,24 @@ class TestServerImports(unittest.TestCase):
                              "MORNING_ENABLED must be False when plugin missing")
 
 
+class TestRunScript(unittest.TestCase):
+    def test_run_script_syntax_is_valid(self):
+        script = pathlib.Path(PROJECT_ROOT, "run.sh")
+        result = subprocess.run(["bash", "-n", str(script)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_run_script_help_advertises_launchd_service(self):
+        script = pathlib.Path(PROJECT_ROOT, "run.sh")
+        result = subprocess.run(["bash", str(script), "--help"],
+                                cwd=PROJECT_ROOT,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--install-service", result.stdout)
+        self.assertIn("--uninstall-service", result.stdout)
+        self.assertIn("--service-status", result.stdout)
+
+
 class TestRepoContextHelpers(unittest.TestCase):
     def setUp(self):
         self.tmp_home = tempfile.mkdtemp(prefix="ccc-repo-context-home-")
@@ -107,6 +126,81 @@ class TestRepoContextHelpers(unittest.TestCase):
 
     def test_valid_repo_path_is_accepted(self):
         self.assertEqual(self.server.resolve_repo_path(str(self.repo)), str(self.repo))
+
+    def test_strips_ccc_session_state_instruction_from_visible_text(self):
+        text = (
+            "now to 00000000-0000-4000-8000-000000000001: "
+            "/Users/example/.claude/command-center/pasted-images/paste-1.png\n\n"
+            "Before your final reply, end with a block formatted EXACTLY like this "
+            "(the Claude Command Center dashboard parses it):\n"
+            "<session-state>\n"
+            "DID: <one sentence>\n"
+            "INSIGHT: <one sentence>\n"
+            "NEXT_STEP_USER: <one sentence>\n"
+            "</session-state>"
+        )
+        self.assertEqual(
+            self.server._strip_ccc_session_state_instruction(text),
+            "now to 00000000-0000-4000-8000-000000000001: "
+            "/Users/example/.claude/command-center/pasted-images/paste-1.png",
+        )
+
+    def test_terminal_inject_strips_ccc_session_state_instruction(self):
+        text = (
+            "follow up\n\n"
+            "Before your final reply, end with a block formatted EXACTLY like this:\n"
+            "<session-state>\n"
+            "DID: <one sentence>\n"
+            "INSIGHT: <one sentence>\n"
+            "NEXT_STEP_USER: <one sentence>\n"
+            "</session-state>"
+        )
+        with mock.patch.object(self.server, "_is_codex_session", return_value=False), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={
+                     "live": True,
+                     "tty": "/dev/ttys001",
+                     "terminal_app": "Terminal",
+                 },
+             ), \
+             mock.patch.object(
+                 self.server,
+                 "inject_input_via_keystroke",
+                 return_value={"ok": True, "via": "keystroke"},
+             ) as inject:
+            result = self.server._inject_text_into_session(
+                "00000000-0000-4000-8000-000000000001",
+                text,
+            )
+        self.assertTrue(result["ok"])
+        inject.assert_called_once_with("/dev/ttys001", "Terminal", "follow up")
+
+    def test_spawn_session_preflights_missing_claude_cli(self):
+        with mock.patch.object(
+            self.server,
+            "_resolve_claude_bin",
+            return_value={
+                "available": False,
+                "bin": None,
+                "code": "claude_unavailable",
+                "reason": "Claude Code CLI not found",
+            },
+        ), mock.patch.object(
+            self.server, "_git_toplevel_for_existing_dir", return_value=str(self.repo)
+        ), mock.patch.object(self.server.subprocess, "Popen") as popen:
+            result = self.server.spawn_session(
+                "do the thing",
+                name="do the thing",
+                cwd=str(self.repo),
+                repo_path=str(self.repo),
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result.get("code"), "claude_unavailable")
+        popen.assert_not_called()
 
     def test_unknown_repo_path_is_rejected(self):
         unknown = pathlib.Path(self.tmp_home, "not-a-repo").resolve()
@@ -278,6 +372,42 @@ class TestRepoContextHelpers(unittest.TestCase):
             result = server._resolve_codex_bin()
         self.assertFalse(result["available"])
         self.assertIn("reason", result)
+
+    def test_resolve_claude_bin_prefers_env_override(self):
+        """CCC_CLAUDE_BIN must win over PATH so launchd services can pin
+        the same CLI path an interactive shell uses."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_resolve_claude_bin"))
+
+        with tempfile.NamedTemporaryFile(prefix="claude-", suffix=".sh", delete=False) as f:
+            f.write(b"#!/bin/sh\nexit 0\n")
+            fake_bin = f.name
+        os.chmod(fake_bin, os.stat(fake_bin).st_mode | stat.S_IXUSR)
+
+        try:
+            with mock.patch.dict(os.environ, {"CCC_CLAUDE_BIN": fake_bin}), \
+                 mock.patch.object(server.shutil, "which", return_value="/sentinel/from/path"):
+                result = server._resolve_claude_bin()
+            self.assertEqual(result["bin"], fake_bin)
+            self.assertEqual(result["source"], "env")
+            self.assertTrue(result["available"])
+        finally:
+            os.unlink(fake_bin)
+
+    def test_resolve_claude_bin_returns_unavailable_for_bad_env_override(self):
+        """A bad CCC_CLAUDE_BIN should fail clearly instead of falling
+        through to another binary and hiding the service configuration error."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with mock.patch.dict(os.environ, {"CCC_CLAUDE_BIN": "/definitely/does/not/exist/claude"}), \
+             mock.patch.object(server.shutil, "which", return_value="/sentinel/from/path"):
+            result = server._resolve_claude_bin()
+        self.assertFalse(result["available"])
+        self.assertEqual(result.get("code"), "claude_unavailable")
+        self.assertIn("CCC_CLAUDE_BIN", result.get("reason", ""))
 
     def test_spawn_session_codex_exists(self):
         """`spawn_session_codex` must exist alongside `spawn_session`
@@ -535,6 +665,62 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertFalse(result["core_sandbox"])
         self.assertTrue(result["session_sandbox"])
 
+    def test_open_launch_allows_markdown_session_cwd_files(self):
+        """Markdown transcript links may launch externally via macOS open."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            session_cwd = root / "session"
+            (session_cwd / ".claude").mkdir(parents=True)
+            doc = session_cwd / "notes.md"
+            doc.write_text("# notes\n")
+
+            with mock.patch.object(server, "find_session_cwd", return_value=str(session_cwd)):
+                result = server._resolve_open_target(
+                    "notes.md",
+                    session_id="11111111-2222-3333-4444-555555555555",
+                    cwd=str(session_cwd),
+                    repo_path=str(repo),
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["core_sandbox"])
+        self.assertTrue(server._open_launch_allowed(result))
+
+    def test_open_launch_blocks_non_markdown_session_cwd_files(self):
+        """Launching outside the repo/log sandbox stays limited to markdown."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / ".git").mkdir()
+            session_cwd = root / "session"
+            (session_cwd / ".claude").mkdir(parents=True)
+            image = session_cwd / "screenshot.png"
+            image.write_bytes(b"not really a png")
+
+            with mock.patch.object(server, "find_session_cwd", return_value=str(session_cwd)):
+                result = server._resolve_open_target(
+                    "screenshot.png",
+                    session_id="11111111-2222-3333-4444-555555555555",
+                    cwd=str(session_cwd),
+                    repo_path=str(repo),
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["core_sandbox"])
+        self.assertFalse(server._open_launch_allowed(result))
+
     def test_open_target_blocks_executable_session_cwd_files(self):
         """Session-cwd fallback must not turn /api/open into script launch/reveal."""
         for mod in ("server",):
@@ -562,6 +748,12 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], 403)
         self.assertIn("extension not allowed", result["error"])
+
+    def test_markdown_path_links_request_external_open(self):
+        """The transcript click handler asks /api/open to launch markdown."""
+        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
+        self.assertIn("function _isMarkdownPath", js)
+        self.assertIn("payload.launch = true", js)
 
     def test_files_endpoint_route_registered(self):
         """Smoke check: GET /api/conversations/<id>/files dispatcher

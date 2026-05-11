@@ -30,8 +30,9 @@
   // Strip the "Fix GitHub issue #N: ... Read the issue first with `gh issue view N`,
   // then implement the fix." boilerplate from older spawn prompts. Kept here so it
   // retroactively cleans cards spawned before the prompt-template cleanup.
-  // Structured block every spawned session is asked to emit on its final reply
-  // so the /attention panel can show exact state + next step without heuristics.
+  // Legacy client-side trailer that older CCC builds appended to spawn
+  // prompts. Kept so the UI can scrub existing transcripts; current Claude
+  // spawns receive the reminder as a hidden backend system prompt instead.
   const SESSION_STATE_INSTRUCTION = "\n\nBefore your final reply, end with a block formatted EXACTLY like this (the Claude Command Center dashboard parses it):\n<session-state>\nDID: <one sentence — what you actually changed/learned>\nINSIGHT: <one sentence — the main finding, root cause, or surprise>\nNEXT_STEP_USER: <one sentence — the exact next thing the user should do>\n</session-state>";
 
   // When a prompt starts with the sibling-orchestrator preamble ("You are
@@ -61,9 +62,9 @@
     // Done first so the rest of the cleanup applies to the real task body.
     const siblingBody = extractSiblingTaskBody(out);
     if (siblingBody) out = siblingBody;
-    // Strip the session-state instruction CCC appends to spawn prompts.
-    // Use the constant rather than a literal so future edits to the
-    // template flow through automatically.
+    // Strip the session-state instruction older CCC builds appended to
+    // spawn prompts. Use the constant so legacy cleanup follows template
+    // edits automatically.
     if (SESSION_STATE_INSTRUCTION && out.indexOf(SESSION_STATE_INSTRUCTION) !== -1) {
       out = out.split(SESSION_STATE_INSTRUCTION).join('');
     }
@@ -1487,13 +1488,11 @@
     return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  // Replace literal `.claude/pasted-images/paste-*.{png,jpg,…}` paths inside
-  // an already-escapeHtml'd string with inline <img> tags. The server's
-  // /api/pasted-image route only serves files actually under `.claude/
-  // pasted-images/` inside the user's home, so a malformed match resolves
-  // to a broken image rather than something dangerous. Reuses .msg-image
-  // so the existing lightbox click handler picks them up for free.
-  const PASTED_IMG_RE = /(\/[^\s<>"]*?\/\.claude\/pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))/gi;
+  // Replace literal pasted-image paths inside an already-escapeHtml'd string
+  // with inline <img> tags. CCC now uploads to `.claude/command-center/
+  // pasted-images/`; legacy `.claude/pasted-images/` paths still render.
+  // The server's /api/pasted-image route performs the real path sandboxing.
+  const PASTED_IMG_RE = /(\/[^\s<>"]*?\/\.claude\/(?:command-center\/)?pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))/gi;
   function linkifyPastedImages(escapedHtml) {
     if (!escapedHtml) return escapedHtml;
     return String(escapedHtml).replace(PASTED_IMG_RE, (m) =>
@@ -1924,19 +1923,23 @@
 
   // Inline-code paths in conversation messages get rendered as
   // `<a class="path-link">`. Two kinds in practice:
-  //   • file paths       → open in editor via /api/open
+  //   • file paths       → open/reveal through /api/open
   //   • web routes       → open in a browser tab on the project's deploy
   //                        URL (Vercel) when known, else the same origin
   // Heuristic: if it starts with `/` AND the last segment has a file
   // extension, treat as a file. Otherwise treat as a web route. Routes
   // like `/api/foo/bar` (no extension on the last segment) win the
-  // browser-tab path; files like `static/index.html` win the editor path.
+  // browser-tab path; files like `static/index.html` win the file path.
   function _isWebRoutePath(p) {
     if (!p.startsWith('/')) return false;
     const last = p.split('/').pop() || '';
     // Strip query/fragment before extension check.
     const cleanLast = last.split(/[?#]/)[0];
     return !/\.[a-zA-Z0-9]{1,8}$/.test(cleanLast);
+  }
+  function _isMarkdownPath(p) {
+    const clean = String(p || '').split(/[?#]/)[0].replace(/:\d+(?::\d+)?$/, '');
+    return /\.(?:md|mdx)$/i.test(clean);
   }
   function _pathLinkSessionContext(el) {
     try {
@@ -1977,6 +1980,7 @@
     try {
       const ctx = _pathLinkSessionContext(a);
       const payload = { path: p };
+      if (_isMarkdownPath(p)) payload.launch = true;
       if (ctx && ctx.id) payload.session_id = ctx.id;
       if (ctx && ctx.cwd) payload.cwd = ctx.cwd;
       if (ctx && (ctx.repoPath || ctx.repo_path)) payload.repo_path = ctx.repoPath || ctx.repo_path;
@@ -4984,7 +4988,8 @@
         const cleanTitle = (title || '').replace(/^#\d+:\s*/, '').replace(/\[[^\]]*\]\s*/g, '').trim();
         // GH issue titles truncate around ~94 chars, so always tell Claude to
         // read the full issue. Keep the short title as a hint.
-        // (No SESSION_STATE_INSTRUCTION here — submitNewSessionModal appends it.)
+        // The backend now supplies the session-state reminder as a hidden
+        // Claude system prompt, so the user-visible prompt stays clean.
         const card = btn.closest('.kanban-card');
         const conv = card ? conversationsData.find(x => x.id === card.dataset.id) : null;
         const body = issueNum
@@ -5062,9 +5067,9 @@
         // See the Edit & start handler above — same rationale. Titles over
         // ~94 chars get truncated by GitHub, so always direct Claude to read
         // the full body via `gh issue view N`.
-        const prompt = (issueNum
+        const prompt = issueNum
           ? 'Fix issue #' + issueNum + ' — ' + cleanTitle + '\n\nRun `gh issue view ' + issueNum + '` for the full body (title may be truncated).'
-          : cleanTitle) + SESSION_STATE_INSTRUCTION;
+          : cleanTitle;
         const spawnKey = issueNum ? (_issueStartKey(issueNum, repoPath) || ('issue-' + issueNum)) : sessionName;
         if (_spawningKeys.has(spawnKey)) return;  // already spawning — ignore duplicate tap
         _spawningKeys.add(spawnKey);
@@ -6602,9 +6607,9 @@
         const sessionName = issueNum
           ? ('issue-' + issueNum)
           : cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40);
-        const prompt = (issueNum
+        const prompt = issueNum
           ? 'Fix issue #' + issueNum + ' — ' + cleanTitle + '\n\nRun `gh issue view ' + issueNum + '` for the full body (title may be truncated).'
-          : cleanTitle) + SESSION_STATE_INSTRUCTION;
+          : cleanTitle;
         const spawnRepoPath = spawnCwd || repoPathForIssueNumber(issueNum);
         const spawnKey = issueNum ? (_issueStartKey(issueNum, spawnRepoPath) || ('issue-' + issueNum)) : sessionName;
         if (_spawningKeys.has(spawnKey)) return;
@@ -13394,7 +13399,7 @@
       return first.length > 120 ? first.slice(0, 120).trim() + '...' : first;
     }
     const effectiveSubject = firstSentence(body);
-    const prompt = body + SESSION_STATE_INSTRUCTION;
+    const prompt = body;
     const engine = ($nsmEngineSelect && $nsmEngineSelect.value) || 'claude';
     const repoPath = ($nsm && $nsm.dataset.repoPath) || requireSelectedRepo('New session');
     if (!repoPath) return;
@@ -14389,7 +14394,7 @@
       + '\n\nRun `gh issue view ' + issueNum + '` for the full body (title may be truncated).';
     const body = preamble + '\n\n' + userText;
     const subject = 'issue-' + issueNum;
-    const prompt = body + SESSION_STATE_INSTRUCTION;
+    const prompt = body;
     if ($convSendBtn) $convSendBtn.disabled = true;
     const flashRed = () => {
       if (!$convInput) return;
@@ -14511,7 +14516,7 @@
       return first.length > 120 ? first.slice(0, 120).trim() + '...' : first;
     }
     const subject = firstSentence(body);
-    const prompt = body + SESSION_STATE_INSTRUCTION;
+    const prompt = body;
     const engine = getSpawnEngine();
     const spawnCwd = (typeof getSpawnCwd === 'function') ? getSpawnCwd() : '';
     const repoPath = spawnCwd || selectedRepoPath();

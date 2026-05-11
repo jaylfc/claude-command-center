@@ -226,6 +226,13 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
     }
 
 
+def _open_launch_allowed(resolved_target):
+    """Whether /api/open may launch, not just reveal, a resolved target."""
+    if resolved_target.get("core_sandbox"):
+        return True
+    return _categorize_file_target(resolved_target.get("path")) == "markdown"
+
+
 _SESSION_LOAD_STATUS_LOCK = threading.Lock()
 _SESSION_LOAD_STATUS = {
     "active": False,
@@ -1747,6 +1754,78 @@ def _which(cmd):
     return shutil.which(cmd)
 
 
+def _iter_common_cli_candidates(cmd):
+    """Yield common user-install locations that launchd often omits from PATH."""
+    home = Path.home()
+    fixed = [
+        Path("/opt/homebrew/bin") / cmd,
+        Path("/usr/local/bin") / cmd,
+        home / ".local" / "bin" / cmd,
+        home / ".npm-global" / "bin" / cmd,
+        home / "Library" / "pnpm" / cmd,
+        home / ".volta" / "bin" / cmd,
+        home / ".bun" / "bin" / cmd,
+        home / ".asdf" / "shims" / cmd,
+        home / ".nodenv" / "shims" / cmd,
+        home / ".local" / "share" / "mise" / "shims" / cmd,
+    ]
+    seen = set()
+    for p in fixed:
+        s = str(p)
+        if s not in seen:
+            seen.add(s)
+            yield p
+    glob_roots = [
+        (home / ".nvm" / "versions" / "node", f"*/bin/{cmd}"),
+        (home / ".fnm" / "node-versions", f"*/installation/bin/{cmd}"),
+    ]
+    for root, pattern in glob_roots:
+        if not root.is_dir():
+            continue
+        try:
+            paths = sorted(root.glob(pattern), reverse=True)
+        except OSError:
+            continue
+        for p in paths:
+            s = str(p)
+            if s not in seen:
+                seen.add(s)
+                yield p
+
+
+def _resolve_claude_bin():
+    """Locate a usable Claude Code CLI binary.
+
+    LaunchAgents inherit a sparse PATH, so relying only on Popen(["claude", ...])
+    produces opaque FileNotFoundError failures even when an interactive shell can
+    run Claude. CCC_CLAUDE_BIN is the explicit escape hatch; common user-install
+    locations cover Homebrew, npm/nvm/fnm, Volta, asdf, mise, and similar setups.
+    """
+    env_bin = (os.environ.get("CCC_CLAUDE_BIN") or "").strip()
+    if env_bin:
+        expanded = os.path.expanduser(env_bin)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return {"available": True, "bin": expanded, "source": "env"}
+        return {
+            "available": False,
+            "bin": None,
+            "code": "claude_unavailable",
+            "reason": f"CCC_CLAUDE_BIN is set to {env_bin!r} but it isn't an executable file",
+        }
+    which_bin = shutil.which("claude")
+    if which_bin:
+        return {"available": True, "bin": which_bin, "source": "path"}
+    for candidate in _iter_common_cli_candidates("claude"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return {"available": True, "bin": str(candidate), "source": "candidate"}
+    return {
+        "available": False,
+        "bin": None,
+        "code": "claude_unavailable",
+        "reason": "Claude Code CLI not found. Install Claude Code or set CCC_CLAUDE_BIN.",
+    }
+
+
 # ── In-app update: version check + self-update ─────────────────────────────
 # The UI pings /api/version/check on load; if the local __version__ is behind
 # the latest GitHub release tag, it shows a "Update available" pill. Clicking
@@ -2504,15 +2583,15 @@ def _run_healthcheck():
     out = {"checks": []}
 
     # ── claude CLI ────────────────────────────────────────────────────
-    claude_path = _which("claude")
+    claude_info = _resolve_claude_bin()
     projects_dir = Path.home() / ".claude" / "projects"
-    if not claude_path:
+    if not claude_info.get("available"):
         out["checks"].append({
             "id": "claude_cli",
             "label": "Claude Code CLI",
             "status": "error",
-            "message": "`claude` not found on PATH",
-            "hint": "Install Claude Code: https://docs.claude.com/en/docs/claude-code",
+            "message": "Claude Code CLI not found",
+            "hint": claude_info.get("reason") or "Install Claude Code: https://docs.claude.com/en/docs/claude-code",
         })
     elif not projects_dir.is_dir():
         out["checks"].append({
@@ -3383,6 +3462,23 @@ _SESSION_STATE_FIELD_RE = re.compile(
     r"^(DID|INSIGHT|NEXT_STEP_USER)\s*:\s*(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+_CCC_SESSION_STATE_INSTRUCTION_TRAILER_RE = re.compile(
+    r"\n*Before your final reply\b.*?</session-state>\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_CCC_SESSION_STATE_SYSTEM_PROMPT = (
+    "End your final reply with a compact CCC session-state block:\n"
+    "<session-state>\n"
+    "DID: one sentence describing what you changed or learned\n"
+    "INSIGHT: one sentence with the main finding, root cause, or surprise\n"
+    "NEXT_STEP_USER: one sentence with the exact next thing the user should do\n"
+    "</session-state>"
+)
+
+
+def _claude_session_state_args():
+    """CLI args that keep CCC's final-state reminder out of user text."""
+    return ["--append-system-prompt", _CCC_SESSION_STATE_SYSTEM_PROMPT]
 
 
 def _parse_session_state(text):
@@ -3408,6 +3504,17 @@ def _parse_session_state(text):
     if not any(out.values()):
         return None
     return out
+
+
+def _strip_ccc_session_state_instruction(text):
+    """Remove CCC's own prompt trailer before sending visible user text.
+
+    The dashboard reminder belongs in a hidden system prompt for CCC-spawned
+    Claude runs, not in text typed into a user's terminal.
+    """
+    if text is None:
+        return ""
+    return _CCC_SESSION_STATE_INSTRUCTION_TRAILER_RE.sub("", str(text)).rstrip()
 
 
 def _detect_issue_number_for_session(conv):
@@ -3868,14 +3975,20 @@ def summarize_issue_title(issue_number, repo_path):
         "boilerplate. The output should read like a kanban card title.\n\n"
         f"Issue title: {raw_title}\n\nIssue body:\n{body[:1500]}\n\nTitle:"
     )
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin.get("available"):
+        result["error"] = claude_bin.get("reason") or "Claude Code CLI not found"
+        result["code"] = claude_bin.get("code", "claude_unavailable")
+        return result
     try:
         proc = subprocess.run(
-            ["claude", "-p", "--model", "claude-haiku-4-5-20251001", instruction],
+            [claude_bin["bin"], "-p", "--model", "claude-haiku-4-5-20251001", instruction],
             capture_output=True, text=True, timeout=45,
             cwd=str(_SCRATCH_DIR),  # keep throwaway JSONLs out of repo scans
         )
     except FileNotFoundError:
-        result["error"] = "claude CLI not in PATH"
+        result["error"] = "Claude Code CLI disappeared after resolution"
+        result["code"] = "claude_unavailable"
         return result
     except subprocess.TimeoutExpired:
         result["error"] = "claude -p timed out"
@@ -3918,16 +4031,22 @@ def summarize_session_title(session_id):
         + "\n\nTitle:"
     )
 
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin.get("available"):
+        result["error"] = claude_bin.get("reason") or "Claude Code CLI not found"
+        result["code"] = claude_bin.get("code", "claude_unavailable")
+        return result
     try:
         proc = subprocess.run(
-            ["claude", "-p", "--model", "claude-haiku-4-5-20251001", instruction],
+            [claude_bin["bin"], "-p", "--model", "claude-haiku-4-5-20251001", instruction],
             capture_output=True,
             text=True,
             timeout=45,
             cwd=str(_SCRATCH_DIR),  # keep throwaway JSONLs out of repo project dirs
         )
     except FileNotFoundError:
-        result["error"] = "claude CLI not in PATH"
+        result["error"] = "Claude Code CLI disappeared after resolution"
+        result["code"] = "claude_unavailable"
         return result
     except subprocess.TimeoutExpired:
         result["error"] = "claude -p timed out"
@@ -8634,6 +8753,9 @@ def _start_resume_queue_watcher() -> None:
 
 def resume_session_codex(session_id, text):
     """Resume a dormant Codex thread with a new prompt via `codex exec resume`."""
+    text = _strip_ccc_session_state_instruction(text)
+    if not text:
+        return {"ok": False, "error": "missing text"}
     resolved = _resolve_codex_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
@@ -9669,6 +9791,9 @@ def _extract_gemini_timeline(session_id):
 
 def resume_session_gemini(session_id, text):
     """Resume a Gemini session with a one-shot headless prompt."""
+    text = _strip_ccc_session_state_instruction(text)
+    if not text:
+        return {"ok": False, "error": "missing text"}
     resolved = _resolve_gemini_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
@@ -9748,6 +9873,7 @@ def resume_session_gemini(session_id, text):
 
 def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=False):
     """Spawn a headless Gemini CLI run and return tracking info."""
+    prompt = _strip_ccc_session_state_instruction(prompt)
     resolved = _resolve_gemini_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
@@ -9817,8 +9943,9 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
     If `worktree=True`, create a fresh git worktree off the launch cwd on a
     `feat/<slug>` branch and run the spawned session there. The worktree path
     + branch are returned in the response under
-    `worktree_path` / `worktree_branch` so the UI can show them.
+      `worktree_path` / `worktree_branch` so the UI can show them.
     """
+    prompt = _strip_ccc_session_state_instruction(prompt)
     ctx = require_repo_context({"cwd": cwd, "repo_path": repo_path}, allow_session=False)
     spawn_cwd = ctx["cwd"]
     repo_for_logs = ctx["repo_path"]
@@ -9833,14 +9960,23 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
 
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin.get("available"):
+        return {
+            "ok": False,
+            "error": claude_bin.get("reason") or "Claude Code CLI not found",
+            "code": claude_bin.get("code", "claude_unavailable"),
+        }
+
     cmd = [
-        "claude", "-p", "--verbose",
+        claude_bin["bin"], "-p", "--verbose",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--model", "opus",
         "--dangerously-skip-permissions",
         "--name", session_name,
     ]
+    cmd.extend(_claude_session_state_args())
 
     worktree_path = None
     worktree_branch = None
@@ -9861,7 +9997,19 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
         start_new_session=True,
     )
     popen_kwargs["stdin"] = child_stdin_fd if child_stdin_fd is not None else subprocess.PIPE
-    proc = subprocess.Popen(cmd, **popen_kwargs)
+    try:
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        if child_stdin_fd is not None:
+            _close_fd_quiet(child_stdin_fd)
+        if fifo_path:
+            _unlink_quiet(fifo_path)
+        return {
+            "ok": False,
+            "error": f"Claude Code CLI failed to start: {e}",
+            "code": "claude_unavailable",
+        }
     # Drop our local copy of the rdwr fd — Popen has dup'd it into the
     # child as fd 0, and the child's RDWR reference is what keeps the
     # FIFO from EOFing on a CCC restart.
@@ -9927,6 +10075,7 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None):
       {ok: True,  pid, name, log}                       — success
       {ok: False, error}                                — resolver failed
     """
+    prompt = _strip_ccc_session_state_instruction(prompt)
     resolved = _resolve_codex_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
@@ -10148,6 +10297,9 @@ def _write_stream_json_user_message(target, text):
 
 def inject_into_spawned(pid, text):
     """Send a follow-up user message to a previously spawned session."""
+    text = _strip_ccc_session_state_instruction(text)
+    if not text:
+        return {"ok": False, "error": "missing text"}
     for s in _spawned_sessions:
         if s["pid"] == pid:
             if s["proc"].poll() is not None:
@@ -10188,6 +10340,9 @@ def resume_session_headless(session_id, text):
 
     If we already resumed this session and the process is still alive, reuse it.
     """
+    text = _strip_ccc_session_state_instruction(text)
+    if not text:
+        return {"ok": False, "error": "missing text"}
     # Reuse existing resumed process
     for s in _spawned_sessions:
         if s.get("resumed_sid") == session_id and s["proc"].poll() is None:
@@ -10205,13 +10360,22 @@ def resume_session_headless(session_id, text):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
 
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin.get("available"):
+        return {
+            "ok": False,
+            "error": claude_bin.get("reason") or "Claude Code CLI not found",
+            "code": claude_bin.get("code", "claude_unavailable"),
+        }
+
     cmd = [
-        "claude", "-p", "--verbose",
+        claude_bin["bin"], "-p", "--verbose",
         "--resume", session_id,
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
     ]
+    cmd.extend(_claude_session_state_args())
     # Per-session override (set via the click-to-switch picker). Resume
     # would otherwise inherit the previously-recorded model. The `[1m]`
     # suffix flips the 1M-context variant when supported.
@@ -10234,13 +10398,17 @@ def resume_session_headless(session_id, text):
     popen_kwargs["stdin"] = child_stdin_fd if child_stdin_fd is not None else subprocess.PIPE
     try:
         proc = subprocess.Popen(cmd, **popen_kwargs)
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError) as e:
         log_fh.close()
         if child_stdin_fd is not None:
             _close_fd_quiet(child_stdin_fd)
         if fifo_path:
             _unlink_quiet(fifo_path)
-        return {"ok": False, "error": "claude CLI not in PATH"}
+        return {
+            "ok": False,
+            "error": f"Claude Code CLI failed to start: {e}",
+            "code": "claude_unavailable",
+        }
     if child_stdin_fd is not None:
         _close_fd_quiet(child_stdin_fd)
     stdin_fd = _open_fifo_writer(fifo_path) if fifo_path else None
@@ -11518,6 +11686,7 @@ def _inject_text_into_session(session_id, text):
     else `claude --resume` headless. Returns a dict with at least
     {"ok": bool, "via": <route>}.
     """
+    text = _strip_ccc_session_state_instruction(text)
     if not session_id or not text:
         return {"ok": False, "error": "missing session_id or text"}
     if _is_codex_session(session_id):
@@ -12484,6 +12653,14 @@ def spawn_issue_fix(issue_number, repo_path):
     except Exception as e:
         return {"error": f"Failed to fetch issue: {e}"}
 
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin.get("available"):
+        return {
+            "ok": False,
+            "error": claude_bin.get("reason") or "Claude Code CLI not found",
+            "code": claude_bin.get("code", "claude_unavailable"),
+        }
+
     # Mark as in-progress
     subprocess.run(
         ["gh", "issue", "edit", issue_number, "--add-label", "claude-in-progress", "--remove-label", "claude-fix"],
@@ -12512,12 +12689,13 @@ Instructions:
     log_path = log_dir / log_filename
 
     cmd = [
-        "claude", "-p", "--verbose",
+        claude_bin["bin"], "-p", "--verbose",
         "--output-format", "stream-json",
         "--model", "claude-opus-4-6",
         "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash",
         "--dangerously-skip-permissions",
         "--name", session_name,
+        *_claude_session_state_args(),
         prompt,
     ]
 
@@ -12527,13 +12705,21 @@ Instructions:
     # it via `extract_session_id` to backfill the session id when the
     # in-memory spawn registry is wiped on a restart.
     log_fh = open(log_path, "w")
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log_fh,
-        stderr=subprocess.STDOUT,
-        cwd=str(repo_path),
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd=str(repo_path),
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        return {
+            "ok": False,
+            "error": f"Claude Code CLI failed to start: {e}",
+            "code": "claude_unavailable",
+        }
 
     entry = {
         "pid": proc.pid,
@@ -15364,14 +15550,22 @@ def morning_braindump(text):
         dump=text,
     )
 
+    claude_bin = _resolve_claude_bin()
+    if not claude_bin.get("available"):
+        return {
+            "ok": False,
+            "error": claude_bin.get("reason") or "Claude Code CLI not found",
+            "code": claude_bin.get("code", "claude_unavailable"),
+        }
+
     try:
         r = subprocess.run(
-            ["claude", "-p", "--model", "haiku"],
+            [claude_bin["bin"], "-p", "--model", "haiku"],
             input=prompt, capture_output=True, text=True, timeout=60,
             cwd=str(_SCRATCH_DIR),  # keep throwaway JSONLs out of repo project dirs
         )
     except (subprocess.SubprocessError, OSError) as e:
-        return {"ok": False, "error": f"claude -p failed: {e}"}
+        return {"ok": False, "error": f"claude -p failed: {e}", "code": "claude_unavailable"}
     if r.returncode != 0:
         return {"ok": False, "error": f"claude -p exited {r.returncode}: {r.stderr[:200]}"}
 
@@ -17471,10 +17665,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             status = int(result.pop("status", 200))
             if not result.get("ok"):
                 self.send_json(result, status)
-            elif payload.get("launch") and not result.get("core_sandbox"):
+            elif payload.get("launch") and not _open_launch_allowed(result):
                 self.send_json({
                     "ok": False,
-                    "error": "launch is only allowed under the repo/log dir",
+                    "error": "launch outside the repo/log dir is only allowed for markdown files",
                     "path": result.get("path"),
                 }, 403)
             else:
@@ -17532,13 +17726,17 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
             else:
                 try:
-                    self.send_json(spawn_session(
+                    result = spawn_session(
                         prompt,
                         name=name,
                         cwd=str(cwd_resolved) if cwd_resolved else None,
                         repo_path=payload.get("repo_path"),
                         worktree=worktree_flag,
-                    ))
+                    )
+                    if result.get("code") == "claude_unavailable":
+                        self.send_json(result, 503)
+                    else:
+                        self.send_json(result)
                 except RepoContextError as e:
                     self.send_json(e.as_payload(), e.status)
                 except Exception as e:

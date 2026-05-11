@@ -21,21 +21,87 @@ is_port_bound() {
   (echo > "/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
 }
 
+service_domain() {
+  echo "gui/$(id -u)"
+}
+
+service_target() {
+  echo "$(service_domain)/$PLIST_LABEL"
+}
+
+xml_escape() {
+  local val="$1"
+  val="${val//&/&amp;}"
+  val="${val//</&lt;}"
+  val="${val//>/&gt;}"
+  printf '%s' "$val"
+}
+
+append_env_entry() {
+  local key="$1"
+  local val="$2"
+  if [ -z "$val" ]; then
+    return
+  fi
+  val="$(xml_escape "$val")"
+  env_block+="    <key>$key</key>"$'\n'
+  env_block+="    <string>$val</string>"$'\n'
+}
+
+append_path_dir() {
+  local dir="$1"
+  case ":$service_path:" in
+    *":$dir:"*) ;;
+    *) service_path="${service_path:+$service_path:}$dir" ;;
+  esac
+}
+
+launchctl_supports_bootstrap() {
+  local help
+  help="$(launchctl help 2>&1 || true)"
+  case "$help" in
+    *bootstrap*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+unload_service() {
+  if launchctl_supports_bootstrap; then
+    launchctl bootout "$(service_target)" >/dev/null 2>&1 \
+      || launchctl bootout "$(service_domain)" "$PLIST_PATH" >/dev/null 2>&1 \
+      || true
+  fi
+  launchctl unload "$PLIST_PATH" >/dev/null 2>&1 || true
+}
+
+load_service() {
+  if launchctl_supports_bootstrap; then
+    launchctl bootstrap "$(service_domain)" "$PLIST_PATH"
+    launchctl enable "$(service_target)" >/dev/null 2>&1 || true
+    launchctl kickstart -k "$(service_target)" >/dev/null 2>&1 || true
+  else
+    launchctl load "$PLIST_PATH"
+  fi
+}
+
 write_plist() {
   local target_port="$1"
   mkdir -p "$(dirname "$PLIST_PATH")" "$SERVICE_LOG_DIR"
 
   local env_block=""
-  env_block+="    <key>PATH</key>"$'\n'
-  env_block+="    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>"$'\n'
-  for var in PORT CCC_BIND_HOST CCC_ALLOWED_ORIGIN CCC_TRUST_TAILNET CCC_TITLE_STRIP CCC_ORG_PATTERNS VERCEL_PROJECT CCC_SKIP_SKILL_INSTALL; do
-    local val="${!var:-}"
-    if [ -n "$val" ]; then
-      val="${val//&/&amp;}"; val="${val//</&lt;}"; val="${val//>/&gt;}"
-      env_block+="    <key>$var</key>"$'\n'
-      env_block+="    <string>$val</string>"$'\n'
-    fi
-  done
+  local service_path="${PATH:-}"
+  append_path_dir "/opt/homebrew/bin"
+  append_path_dir "/usr/local/bin"
+  append_path_dir "/usr/bin"
+  append_path_dir "/bin"
+  append_env_entry "PATH" "$service_path"
+  append_env_entry "PORT" "$target_port"
+  append_env_entry "VERCEL_PROJECT" "${VERCEL_PROJECT:-}"
+  while IFS='=' read -r var val; do
+    case "$var" in
+      CCC_*) append_env_entry "$var" "$val" ;;
+    esac
+  done < <(env | sort)
 
   cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -80,10 +146,8 @@ install_service() {
 
   # Unload any previous version first so re-install is idempotent and the port
   # check below sees the real "is something else holding it" answer.
-  if [ -f "$PLIST_PATH" ]; then
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
-    sleep 0.3
-  fi
+  unload_service
+  sleep 0.3
 
   if is_port_bound "$target_port"; then
     cat >&2 <<EOF
@@ -98,11 +162,12 @@ EOF
 
   echo "→ Installing CCC as a launchd agent"
   echo "  plist : $PLIST_PATH"
+  echo "  target: $(service_target)"
   echo "  port  : $target_port"
   echo "  logs  : $SERVICE_LOG_DIR/service.{out,err}.log"
 
   write_plist "$target_port"
-  launchctl load "$PLIST_PATH"
+  load_service
 
   for _ in 1 2 3 4 5; do
     sleep 0.5
@@ -124,14 +189,40 @@ uninstall_service() {
     exit 0
   fi
   echo "→ Removing CCC launchd agent"
-  launchctl unload "$PLIST_PATH" 2>/dev/null || true
+  unload_service
+  if launchctl_supports_bootstrap; then
+    launchctl disable "$(service_target)" >/dev/null 2>&1 || true
+  fi
   rm -f "$PLIST_PATH"
   echo "✓ Service removed."
+}
+
+service_status() {
+  if [ "$(uname -s)" != "Darwin" ]; then
+    echo "Error: --service-status supports macOS only." >&2
+    exit 1
+  fi
+
+  echo "CCC launchd agent"
+  echo "  path  : $PLIST_PATH"
+  echo "  target: $(service_target)"
+  if [ -f "$PLIST_PATH" ]; then
+    echo "  state : installed"
+  else
+    echo "  state : not installed"
+  fi
+
+  if launchctl print "$(service_target)" >/dev/null 2>&1; then
+    echo "  loaded: yes"
+  else
+    echo "  loaded: no"
+  fi
 }
 
 case "${1:-}" in
   --install-service) install_service; exit 0 ;;
   --uninstall-service) uninstall_service; exit 0 ;;
+  --service-status) service_status; exit 0 ;;
   --help|-h)
     cat <<'EOF'
 Usage: ./run.sh [OPTION]
@@ -139,6 +230,7 @@ Usage: ./run.sh [OPTION]
   (no args)            Run CCC in the foreground
   --install-service    Install as a launchd agent that starts at login
   --uninstall-service  Remove the launchd agent
+  --service-status     Show launchd install/load status
   --help, -h           Show this help
 
 Env vars (PORT, CCC_BIND_HOST, CCC_ALLOWED_ORIGIN, etc.)

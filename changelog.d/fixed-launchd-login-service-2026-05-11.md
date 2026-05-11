@@ -1,0 +1,1 @@
+CCC's macOS service installer now registers the LaunchAgent in the per-user launchd domain with modern `bootstrap` / `enable` / `kickstart` calls, adds `./run.sh --service-status`, and documents the login-start install and update behavior in the OSS quickstart.
