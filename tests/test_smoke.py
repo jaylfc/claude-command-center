@@ -1001,6 +1001,80 @@ class TestModelPicker(unittest.TestCase):
         self.assertGreater(post_idx, 0)
         self.assertIn("_check_same_origin", src[post_idx:post_idx + 200])
 
+    def test_extract_session_slash_commands_from_init_event(self):
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        sid = "11111111-2222-3333-4444-555555555555"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            project = root / "project"
+            project.mkdir()
+            (project / f"{sid}.jsonl").write_text(
+                json.dumps({
+                    "type": "system",
+                    "subtype": "init",
+                    "slash_commands": [
+                        "/compact",
+                        {"name": "project:ship", "description": "Ship this repo"},
+                        {"command": "/review", "purpose": "Review changes"},
+                    ],
+                }) + "\n"
+            )
+            orig = server.PROJECTS_ROOT
+            server.PROJECTS_ROOT = root
+            try:
+                result = server.extract_session_slash_commands(sid)
+            finally:
+                server.PROJECTS_ROOT = orig
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"], "transcript")
+        commands = {c["name"]: c.get("description", "") for c in result["commands"]}
+        self.assertIn("/compact", commands)
+        self.assertIn("/mcp", commands)
+        self.assertEqual(commands["/project:ship"], "Ship this repo")
+        self.assertEqual(commands["/review"], "Review changes")
+
+    def test_slash_command_files_and_skills_are_discovered(self):
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            command_dir = root / "commands"
+            command_dir.mkdir()
+            (command_dir / "ship.md").write_text("# Ship\n\nRun the release flow.\n")
+            nested = command_dir / "commit-commands"
+            nested.mkdir()
+            (nested / "commit.md").write_text("---\ndescription: Commit current work\n---\n")
+            (command_dir / "old.md.bak").write_text("# Ignore\n")
+
+            skill_dir = root / "skills"
+            skill = skill_dir / "screenshot"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("---\ndescription: Inspect screenshots\n---\n")
+
+            commands = server._merge_slash_commands(
+                server._slash_commands_from_command_dir(command_dir),
+                server._slash_commands_from_command_dir(command_dir, prefix="plugin-name"),
+                server._slash_commands_from_skill_dir(skill_dir),
+            )
+
+        names = {c["name"]: c.get("description", "") for c in commands}
+        self.assertEqual(names["/ship"], "Ship")
+        self.assertEqual(names["/commit-commands:commit"], "Commit current work")
+        self.assertEqual(names["/plugin-name:ship"], "Ship")
+        self.assertEqual(names["/screenshot"], "Inspect screenshots")
+        self.assertNotIn("/old.md", names)
+
+    def test_session_slash_commands_route_registered(self):
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        src = pathlib.Path(server.__file__).read_text()
+        self.assertIn("/api/session/[a-zA-Z0-9-]+/slash-commands", src)
+
     def test_extract_session_usage_resets_at_compact_boundary(self):
         """`/compact` emits a `compact_boundary` system event; assistant
         turns before that boundary no longer contribute to the live

@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "3.3.3"
+__version__ = "3.4.0"
 
 import ast
 import base64
@@ -704,6 +704,320 @@ def _build_slash_model_command(model, context_1m):
     if context_1m:
         return f"/model {alias}[1m]"
     return f"/model {alias}"
+
+
+_FALLBACK_SLASH_COMMANDS = (
+    {"name": "/add-dir", "description": "Add a working directory"},
+    {"name": "/agents", "description": "Manage agents"},
+    {"name": "/bashes", "description": "List background shell sessions"},
+    {"name": "/clear", "description": "Clear conversation history"},
+    {"name": "/color", "description": "Change terminal color"},
+    {"name": "/compact", "description": "Compact conversation context"},
+    {"name": "/config", "description": "Open configuration"},
+    {"name": "/context", "description": "Show context usage"},
+    {"name": "/cost", "description": "Show current session cost"},
+    {"name": "/doctor", "description": "Check Claude Code health"},
+    {"name": "/exit", "description": "Exit Claude Code"},
+    {"name": "/help", "description": "Show available commands"},
+    {"name": "/hooks", "description": "Manage hooks"},
+    {"name": "/init", "description": "Create or update CLAUDE.md"},
+    {"name": "/login", "description": "Sign in"},
+    {"name": "/logout", "description": "Sign out"},
+    {"name": "/mcp", "description": "Manage MCP servers"},
+    {"name": "/memory", "description": "Edit memory files"},
+    {"name": "/model", "description": "Select or change model"},
+    {"name": "/output-style", "description": "Select output style"},
+    {"name": "/permissions", "description": "Manage tool permissions"},
+    {"name": "/pr-comments", "description": "View pull request comments"},
+    {"name": "/review", "description": "Review changes"},
+    {"name": "/resume", "description": "Resume a conversation"},
+    {"name": "/status", "description": "Show session status"},
+    {"name": "/terminal-setup", "description": "Install terminal integration"},
+    {"name": "/vim", "description": "Toggle Vim mode"},
+)
+
+
+def _clean_slash_command_name(value):
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    name = name.split()[0]
+    if not name.startswith("/"):
+        name = "/" + name
+    if name == "/" or len(name) > 120 or any(ch.isspace() for ch in name):
+        return ""
+    return name
+
+
+def _normalize_slash_command_entry(entry):
+    """Normalize Claude's `slash_commands` init payload.
+
+    Claude versions have emitted both simple strings and objects. Keep the
+    shape small for the frontend and tolerate unknown keys so custom commands
+    keep working as the CLI evolves.
+    """
+    if isinstance(entry, str):
+        name = _clean_slash_command_name(entry)
+        return {"name": name, "description": ""} if name else None
+    if not isinstance(entry, dict):
+        return None
+    raw_name = entry.get("name") or entry.get("command") or entry.get("id")
+    name = _clean_slash_command_name(raw_name)
+    if not name:
+        return None
+    desc = (
+        entry.get("description")
+        or entry.get("desc")
+        or entry.get("purpose")
+        or ""
+    )
+    return {"name": name, "description": str(desc or "").strip()}
+
+
+def _merge_slash_commands(*groups):
+    seen = {}
+    order = []
+    for group in groups:
+        for item in group or []:
+            norm = _normalize_slash_command_entry(item)
+            if not norm:
+                continue
+            key = norm["name"].lower()
+            if key not in seen:
+                seen[key] = norm
+                order.append(key)
+            elif norm.get("description") and not seen[key].get("description"):
+                seen[key]["description"] = norm["description"]
+    return sorted((seen[key] for key in order), key=lambda c: c["name"].lower())
+
+
+def _markdown_summary(path, fallback=""):
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return fallback
+    in_frontmatter = False
+    for idx, raw in enumerate(lines[:80]):
+        line = raw.strip()
+        if idx == 0 and line == "---":
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if line == "---":
+                in_frontmatter = False
+                continue
+            if line.lower().startswith("description:"):
+                return line.split(":", 1)[1].strip().strip('"\'') or fallback
+            continue
+        if not line:
+            continue
+        if line.startswith("#"):
+            return line.lstrip("#").strip() or fallback
+        return line[:120]
+    return fallback
+
+
+def _slash_commands_from_command_dir(root, prefix=""):
+    root = Path(root).expanduser()
+    if not root.is_dir():
+        return []
+    commands = []
+    try:
+        paths = sorted(root.rglob("*.md"))
+    except OSError:
+        return []
+    for path in paths:
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        if path.name.endswith(".bak") or ".bak." in path.name:
+            continue
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        parts = list(rel.parts)
+        if not parts:
+            continue
+        parts[-1] = Path(parts[-1]).stem
+        command_name = ":".join(parts)
+        if prefix:
+            command_name = f"{prefix}:{command_name}"
+        name = "/" + command_name
+        norm_name = _clean_slash_command_name(name)
+        if not norm_name:
+            continue
+        commands.append({
+            "name": norm_name,
+            "description": _markdown_summary(path, "Custom command"),
+        })
+    return commands
+
+
+def _slash_commands_from_skill_dir(root):
+    root = Path(root).expanduser()
+    if not root.is_dir():
+        return []
+    commands = []
+    try:
+        children = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return []
+    for child in children:
+        if not child.is_dir() or child.name.startswith(".") or child.name.endswith(".bak"):
+            continue
+        skill_path = None
+        for filename in ("SKILL.md", "skill.md"):
+            candidate = child / filename
+            if candidate.is_file():
+                skill_path = candidate
+                break
+        if skill_path is None:
+            continue
+        norm_name = _clean_slash_command_name(child.name)
+        if not norm_name:
+            continue
+        commands.append({
+            "name": norm_name,
+            "description": _markdown_summary(skill_path, "Skill"),
+        })
+    return commands
+
+
+def _slash_commands_from_plugin_cache():
+    cache = Path.home() / ".claude" / "plugins" / "cache"
+    if not cache.is_dir():
+        return []
+    commands = []
+    try:
+        publishers = sorted(cache.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return []
+    for publisher in publishers:
+        if not publisher.is_dir() or publisher.name.startswith("."):
+            continue
+        try:
+            plugins = sorted(publisher.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for plugin in plugins:
+            if not plugin.is_dir() or plugin.name.startswith("."):
+                continue
+            try:
+                versions = sorted(plugin.iterdir(), key=lambda p: p.name.lower())
+            except OSError:
+                continue
+            for version in versions:
+                if not version.is_dir() or version.name.startswith("."):
+                    continue
+                commands.extend(
+                    _slash_commands_from_command_dir(
+                        version / "commands",
+                        prefix=plugin.name,
+                    )
+                )
+                try:
+                    skill_dirs = sorted(
+                        (p for p in version.rglob("skills") if p.is_dir()),
+                        key=lambda p: str(p).lower(),
+                    )
+                except OSError:
+                    skill_dirs = []
+                for skill_dir in skill_dirs:
+                    commands.extend(_slash_commands_from_skill_dir(skill_dir))
+    return commands
+
+
+def _local_slash_commands_for_session(session_id):
+    commands = []
+    command_roots = [Path.home() / ".claude" / "commands"]
+    skill_roots = [Path.home() / ".claude" / "skills"]
+    cwd = find_session_cwd(session_id) if session_id else ""
+    if cwd:
+        cwd_path = Path(cwd).expanduser()
+        candidates = [cwd_path]
+        repo_root = _git_toplevel_for_existing_dir(cwd)
+        if repo_root:
+            candidates.append(Path(repo_root))
+        for base in candidates:
+            command_roots.append(base / ".claude" / "commands")
+            skill_roots.append(base / ".claude" / "skills")
+    seen_roots = set()
+    for root in command_roots:
+        key = str(root)
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        commands.extend(_slash_commands_from_command_dir(root))
+    seen_roots.clear()
+    for root in skill_roots:
+        key = str(root)
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        commands.extend(_slash_commands_from_skill_dir(root))
+    commands.extend(_slash_commands_from_plugin_cache())
+    return commands
+
+
+def extract_session_slash_commands(session_id):
+    """Return slash commands advertised by a Claude session's init events.
+
+    The Claude Agent SDK exposes dispatchable slash commands in `system/init`.
+    Reading that list from the transcript lets CCC support built-ins and custom
+    skills without hardcoding a stale command catalog. If the transcript is
+    missing or predates the field, fall back to a small common set.
+    """
+    result = {
+        "ok": True,
+        "session_id": session_id,
+        "commands": list(_FALLBACK_SLASH_COMMANDS),
+        "source": "fallback",
+    }
+    if not session_id or _detect_session_engine(session_id) != "claude":
+        return {**result, "commands": []}
+    local_commands = _local_slash_commands_for_session(session_id)
+    path = _find_session_jsonl(session_id)
+    if path is None:
+        commands = _merge_slash_commands(local_commands, _FALLBACK_SLASH_COMMANDS)
+        result["commands"] = commands
+        result["source"] = "filesystem" if local_commands else "fallback"
+        return result
+
+    discovered = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                containers = [ev]
+                msg = ev.get("message")
+                if isinstance(msg, dict):
+                    containers.append(msg)
+                data = ev.get("data")
+                if isinstance(data, dict):
+                    containers.append(data)
+                for obj in containers:
+                    raw = obj.get("slash_commands") or obj.get("slashCommands")
+                    if isinstance(raw, list):
+                        discovered.extend(raw)
+    except OSError:
+        return result
+
+    commands = _merge_slash_commands(discovered, local_commands, _FALLBACK_SLASH_COMMANDS)
+    if commands:
+        result["commands"] = commands
+        if discovered:
+            result["source"] = "transcript"
+        elif local_commands:
+            result["source"] = "filesystem"
+        else:
+            result["source"] = "fallback"
+    return result
 
 
 def _detect_session_engine(session_id):
@@ -16578,6 +16892,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # Token-usage stats for the conv pane's "Context: 142k / 200k" pill.
             sid = path.rsplit("/", 2)[-2]
             self.send_json(extract_session_usage(sid))
+        elif re.match(r"^/api/session/[a-zA-Z0-9-]+/slash-commands$", path):
+            # Slash commands reported by Claude's system/init event. The
+            # composer uses this for `/` suggestions, including project and
+            # personal custom skills.
+            sid = path.rsplit("/", 2)[-2]
+            self.send_json(extract_session_slash_commands(sid))
         elif re.match(r"^/api/session/[a-zA-Z0-9-]+/workspace$", path):
             # Workspace info — cwd, branch, worktree?, ahead/behind, co-tenants.
             sid = path.rsplit("/", 2)[-2]

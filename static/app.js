@@ -1257,6 +1257,215 @@
     }
   }
 
+  const SLASH_FALLBACK_COMMANDS = [
+    { name: '/compact', description: 'Compact conversation context' },
+    { name: '/context', description: 'Show context usage' },
+    { name: '/cost', description: 'Show current session cost' },
+    { name: '/help', description: 'Show available commands' },
+    { name: '/mcp', description: 'Manage MCP servers' },
+    { name: '/model', description: 'Select or change model' },
+    { name: '/status', description: 'Show session status' },
+  ];
+  const _slashCommandCache = new Map();
+  let _slashMenuEl = null;
+  let _slashMenuInput = null;
+  let _slashMenuItems = [];
+  let _slashMenuIndex = 0;
+  let _slashMenuReq = 0;
+
+  function slashQueryForInput(input) {
+    if (!input) return null;
+    const value = input.value || '';
+    const pos = input.selectionStart == null ? value.length : input.selectionStart;
+    if (pos !== value.length) return null;
+    if (!value.startsWith('/')) return null;
+    if (/\s/.test(value)) return null;
+    return value.slice(1).toLowerCase();
+  }
+
+  function hideSlashCommandMenu() {
+    if (_slashMenuEl) {
+      _slashMenuEl.remove();
+      _slashMenuEl = null;
+    }
+    _slashMenuInput = null;
+    _slashMenuItems = [];
+    _slashMenuIndex = 0;
+  }
+
+  function activatePaneFromComposer(input) {
+    const pane = input && input.closest && input.closest('.conv-pane[data-pane-id]');
+    const paneId = pane && pane.getAttribute('data-pane-id');
+    if (!paneId) return;
+    const idx = paneIndexByPaneId(paneId);
+    if (idx >= 0) splitState.activeIndex = idx;
+  }
+
+  function slashCommandUnavailableReason() {
+    if ((currentConversation || '').startsWith('backlog-issue-')) return 'Issue actions do not use Claude slash commands';
+    if (conversationsData.some(x => x.id === currentConversation && x.source === 'backlog')) return 'Issue actions do not use Claude slash commands';
+    const source = currentSession && currentSession.source;
+    if (source === 'codex') return 'Codex sessions do not use Claude slash commands';
+    if (source === 'gemini') return 'Gemini sessions do not use Claude slash commands';
+    if (source === 'pkood') return 'pkood agents do not use Claude slash commands';
+    if (currentConversation === '__new__') {
+      const engine = (typeof getSpawnEngine === 'function') ? getSpawnEngine() : 'claude';
+      return engine === 'claude' ? '' : 'Switch the new-session engine to claude';
+    }
+    return (currentSession && currentSession.id) ? '' : 'Select a Claude session first';
+  }
+
+  async function slashCommandsForCurrentContext() {
+    const unavailable = slashCommandUnavailableReason();
+    if (unavailable) {
+      return [{ name: '/slash', description: unavailable, disabled: true }];
+    }
+    if (currentConversation === '__new__') return SLASH_FALLBACK_COMMANDS;
+    const sid = currentSession && currentSession.id;
+    if (!sid) return [];
+    if (_slashCommandCache.has(sid)) return _slashCommandCache.get(sid);
+    let commands = SLASH_FALLBACK_COMMANDS;
+    try {
+      const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/slash-commands', { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data && Array.isArray(data.commands) && data.commands.length) {
+        commands = data.commands
+          .map(c => ({
+            name: String((c && c.name) || '').trim(),
+            description: String((c && c.description) || '').trim(),
+          }))
+          .filter(c => c.name.startsWith('/'));
+      }
+    } catch (_) {}
+    _slashCommandCache.set(sid, commands);
+    return commands;
+  }
+
+  function positionSlashCommandMenu(input) {
+    if (!_slashMenuEl || !input) return;
+    const rect = input.getBoundingClientRect();
+    const width = Math.min(Math.max(rect.width, 260), 520);
+    _slashMenuEl.style.width = width + 'px';
+    _slashMenuEl.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + 'px';
+    const below = rect.bottom + 6;
+    const above = rect.top - _slashMenuEl.offsetHeight - 6;
+    _slashMenuEl.style.top = (below + _slashMenuEl.offsetHeight < window.innerHeight || above < 8
+      ? below
+      : above) + 'px';
+  }
+
+  function renderSlashCommandMenu(input, commands, query) {
+    const q = (query || '').toLowerCase();
+    const matches = (commands || []).filter(c => {
+      const name = (c.name || '').toLowerCase();
+      const desc = (c.description || '').toLowerCase();
+      return !q || name.includes(q) || desc.includes(q);
+    });
+    if (!matches.length) {
+      hideSlashCommandMenu();
+      return;
+    }
+    if (!_slashMenuEl) {
+      _slashMenuEl = document.createElement('div');
+      _slashMenuEl.className = 'slash-command-menu';
+      _slashMenuEl.addEventListener('mousedown', (ev) => ev.preventDefault());
+      document.body.appendChild(_slashMenuEl);
+    }
+    _slashMenuInput = input;
+    _slashMenuItems = matches;
+    _slashMenuIndex = Math.min(_slashMenuIndex, matches.length - 1);
+    _slashMenuEl.innerHTML = matches.map((cmd, idx) => (
+      '<button type="button" class="slash-command-item'
+      + (idx === _slashMenuIndex ? ' selected' : '')
+      + (cmd.disabled ? ' disabled' : '')
+      + '" data-idx="' + idx + '">'
+      + '<span class="slash-command-name">' + escapeHtml(cmd.name || '') + '</span>'
+      + (cmd.description ? '<span class="slash-command-desc">' + escapeHtml(cmd.description) + '</span>' : '')
+      + '</button>'
+    )).join('');
+    _slashMenuEl.querySelectorAll('.slash-command-item').forEach(btn => {
+      btn.addEventListener('mouseenter', () => {
+        _slashMenuIndex = parseInt(btn.dataset.idx || '0', 10);
+        renderSlashCommandMenu(input, _slashMenuItems, q);
+      });
+      btn.addEventListener('click', () => commitSlashCommandSelection(input));
+    });
+    positionSlashCommandMenu(input);
+  }
+
+  async function refreshSlashCommandMenu(input) {
+    activatePaneFromComposer(input);
+    const query = slashQueryForInput(input);
+    const req = ++_slashMenuReq;
+    if (query == null) {
+      hideSlashCommandMenu();
+      return;
+    }
+    const commands = await slashCommandsForCurrentContext();
+    if (req !== _slashMenuReq) return;
+    renderSlashCommandMenu(input, commands, query);
+  }
+
+  function commitSlashCommandSelection(input) {
+    if (!_slashMenuItems.length || !input) return false;
+    const selected = _slashMenuItems[_slashMenuIndex] || _slashMenuItems[0];
+    if (!selected || !selected.name) return false;
+    if (selected.disabled) return false;
+    input.value = selected.name + ' ';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+    hideSlashCommandMenu();
+    return true;
+  }
+
+  function moveSlashCommandSelection(delta) {
+    if (!_slashMenuEl || !_slashMenuItems.length) return false;
+    _slashMenuIndex = (_slashMenuIndex + delta + _slashMenuItems.length) % _slashMenuItems.length;
+    renderSlashCommandMenu(_slashMenuInput, _slashMenuItems, slashQueryForInput(_slashMenuInput) || '');
+    return true;
+  }
+
+  function handleSlashCommandKeydown(input, ev) {
+    if (!_slashMenuEl || _slashMenuInput !== input) return false;
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      moveSlashCommandSelection(1);
+      return true;
+    }
+    if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      moveSlashCommandSelection(-1);
+      return true;
+    }
+    if (ev.key === 'Tab') {
+      ev.preventDefault();
+      return commitSlashCommandSelection(input);
+    }
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      hideSlashCommandMenu();
+      return true;
+    }
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
+      const query = slashQueryForInput(input);
+      const selected = _slashMenuItems[_slashMenuIndex] || _slashMenuItems[0];
+      if (selected && selected.disabled) return false;
+      const selectedName = selected && selected.name ? selected.name.slice(1).toLowerCase() : '';
+      if (!query || (selectedName && query !== selectedName)) {
+        ev.preventDefault();
+        return commitSlashCommandSelection(input);
+      }
+    }
+    return false;
+  }
+
+  document.addEventListener('click', (ev) => {
+    if (!_slashMenuEl) return;
+    if (_slashMenuEl.contains(ev.target) || (_slashMenuInput && _slashMenuInput.contains(ev.target))) return;
+    hideSlashCommandMenu();
+  });
+  window.addEventListener('resize', () => positionSlashCommandMenu(_slashMenuInput));
+
   async function sendToTerminal(paneId) {
     if (paneId) {
       const idx = paneIndexByPaneId(paneId);
@@ -1267,9 +1476,10 @@
     // (built by buildPaneElement) had their ids stripped, so we have
     // to query by class/tag scoped to the pane element.
     const _paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId || activePaneId()}"]`);
-    const $input = (_paneEl && _paneEl.querySelector('input[type="text"]')) || $convInput;
+    const $input = (_paneEl && _paneEl.querySelector('textarea, input[type="text"]')) || $convInput;
     const $sendBtn = (_paneEl && _paneEl.querySelector('.send-btn')) || $convSendBtn;
     const text = ($input && $input.value || '').trim();
+    hideSlashCommandMenu();
     // Backlog GH issue: dispatch based on the action selector.
     if ((currentConversation || '').startsWith('backlog-issue-') ||
         conversationsData.some(x => x.id === currentConversation && x.source === 'backlog')) {
@@ -1412,8 +1622,14 @@
     $convInput.style.height = Math.min($convInput.scrollHeight, max) + 'px';
   }
   if ($convInput) {
-    $convInput.addEventListener('input', _autosizeConvInput);
+    $convInput.addEventListener('input', () => {
+      _autosizeConvInput();
+      refreshSlashCommandMenu($convInput);
+    });
+    $convInput.addEventListener('focus', () => refreshSlashCommandMenu($convInput));
+    $convInput.addEventListener('click', () => refreshSlashCommandMenu($convInput));
     $convInput.addEventListener('keydown', (e) => {
+      if (handleSlashCommandKeydown($convInput, e)) return;
       // Enter sends, Shift+Enter inserts a newline. Same as Claude Desktop,
       // Slack, the kanban variant of CCC, and Omnara.
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -7259,7 +7475,7 @@
     }
     // Wire the cloned input bar to send into this specific pane.
     const sendBtn = clone.querySelector('.send-btn');
-    const input = clone.querySelector('input[type="text"]');
+    const input = clone.querySelector('textarea, input[type="text"]');
     if (sendBtn) {
       sendBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
@@ -7267,7 +7483,11 @@
       });
     }
     if (input) {
+      input.addEventListener('input', () => refreshSlashCommandMenu(input));
+      input.addEventListener('focus', () => refreshSlashCommandMenu(input));
+      input.addEventListener('click', () => refreshSlashCommandMenu(input));
       input.addEventListener('keydown', (ev) => {
+        if (handleSlashCommandKeydown(input, ev)) return;
         if (ev.key === 'Enter' && !ev.shiftKey) {
           ev.preventDefault();
           sendToTerminal(paneId);
@@ -13668,6 +13888,7 @@
     async function sendToSplitTerminal() {
       const text = ($cpInput.value || '').trim();
       if (!text || !currentSession.id) return;
+      hideSlashCommandMenu();
       $cpSendBtn.disabled = true;
       const flashRed = () => {
         $cpInput.style.borderColor = 'var(--red)';
@@ -13742,8 +13963,15 @@
       $cpSendBtn.disabled = !hasText || !currentSession.id;
     };
     $cpSendBtn.addEventListener('click', sendToSplitTerminal);
-    $cpInput.addEventListener('input', () => { cpInputAutoResize(); $cpInput.__cpRefresh(); });
+    $cpInput.addEventListener('input', () => {
+      cpInputAutoResize();
+      $cpInput.__cpRefresh();
+      refreshSlashCommandMenu($cpInput);
+    });
+    $cpInput.addEventListener('focus', () => refreshSlashCommandMenu($cpInput));
+    $cpInput.addEventListener('click', () => refreshSlashCommandMenu($cpInput));
     $cpInput.addEventListener('keydown', (e) => {
+      if (handleSlashCommandKeydown($cpInput, e)) return;
       // Enter submits, Shift+Enter inserts a newline. Guard against IME
       // composition (Chinese/Japanese input methods dispatch Enter to commit
       // candidate text — we'd otherwise send the prompt mid-composition).
