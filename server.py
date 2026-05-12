@@ -13508,6 +13508,70 @@ def _detect_nextjs(repo_path: Path) -> bool:
     return False
 
 
+def _discover_node_bins():
+    """Return a list of directories likely to contain `node`/`npm`/`npx`,
+    in priority order. Used to augment the spawn env's PATH when CCC was
+    started from a shell that didn't source nvm.
+
+    Strategy: prefer nvm's `default` alias, then nvm's newest installed
+    version, then Homebrew (Apple Silicon + Intel), then `/usr/local/bin`.
+    Only includes paths that actually exist + contain a `node` executable
+    so we don't accidentally PATH-poison with stale entries.
+    """
+    candidates = []
+    home = Path.home()
+    nvm_versions = home / ".nvm" / "versions" / "node"
+
+    # nvm "default" alias points at the canonical user-preferred version
+    default_alias = home / ".nvm" / "alias" / "default"
+    if default_alias.is_file():
+        try:
+            ver = default_alias.read_text().strip()
+            if ver:
+                # alias may store a version like "v24.12.0" or "stable" — both
+                # resolve to a versioned dir name under versions/node/.
+                if not ver.startswith("v"):
+                    # Resolve named aliases like "stable" → versioned dir
+                    for sub in sorted(nvm_versions.iterdir() if nvm_versions.is_dir() else [], reverse=True):
+                        if sub.is_dir():
+                            ver = sub.name
+                            break
+                candidates.append(str(nvm_versions / ver / "bin"))
+        except OSError:
+            pass
+
+    # Newest installed nvm version, as a fallback
+    if nvm_versions.is_dir():
+        try:
+            installed = sorted(
+                (p for p in nvm_versions.iterdir() if p.is_dir()),
+                key=lambda p: p.name,
+                reverse=True,
+            )
+            for p in installed:
+                candidates.append(str(p / "bin"))
+        except OSError:
+            pass
+
+    # System / package-manager Node installs
+    candidates.extend([
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        str(home / ".local" / "bin"),
+    ])
+
+    # Dedup while keeping order; keep only paths that contain a `node` binary
+    seen = set()
+    out = []
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        if Path(c, "node").exists() or Path(c, "node").is_symlink():
+            out.append(c)
+    return out
+
+
 def _nextjs_pkg_manager(repo_path: Path):
     """Pick a package manager + dev argv based on lockfile presence."""
     repo_path = Path(repo_path)
@@ -13682,6 +13746,14 @@ def nextjs_start(repo_path):
     spawn_env["FORCE_COLOR"] = "0"
     spawn_env["NO_COLOR"] = "1"
     spawn_env["BROWSER"] = "none"
+    # If CCC was launched from a shell that didn't source nvm, its PATH
+    # won't include the user's installed node — and `npx`/`turbo`/`next`
+    # all fail with ENOENT. Probe for common node locations and prepend
+    # them so subprocess (and the `sh -c next dev` shell inside npm/turbo)
+    # can resolve the binaries.
+    node_bins = _discover_node_bins()
+    if node_bins:
+        spawn_env["PATH"] = ":".join(node_bins) + ":" + spawn_env.get("PATH", "")
     try:
         log_path.write_text("")  # truncate prior run
         log_fh = open(log_path, "a")
