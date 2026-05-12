@@ -2731,6 +2731,80 @@
     return placeholder;
   }
 
+  function normalizePendingPrompt(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function pendingSpawnMatchesRow(pid, placeholder, row) {
+    if (!placeholder || !row) return false;
+    if (row.spawn_pid && String(row.spawn_pid) === String(pid)) return true;
+
+    const prompt = normalizePendingPrompt(placeholder.first_message || placeholder.display_name);
+    const rowPrompt = normalizePendingPrompt(row.first_message || row.display_name);
+    if (!prompt || !rowPrompt) return false;
+    const promptHead = prompt.slice(0, Math.min(80, prompt.length));
+    const rowHead = rowPrompt.slice(0, Math.min(80, rowPrompt.length));
+    const promptMatches = prompt === rowPrompt
+      || (promptHead.length >= 24 && rowPrompt.startsWith(promptHead))
+      || (rowHead.length >= 24 && prompt.startsWith(rowHead));
+    if (!promptMatches) return false;
+
+    const pendingCwd = placeholder.spawn_cwd || placeholder.session_cwd || placeholder.repo_path || placeholder.folder_path || '';
+    const rowCwd = row.session_cwd || row.folder_path || row.repo_path || '';
+    if (pendingCwd && rowCwd && pendingCwd !== rowCwd) return false;
+
+    const pendingTs = Number(placeholder.modified || 0);
+    const rowTs = Number(row.modified || row.mtime || row.last_interacted || 0);
+    return !pendingTs || !rowTs || rowTs >= (pendingTs - 120);
+  }
+
+  function reconcilePendingSpawnsWithRows(rows) {
+    if (!pendingSpawns.size || !Array.isArray(rows) || !rows.length) return null;
+    let selectionSwap = null;
+    for (const [pid, placeholder] of Array.from(pendingSpawns.entries())) {
+      const realCard = rows.find(row => pendingSpawnMatchesRow(pid, placeholder, row));
+      if (!realCard) continue;
+      const placeholderId = placeholder.id || ('spawning-' + pid);
+      const defaultPlaceholderId = 'spawning-' + pid;
+      if (currentConversation === placeholderId || currentConversation === defaultPlaceholderId) {
+        selectionSwap = { realCard, placeholderId };
+      }
+      delete columnOverrides[placeholderId];
+      delete columnOverrides[defaultPlaceholderId];
+      pendingSpawns.delete(pid);
+    }
+    return selectionSwap;
+  }
+
+  function rebindCurrentSelectionToRealCard(real) {
+    if (!real) return;
+    const realId = real.id || real.session_id;
+    const sid = real.session_id || realId;
+    if (!realId) return;
+    currentConversation = realId;
+    try { localStorage.setItem('ccc-last-conv', realId); } catch (_) {}
+    if (typeof stopConvStream === 'function') stopConvStream();
+    if (typeof stopSpawnStream === 'function') stopSpawnStream();
+    setCurrentSession(
+      real.source || 'interactive',
+      sid,
+      real.session_cwd,
+      real.session_cwd_exists,
+      real.spawn_pid,
+      rowRepoPath(real) || selectedRepoPath()
+    );
+    convLastLine = 0;
+    _firstUserMsgRendered = false;
+    _currentToolGroup = null;
+    _currentToolCount = 0;
+    setCopyableSessionId($cpSessionId, sid || '');
+    fetchConversationEvents();
+    startConvStream();
+    if (sid && real.source !== 'codex') startSpawnStream(sid);
+    updateSplitInputBar();
+    updateSplitToolbar();
+  }
+
   function insertPendingSpawnCard(pid, subject, sourceOrEngine, logPath, meta) {
     if (!pid) return;
     const id = 'spawning-' + pid;
@@ -12943,6 +13017,17 @@
       }
     }
 
+    // Archive mode bypasses /api/sessions, so it needs its own
+    // placeholder-to-real handoff. Claude archive rows do not carry
+    // spawn_pid, so reconcile by prompt/cwd/recency as a fallback.
+    const archiveSelectionSwap = reconcilePendingSpawnsWithRows(shaped);
+    const pendingRows = Array.from(pendingSpawns.values()).filter(c => {
+      if (!q) return true;
+      return ((c.display_name || '') + ' ' + (c.first_message || '') + ' ' + (c.folder_label || '') + ' ' + (c.session_id || '') + ' ' + (c.id || ''))
+        .toLowerCase().includes(q);
+    });
+    const rowsForRender = pendingRows.concat(shaped);
+
     // Make sure the list is visible (kanban is hidden in setArchiveMode).
     const $kanban = document.getElementById('kanbanBoard');
     if ($kanban) $kanban.style.display = 'none';
@@ -12954,18 +13039,22 @@
     // to setCurrentSession, currentSession.id stays null, and the input bar
     // hides because hasSession is false. Populate the maps here so the
     // existing right-pane code path works for archive entries.
-    for (const c of shaped) {
+    for (const c of rowsForRender) {
       if (c.session_id) sessionIdByConv[c.id] = c.session_id;
       if (c.session_cwd) sessionCwdByConv[c.id] = c.session_cwd;
       sessionCwdExistsByConv[c.id] = !!c.session_cwd_exists;
       sessionSourceByConv[c.id] = c.source || 'interactive';
+      if (c.spawn_pid) sessionSpawnPidByConv[c.id] = c.spawn_pid;
     }
     // Also keep conversationsData in sync so downstream code (selection
     // restore, etc.) sees a non-empty list while in archive mode. This
     // gets reset on toggle-off via loadConversationList().
-    conversationsData = applyConvSort(_applyOptimisticTouches(shaped));
+    conversationsData = applyConvSort(_applyOptimisticTouches(rowsForRender));
 
     renderConversationList(conversationsData);
+    if (archiveSelectionSwap) {
+      rebindCurrentSelectionToRealCard(archiveSelectionSwap.realCard);
+    }
   }
 
   async function setArchiveMode() {

@@ -1,0 +1,1 @@
+- Keep new-session placeholders visible in the All conversations archive and hand them off to the real transcript row when it appears.
