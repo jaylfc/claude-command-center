@@ -1,0 +1,1 @@
+- Group-chat participant pings now include an advisory snapshot of the latest chat post in the `/group-chat` injection, so sessions can immediately see why they were woken up while still treating the markdown chat file as the source of truth before posting.

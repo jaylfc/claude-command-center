@@ -11405,6 +11405,68 @@ def _group_chat_read(path):
         return {"ok": False, "error": str(exc)}, None
 
 
+_GROUP_CHAT_SNAPSHOT_TAIL_BYTES = 24000
+_GROUP_CHAT_SNAPSHOT_BODY_LIMIT = 2000
+
+
+def _group_chat_latest_message_snapshot(chat_path: str) -> str:
+    """Return an advisory snapshot of the latest real group-chat post.
+
+    The chat file remains authoritative. This only gives a nudged participant
+    enough immediate context to know why it was woken up before it re-reads
+    the file.
+    """
+    try:
+        with open(chat_path, "r", encoding="utf-8") as fh:
+            tail = fh.read()[-_GROUP_CHAT_SNAPSHOT_TAIL_BYTES:]
+    except OSError:
+        return ""
+
+    headings = list(re.finditer(
+        r"^##\s+.+?—\s+(?:[0-9a-fA-F]{8}\b|Human\b).*$",
+        tail,
+        re.MULTILINE,
+    ))
+    if not headings:
+        return ""
+
+    last = headings[-1]
+    heading = last.group(0).strip()
+    body = tail[last.end():]
+    body_lines = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("> _") and "system:" in stripped:
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines).strip()
+
+    truncated = False
+    if len(body) > _GROUP_CHAT_SNAPSHOT_BODY_LIMIT:
+        body = body[:_GROUP_CHAT_SNAPSHOT_BODY_LIMIT].rstrip()
+        truncated = True
+    if truncated:
+        body += "\n\n[Snapshot truncated by CCC.]"
+
+    if body:
+        return f"{heading}\n\n{body}"
+    return heading
+
+
+def _group_chat_inject_text(chat_path: str, topic: str, mode: str, sid: str) -> str:
+    """Build the /group-chat injection, with a latest-post context hint."""
+    safe_topic = (topic or "").replace('"', '\\"')
+    text = f'/group-chat chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
+    snapshot = _group_chat_latest_message_snapshot(chat_path)
+    if snapshot:
+        text += (
+            "\n\n"
+            "CCC latest chat snapshot (advisory; read the chat file before posting):\n"
+            f"{snapshot}"
+        )
+    return text
+
+
 def _coordinate_sessions(payload):
     """Create a group-chat file and inject /group-chat into selected sessions."""
     session_ids = payload.get("session_ids")
@@ -11461,10 +11523,9 @@ def _coordinate_sessions(payload):
     except OSError as exc:
         return {"ok": False, "error": f"cannot write chat file: {exc}"}
 
-    safe_topic = topic.replace('"', '\\"')
     results = []
     for sid in session_ids:
-        text = f'/group-chat chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
+        text = _group_chat_inject_text(chat_path, topic, mode, sid)
         inject_result = _inject_text_into_session(sid, text)
         results.append({
             "session_id": sid,
@@ -11593,7 +11654,6 @@ def _group_chat_nudge(path):
     except OSError:
         pass
 
-    safe_topic = topic.replace('"', '\\"')
     results = []
     pinged_labels = []
     for sid in session_ids:
@@ -11605,7 +11665,7 @@ def _group_chat_nudge(path):
         if sid == exclude_sid:
             results.append({"session_id": sid, "ok": True, "skipped": "last writer"})
             continue
-        text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
+        text = _group_chat_inject_text(real_path, topic, mode, sid)
         r = _inject_text_into_session(sid, text)
         results.append({"session_id": sid, "ok": bool(r.get("ok")), "error": r.get("error", "")})
         if r.get("ok"):
@@ -12303,8 +12363,7 @@ def _group_chat_add_participant(raw_path: str, session_id: str, display_name: st
 
     inject_result = {"ok": True, "skipped": "already a participant"}
     if not already:
-        safe_topic = topic.replace('"', '\\"')
-        text = f'/group-chat chat="{real_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
+        text = _group_chat_inject_text(real_path, topic, mode, sid)
         inject_result = _inject_text_into_session(sid, text)
         added_label = name_map.get(sid) or display_name or sid
         _group_chat_log_system(real_path, f"added `{added_label}` ({sid[:8]})")

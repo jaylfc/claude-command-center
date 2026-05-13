@@ -1462,6 +1462,53 @@ class TestGroupChatSidecarHelpers(unittest.TestCase):
                 fh.write("# header\n## one\nbody\n## two\n## three — author\n")
             self.assertEqual(server._group_chat_message_count(md), 3)
 
+    def test_latest_message_snapshot_uses_latest_post(self):
+        """The injected wake-up hint should show the latest post only."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            md = os.path.join(tmp, "x.md")
+            with open(md, "w") as fh:
+                fh.write(
+                    "# header\n"
+                    "## 2026-05-13 10:00 PDT — aaaaaaaa: ALPHA\n\n"
+                    "old body\n\n"
+                    "## 2026-05-13 10:01 PDT — Human\n\n"
+                    "new body\n"
+                    "## markdown subheading inside the message\n"
+                    "more detail\n"
+                    "> _2026-05-13 10:02:00 PDT — system: pinged `ALPHA`_\n"
+                )
+            snapshot = server._group_chat_latest_message_snapshot(md)
+            self.assertIn("Human", snapshot)
+            self.assertIn("new body", snapshot)
+            self.assertIn("markdown subheading inside the message", snapshot)
+            self.assertNotIn("old body", snapshot)
+            self.assertNotIn("system: pinged", snapshot)
+
+    def test_group_chat_inject_text_includes_latest_snapshot(self):
+        """Participants get a bounded advisory snapshot in the injection."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            md = os.path.join(tmp, "x.md")
+            with open(md, "w") as fh:
+                fh.write(
+                    "# header\n"
+                    "## 2026-05-13 10:01 PDT — Human\n\n"
+                    "please respond\n"
+                )
+            text = server._group_chat_inject_text(
+                md, 'topic with "quotes"', "topic", "abc12345-session"
+            )
+            self.assertIn(f'/group-chat chat="{md}"', text)
+            self.assertIn('topic="topic with \\"quotes\\""', text)
+            self.assertIn('sid="abc12345-session"', text)
+            self.assertIn("CCC latest chat snapshot", text)
+            self.assertIn("please respond", text)
+
     def test_resolve_group_chat_path_rejects_outside_dir(self):
         """The path validator must clamp to ~/.claude/group-chats/ and
         reject anything outside (no path traversal)."""

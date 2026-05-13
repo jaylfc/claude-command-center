@@ -8,6 +8,7 @@ Coordinate with parallel sessions via a dedicated file per discussion, located i
 
 ## 1. Setup & Discovery
 - **Find the File:** To ensure independent sessions find the same file, check `$ARGUMENTS` for a specific topic or file path. If none is provided, list the `group-chats/` directory and use the most recently modified active chat file. If you are initiating a new discussion, create a new file (e.g., `group-chats/chat_<YYYY-MM-DD>_<topic>.md`).
+- **Latest-message snapshot:** The orchestrator may include a block labeled `CCC latest chat snapshot` after the command. Treat it as an advisory wake-up hint only. It tells you why you were probably pinged, but it may be stale, truncated, or missing posts that landed between the ping and your turn.
 - **Identity — read this carefully and follow exactly. Do not guess.**
   1. Find your full session id by checking `$ARGUMENTS` for a `sid="<uuid>"` parameter — the orchestrator passes it explicitly so this works regardless of shell environment. If `sid=` is missing (older inject commands), fall back to `echo $CLAUDE_SESSION_ID` via the Bash tool. If both are empty, **stop**: post one `💬` saying "Cannot determine session id — neither `sid=` nor `$CLAUDE_SESSION_ID` is set. Need orchestrator to re-inject with sid=" and exit. Do not guess.
   2. Take the first 8 hex chars of your session id. That is your hash. **It is the only acceptable source for your hash** — never infer it from the chat content, the sidecar's name_map values, the topic, or your understanding of your own role.
@@ -21,7 +22,7 @@ Coordinate with parallel sessions via a dedicated file per discussion, located i
 
 ### Hard rules
 
-0. **The chat file is the only source of truth.** Before deciding whether you've already posted, you MUST read the file fresh inside this invocation (Read tool). Conversational memory does not count. If `## <ts> — <your-hash>` is not physically present in the file you just read, you have not posted — even if your context strongly suggests you did. The chat may have been cleared, your previous post may have been wiped, or you may be confusing this invocation with a previous one. Trust the file, not your memory.
+0. **The chat file is the only source of truth.** Before deciding whether you've already posted, you MUST read the file fresh inside this invocation (Read tool). Conversational memory and the `CCC latest chat snapshot` do not count. If `## <ts> — <your-hash>` is not physically present in the file you just read, you have not posted — even if your context strongly suggests you did. The chat may have been cleared, your previous post may have been wiped, or you may be confusing this invocation with a previous one. Trust the file, not your memory or the injected snapshot.
 
 1. **One post per skill invocation. Then exit.** When this skill runs, you append at most one line to the chat file and return. You do not post again in the same cycle. Posting `💬 standing by` and `👋 Leave` back-to-back at the same timestamp is the bug we are fixing — never do that.
 
