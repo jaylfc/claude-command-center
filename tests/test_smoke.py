@@ -867,6 +867,32 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertFalse(result["core_sandbox"])
         self.assertTrue(server._open_launch_allowed(result))
 
+    def test_open_target_strips_markdown_angle_wrapped_paths(self):
+        """Markdown links to paths with spaces use <...>; /api/open should unwrap."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            repo = root / "non-code projects" / "ADS"
+            repo.mkdir(parents=True)
+            (repo / ".git").mkdir()
+            report_dir = repo / "final" / "posthog-export"
+            report_dir.mkdir(parents=True)
+            report = report_dir / "paid-meta-posthog-analysis-20260512.md"
+            report.write_text("# report\n")
+
+            result = server._resolve_open_target(
+                f"<{report}>",
+                cwd=str(repo),
+                repo_path=str(repo),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(pathlib.Path(result["path"]), report.resolve())
+        self.assertTrue(result["core_sandbox"])
+
     def test_open_launch_blocks_non_markdown_session_cwd_files(self):
         """Launching outside the repo/log sandbox stays limited to markdown."""
         for mod in ("server",):
@@ -894,6 +920,96 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["core_sandbox"])
         self.assertFalse(server._open_launch_allowed(result))
+
+    def test_open_target_allows_command_center_pasted_images(self):
+        """CCC-uploaded pasted images should be revealable from transcript links."""
+        server = self.server
+        paste_dir = server.COMMAND_CENTER_PASTED_IMAGES_DIR
+        paste_dir.mkdir(parents=True)
+        image = paste_dir / "paste-123.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        result = server._resolve_open_target(
+            str(image),
+            cwd=str(self.repo),
+            repo_path=str(self.repo),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["core_sandbox"])
+        self.assertFalse(result["session_sandbox"])
+        self.assertTrue(result["pasted_image_sandbox"])
+        self.assertFalse(server._open_launch_allowed(result))
+
+    def test_spawn_codex_attaches_command_center_pasted_images(self):
+        """Pasted image paths in Codex prompts should be sent as --image args."""
+        server = self.server
+        paste_dir = server.COMMAND_CENTER_PASTED_IMAGES_DIR
+        paste_dir.mkdir(parents=True)
+        image = paste_dir / "paste-123.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        proc = mock.Mock(pid=4242)
+        original_spawns = list(server._spawned_sessions)
+        server._spawned_sessions.clear()
+        try:
+            with mock.patch.object(
+                server,
+                "_resolve_codex_bin",
+                return_value={"available": True, "bin": "/usr/bin/codex-test"},
+            ), mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
+                 mock.patch.object(server, "_record_spawn_to_registry"):
+                result = server.spawn_session_codex(
+                    f"inspect this screenshot {image}",
+                    name="image prompt",
+                    repo_path=str(self.repo),
+                )
+        finally:
+            for entry in server._spawned_sessions:
+                fh = entry.get("log_fh")
+                if fh:
+                    fh.close()
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+
+        self.assertTrue(result["ok"])
+        cmd = popen.call_args.args[0]
+        self.assertIn("--image", cmd)
+        self.assertEqual(cmd[cmd.index("--image") + 1], str(image))
+
+    def test_resume_codex_attaches_command_center_pasted_images(self):
+        """Resumed Codex sessions need the same pasted-image attachment path."""
+        server = self.server
+        paste_dir = server.COMMAND_CENTER_PASTED_IMAGES_DIR
+        paste_dir.mkdir(parents=True)
+        image = paste_dir / "paste-123.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        sid = "00000000-0000-4000-8000-000000000003"
+        proc = mock.Mock(pid=4243)
+        original_spawns = list(server._spawned_sessions)
+        server._spawned_sessions.clear()
+        try:
+            with mock.patch.object(
+                server,
+                "_resolve_codex_bin",
+                return_value={"available": True, "bin": "/usr/bin/codex-test"},
+            ), mock.patch.object(server, "_codex_thread_row", return_value={"cwd": str(self.repo)}), \
+                 mock.patch.object(server, "_git_toplevel_for_existing_dir", return_value=str(self.repo)), \
+                 mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
+                 mock.patch.object(server, "_record_spawn_to_registry"):
+                result = server.resume_session_codex(sid, f"look at {image}")
+        finally:
+            for entry in server._spawned_sessions:
+                fh = entry.get("log_fh")
+                if fh:
+                    fh.close()
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+
+        self.assertTrue(result["ok"])
+        cmd = popen.call_args.args[0]
+        self.assertIn("--image", cmd)
+        self.assertEqual(cmd[cmd.index("--image") + 1], str(image))
+        self.assertIn(sid, cmd)
 
     def test_open_target_blocks_executable_session_cwd_files(self):
         """Session-cwd fallback must not turn /api/open into script launch/reveal."""
@@ -927,6 +1043,7 @@ class TestRepoContextHelpers(unittest.TestCase):
         """The transcript click handler asks /api/open to launch markdown."""
         js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
         self.assertIn("function _isMarkdownPath", js)
+        self.assertIn("function normalizeMarkdownLinkTarget", js)
         self.assertIn("payload.launch = true", js)
 
     def test_original_ask_renders_pasted_images_inline(self):

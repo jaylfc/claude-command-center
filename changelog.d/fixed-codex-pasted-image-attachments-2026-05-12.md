@@ -1,0 +1,1 @@
+- Attach CCC pasted-image uploads to Codex spawn/resume prompts with `codex exec --image`, and allow those uploaded images to be revealed from transcript path links.

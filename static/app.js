@@ -1704,6 +1704,24 @@
     return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  function unescapeHtml(s) {
+    return String(s || '')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;|&#x27;/g, "'")
+      .replace(/&amp;/g, '&');
+  }
+
+  function normalizeMarkdownLinkTarget(raw) {
+    let target = unescapeHtml(String(raw || '').trim());
+    const angle = /^<([\s\S]+)>(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?$/.exec(target);
+    if (angle) return angle[1].trim();
+    const titled = /^(\S+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))$/.exec(target);
+    if (titled) return titled[1].trim();
+    return target;
+  }
+
   // Replace pasted-image references inside an already-escapeHtml'd string
   // with inline <img> tags. CCC now uploads to `.claude/command-center/
   // pasted-images/`; legacy `.claude/pasted-images/` paths still render.
@@ -2183,10 +2201,11 @@
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     // Markdown links [text](url)
     s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, url) => {
-      if (/^https?:\/\//i.test(url)) {
-        return '<a href="' + url + '" target="_blank" rel="noopener">' + text + '</a>';
+      const target = normalizeMarkdownLinkTarget(url);
+      if (/^https?:\/\//i.test(target)) {
+        return '<a href="' + escapeAttr(target) + '" target="_blank" rel="noopener">' + text + '</a>';
       }
-      return '<a role="button" tabindex="0" class="path-link" data-path="' + url + '">' + text + '</a>';
+      return '<a role="button" tabindex="0" class="path-link" data-path="' + escapeAttr(target) + '">' + text + '</a>';
     });
     // Bare http(s) URLs
     s = s.replace(/(^|[\s(])((?:https?:\/\/)[^\s<>"')]+)/g,
@@ -2198,10 +2217,11 @@
   }
 
   function linkifyPath(p) {
-    if (/^https?:\/\//i.test(p)) {
-      return '<a href="' + p + '" target="_blank" rel="noopener">' + p + '</a>';
+    const target = normalizeMarkdownLinkTarget(p);
+    if (/^https?:\/\//i.test(target)) {
+      return '<a href="' + escapeAttr(target) + '" target="_blank" rel="noopener">' + escapeHtml(target) + '</a>';
     }
-    return '<a role="button" tabindex="0" class="path-link" data-path="' + p + '">' + p + '</a>';
+    return '<a role="button" tabindex="0" class="path-link" data-path="' + escapeAttr(target) + '">' + escapeHtml(target) + '</a>';
   }
 
   // Copy button on fenced code blocks. Reads plain text from the <code>

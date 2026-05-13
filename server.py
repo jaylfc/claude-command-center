@@ -16,6 +16,7 @@ __version__ = "3.4.0"
 import ast
 import base64
 import fcntl
+import html
 import hashlib
 import http.server
 import json
@@ -42,6 +43,7 @@ from pathlib import Path
 # every repo-scoped request must carry a concrete repo path, cwd, or session id.
 CCC_ROOT = Path(__file__).resolve().parent
 COMMAND_CENTER_STATE_DIR = Path.home() / ".claude" / "command-center"
+COMMAND_CENTER_PASTED_IMAGES_DIR = COMMAND_CENTER_STATE_DIR / "pasted-images"
 PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 # User-picked repos that live outside the $HOME scan (e.g. ~/dev/foo, /workspaces/bar).
 # One absolute path per line. Written by /api/repo/add, read by load_known_repos.
@@ -64,6 +66,12 @@ _IDLE_REAPER_INTERVAL_S = 1800  # 30 min
 # project conversation store. Pinning cwd here makes those JSONLs easy to avoid
 # in repo-specific scans and easy to garbage-collect on demand.
 _SCRATCH_DIR = COMMAND_CENTER_STATE_DIR / "scratch"
+_PASTED_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+_PASTED_IMAGE_PATH_RE = re.compile(
+    r"(?:file://)?(/[^\s<>\"')]+/\.claude/(?:command-center/)?"
+    r"pasted-images/paste-[\w.-]+\.(?:png|jpe?g|gif|webp))",
+    re.IGNORECASE,
+)
 
 # Files-from-conversation: extension whitelist driving both the
 # /api/conversations/<id>/files extractor and the /api/reveal-file
@@ -116,7 +124,18 @@ def _path_is_within(child, parent):
 
 def _open_target_path(target):
     """Normalize a transcript path token before resolving it on disk."""
-    s = str(target or "").strip()
+    s = html.unescape(str(target or "").strip())
+    for _ in range(2):
+        if len(s) >= 2 and (
+            (s[0] == "<" and s[-1] == ">")
+            or (s[0] == '"' and s[-1] == '"')
+            or (s[0] == "'" and s[-1] == "'")
+        ):
+            s = s[1:-1].strip()
+        else:
+            break
+    if s.startswith("file://"):
+        s = s[len("file://"):]
     for sep in ("?", "#"):
         if sep in s:
             s = s.split(sep, 1)[0]
@@ -126,6 +145,50 @@ def _open_target_path(target):
     if m:
         s = m.group(1)
     return s
+
+
+def _resolve_pasted_image_path(target, *, require_file=False):
+    """Return resolved path when target is one of CCC's pasted-image files."""
+    raw = urllib.parse.unquote(str(target or "").strip())
+    if raw.startswith("file://"):
+        raw = raw[len("file://"):]
+    ext = os.path.splitext(raw)[1].lower()
+    if not raw or ext not in _PASTED_IMAGE_EXTS:
+        return None
+    try:
+        resolved = Path(raw).expanduser().resolve(strict=False)
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return None
+    if not _path_is_within(resolved, home):
+        return None
+    in_legacy_paste_dir = (
+        len(resolved.parts) >= 3
+        and resolved.parts[-2] == "pasted-images"
+        and resolved.parts[-3] == ".claude"
+    )
+    in_state_paste_dir = _path_is_within(resolved, COMMAND_CENTER_PASTED_IMAGES_DIR)
+    if not (in_legacy_paste_dir or in_state_paste_dir):
+        return None
+    if require_file and not resolved.is_file():
+        return None
+    return resolved
+
+
+def _extract_pasted_image_paths(text):
+    """Extract existing CCC-pasted images from prompt text for CLI attachment."""
+    out = []
+    seen = set()
+    for m in _PASTED_IMAGE_PATH_RE.finditer(str(text or "")):
+        resolved = _resolve_pasted_image_path(m.group(1), require_file=True)
+        if not resolved:
+            continue
+        path = str(resolved)
+        if path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
 
 
 def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
@@ -200,7 +263,8 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
 
     core_sandbox = _path_is_within(resolved, repo_root) or _path_is_within(resolved, log_root)
     session_sandbox = any(_path_is_within(resolved, root) for root in session_roots)
-    if not core_sandbox and not session_sandbox:
+    pasted_image_sandbox = _resolve_pasted_image_path(resolved, require_file=True) is not None
+    if not core_sandbox and not session_sandbox and not pasted_image_sandbox:
         return {
             "ok": False,
             "error": "path outside repo/session sandbox",
@@ -222,6 +286,7 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
         "path": str(resolved),
         "core_sandbox": core_sandbox,
         "session_sandbox": session_sandbox,
+        "pasted_image_sandbox": pasted_image_sandbox,
         "tried": tried,
     }
 
@@ -9317,6 +9382,7 @@ def resume_session_codex(session_id, text):
     text = _strip_ccc_session_state_instruction(text)
     if not text:
         return {"ok": False, "error": "missing text"}
+    image_paths = _extract_pasted_image_paths(text)
     resolved = _resolve_codex_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
@@ -9357,9 +9423,10 @@ def resume_session_codex(session_id, text):
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", model,
-        session_id,
-        text,
     ]
+    for image_path in image_paths:
+        cmd.extend(["--image", image_path])
+    cmd.extend([session_id, text])
     log_fh = open(log_path, "w")
     try:
         proc = subprocess.Popen(
@@ -10644,6 +10711,7 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None):
       {ok: False, error}                                — resolver failed
     """
     prompt = _strip_ccc_session_state_instruction(prompt)
+    image_paths = _extract_pasted_image_paths(prompt)
     resolved = _resolve_codex_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
@@ -10668,9 +10736,10 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None):
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", model,
         "--cd", spawn_cwd,
-        "--",
-        prompt,
     ]
+    for image_path in image_paths:
+        cmd.extend(["--image", image_path])
+    cmd.extend(["--", prompt])
 
     log_fh = open(log_path, "w")
     proc = subprocess.Popen(
@@ -17367,9 +17436,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # allowed image extension. No path traversal can escape (a).
             qs = urllib.parse.parse_qs(parsed.query)
             raw = (qs.get("path", [""])[0] or "").strip()
-            allowed_exts = (".png", ".jpg", ".jpeg", ".gif", ".webp")
             ext = ("." + raw.rsplit(".", 1)[-1].lower()) if "." in raw else ""
-            if not raw or ext not in allowed_exts:
+            if not raw or ext not in _PASTED_IMAGE_EXTS:
                 self.send_json({"error": "not found"}, 404)
                 return
             try:
@@ -17389,7 +17457,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 and resolved.parts[-3] == ".claude"
             )
             try:
-                resolved.relative_to((COMMAND_CENTER_STATE_DIR / "pasted-images").resolve())
+                resolved.relative_to(COMMAND_CENTER_PASTED_IMAGES_DIR.resolve())
                 in_state_paste_dir = True
             except ValueError:
                 in_state_paste_dir = False
@@ -18327,7 +18395,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     "image/gif": "gif", "image/webp": "webp", "image/svg+xml": "svg",
                 }
                 ext = ext_map.get(ctype.split(";")[0].strip().lower(), "png")
-                img_dir = str(COMMAND_CENTER_STATE_DIR / "pasted-images")
+                img_dir = str(COMMAND_CENTER_PASTED_IMAGES_DIR)
                 os.makedirs(img_dir, exist_ok=True)
                 fname = f"paste-{int(time.time()*1000)}.{ext}"
                 fpath = os.path.join(img_dir, fname)
