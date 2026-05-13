@@ -3780,7 +3780,6 @@
     font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
-  #convKanbanToggle { display: none; }
   #convList .conv-folder-group.collapsed > .conv-item,
   #convList .conv-folder-group.collapsed > .conv-gap-separator,
   #convList .conv-folder-group.collapsed > .conv-ghissues-more { display: none; }
