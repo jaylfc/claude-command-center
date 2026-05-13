@@ -5168,8 +5168,8 @@ def inject_input_via_keystroke(tty, terminal_app, text):
          consecutive injects to concatenate in the buffer.
 
     Stage 2 briefly steals focus; we capture the previously-frontmost
-    app and restore it at the end so the user's browser doesn't stay
-    buried.
+    process id and restore it at the end so the user's browser doesn't
+    stay buried.
     """
     tty_short = tty.replace("/dev/", "")
     tty_full = "/dev/" + tty_short
@@ -5234,9 +5234,9 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         # native session API (no focus needed), then activate iTerm and
         # emit a real Return keystroke so the TUI submits.
         script = f'''
-        set prevApp to ""
+        set prevPid to 0
         try
-          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+          tell application "System Events" to set prevPid to unix id of first application process whose frontmost is true
         end try
         tell application "iTerm2"
           set foundSession to missing value
@@ -5281,8 +5281,8 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         end try
         delay 0.05
         try
-          if prevApp is not "" and prevApp is not "iTerm2" then
-            tell application prevApp to activate
+          if prevPid is not 0 then
+            tell application "System Events" to set frontmost of first application process whose unix id is prevPid to true
           end if
         end try
         if submitErr is not "" then return "ok-no-submit:" & submitErr
@@ -5295,9 +5295,9 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         # the TUI submits. Target "process Terminal" explicitly so the
         # keystroke reaches the right process even if focus briefly shifts.
         script = f'''
-        set prevApp to ""
+        set prevPid to 0
         try
-          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+          tell application "System Events" to set prevPid to unix id of first application process whose frontmost is true
         end try
         tell application "Terminal"
           set foundWin to missing value
@@ -5338,8 +5338,8 @@ def inject_input_via_keystroke(tty, terminal_app, text):
         end try
         delay 0.05
         try
-          if prevApp is not "" and prevApp is not "Terminal" then
-            tell application prevApp to activate
+          if prevPid is not 0 then
+            tell application "System Events" to set frontmost of first application process whose unix id is prevPid to true
           end if
         end try
         if submitErr is not "" then return "ok-no-submit:" & submitErr
@@ -5427,16 +5427,16 @@ def interrupt_input_via_keystroke(tty, terminal_app):
     Mirrors `inject_input_via_keystroke` but delivers an interrupt instead of
     text — Claude Code's TUI treats Esc as cancel-the-current-stream when a
     response is in flight, and as clear-input-buffer when one isn't. Same focus
-    + restore-prev-app dance so the user's browser doesn't stay buried.
+    + restore-prev-process dance so the user's browser doesn't stay buried.
     """
     tty_short = tty.replace("/dev/", "")
     tty_full = "/dev/" + tty_short
 
     if terminal_app == "iTerm2":
         script = f'''
-        set prevApp to ""
+        set prevPid to 0
         try
-          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+          tell application "System Events" to set prevPid to unix id of first application process whose frontmost is true
         end try
         tell application "iTerm2"
           set found to false
@@ -5475,17 +5475,17 @@ def interrupt_input_via_keystroke(tty, terminal_app):
         end tell
         delay 0.08
         try
-          if prevApp is not "" and prevApp is not "iTerm2" then
-            tell application prevApp to activate
+          if prevPid is not 0 then
+            tell application "System Events" to set frontmost of first application process whose unix id is prevPid to true
           end if
         end try
         return "ok"
         '''
     else:
         script = f'''
-        set prevApp to ""
+        set prevPid to 0
         try
-          tell application "System Events" to set prevApp to name of first application process whose frontmost is true
+          tell application "System Events" to set prevPid to unix id of first application process whose frontmost is true
         end try
         tell application "Terminal"
           set foundWin to missing value
@@ -5520,8 +5520,8 @@ def interrupt_input_via_keystroke(tty, terminal_app):
         end tell
         delay 0.08
         try
-          if prevApp is not "" and prevApp is not "Terminal" then
-            tell application prevApp to activate
+          if prevPid is not 0 then
+            tell application "System Events" to set frontmost of first application process whose unix id is prevPid to true
           end if
         end try
         return "ok"

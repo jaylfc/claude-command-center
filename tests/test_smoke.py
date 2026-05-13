@@ -190,6 +190,22 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIn("app_node", result["error"])
         self.assertNotIn("secret", result["error"])
 
+    def test_terminal_inject_restores_focus_by_process_id(self):
+        seen = {}
+
+        def fake_run(args, **kwargs):
+            seen["script"] = args[2]
+            return subprocess.CompletedProcess(args, 0, stdout="ok\n", stderr="")
+
+        with mock.patch.object(self.server.subprocess, "run", side_effect=fake_run):
+            result = self.server.inject_input_via_keystroke("/dev/ttys001", "Terminal", "hello")
+
+        self.assertTrue(result["ok"])
+        script = seen["script"]
+        self.assertIn("unix id of first application process whose frontmost is true", script)
+        self.assertIn("frontmost of first application process whose unix id is prevPid", script)
+        self.assertNotIn("tell application prevApp", script)
+
     def test_spawn_session_preflights_missing_claude_cli(self):
         with mock.patch.object(
             self.server,
