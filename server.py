@@ -1716,6 +1716,7 @@ _TRANSCRIPT_CONTROL_PREFIXES = (
     "<system-reminder>",
     "<command-",
     "<local-command",
+    "<bash-",
 )
 
 

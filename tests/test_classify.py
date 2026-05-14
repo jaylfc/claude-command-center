@@ -188,6 +188,29 @@ class TestTranscriptControlMessageFilter(unittest.TestCase):
                     {
                         **common,
                         "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": (
+                                "<bash-input>open ~/example.md</bash-input>"
+                            ),
+                        },
+                        "timestamp": "2026-05-02T00:00:02.500Z",
+                    },
+                    {
+                        **common,
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": (
+                                "<bash-stdout>(Bash completed with no output)"
+                                "</bash-stdout><bash-stderr></bash-stderr>"
+                            ),
+                        },
+                        "timestamp": "2026-05-02T00:00:02.600Z",
+                    },
+                    {
+                        **common,
+                        "type": "user",
                         "message": {"role": "user", "content": real_prompt},
                         "timestamp": "2026-05-02T00:00:03.000Z",
                     },
@@ -201,6 +224,11 @@ class TestTranscriptControlMessageFilter(unittest.TestCase):
 
             self.assertEqual(repo_card["first_message"], real_prompt)
             self.assertEqual(all_card["first_message"], real_prompt)
+            parsed = server.parse_conversation(sid, repo_path=str(repo))
+            user_texts = [
+                ev["text"] for ev in parsed["events"] if ev["type"] == "user_text"
+            ]
+            self.assertEqual(user_texts, [real_prompt])
         finally:
             if prev_home is None:
                 os.environ.pop("HOME", None)
