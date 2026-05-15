@@ -238,6 +238,111 @@ class TestTranscriptControlMessageFilter(unittest.TestCase):
                 sys.modules.pop(mod, None)
             shutil.rmtree(tmp_home, ignore_errors=True)
 
+    def test_queued_prompt_attachments_render_as_user_messages(self):
+        tmp_home = tempfile.mkdtemp(prefix="ccc-queued-prompt-home-")
+        prev_home = os.environ.get("HOME")
+        try:
+            resolved_home = Path(tmp_home).resolve()
+            os.environ["HOME"] = str(resolved_home)
+            server = _fresh_server()
+
+            repo = resolved_home / "demo-repo"
+            repo.mkdir()
+            server._append_custom_repo(str(repo))
+            project_dir = (
+                resolved_home
+                / ".claude"
+                / "projects"
+                / server._encode_project_slug(str(repo))
+            )
+            project_dir.mkdir(parents=True)
+
+            sid = "00000000-queue-4000-8000-000000000001"
+            common = {
+                "userType": "external",
+                "entrypoint": "cli",
+                "cwd": str(repo),
+                "sessionId": sid,
+                "version": "2.1.142",
+                "gitBranch": "main",
+            }
+            events = [
+                {
+                    **common,
+                    "type": "user",
+                    "message": {"role": "user", "content": "first ask"},
+                    "timestamp": "2026-05-15T19:00:00.000Z",
+                },
+                {
+                    **common,
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "Bash",
+                                "input": {"command": "sleep 5"},
+                            }
+                        ],
+                    },
+                    "timestamp": "2026-05-15T19:00:01.000Z",
+                },
+                {
+                    **common,
+                    "type": "attachment",
+                    "attachment": {
+                        "type": "queued_command",
+                        "prompt": [
+                            {"type": "text", "text": "clarify while busy"}
+                        ],
+                        "commandMode": "prompt",
+                    },
+                    "timestamp": "2026-05-15T19:00:02.000Z",
+                },
+                {
+                    **common,
+                    "type": "attachment",
+                    "attachment": {
+                        "type": "queued_command",
+                        "prompt": "<task-notification>done</task-notification>",
+                        "commandMode": "task-notification",
+                    },
+                    "timestamp": "2026-05-15T19:00:03.000Z",
+                },
+                {
+                    "type": "last-prompt",
+                    "lastPrompt": "first ask",
+                    "leafUuid": "leaf-1",
+                    "sessionId": sid,
+                },
+            ]
+            path = project_dir / f"{sid}.jsonl"
+            path.write_text(
+                "".join(json.dumps(e, separators=(",", ":")) + "\n" for e in events),
+                encoding="utf-8",
+            )
+
+            parsed = server.parse_conversation(sid, repo_path=str(repo))
+            user_texts = [
+                ev["text"] for ev in parsed["events"] if ev["type"] == "user_text"
+            ]
+            self.assertEqual(user_texts, ["first ask", "clarify while busy"])
+
+            tail = server._extract_tail_meta(path)
+            self.assertEqual(tail["last_prompt"], "clarify while busy")
+            self.assertEqual(tail["last_event_type"], "user")
+            self.assertGreater(tail["last_meaningful_ts"], 0)
+        finally:
+            if prev_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = prev_home
+            for mod in ("server", "morning", "morning_store"):
+                sys.modules.pop(mod, None)
+            shutil.rmtree(tmp_home, ignore_errors=True)
+
 
 class TestExtractTailMetaPrLink(unittest.TestCase):
     def test_pr_link_event_sets_tail_pr_fields(self):

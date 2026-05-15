@@ -1839,6 +1839,39 @@ def _extract_user_prompt_text(ev):
     return _strip_ccc_session_state_instruction(text).strip()
 
 
+def _extract_queued_command_prompt(ev):
+    """Extract a queued human prompt from Claude Code attachment events.
+
+    When the user types while Claude is busy, recent Claude Code builds write
+    the prompt as an attachment:
+
+      {"type": "attachment", "attachment": {"type": "queued_command", ...}}
+
+    Those prompts are real user-visible turns and should render in CCC's
+    transcript pane. Background task notifications also use queued_command,
+    so only commandMode=prompt is treated as chat input.
+    """
+    if ev.get("type") != "attachment":
+        return None
+    attachment = ev.get("attachment")
+    if not isinstance(attachment, dict):
+        return None
+    if attachment.get("type") != "queued_command":
+        return None
+    if attachment.get("commandMode") != "prompt":
+        return None
+    prompt = attachment.get("prompt", "")
+    text = _extract_text_from_content(prompt)
+    if _is_transcript_control_text(text):
+        return None
+    images = _extract_images_from_content(prompt)
+    display_text = "" if (text == "[image]" and images) else text
+    display_text = _strip_ccc_session_state_instruction(display_text).strip()
+    if display_text or images:
+        return {"text": display_text, "images": images}
+    return None
+
+
 def _is_generated_helper_session(first_message):
     """Return True for CCC's own throwaway utility prompts."""
     text = (first_message or "").lstrip()
@@ -3597,6 +3630,7 @@ _META_MARKERS = (
     '"type":"custom-title"',
     '"type":"agent-name"',
     '"type":"last-prompt"',
+    '"type":"queued_command"',
 )
 
 # Markers for session signals — only lines with these need full JSON parse
@@ -3706,13 +3740,30 @@ def _extract_tail_meta(path):
                             meta["last_meaningful_ts"] = dt.timestamp()
                         except (ValueError, ImportError):
                             pass
+                    if t == "user":
+                        prompt_text = _extract_user_prompt_text(ev)
+                        if prompt_text:
+                            meta["last_prompt"] = prompt_text
                 # Metadata
                 if t == "custom-title":
                     meta["custom_title"] = ev.get("customTitle") or meta["custom_title"]
                 elif t == "agent-name":
                     meta["agent_name"] = ev.get("agentName") or meta["agent_name"]
                 elif t == "last-prompt":
-                    meta["last_prompt"] = ev.get("lastPrompt") or meta["last_prompt"]
+                    meta["last_prompt"] = meta["last_prompt"] or ev.get("lastPrompt")
+                elif t == "attachment":
+                    queued = _extract_queued_command_prompt(ev)
+                    if queued:
+                        meta["last_event_type"] = "user"
+                        meta["last_prompt"] = queued.get("text") or meta["last_prompt"]
+                        ts = ev.get("timestamp", "")
+                        if ts:
+                            try:
+                                from datetime import datetime as _dt
+                                dt = _dt.fromisoformat(ts.replace("Z", "+00:00"))
+                                meta["last_meaningful_ts"] = dt.timestamp()
+                            except (ValueError, ImportError):
+                                pass
                 elif t == "pr-link":
                     pr_url = ev.get("prUrl") or ev.get("pr_url") or ""
                     mp = _gh_pr_url_re.search(pr_url)
@@ -8472,6 +8523,16 @@ def _parse_conversation_event(ev, line_num):
                         "is_error": bool(item.get("is_error")),
                     }
         return None
+
+    queued = _extract_queued_command_prompt(ev)
+    if queued:
+        return {
+            "line": line_num,
+            "ts": ts,
+            "type": "user_text",
+            "text": queued.get("text", ""),
+            "images": queued.get("images", []),
+        }
 
     if ev_type == "assistant":
         msg = _safe_parse_message(ev.get("message", {}))
