@@ -266,6 +266,55 @@ class TestRepoContextHelpers(unittest.TestCase):
             with self.server._pending_terminal_input_lock:
                 self.server._pending_terminal_input_queue.clear()
 
+    def test_codex_live_terminal_injects_via_tty(self):
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        with mock.patch.object(self.server, "_is_codex_session", return_value=True), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={
+                     "live": True,
+                     "tty": "ttys009",
+                     "terminal_app": "Terminal",
+                 },
+             ), \
+             mock.patch.object(
+                 self.server,
+                 "inject_input_via_keystroke",
+                 return_value={"ok": True, "via": "terminal-control"},
+             ) as inject, \
+             mock.patch.object(self.server, "resume_session_codex") as resume:
+            result = self.server._inject_text_into_session(sid, "hello")
+
+        self.assertTrue(result["ok"])
+        inject.assert_called_once_with("ttys009", "Terminal", "hello")
+        resume.assert_not_called()
+
+    def test_codex_without_live_tty_uses_resume(self):
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        with mock.patch.object(self.server, "_is_codex_session", return_value=True), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={"live": False, "tty": None, "terminal_app": None},
+             ), \
+             mock.patch.object(
+                 self.server,
+                 "resume_session_codex",
+                 return_value={"ok": True, "via": "codex-resume"},
+             ) as resume, \
+             mock.patch.object(self.server, "inject_input_via_keystroke") as inject:
+            result = self.server._inject_text_into_session(sid, "hello")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["via"], "codex-resume")
+        resume.assert_called_once_with(sid, "hello")
+        inject.assert_not_called()
+
     def test_terminal_inject_timeout_has_actionable_macos_error(self):
         timeout = subprocess.TimeoutExpired(cmd=["osascript", "-e", "secret"], timeout=5)
         with mock.patch.object(self.server.subprocess, "run", side_effect=timeout):

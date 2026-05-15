@@ -12721,25 +12721,26 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False):
     text = _strip_ccc_session_state_instruction(text)
     if not session_id or not text:
         return {"ok": False, "error": "missing session_id or text"}
-    if _is_codex_session(session_id):
-        return resume_session_codex(session_id, text)
-    if _is_gemini_session(session_id):
-        return resume_session_gemini(session_id, text)
     cwd = find_session_cwd(session_id)
     status = session_live_status(session_id, cwd)
     tty = status.get("tty")
     term_app = status.get("terminal_app")
     has_tty = bool(tty) and tty != "??"
+    if status.get("live") and has_tty:
+        if not _from_terminal_queue:
+            if _terminal_input_queue_has_pending(session_id) or _session_status_is_busy(status):
+                return _queue_terminal_input(session_id, text, status)
+        return inject_input_via_keystroke(tty, term_app or "Terminal", text)
+    if _is_codex_session(session_id):
+        return resume_session_codex(session_id, text)
+    if _is_gemini_session(session_id):
+        return resume_session_gemini(session_id, text)
     if not status.get("live") or not has_tty:
         spawn = _find_live_spawn_entry_for_session(session_id)
         if spawn is not None:
             ok = _write_stream_json_user_message(spawn, text)
             return {"ok": ok, "pid": spawn["pid"], "via": "spawn-fifo"}
         return resume_session_headless(session_id, text)
-    if not _from_terminal_queue:
-        if _terminal_input_queue_has_pending(session_id) or _session_status_is_busy(status):
-            return _queue_terminal_input(session_id, text, status)
-    return inject_input_via_keystroke(tty, term_app or "Terminal", text)
 
 
 def _set_session_model(session_id, model, context_1m):
