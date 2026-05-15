@@ -727,6 +727,78 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(result.get("code"), "claude_unavailable")
         self.assertIn("CCC_CLAUDE_BIN", result.get("reason", ""))
 
+    def test_resolve_gemini_bin_uses_common_candidates(self):
+        """Gemini should be available when installed in a user bin dir that
+        launchd did not put on PATH."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_resolve_gemini_bin"))
+
+        with tempfile.NamedTemporaryFile(prefix="gemini-", suffix=".sh", delete=False) as f:
+            f.write(b"#!/bin/sh\nexit 0\n")
+            fake_bin = pathlib.Path(f.name)
+        os.chmod(fake_bin, os.stat(fake_bin).st_mode | stat.S_IXUSR)
+
+        try:
+            with mock.patch.dict(os.environ, {}, clear=True), \
+                 mock.patch.object(server.shutil, "which", return_value=None), \
+                 mock.patch.object(server, "_iter_common_cli_candidates", return_value=[fake_bin]):
+                result = server._resolve_gemini_bin()
+            self.assertEqual(result["bin"], str(fake_bin))
+            self.assertEqual(result["source"], "candidate")
+            self.assertTrue(result["available"])
+        finally:
+            os.unlink(fake_bin)
+
+    def test_nextjs_turbo_workspace_uses_dev_filter(self):
+        """Workspace Next.js apps should start with the scoped turbo command."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp).resolve()
+            app = root / "apps" / "bookyourmat"
+            app.mkdir(parents=True)
+            (root / "turbo.json").write_text(json.dumps({"tasks": {"dev": {"persistent": True}}}))
+            (root / "package.json").write_text(json.dumps({"workspaces": ["apps/*"]}))
+            (app / "package.json").write_text(json.dumps({
+                "name": "bookyourmat",
+                "scripts": {"dev": "next dev --port 39001"},
+                "dependencies": {"next": "16.1.6"},
+            }))
+
+            cmd, cwd = server._resolve_dev_invocation(app)
+            (root / ".git").mkdir()
+            status = server.nextjs_status(str(root), str(app))
+
+        self.assertEqual(cmd, ["npx", "turbo", "dev", "--filter=bookyourmat"])
+        self.assertEqual(cwd, root)
+        self.assertEqual(status["launch_cmd"], "npx turbo dev --filter=bookyourmat")
+
+    def test_nextjs_process_match_ignores_prompt_text(self):
+        """Process rediscovery must not match an agent command line that
+        merely pasted the same ps/rg pattern in its prompt."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        info = {
+            "target_path": pathlib.Path("/tmp/repo/apps/bookyourmat"),
+            "run_cwd": pathlib.Path("/tmp/repo"),
+            "package_name": "bookyourmat",
+            "filter_expected": True,
+            "ports": [3001],
+        }
+        self.assertTrue(server._nextjs_command_matches(
+            "npx turbo dev --filter=bookyourmat", info))
+        self.assertTrue(server._nextjs_command_matches(
+            "node /tmp/repo/node_modules/.bin/next dev --port 3001", info))
+        self.assertFalse(server._nextjs_command_matches(
+            "/opt/homebrew/bin/codex exec --json -- prompt contains "
+            "turbo dev --filter=bookyourmat and next dev --port 3001",
+            info,
+        ))
+
     def test_spawn_session_codex_exists(self):
         """`spawn_session_codex` must exist alongside `spawn_session`
         and accept explicit cwd/repo context."""

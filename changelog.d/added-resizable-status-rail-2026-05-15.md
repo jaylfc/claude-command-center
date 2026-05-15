@@ -1,0 +1,1 @@
+- The right-side status rail is now resizable, can be collapsed by dragging its handle to the right edge, and shows a slim restore tab when hidden.

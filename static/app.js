@@ -8332,7 +8332,7 @@
         }
         inner += '</div>';
         $issueHeader.innerHTML = inner;
-        $rail.insertBefore($issueHeader, $rail.firstChild);
+        $rail.insertBefore($issueHeader, $rail.querySelector('#railActions') || $rail.firstChild);
       }
       // Strip the now-duplicated title + GH-link from the body. They live
       // in the rail; keeping them in the body too would just be noise.
@@ -10629,6 +10629,11 @@
       return parts[parts.length - 1] || cleaned;
     };
     const trunc = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+    const codeRead = (name === 'Bash' || name === 'exec_command') ? parseCodeReadCommand(detail) : null;
+    if (codeRead) {
+      const loc = codeRead.start ? ':' + codeRead.start + (codeRead.end && codeRead.end !== codeRead.start ? '-' + codeRead.end : '') : '';
+      return 'Viewed ' + _pathBase(codeRead.path) + loc;
+    }
     switch (name) {
       case 'Read':         return detail ? 'Read ' + basename(detail) : 'Ran Read';
       case 'Edit':         return detail ? 'Edited ' + basename(detail) : 'Ran Edit';
@@ -10647,6 +10652,186 @@
       case 'ExitPlanMode': return 'Exited plan mode';
       default:             return detail ? 'Ran ' + name + ': ' + trunc(detail, 40) : 'Ran ' + (name || 'tool');
     }
+  }
+
+  function splitShellWords(cmd) {
+    const words = [];
+    let cur = '';
+    let quote = '';
+    let esc = false;
+    for (const ch of String(cmd || '')) {
+      if (esc) {
+        cur += ch;
+        esc = false;
+        continue;
+      }
+      if (ch === '\\' && quote !== "'") {
+        esc = true;
+        continue;
+      }
+      if (quote) {
+        if (ch === quote) quote = '';
+        else cur += ch;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        if (cur) {
+          words.push(cur);
+          cur = '';
+        }
+        continue;
+      }
+      cur += ch;
+    }
+    if (cur) words.push(cur);
+    return words;
+  }
+
+  function _codeLangForPath(path) {
+    const clean = String(path || '').split(/[?#]/)[0].toLowerCase();
+    const m = /\.([a-z0-9]+)$/.exec(clean);
+    if (!m) return '';
+    return ({
+      js: 'ts', jsx: 'tsx', ts: 'ts', tsx: 'tsx',
+      py: 'py',
+      sh: 'bash', bash: 'bash', zsh: 'bash',
+      json: 'json',
+      css: 'css',
+      html: 'html', htm: 'html',
+      md: 'markdown', mdx: 'markdown',
+      yaml: 'yaml', yml: 'yaml',
+    })[m[1]] || m[1];
+  }
+
+  function _pathBase(path) {
+    const s = String(path || '');
+    const parts = s.split('/');
+    return parts[parts.length - 1] || s;
+  }
+
+  function parseCodeReadCommand(command) {
+    const raw = String(command || '').trim();
+    if (!raw) return null;
+    if (/[|;&<>`]/.test(raw)) return null;
+    const words = splitShellWords(raw);
+    if (!words.length) return null;
+    const cmd = _pathBase(words[0]);
+    const pathLooksUseful = (p) => !!String(p || '').match(/\.(?:md|mdx|txt|py|js|jsx|ts|tsx|json|ya?ml|css|html?|sh|bash|zsh|toml|ini|cfg|conf|sql|prisma|go|rs|java|kt|swift|c|cc|cpp|h|hpp|rb|php)$/i);
+    const cleanPath = (p) => String(p || '').replace(/^--$/, '');
+
+    if (cmd === 'sed') {
+      let expr = '';
+      let path = '';
+      for (let i = 1; i < words.length; i++) {
+        const w = words[i];
+        if (w === '-n' || w === '-E' || w === '-r') continue;
+        if ((w === '-e' || w === '-f') && i + 1 < words.length) {
+          if (w === '-e' && !expr) expr = words[++i];
+          else i += 1;
+          continue;
+        }
+        if (!expr) {
+          expr = w;
+          continue;
+        }
+        if (w === '--') continue;
+        path = cleanPath(w);
+        break;
+      }
+      const range = /^(\d+)(?:,(\d+)|,\+(\d+))?p$/.exec(expr || '');
+      if (range && path) {
+        const start = Number(range[1]);
+        const end = range[2] ? Number(range[2]) : (range[3] ? start + Number(range[3]) : start);
+        return { kind: 'excerpt', path, start, end, lang: _codeLangForPath(path) };
+      }
+    }
+
+    if (cmd === 'cat') {
+      const files = words.slice(1).filter(w => w !== '--' && !/^-/.test(w));
+      if (files.length === 1 && pathLooksUseful(files[0])) {
+        return { kind: 'file', path: files[0], start: null, end: null, lang: _codeLangForPath(files[0]) };
+      }
+    }
+
+    if (cmd === 'nl') {
+      const files = words.slice(1).filter(w => w !== '--' && !/^-/.test(w) && !/^\d+$/.test(w));
+      const path = files[files.length - 1] || '';
+      if (pathLooksUseful(path)) {
+        return { kind: 'file', path, start: null, end: null, lang: _codeLangForPath(path) };
+      }
+    }
+
+    return null;
+  }
+
+  function toolCallCommandInfo(toolCall) {
+    if (!toolCall) return null;
+    const nameEl = toolCall.querySelector('.tool-name');
+    const name = (nameEl?.dataset?.toolName || nameEl?.textContent || '').trim();
+    const detail = (toolCall.querySelector('.tool-detail')?.textContent || '').trim();
+    if (name !== 'exec_command' && name !== 'Bash') return null;
+    return parseCodeReadCommand(detail);
+  }
+
+  function toolCallLooksLikeCodeRead(div) {
+    return !!toolCallCommandInfo(div && div.querySelector ? div.querySelector('.tool-call') : null);
+  }
+
+  function updateToolGroupLabel(group) {
+    if (!group) return;
+    const label = group.querySelector('.tcg-label');
+    if (!label) return;
+    const count = Number(group.dataset.toolCount || 0);
+    const codeReads = Number(group.dataset.codeReadCount || 0);
+    if (count === 1) {
+      const only = group.querySelector('.tool-call-group-body > .event.tool-only');
+      label.textContent = only ? summarizeToolCall(only) : 'Ran 1 command';
+    } else if (count > 1 && codeReads === count) {
+      label.textContent = 'Viewed ' + count + ' file excerpts';
+    } else {
+      label.textContent = 'Ran ' + count + ' commands';
+    }
+  }
+
+  function stripToolOutputEnvelope(text) {
+    const raw = String(text || '').replace(/\r\n/g, '\n');
+    const lines = raw.split('\n');
+    const outIdx = lines.findIndex(line => line.trim() === 'Output:');
+    if (outIdx < 0) return raw;
+    const exit = raw.match(/^Process exited with code\s+(-?\d+)/m);
+    if (exit && exit[1] !== '0') return raw;
+    let body = lines.slice(outIdx + 1);
+    if (body[0] && /^Total output lines:\s+\d+\s*$/.test(body[0].trim())) body = body.slice(1);
+    return body.join('\n').replace(/\n+$/, '');
+  }
+
+  function renderToolCodePreview(toolCall, text) {
+    const info = toolCallCommandInfo(toolCall);
+    if (!info) return null;
+    const code = stripToolOutputEnvelope(text);
+    if (!code.trim()) return null;
+    const loc = info.start ? ':' + info.start + (info.end && info.end !== info.start ? '-' + info.end : '') : '';
+    const label = info.path + loc;
+    const lang = info.lang || '';
+    const langLabel = lang
+      ? '<span class="cb-lang">' + escapeHtml(lang) + '</span>'
+      : '<span class="cb-lang cb-lang-plain">code</span>';
+    const wrap = document.createElement('div');
+    wrap.className = 'tool-result-code-preview cb-wrap';
+    wrap.innerHTML =
+      '<div class="tool-result-code-title">'
+        + '<span>File excerpt</span>'
+        + '<code title="' + escapeAttr(label) + '">' + escapeHtml(_pathBase(info.path) + loc) + '</code>'
+      + '</div>'
+      + '<div class="cb-head">' + langLabel
+        + '<button class="cb-copy" type="button" title="Copy">Copy</button>'
+      + '</div>'
+      + '<pre class="cb"><code>' + _linkifyEscapedUrls(highlightCode(code, lang)) + '</code></pre>';
+    return wrap;
   }
 
   function renderConversationEvents(events, paneId) {
@@ -10930,24 +11115,29 @@
         if (text && _currentToolGroup) {
           const calls = _currentToolGroup.querySelectorAll('.tool-call');
           const last = calls[calls.length - 1];
-          if (last && !last.querySelector('.tool-result-output')) {
-            const out = document.createElement('pre');
-            out.className = 'tool-result-output' + (ev.is_error ? ' is-error' : '');
+          if (last && !last.querySelector('.tool-result-output, .tool-result-code-preview')) {
             // Stamp this output with the tool_result event's own ts (when
             // the result actually landed in the JSONL), not render time.
             // The parent .event.tool_result row is display:none, so the
-            // CSS ::before never renders — we bake the prefix into the
-            // <pre>'s text content instead.
+            // CSS ::before never renders. Plain outputs bake the prefix into
+            // their <pre>; structured code previews rely on the group stamp.
             const _toolTs = eventStamp(ev.ts) || nowStamp();
-            out.dataset.renderTs = _toolTs;
-            // textContent for safety, then if the text has URLs swap to
-            // an escaped+linkified innerHTML so they're one-click. The
-            // `[J <ts>]` prefix is also preserved in escaped form.
-            const _prefix = '[J ' + _toolTs + ']  ';
-            if (text.indexOf('http') !== -1) {
-              out.innerHTML = _linkifyEscapedUrls(escapeHtml(_prefix + text));
+            const codePreview = ev.is_error ? null : renderToolCodePreview(last, text);
+            const out = codePreview || document.createElement('pre');
+            if (codePreview) {
+              out.dataset.renderTs = _toolTs;
             } else {
-              out.textContent = _prefix + text;
+              out.className = 'tool-result-output' + (ev.is_error ? ' is-error' : '');
+              out.dataset.renderTs = _toolTs;
+              // textContent for safety, then if the text has URLs swap to
+              // an escaped+linkified innerHTML so they're one-click. The
+              // `[J <ts>]` prefix is also preserved in escaped form.
+              const _prefix = '[J ' + _toolTs + ']  ';
+              if (text.indexOf('http') !== -1) {
+                out.innerHTML = _linkifyEscapedUrls(escapeHtml(_prefix + text));
+              } else {
+                out.textContent = _prefix + text;
+              }
             }
             // Bump the group's header stamp too so it reflects the most
             // recent activity (tool_use OR tool_result), not just tool_use.
@@ -10993,15 +11183,13 @@
         _currentToolGroup.dataset.renderTs = _ts;
         _currentToolGroup.querySelector('.tool-call-group-header').dataset.renderTs = _ts;
         _currentToolCount += 1;
+        _currentToolGroup.dataset.toolCount = String(_currentToolCount);
+        const prevCodeReads = Number(_currentToolGroup.dataset.codeReadCount || 0);
+        _currentToolGroup.dataset.codeReadCount = String(prevCodeReads + (toolCallLooksLikeCodeRead(div) ? 1 : 0));
         // Update the header label. Single-command groups get a smart
-        // tool-specific summary ("Read foo.py"); multi-command groups
-        // collapse to "Ran N commands".
-        const $lbl = _currentToolGroup.querySelector('.tcg-label');
-        if (_currentToolCount === 1) {
-          $lbl.textContent = summarizeToolCall(div);
-        } else {
-          $lbl.textContent = 'Ran ' + _currentToolCount + ' commands';
-        }
+        // tool-specific summary ("Read foo.py"); multi-command groups of
+        // source-file reads say what they are instead of generic commands.
+        updateToolGroupLabel(_currentToolGroup);
       } else {
         // Any non-tool-only event closes the current group.
         _currentToolGroup = null;
@@ -11449,16 +11637,24 @@
     }
     _hiStartPolling();
 
-    // Status-position toggle. Two states: top (default) and right (260px
+    // Status-position toggle. Two states: top (default) and right (resizable
     // rail beside the conversation pane). Body class is restored before
     // paint by the inline script in index.html; here we only wire the
     // click handler, keep the icon glyph in sync, and run the DOM mover
     // so the layout reflects the persisted state on first load.
     const $statusToggle = document.getElementById('statusPosToggle');
     const $statusIcon = document.getElementById('statusPosIcon');
+    const $statusRail = document.getElementById('statusRail');
+    const $statusRailResizer = document.getElementById('statusRailResizer');
+    const $statusRailRestore = document.getElementById('statusRailRestoreBtn');
+    const STATUS_RAIL_DEFAULT_WIDTH = 260;
+    const STATUS_RAIL_MIN_WIDTH = 220;
+    const STATUS_RAIL_MAX_WIDTH = 520;
+    const STATUS_RAIL_COLLAPSE_WIDTH = 130;
     const _syncStatusIcon = () => {
       if (!$statusIcon) return;
       const isRight = document.body.classList.contains('status-pos-right');
+      const isCollapsed = document.body.classList.contains('status-rail-collapsed');
       // Lucide-style "panel" icon — a small SVG that reads more clearly
       // than the previous ▤/▥ unicode glyphs. Two variants: panel-right
       // (active = right rail visible) and panel-top (active = top mode).
@@ -11468,19 +11664,145 @@
       if ($statusToggle) {
         $statusToggle.setAttribute('aria-pressed', String(isRight));
         $statusToggle.title = isRight
-          ? 'Original ask + Session activity are in the right rail. Click to move them back above the conversation.'
-          : 'Original ask + Session activity are above the conversation. Click to move them into a 260px right rail.';
+          ? (isCollapsed
+              ? 'Status rail is hidden. Click to move Original ask + Session activity back above the conversation.'
+              : 'Original ask + Session activity are in the right rail. Click to move them back above the conversation.')
+          : 'Original ask + Session activity are above the conversation. Click to move them into a right rail.';
       }
     };
+    const _statusRailMaxWidth = () => {
+      const pane = document.querySelector('.conv-pane');
+      const paneWidth = pane ? pane.getBoundingClientRect().width : window.innerWidth;
+      return Math.max(STATUS_RAIL_MIN_WIDTH, Math.min(STATUS_RAIL_MAX_WIDTH, Math.round(paneWidth - 260)));
+    };
+    const _clampStatusRailWidth = (width) => {
+      const n = Number(width);
+      const raw = Number.isFinite(n) && n > 0 ? n : STATUS_RAIL_DEFAULT_WIDTH;
+      return Math.max(STATUS_RAIL_MIN_WIDTH, Math.min(_statusRailMaxWidth(), Math.round(raw)));
+    };
+    const _savedStatusRailWidth = () => {
+      const saved = parseInt(localStorage.getItem('ccc-status-rail-width') || '0', 10);
+      return saved >= STATUS_RAIL_MIN_WIDTH ? saved : STATUS_RAIL_DEFAULT_WIDTH;
+    };
+    const _setStatusRailWidth = (width, persist) => {
+      const next = _clampStatusRailWidth(width);
+      document.documentElement.style.setProperty('--status-rail-width', next + 'px');
+      if ($statusRailResizer) {
+        $statusRailResizer.setAttribute('aria-valuemin', String(STATUS_RAIL_MIN_WIDTH));
+        $statusRailResizer.setAttribute('aria-valuemax', String(_statusRailMaxWidth()));
+        $statusRailResizer.setAttribute('aria-valuenow', String(next));
+      }
+      if (persist) {
+        try { localStorage.setItem('ccc-status-rail-width', String(next)); } catch (_) {}
+      }
+      return next;
+    };
+    const _setStatusRailCollapsed = (collapsed, persist) => {
+      document.body.classList.toggle('status-rail-collapsed', !!collapsed);
+      if (!collapsed) _setStatusRailWidth(_savedStatusRailWidth(), false);
+      if ($statusRailRestore) {
+        $statusRailRestore.setAttribute('aria-expanded', String(!collapsed));
+      }
+      if (persist) {
+        try {
+          if (collapsed) localStorage.setItem('ccc-status-rail-collapsed', '1');
+          else localStorage.removeItem('ccc-status-rail-collapsed');
+        } catch (_) {}
+      }
+      _syncStatusIcon();
+    };
+    _setStatusRailWidth(_savedStatusRailWidth(), false);
+    _setStatusRailCollapsed(document.body.classList.contains('status-rail-collapsed'), false);
     if ($statusToggle) {
       $statusToggle.addEventListener('click', () => {
         const next = !document.body.classList.contains('status-pos-right');
         document.body.classList.toggle('status-pos-right', next);
+        _setStatusRailCollapsed(false, true);
         try { localStorage.setItem('ccc-status-pos', next ? 'right' : 'top'); } catch (_) {}
         _syncStatusIcon();
         _applyStatusRailLayout();
         if (typeof window._cccApplyToolbarRailLayout === 'function') {
           window._cccApplyToolbarRailLayout();
+        }
+      });
+    }
+    if ($statusRailRestore) {
+      $statusRailRestore.addEventListener('click', () => {
+        document.body.classList.add('status-pos-right');
+        try { localStorage.setItem('ccc-status-pos', 'right'); } catch (_) {}
+        _setStatusRailCollapsed(false, true);
+        _applyStatusRailLayout();
+        if (typeof window._cccApplyToolbarRailLayout === 'function') {
+          window._cccApplyToolbarRailLayout();
+        }
+      });
+    }
+    if ($statusRail && $statusRailResizer) {
+      let railStartX = 0;
+      let railStartWidth = STATUS_RAIL_DEFAULT_WIDTH;
+      let railCollapseOnRelease = false;
+      const _railShouldCollapse = (e, rawWidth) => {
+        const pane = document.querySelector('.conv-pane');
+        const right = pane ? pane.getBoundingClientRect().right : window.innerWidth;
+        return rawWidth <= STATUS_RAIL_COLLAPSE_WIDTH || e.clientX >= right - 28;
+      };
+      const _railMove = (e) => {
+        const raw = railStartWidth + (railStartX - e.clientX);
+        railCollapseOnRelease = _railShouldCollapse(e, raw);
+        if (!railCollapseOnRelease) {
+          _setStatusRailWidth(raw, false);
+        }
+      };
+      const _railUp = (e) => {
+        document.removeEventListener('mousemove', _railMove);
+        document.removeEventListener('mouseup', _railUp);
+        $statusRailResizer.classList.remove('dragging');
+        document.body.classList.remove('status-rail-resizing');
+        if (railCollapseOnRelease) {
+          _setStatusRailCollapsed(true, true);
+        } else {
+          const finalWidth = $statusRail.getBoundingClientRect().width;
+          _setStatusRailWidth(finalWidth, true);
+          _setStatusRailCollapsed(false, true);
+        }
+      };
+      $statusRailResizer.addEventListener('mousedown', (e) => {
+        if (!document.body.classList.contains('status-pos-right')) return;
+        e.preventDefault();
+        railStartX = e.clientX;
+        railStartWidth = $statusRail.getBoundingClientRect().width || _savedStatusRailWidth();
+        railCollapseOnRelease = false;
+        $statusRailResizer.classList.add('dragging');
+        document.body.classList.add('status-rail-resizing');
+        document.addEventListener('mousemove', _railMove);
+        document.addEventListener('mouseup', _railUp);
+      });
+      $statusRailResizer.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        _setStatusRailCollapsed(false, true);
+        _setStatusRailWidth(STATUS_RAIL_DEFAULT_WIDTH, true);
+      });
+      $statusRailResizer.addEventListener('keydown', (e) => {
+        if (!document.body.classList.contains('status-pos-right')) return;
+        const current = $statusRail.getBoundingClientRect().width || _savedStatusRailWidth();
+        const step = e.shiftKey ? 40 : 20;
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+          e.preventDefault();
+          _setStatusRailCollapsed(false, true);
+          _setStatusRailWidth(current + (e.key === 'ArrowLeft' ? step : -step), true);
+        } else if (e.key === 'Home') {
+          e.preventDefault();
+          _setStatusRailCollapsed(false, true);
+          _setStatusRailWidth(STATUS_RAIL_DEFAULT_WIDTH, true);
+        } else if (e.key === 'End') {
+          e.preventDefault();
+          _setStatusRailCollapsed(true, true);
+        }
+      });
+      window.addEventListener('resize', () => {
+        if (document.body.classList.contains('status-pos-right')
+            && !document.body.classList.contains('status-rail-collapsed')) {
+          _setStatusRailWidth($statusRail.getBoundingClientRect().width || _savedStatusRailWidth(), false);
         }
       });
     }
@@ -12005,12 +12327,50 @@
   // States govern click semantics:
   //   no-repo / no-nextjs → click is a no-op with a one-shot explainer alert
   //   idle (Next.js detected, no server) → click POSTs /api/nextjs/start
-  //   starting → click ignored
+  //   starting → click reports the command already in flight
+  //   stuck    → click POSTs /api/nextjs/restart
   //   running  → <a href> opens http://localhost:<port> in a new tab
   //   failed   → click retries start
   let _localhostState = 'idle';
   let _localhostFastPollUntil = 0;
   let _localhostPollTimer = null;
+  let _localhostLastCommand = '';
+
+  function localhostContext() {
+    const convId = (typeof currentConversation !== 'undefined') ? currentConversation : '';
+    const row = convId ? ((conversationsData || []).find(x => x.id === convId) || null) : null;
+    const rowRepo = row ? (row.repo_path || row.folder_path || '') : '';
+    const selectedRepo = selectedRepoPath();
+    const repoPath = selectedRepo || rowRepo || '';
+    const mapCwd = (row && typeof sessionCwdByConv !== 'undefined') ? (sessionCwdByConv[row.id] || '') : '';
+    let cwd = mapCwd || (row && (row.session_cwd || row.spawn_cwd || row.cwd)) || '';
+    if (repoPath && cwd && cwd !== repoPath) {
+      const root = repoPath.replace(/\/+$/, '');
+      if (cwd !== root && !cwd.startsWith(root + '/')) cwd = '';
+    }
+    return {
+      repoPath,
+      cwd: cwd && cwd !== repoPath ? cwd : '',
+    };
+  }
+
+  function localhostUrl(path, ctx) {
+    const u = new URL(path, window.location.href);
+    if (ctx && ctx.repoPath) u.searchParams.set('repo_path', ctx.repoPath);
+    if (ctx && ctx.cwd) u.searchParams.set('cwd', ctx.cwd);
+    return u.pathname + u.search;
+  }
+
+  function localhostBody(ctx) {
+    const body = {};
+    if (ctx && ctx.repoPath) body.repo_path = ctx.repoPath;
+    if (ctx && ctx.cwd) body.cwd = ctx.cwd;
+    return body;
+  }
+
+  function localhostCommand(d) {
+    return (d && (d.launch_cmd || d.cmd)) || _localhostLastCommand || '';
+  }
 
   function setLocalhostPill({ dotClass, label, title, href, busy }) {
     if ($localhostDot) $localhostDot.className = 'deploy-dot' + (dotClass ? ' ' + dotClass : '');
@@ -12033,8 +12393,8 @@
 
   async function pollLocalhost() {
     if (!$localhostPill) return;
-    const repoPath = selectedRepoPath();
-    if (!repoPath) {
+    const ctx = localhostContext();
+    if (!ctx.repoPath && !ctx.cwd) {
       _localhostState = 'no-repo';
       setLocalhostPill({
         dotClass: '',
@@ -12046,7 +12406,7 @@
     }
     let res;
     try {
-      res = await fetch(repoUrl('/api/nextjs/status', repoPath));
+      res = await fetch(localhostUrl('/api/nextjs/status', ctx));
     } catch (e) {
       _localhostState = 'unreachable';
       setLocalhostPill({
@@ -12081,6 +12441,7 @@
       });
       return;
     }
+    _localhostLastCommand = localhostCommand(d);
     if (!d.detected) {
       _localhostState = 'no-nextjs';
       setLocalhostPill({
@@ -12101,21 +12462,25 @@
         label: 'localhost:' + d.port,
         title: 'Next.js dev server running' + (age ? ' · started ' + age : '') +
                (d.cmd ? ' · ' + d.cmd : '') +
+               (d.target_path ? '\napp: ' + d.target_path : '') +
                (d.cwd ? '\nin: ' + d.cwd : '') +
-               ' · click to open · right-click to stop',
+               ' · click to open',
         href: url,
       });
       return;
     }
     if (d.running && !d.port) {
-      _localhostState = 'starting';
+      _localhostState = 'stuck';
+      const cmd = localhostCommand(d) || 'dev command';
       setLocalhostPill({
         dotClass: 'building',
-        label: 'Starting…',
-        title: 'Next.js dev server is starting — waiting for the port. ' +
-               'Tail the log: ' + (d.log_path || '<unknown>'),
+        label: cmd,
+        title: 'Waiting on: ' + cmd +
+               (d.target_path ? '\napp: ' + d.target_path : '') +
+               (d.cmd && d.cmd !== cmd ? '\nmatched process: ' + d.cmd : '') +
+               (d.log_path ? '\nTail the log: ' + d.log_path : '') +
+               '\nClick to restart it.',
         href: '',
-        busy: true,
       });
       return;
     }
@@ -12137,8 +12502,7 @@
     setLocalhostPill({
       dotClass: '',
       label: '▶ Start localhost',
-      title: 'Click to start a Next.js dev server in this repo (' +
-             'auto-detects npm / pnpm / yarn from your lockfile).',
+      title: 'Click to run: ' + (_localhostLastCommand || 'the detected dev command'),
       href: '',
     });
   }
@@ -12157,6 +12521,35 @@
     _localhostPollTimer = setTimeout(tick, 250);
   }
 
+  async function restartLocalhostDevServer(ctx) {
+    const cmd = _localhostLastCommand || 'dev command';
+    setLocalhostPill({
+      dotClass: 'building',
+      label: cmd,
+      title: 'Restarting: ' + cmd,
+      href: '',
+      busy: true,
+    });
+    let d = null;
+    try {
+      const res = await fetch(localhostUrl('/api/nextjs/restart', ctx), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(localhostBody(ctx)),
+      });
+      d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.ok) {
+        showOpToast('Restart failed: ' + ((d && d.error) || ('HTTP ' + res.status)), 'error');
+      } else {
+        _localhostLastCommand = d.cmd || _localhostLastCommand;
+        showOpToast('Restarted: ' + (_localhostLastCommand || cmd));
+      }
+    } catch (e) {
+      showOpToast('Restart failed: ' + (e && e.message || e), 'error');
+    }
+    _scheduleLocalhostFastPoll();
+  }
+
   if ($localhostPill) {
     $localhostPill.addEventListener('click', async (ev) => {
       // Running state: pill has an href, let the browser open the URL.
@@ -12166,7 +12559,7 @@
       // Explicit feedback for every non-actionable state, so a click is
       // never silent.
       if (_localhostState === 'starting') {
-        showOpToast('Dev server is already starting — give it a moment.');
+        showOpToast('Already waiting on: ' + (_localhostLastCommand || 'dev command'));
         return;
       }
       if (_localhostState === 'no-repo') {
@@ -12190,25 +12583,29 @@
         return;
       }
 
-      const repoPath = selectedRepoPath();
-      if (!repoPath) {
+      const ctx = localhostContext();
+      if (!ctx.repoPath && !ctx.cwd) {
         showOpToast('Pick a repo first.');
+        return;
+      }
+      if (_localhostState === 'stuck') {
+        await restartLocalhostDevServer(ctx);
         return;
       }
       setLocalhostPill({
         dotClass: 'building',
-        label: 'Starting…',
-        title: 'Asking the server to spawn the dev server…',
+        label: _localhostLastCommand || 'dev command',
+        title: 'Running: ' + (_localhostLastCommand || 'detected dev command'),
         href: '',
         busy: true,
       });
       _localhostState = 'starting';
       let d;
       try {
-        const res = await fetch(repoUrl('/api/nextjs/start', repoPath), {
+        const res = await fetch(localhostUrl('/api/nextjs/start', ctx), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo_path: repoPath }),
+          body: JSON.stringify(localhostBody(ctx)),
         });
         try {
           d = await res.json();
@@ -12237,32 +12634,18 @@
         showOpToast('Start failed: ' + d.error, 'error');
         return;
       }
-      showOpToast('Dev server starting — waiting for port…');
-      _scheduleLocalhostFastPoll();
-    });
-
-    $localhostPill.addEventListener('contextmenu', async (ev) => {
-      if (_localhostState !== 'running') return;
-      ev.preventDefault();
-      if (!confirm('Stop the Next.js dev server for this repo?')) return;
-      const repoPath = selectedRepoPath();
-      if (!repoPath) return;
+      if (d && d.cmd) _localhostLastCommand = d.cmd;
       setLocalhostPill({
         dotClass: 'building',
-        label: 'Stopping…',
-        title: 'Sending SIGTERM…',
+        label: _localhostLastCommand || 'dev command',
+        title: 'Waiting on: ' + (_localhostLastCommand || 'dev command'),
         href: '',
         busy: true,
       });
-      try {
-        await fetch(repoUrl('/api/nextjs/stop', repoPath), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repo_path: repoPath }),
-        });
-      } catch (_e) {}
-      pollLocalhost();
+      showOpToast('Waiting on: ' + (_localhostLastCommand || 'dev command'));
+      _scheduleLocalhostFastPoll();
     });
+
   }
 
   // ── Sidebar resizer ──
@@ -12881,6 +13264,51 @@
   let archiveLoaded = false;
   let _lastArchiveRenderFilter = null;
 
+  function _archiveRowStableKey(c) {
+    if (!c) return '';
+    return c.session_id || c.id || (c.tail_pr_url ? 'pr-url:' + c.tail_pr_url : '');
+  }
+
+  function _mergeArchivePrSnapshot(freshRows, previousRows) {
+    const fresh = Array.isArray(freshRows) ? freshRows : [];
+    const previous = Array.isArray(previousRows) ? previousRows : [];
+    if (!previous.length) return fresh;
+
+    const prevByKey = new Map();
+    for (const row of previous) {
+      const key = _archiveRowStableKey(row);
+      if (key) prevByKey.set(key, row);
+    }
+
+    const seen = new Set();
+    const out = fresh.map(row => {
+      const key = _archiveRowStableKey(row);
+      if (key) seen.add(key);
+      const prev = key ? prevByKey.get(key) : null;
+      if (!prev) return row;
+      const merged = Object.assign({}, row);
+      const copyIfMissing = (field) => {
+        const val = merged[field];
+        const emptyArray = Array.isArray(val) && val.length === 0;
+        if (val === undefined || val === null || val === '' || emptyArray) {
+          if (prev[field] !== undefined && prev[field] !== null) merged[field] = prev[field];
+        }
+      };
+      [
+        'tail_pr_number', 'tail_pr_url', 'pr_state', 'pr_notes',
+        'pr_is_draft', 'pr_mergeable', 'pr_review_decision',
+      ].forEach(copyIfMissing);
+      return merged;
+    });
+
+    for (const row of previous) {
+      const key = _archiveRowStableKey(row);
+      if (!key || seen.has(key)) continue;
+      if (row.source === 'github_pr') out.push(row);
+    }
+    return out;
+  }
+
   function _captureArchiveListScroll(q, $list) {
     if (!$list || _lastArchiveRenderFilter !== q) return null;
     const state = { filter: q, top: $list.scrollTop, anchorId: '', anchorOffset: 0 };
@@ -12918,9 +13346,18 @@
     });
   }
 
-  async function loadArchiveAll() {
+  async function loadArchiveAll(opts = {}) {
     try {
-      const r = await fetch('/api/conversations/all');
+      const params = new URLSearchParams();
+      if (opts.includePrs) {
+        params.set('include_prs', '1');
+        params.set('resolve_prs', '1');
+        params.set('resolve_effective', '1');
+        params.set('resolve_worktrees', '1');
+        params.set('background', '1');
+      }
+      const url = '/api/conversations/all' + (params.toString() ? '?' + params.toString() : '');
+      const r = await fetch(url);
       if (!r.ok) return [];
       const d = await r.json();
       return Array.isArray(d.conversations) ? d.conversations : [];
@@ -12989,6 +13426,53 @@
   }
 
   let _archiveProgressPollId = null;
+  let _archiveSideDataPromise = null;
+  let _archivePrHydratePromise = null;
+  let _archiveSideDataHydratedAt = 0;
+  let _archivePrHydratedAt = 0;
+  const ARCHIVE_HYDRATE_TTL_MS = 5 * 60 * 1000;
+  function _archiveQuery() {
+    return document.getElementById('convSearch')?.value || '';
+  }
+  function _renderArchiveIfLoaded() {
+    if (!archiveLoaded) return;
+    renderArchiveFolderFilter();
+    renderArchiveList(_archiveQuery());
+  }
+  function _hydrateArchiveSideData(force = false) {
+    if (_archiveSideDataPromise) return _archiveSideDataPromise;
+    if (!force && _archiveSideDataHydratedAt && (Date.now() - _archiveSideDataHydratedAt) < ARCHIVE_HYDRATE_TTL_MS) {
+      return Promise.resolve();
+    }
+    _archiveSideDataPromise = Promise.all([
+      loadCrossRepoIssues(),
+      refreshArchivedGroupChats().catch(() => {}),
+      repoListState.repos.length ? Promise.resolve(null) : loadRepoList().catch(() => null),
+    ]).then(([issues]) => {
+      crossRepoIssuesData = issues || [];
+      _archiveSideDataHydratedAt = Date.now();
+      _renderArchiveIfLoaded();
+    }).finally(() => {
+      _archiveSideDataPromise = null;
+    });
+    return _archiveSideDataPromise;
+  }
+  function _hydrateArchivePrData(force = false) {
+    if (_archivePrHydratePromise) return _archivePrHydratePromise;
+    if (!force && _archivePrHydratedAt && (Date.now() - _archivePrHydratedAt) < ARCHIVE_HYDRATE_TTL_MS) {
+      return Promise.resolve();
+    }
+    _archivePrHydratePromise = loadArchiveAll({ includePrs: true }).then(convs => {
+      if (Array.isArray(convs) && convs.length) {
+        archiveData = convs;
+        _archivePrHydratedAt = Date.now();
+        _renderArchiveIfLoaded();
+      }
+    }).finally(() => {
+      _archivePrHydratePromise = null;
+    });
+    return _archivePrHydratePromise;
+  }
   function _startArchiveProgressPoll() {
     if (_archiveProgressPollId) return;
     const tick = async () => {
@@ -13016,19 +13500,14 @@
     _startArchiveProgressPoll();
     _archiveRefreshPromise = (async () => {
       try {
-        const [convs, issues] = await Promise.all([
-          loadArchiveAll(),
-          loadCrossRepoIssues(),
-          repoListState.repos.length ? Promise.resolve(null) : loadRepoList().catch(() => null),
-          // Pull archived group chats in parallel so the first archive
-          // render already has them. Folder-filter changes refresh again
-          // via setArchiveFolderFilter → refreshArchivedGroupChats.
-          refreshArchivedGroupChats().catch(() => {}),
-        ]);
-        archiveData = convs;
-        crossRepoIssuesData = issues || [];
+        const convs = await loadArchiveAll();
+        archiveData = _mergeArchivePrSnapshot(convs, archiveData);
         archiveLoaded = true;
         renderArchiveFolderFilter();
+        setTimeout(() => {
+          _hydrateArchiveSideData();
+          _hydrateArchivePrData();
+        }, 0);
         return archiveData;
       } finally {
         _archiveRefreshPromise = null;

@@ -1,0 +1,1 @@
+- Gemini spawning now detects CLI installs in common user bin directories that are missing from the server process PATH.

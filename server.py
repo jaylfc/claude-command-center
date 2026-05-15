@@ -26,6 +26,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import sqlite3
 import stat
 import subprocess
@@ -610,7 +611,6 @@ def _archive_load_set_step(key, *, label=None, state=None, detail=None, count=_L
 
 def _archive_load_complete(rows):
     total = len(rows or [])
-    _archive_load_set_step("group_chats", state="done")
     with _ARCHIVE_LOAD_STATUS_LOCK:
         _ARCHIVE_LOAD_STATUS.update({
             "active": False,
@@ -1885,7 +1885,12 @@ def _is_generated_helper_session(first_message):
     )
 
 
-def find_all_conversations(limit_per_folder=None):
+def find_all_conversations(
+    limit_per_folder=None,
+    resolve_pr_states=True,
+    resolve_effective=True,
+    resolve_worktree_dirty=True,
+):
     """Walk ~/.claude/projects/ for every subdir and return a flat list of
     conversation metadata across every folder you've ever Claude-Code'd in.
 
@@ -2026,6 +2031,19 @@ def find_all_conversations(limit_per_folder=None):
             # happens lazily via find_session_cwd / find_conversations
             # (per-repo, cached) when the UI actually needs the cwd.
 
+            # Reuse _extract_tail_meta — same source of truth /api/sessions
+            # uses, mtime-cached. Pulls per-session signals from JSONL
+            # tool-use events: has_edit (Edit/Write/NotebookEdit), has_commit
+            # (`git commit` Bash), has_push (`git push` Bash), tail_pr_number
+            # / tail_pr_url (`gh pr create` URL). It also records whether a
+            # session ever used `cd <path>` / `git -C <path>`, which lets the
+            # archive skip effective-repo inference for the common no-drift
+            # case instead of walking tool paths for every recent transcript.
+            try:
+                tail_meta = _extract_tail_meta(f) or {}
+            except Exception:
+                tail_meta = {}
+
             # Tool-call inference — match what extract_session_workspace
             # does for active sessions. The JSONL's first-event cwd /
             # gitBranch reflect where the session was *launched*, but the
@@ -2055,7 +2073,11 @@ def find_all_conversations(limit_per_folder=None):
                     session_id,
                     literal_cwd=session_cwd or folder_path,
                     jsonl_mtime=stat.st_mtime,
-                ) if is_recent_for_inference else None
+                ) if (
+                    resolve_effective
+                    and is_recent_for_inference
+                    and tail_meta.get("has_external_cd")
+                ) else None
             except Exception:
                 eff = None
             if eff and eff.get("top"):
@@ -2094,20 +2116,6 @@ def find_all_conversations(limit_per_folder=None):
                     pass
 
             display_name = name_overrides.get(session_id) or None
-
-            # Reuse _extract_tail_meta — same source of truth /api/sessions
-            # uses, mtime-cached. Pulls per-session signals from JSONL
-            # tool-use events: has_edit (Edit/Write/NotebookEdit), has_commit
-            # (`git commit` Bash), has_push (`git push` Bash), tail_pr_number
-            # / tail_pr_url (`gh pr create` URL). Replaces an earlier
-            # home-grown helper that ran git status against the cwd — that
-            # approach gave every session in the same clone the same answer
-            # and missed has_push entirely. tail_pr_url feeds the sidebar's
-            # Ready-to-merge filter via _get_pr_state.
-            try:
-                tail_meta = _extract_tail_meta(f) or {}
-            except Exception:
-                tail_meta = {}
             has_edit = bool(tail_meta.get("has_edit"))
             has_commit = bool(tail_meta.get("has_commit"))
             has_push = bool(tail_meta.get("has_push"))
@@ -2121,7 +2129,7 @@ def find_all_conversations(limit_per_folder=None):
                 # Only probe last-meaningful-ts'd sessions to keep this
                 # cheap; old archive rows rarely need this state.
                 _last_ts = tail_meta.get("last_meaningful_ts") or stat.st_mtime
-                if (_now - _last_ts) < (3 * 86400) and effective_cwd:
+                if resolve_worktree_dirty and (_now - _last_ts) < (3 * 86400) and effective_cwd:
                     worktree_dirty = _worktree_dirty_cached(effective_cwd, _last_ts)
             except Exception:
                 worktree_dirty = False
@@ -2231,6 +2239,8 @@ def find_all_conversations(limit_per_folder=None):
             include_old=True,
             repo_only=False,
             limit=limit_per_folder,
+            resolve_pr_states=resolve_pr_states,
+            resolve_worktree_dirty=resolve_worktree_dirty,
         ))
     except Exception:
         pass
@@ -2243,18 +2253,21 @@ def find_all_conversations(limit_per_folder=None):
             include_old=True,
             repo_only=False,
             limit=limit_per_folder,
+            resolve_pr_states=resolve_pr_states,
+            resolve_worktree_dirty=resolve_worktree_dirty,
         ))
     except Exception:
         pass
 
-    # Parallel-resolve PR states for every row that recorded a PR URL.
-    # Hits the in-process cache on warm refreshes; bounded thread pool
-    # keeps the cold path under ~half a second even for hundreds of PRs.
-    _prime_pr_states(r.get("tail_pr_url") for r in out)
-    for r in out:
-        url = r.get("tail_pr_url")
-        if url:
-            r["pr_state"] = _get_pr_state(url)
+    if resolve_pr_states:
+        # Parallel-resolve PR states for every row that recorded a PR URL.
+        # Hits the in-process cache on warm refreshes; bounded thread pool
+        # keeps the cold path under ~half a second even for hundreds of PRs.
+        _prime_pr_states(r.get("tail_pr_url") for r in out)
+        for r in out:
+            url = r.get("tail_pr_url")
+            if url:
+                r["pr_state"] = _get_pr_state(url)
     out.sort(key=lambda r: r["mtime"], reverse=True)
     return out
 
@@ -2359,6 +2372,15 @@ def _iter_common_cli_candidates(cmd):
             if s not in seen:
                 seen.add(s)
                 yield p
+    try:
+        hidden_bin_paths = sorted(home.glob(f".*/bin/{cmd}"), reverse=True)
+    except OSError:
+        hidden_bin_paths = []
+    for p in hidden_bin_paths:
+        s = str(p)
+        if s not in seen:
+            seen.add(s)
+            yield p
 
 
 def _resolve_claude_bin():
@@ -9448,7 +9470,15 @@ def _codex_activity_fields_from_tail(tail, live):
     return fields
 
 
-def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, progress=None, limit=None):
+def find_codex_conversations(
+    repo_path=None,
+    include_old=True,
+    repo_only=True,
+    progress=None,
+    limit=None,
+    resolve_pr_states=True,
+    resolve_worktree_dirty=True,
+):
     rows = _codex_fetch_threads(limit=limit)
     if not rows:
         return []
@@ -9581,7 +9611,8 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
                 tail_worktree_path or (effective_cwd and (Path(effective_cwd) / ".git").is_file())
             ),
             "worktree_dirty": (
-                _worktree_dirty_cached(effective_cwd, modified) if effective_cwd else False
+                _worktree_dirty_cached(effective_cwd, modified)
+                if resolve_worktree_dirty and effective_cwd else False
             ),
             "effective_branch": tail_branch or None,
             "effective_kind": "worktree" if tail_worktree_path else None,
@@ -9612,10 +9643,11 @@ def find_codex_conversations(repo_path=None, include_old=True, repo_only=True, p
             "model": row.get("model") or tail.get("model") or "",
             "reasoning_effort": row.get("reasoning_effort") or "",
         })
-    _prime_pr_states(c.get("tail_pr_url") for c in out)
-    for c in out:
-        if c.get("tail_pr_url"):
-            c["pr_state"] = _get_pr_state(c["tail_pr_url"])
+    if resolve_pr_states:
+        _prime_pr_states(c.get("tail_pr_url") for c in out)
+        for c in out:
+            if c.get("tail_pr_url"):
+                c["pr_state"] = _get_pr_state(c["tail_pr_url"])
     out.sort(key=lambda x: x.get("last_interacted") or x.get("modified") or 0, reverse=True)
     if progress:
         progress(
@@ -10086,11 +10118,13 @@ def _resolve_gemini_bin():
     Priority order mirrors Codex:
       1. $CCC_GEMINI_BIN when set and executable.
       2. `shutil.which("gemini")`.
+      3. Common user-install locations launchd often omits from PATH.
     """
     env_bin = os.environ.get("CCC_GEMINI_BIN")
     if env_bin:
-        if os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
-            return {"available": True, "bin": env_bin, "source": "env"}
+        expanded = os.path.expanduser(env_bin)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return {"available": True, "bin": expanded, "source": "env"}
         return {
             "available": False,
             "bin": None,
@@ -10100,6 +10134,9 @@ def _resolve_gemini_bin():
     which_bin = shutil.which("gemini")
     if which_bin:
         return {"available": True, "bin": which_bin, "source": "path"}
+    for candidate in _iter_common_cli_candidates("gemini"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return {"available": True, "bin": str(candidate), "source": "candidate"}
     return {
         "available": False,
         "bin": None,
@@ -10516,7 +10553,15 @@ def _git_branch_for_cwd(cwd):
     return "" if branch == "HEAD" else branch
 
 
-def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, progress=None, limit=None):
+def find_gemini_conversations(
+    repo_path=None,
+    include_old=True,
+    repo_only=True,
+    progress=None,
+    limit=None,
+    resolve_pr_states=True,
+    resolve_worktree_dirty=True,
+):
     paths = _gemini_chat_paths()
     if not paths:
         return []
@@ -10641,7 +10686,8 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
                 tail_worktree_path or (effective_cwd and (Path(effective_cwd) / ".git").is_file())
             ),
             "worktree_dirty": (
-                _worktree_dirty_cached(effective_cwd, modified) if effective_cwd else False
+                _worktree_dirty_cached(effective_cwd, modified)
+                if resolve_worktree_dirty and effective_cwd else False
             ),
             "effective_branch": tail.get("tail_branch") or None,
             "effective_kind": "worktree" if tail_worktree_path else None,
@@ -10676,10 +10722,11 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
             "model": tail.get("model") or "",
             "reasoning_effort": "",
         })
-    _prime_pr_states(c.get("tail_pr_url") for c in out)
-    for c in out:
-        if c.get("tail_pr_url"):
-            c["pr_state"] = _get_pr_state(c["tail_pr_url"])
+    if resolve_pr_states:
+        _prime_pr_states(c.get("tail_pr_url") for c in out)
+        for c in out:
+            if c.get("tail_pr_url"):
+                c["pr_state"] = _get_pr_state(c["tail_pr_url"])
     out.sort(key=lambda x: x.get("last_interacted") or x.get("modified") or 0, reverse=True)
     if progress:
         progress(
@@ -14236,12 +14283,62 @@ def _nextjs_pkg_manager(repo_path: Path):
     return ["npm", "run", "dev"]
 
 
+def _nextjs_dev_script_ports(path: Path):
+    """Ports explicitly declared by a package's `dev` script."""
+    data = _read_pkg_json(path) or {}
+    scripts = data.get("scripts") or {}
+    dev = scripts.get("dev")
+    if not isinstance(dev, str) or not dev.strip():
+        return []
+    try:
+        parts = shlex.split(dev)
+    except ValueError:
+        parts = dev.split()
+    ports = []
+    for i, part in enumerate(parts):
+        val = None
+        if part in ("--port", "-p") and i + 1 < len(parts):
+            val = parts[i + 1]
+        elif part.startswith("--port="):
+            val = part.split("=", 1)[1]
+        elif part.startswith("-p="):
+            val = part.split("=", 1)[1]
+        if val and re.fullmatch(r"\d{2,5}", str(val)):
+            port = int(val)
+            if 0 < port <= 65535 and port not in ports:
+                ports.append(port)
+    return ports
+
+
+def _nextjs_target_paths(repo_path, cwd=None):
+    """Validate a Next.js target cwd inside a repo-scoped request.
+
+    `repo_path` is the stable API/security boundary. `cwd` lets the UI point
+    at a workspace package inside that repo, so turbo filters and dev-script
+    ports are resolved from the app that is actually selected.
+    """
+    repo_root = Path(resolve_repo_path(repo_path)).resolve()
+    target = Path(cwd or repo_root).expanduser().resolve()
+    if not target.is_dir():
+        raise RepoContextError("invalid_cwd", f"cwd is not a directory: {target}", path=str(target))
+    try:
+        target.relative_to(repo_root)
+    except ValueError:
+        raise RepoContextError(
+            "invalid_cwd",
+            "cwd must be inside repo_path for Next.js dev server actions",
+            path=str(target),
+            status=403,
+        )
+    return repo_root, target
+
+
 def _resolve_dev_invocation(repo_path: Path):
     """Return (cmd, cwd) for spawning the dev server.
 
     Turbo-aware: if a `turbo.json` lives at the picked dir or any ancestor
     AND its `tasks` (or legacy `pipeline`) include `dev`, we run the user's
-    monorepo flow — `npx turbo run dev` from the turbo root, scoped to the
+    monorepo flow — `npx turbo dev` from the turbo root, scoped to the
     current package via `--filter=<name>` when picked at a workspace.
 
     Falls back to `npm run dev` / `pnpm dev` / `yarn dev` from the picked
@@ -14259,12 +14356,12 @@ def _resolve_dev_invocation(repo_path: Path):
         tasks = turbo_cfg.get("tasks") or turbo_cfg.get("pipeline") or {}
         if "dev" in tasks:
             if repo_path == turbo_root:
-                return (["npx", "turbo", "run", "dev"], turbo_root)
+                return (["npx", "turbo", "dev"], turbo_root)
             pkg = _read_pkg_json(repo_path) or {}
             pkg_name = pkg.get("name")
             if pkg_name:
                 return (
-                    ["npx", "turbo", "run", "dev", f"--filter={pkg_name}"],
+                    ["npx", "turbo", "dev", f"--filter={pkg_name}"],
                     turbo_root,
                 )
             # Workspace without a name field — fall through to direct npm.
@@ -14292,6 +14389,174 @@ def _nextjs_proc_alive(entry):
         return True
     except OSError:
         return False
+
+
+def _ps_dev_processes():
+    """Return a small process-table snapshot for Next/Turbo rediscovery."""
+    try:
+        r = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,ppid=,pgid=,command="],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    rows = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        try:
+            rows.append({
+                "pid": int(parts[0]),
+                "ppid": int(parts[1]),
+                "pgid": int(parts[2]),
+                "command": parts[3],
+            })
+        except ValueError:
+            continue
+    return rows
+
+
+def _process_basename(command: str):
+    first = (command or "").strip().split(None, 1)[0] if (command or "").strip() else ""
+    return Path(first).name
+
+
+def _dev_command_port(command: str):
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    for i, part in enumerate(parts):
+        val = None
+        if part in ("--port", "-p") and i + 1 < len(parts):
+            val = parts[i + 1]
+        elif part.startswith("--port="):
+            val = part.split("=", 1)[1]
+        elif part.startswith("-p="):
+            val = part.split("=", 1)[1]
+        if val and re.fullmatch(r"\d{2,5}", str(val)):
+            port = int(val)
+            if 0 < port <= 65535:
+                return port
+    return None
+
+
+def _localhost_port_responds(port: int, timeout=0.35):
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(
+                b"HEAD / HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            try:
+                return sock.recv(16).startswith(b"HTTP/")
+            except socket.timeout:
+                return False
+    except (OSError, ValueError):
+        return False
+
+
+def _nextjs_external_match_info(target_path: Path):
+    target_path = Path(target_path).resolve()
+    cmd, run_cwd = _resolve_dev_invocation(target_path)
+    pkg = _read_pkg_json(target_path) or {}
+    pkg_name = pkg.get("name") if isinstance(pkg.get("name"), str) else ""
+    expected_ports = _nextjs_dev_script_ports(target_path)
+    return {
+        "cmd": cmd,
+        "run_cwd": Path(run_cwd).resolve(),
+        "target_path": target_path,
+        "package_name": pkg_name,
+        "filter_expected": any(str(arg).startswith("--filter") for arg in cmd),
+        "ports": expected_ports,
+    }
+
+
+def _nextjs_command_matches(command: str, info: dict):
+    """True when a process row looks like this target's dev server.
+
+    This intentionally rejects arbitrary commands whose argv merely contains
+    the same text (for example an agent prompt that pasted a `ps | rg` line).
+    """
+    command = command or ""
+    base = _process_basename(command)
+    allowed = {"node", "next", "npx", "npm", "pnpm", "yarn", "turbo"}
+    if base not in allowed:
+        return False
+
+    pkg_name = info.get("package_name") or ""
+    expected_ports = info.get("ports") or []
+    target_s = str(info.get("target_path") or "")
+    cwd_s = str(info.get("run_cwd") or "")
+
+    has_turbo_dev = bool(re.search(r"(?:^|[/\s])turbo(?:\s+run)?\s+dev(?:\s|$)", command))
+    if has_turbo_dev:
+        if pkg_name and info.get("filter_expected"):
+            filter_re = r"--filter(?:=|\s+)" + re.escape(pkg_name) + r"(?:\s|$)"
+            return bool(re.search(filter_re, command))
+        return cwd_s and cwd_s in command
+
+    has_next_dev = bool(re.search(r"(?:^|[/\s])next\s+dev(?:\s|$)", command))
+    if has_next_dev:
+        port = _dev_command_port(command)
+        if expected_ports and port in expected_ports:
+            return True
+        if target_s and target_s in command:
+            return True
+        if cwd_s and cwd_s in command and not expected_ports:
+            return True
+    return False
+
+
+def _find_external_nextjs_process(target_path: Path):
+    """Find a dev server that survived a CCC restart or was started by hand."""
+    info = _nextjs_external_match_info(target_path)
+    rows = _ps_dev_processes()
+    base_matches = [row for row in rows if _nextjs_command_matches(row.get("command", ""), info)]
+    if not base_matches:
+        return None
+
+    matched_pids = {row["pid"] for row in base_matches}
+    changed = True
+    while changed:
+        changed = False
+        for row in rows:
+            if row["pid"] in matched_pids:
+                continue
+            if row["ppid"] in matched_pids:
+                matched_pids.add(row["pid"])
+                changed = True
+
+    matched_rows = [row for row in rows if row["pid"] in matched_pids]
+    ports = []
+    for row in matched_rows:
+        port = _dev_command_port(row.get("command", ""))
+        if port and port not in ports:
+            ports.append(port)
+    for port in info.get("ports") or []:
+        if port not in ports:
+            ports.append(port)
+    ready_port = next((p for p in ports if _localhost_port_responds(p)), None)
+    first = base_matches[0]
+    return {
+        "pid": first["pid"],
+        "pids": sorted(matched_pids),
+        "port": ready_port,
+        "started_at": None,
+        "log_path": None,
+        "cmd": first.get("command") or " ".join(info["cmd"]),
+        "cwd": str(info["run_cwd"]),
+        "external": True,
+        "rows": matched_rows,
+    }
 
 
 def _nextjs_evict(repo_key: str):
@@ -14338,11 +14603,12 @@ def _nextjs_log_tail(log_path, max_lines=12):
 _NEXTJS_LAST_EXIT: dict = {}
 
 
-def nextjs_status(repo_path):
+def nextjs_status(repo_path, cwd=None):
     """Status payload for /api/nextjs/status."""
-    repo_path = resolve_repo_path(repo_path)
-    repo_key = str(Path(repo_path).resolve())
-    detected = _detect_nextjs(Path(repo_path))
+    _repo_root, target_path = _nextjs_target_paths(repo_path, cwd)
+    repo_key = str(target_path)
+    detected = _detect_nextjs(target_path)
+    launch_cmd, launch_cwd = _resolve_dev_invocation(target_path)
     with _NEXTJS_LOCK:
         entry = _NEXTJS_PROCS.get(repo_key)
         snapshot = dict(entry) if entry else None
@@ -14362,32 +14628,44 @@ def nextjs_status(repo_path):
         snapshot = None
     elif not snapshot:
         last_exit = _NEXTJS_LAST_EXIT.get(repo_key)
+    external = None if snapshot or not detected else _find_external_nextjs_process(target_path)
+    running = snapshot or external
     return {
         "detected": detected,
-        "running": bool(snapshot),
-        "pid": snapshot.get("pid") if snapshot else None,
-        "port": snapshot.get("port") if snapshot else None,
-        "log_path": snapshot.get("log_path") if snapshot else None,
-        "started_at": snapshot.get("started_at") if snapshot else None,
-        "cmd": snapshot.get("cmd") if snapshot else None,
-        "cwd": snapshot.get("cwd") if snapshot else None,
+        "running": bool(running),
+        "pid": running.get("pid") if running else None,
+        "pids": running.get("pids") if running else None,
+        "port": running.get("port") if running else None,
+        "log_path": running.get("log_path") if running else None,
+        "started_at": running.get("started_at") if running else None,
+        "cmd": running.get("cmd") if running else None,
+        "cwd": running.get("cwd") if running else None,
+        "launch_cmd": " ".join(launch_cmd),
+        "launch_cwd": str(launch_cwd),
+        "target_path": str(target_path),
+        "external": bool(external),
         "last_exit": last_exit,
     }
 
 
-def nextjs_start(repo_path):
+def nextjs_start(repo_path, cwd=None):
     """Spawn `<pm> dev` in repo_path, track it, return pid + log path."""
-    repo_path = resolve_repo_path(repo_path)
-    repo_key = str(Path(repo_path).resolve())
-    if not _detect_nextjs(Path(repo_path)):
+    _repo_root, target_path = _nextjs_target_paths(repo_path, cwd)
+    repo_key = str(target_path)
+    if not _detect_nextjs(target_path):
         return {"ok": False, "error": "not a Next.js project"}, 400
     with _NEXTJS_LOCK:
         existing = _NEXTJS_PROCS.get(repo_key)
         if existing and _nextjs_proc_alive(existing):
-            return {"ok": False, "error": "already running", **existing}, 409
+            payload = {k: v for k, v in existing.items() if k != "proc"}
+            return {"ok": False, "error": "already running", **payload}, 409
         if existing:
             _NEXTJS_PROCS.pop(repo_key, None)
-    cmd, run_cwd = _resolve_dev_invocation(Path(repo_path))
+    external = _find_external_nextjs_process(target_path)
+    if external:
+        payload = {k: v for k, v in external.items() if k != "rows"}
+        return {"ok": False, "error": "already running", **payload}, 409
+    cmd, run_cwd = _resolve_dev_invocation(target_path)
     _NEXTJS_LOG_DIR.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", repo_key).strip("_")[-120:]
     log_path = _NEXTJS_LOG_DIR / f"{slug}.log"
@@ -14444,14 +14722,51 @@ def nextjs_start(repo_path):
     return {"ok": True, **payload}, 200
 
 
-def nextjs_stop(repo_path):
-    """SIGTERM the tracked process group; SIGKILL after 3s if still alive."""
-    repo_path = resolve_repo_path(repo_path)
-    repo_key = str(Path(repo_path).resolve())
+def _terminate_external_nextjs(target_path: Path):
+    external = _find_external_nextjs_process(target_path)
+    if not external:
+        return {"matched": False, "pids": []}
+    pids = [pid for pid in external.get("pids") or [] if pid and pid != os.getpid()]
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except OSError:
+                pass
+        if not alive:
+            break
+        time.sleep(0.1)
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return {"matched": True, "pids": pids}
+
+
+def nextjs_stop(repo_path, cwd=None):
+    """Stop a tracked or externally-discovered Next.js/Turbo dev server."""
+    _repo_root, target_path = _nextjs_target_paths(repo_path, cwd)
+    repo_key = str(target_path)
     with _NEXTJS_LOCK:
         entry = _NEXTJS_PROCS.get(repo_key)
     if not entry:
-        return {"ok": True, "running": False}, 200
+        external = _terminate_external_nextjs(target_path)
+        return {"ok": True, "running": False, **external}, 200
     pid = entry.get("pid")
     if not pid:
         _nextjs_evict(repo_key)
@@ -14475,6 +14790,16 @@ def nextjs_stop(repo_path):
             pass
     _nextjs_evict(repo_key)
     return {"ok": True, "running": False, "pid": pid}, 200
+
+
+def nextjs_restart(repo_path, cwd=None):
+    """Stop any matching dev server, then start a fresh one."""
+    stop_payload, _stop_status = nextjs_stop(repo_path, cwd)
+    start_payload, start_status = nextjs_start(repo_path, cwd)
+    if start_payload.get("ok"):
+        start_payload["restarted"] = True
+        start_payload["stopped"] = stop_payload
+    return start_payload, start_status
 
 
 def _nextjs_shutdown_all():
@@ -17688,7 +18013,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             try:
                 ctx = require_repo_context(query=qs, allow_session=False)
-                self.send_json(nextjs_status(ctx["repo_path"]))
+                self.send_json(nextjs_status(ctx["repo_path"], ctx.get("cwd")))
             except RepoContextError as e:
                 self.send_json(e.as_payload(), e.status)
         elif re.match(r"^/api/issues/\d+/summary$", path):
@@ -18401,32 +18726,59 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # tracked separately around conversations_with_open_prs). Issues
             # and group-chats run via different endpoints — they're not in
             # this channel.
-            _archive_load_begin()
+            qs = urllib.parse.parse_qs(parsed.query)
+            include_prs = qs.get("include_prs", ["0"])[0] in ("1", "true")
+            resolve_pr_states = qs.get("resolve_prs", ["0"])[0] in ("1", "true")
+            resolve_effective = qs.get("resolve_effective", ["0"])[0] in ("1", "true")
+            resolve_worktrees = qs.get("resolve_worktrees", ["0"])[0] in ("1", "true")
+            background = qs.get("background", ["0"])[0] in ("1", "true")
+            if not background:
+                _archive_load_begin()
+            def progress_step(*args, **kwargs):
+                if not background:
+                    _archive_load_set_step(*args, **kwargs)
             try:
-                _archive_load_set_step("folders",     state="running")
-                _archive_load_set_step("transcripts", state="running")
-                _archive_load_set_step("infer",       state="running")
-                _archive_load_set_step("worktrees",   state="running")
-                _archive_load_set_step("codex",       state="running")
-                raw_convs = find_all_conversations()
+                progress_step("folders",     state="running")
+                progress_step("transcripts", state="running")
+                progress_step("infer",       state="running")
+                progress_step("worktrees",   state="running")
+                progress_step("codex",       state="running")
+                raw_convs = find_all_conversations(
+                    resolve_pr_states=resolve_pr_states,
+                    resolve_effective=resolve_effective,
+                    resolve_worktree_dirty=resolve_worktrees,
+                )
                 count = len(raw_convs or [])
-                _archive_load_set_step("folders",     state="done")
-                _archive_load_set_step("transcripts", state="done", count=count, total=count, detail=f"{count} conversations parsed.")
-                _archive_load_set_step("infer",       state="done")
-                _archive_load_set_step("worktrees",   state="done")
-                _archive_load_set_step("codex",       state="done")
-                _archive_load_set_step("pr_states",   state="running", detail="gh pr view per known PR URL.")
-                convs = conversations_with_open_prs(raw_convs)
-                _archive_load_set_step("pr_states",   state="done")
+                progress_step("folders",     state="done")
+                progress_step("transcripts", state="done", count=count, total=count, detail=f"{count} conversations parsed.")
+                if resolve_effective:
+                    progress_step("infer",       state="done")
+                else:
+                    progress_step("infer",       state="skipped", detail="Deferred until archive rows are visible.")
+                if resolve_worktrees:
+                    progress_step("worktrees",   state="done")
+                else:
+                    progress_step("worktrees",   state="skipped", detail="Deferred until archive rows are visible.")
+                progress_step("codex",       state="done")
+                if include_prs:
+                    progress_step("pr_states",   state="running", detail="gh pr view per known PR URL.")
+                    convs = conversations_with_open_prs(raw_convs)
+                    progress_step("pr_states",   state="done")
+                else:
+                    convs = raw_convs
+                    progress_step("pr_states",   state="skipped", detail="Deferred until archive rows are visible.")
                 # Issues / group-chats run via separate endpoints; mark them
                 # skipped here so the stage list renders complete (○/✓ only
                 # applies to stages this endpoint actually owns).
-                _archive_load_set_step("issues",      state="skipped", detail="Loaded by /api/issues/all.")
-                _archive_load_set_step("group_chats", state="skipped", detail="Loaded by /api/group-chats/archived.")
-                _archive_load_complete(convs)
+                progress_step("issues",      state="skipped", detail="Loaded by /api/issues/all.")
+                progress_step("group_chats", state="skipped", detail="Loaded by /api/group-chats/archived.")
+                if not background:
+                    _archive_load_complete(convs)
+                _save_conv_meta_cache()
                 self.send_json({"conversations": convs, "count": len(convs)})
             except Exception as e:
-                _archive_load_fail(e)
+                if not background:
+                    _archive_load_fail(e)
                 raise
         elif path == "/api/issues/all":
             # Cross-repo GH issues: walk recent ∪ pinned repos in parallel,
@@ -19030,7 +19382,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_json({"ok": True, "path": fpath, "name": fname, "bytes": len(raw)})
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)}, 500)
-        elif path in ("/api/nextjs/start", "/api/nextjs/stop"):
+        elif path in ("/api/nextjs/start", "/api/nextjs/stop", "/api/nextjs/restart"):
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
             try:
@@ -19044,8 +19396,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except RepoContextError as e:
                 self.send_json(e.as_payload(), e.status)
                 return
-            handler = nextjs_start if path.endswith("/start") else nextjs_stop
-            result, status = handler(ctx["repo_path"])
+            if path.endswith("/start"):
+                handler = nextjs_start
+            elif path.endswith("/restart"):
+                handler = nextjs_restart
+            else:
+                handler = nextjs_stop
+            result, status = handler(ctx["repo_path"], ctx.get("cwd"))
             self.send_json(result, status)
         elif path == "/api/reveal-file":
             # SECURITY: macOS `open` will execute apps and scripts. Unlike

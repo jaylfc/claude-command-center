@@ -275,7 +275,16 @@
         // Persisted as `ccc-status-pos` ('top' | 'right'); default 'top'.
         try {
           const pos = localStorage.getItem('ccc-status-pos');
-          if (pos === 'right') document.body.classList.add('status-pos-right');
+          const railWidth = parseInt(localStorage.getItem('ccc-status-rail-width') || '0', 10);
+          if (railWidth >= 220 && railWidth <= 520) {
+            document.documentElement.style.setProperty('--status-rail-width', railWidth + 'px');
+          }
+          if (pos === 'right') {
+            document.body.classList.add('status-pos-right');
+            if (localStorage.getItem('ccc-status-rail-collapsed') === '1') {
+              document.body.classList.add('status-rail-collapsed');
+            }
+          }
         } catch (_) {}
         // Chip color mode — same FOIT-guard reasoning. Persisted as
         // `ccc-chips-mode` ('color' default, 'muted' alt).
@@ -299,7 +308,7 @@
         <button id="historyBtn" class="sh-btn" title="Search past Claude Code conversations across every project on this Mac (powered by the local claude-index). Shortcut: /" aria-label="Search past conversations">&#128269; History</button>
         <button class="conv-kanban-toggle sh-btn" id="convKanbanToggle" title="Toggle Kanban board view" aria-label="Toggle Kanban board view"><span aria-hidden="true">&#9783;</span> Board</button>
         <!-- Status position toggle. Two states: top (status strip above the
-             input — default) and right (status moved into a 260px right
+             input — default) and right (status moved into a resizable right
              rail beside the conversation pane). Persisted under
              `ccc-status-pos`; the body class is restored on page load
              before first paint to avoid a layout flash. -->
@@ -496,8 +505,15 @@
              Original ask + Session activity below them. Buttons are moved
              in by JS at boot from `.ccc-topbar`. -->
         <aside class="status-rail" id="statusRail" aria-label="Session status rail">
+          <div class="status-rail-resizer" id="statusRailResizer" role="separator" aria-orientation="vertical" aria-label="Resize status rail" aria-controls="statusRail" tabindex="0" title="Drag to resize the status rail; drag to the right edge to hide it"></div>
           <div class="rail-actions" id="railActions" data-role="rail-actions"></div>
         </aside>
+        <button class="status-rail-restore" id="statusRailRestoreBtn" type="button" title="Show status rail" aria-label="Show status rail" aria-controls="statusRail">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+            <line x1="15" y1="3" x2="15" y2="21"></line>
+          </svg>
+        </button>
         <div class="conv-input-bar" id="convInputBar">
           <textarea id="convInput" rows="1" placeholder="Send to terminal..." autocomplete="off" spellcheck="false"></textarea>
           <!-- Engine picker for new-session mode. Occupies the same slot as

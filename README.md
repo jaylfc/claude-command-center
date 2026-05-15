@@ -1,9 +1,8 @@
-# Claude Command Center
+# CCC
 
-A local command center for Claude Code that doesn't care how your agents
-were launched. Terminal sessions, headless processes, or spawned from the
-dashboard — it latches onto all of them and lets you drop in and out of any
-task to fix things.
+**Start the next while Claude builds the first.**
+
+Organize every Claude and Codex session into projects, issues, and features. Build them in parallel. Stop staring at the spinner.
 
 <video src="https://github.com/user-attachments/assets/9d00b168-c21c-4397-9334-e3b4a3515500" controls width="100%" poster="docs/images/kanban.png">
   Your browser doesn't support inline video. <a href="https://github.com/amirfish1/claude-command-center/releases/download/v0.1.0/CCC-web.mp4">Download the demo</a> or watch the GIF below.
@@ -11,22 +10,24 @@ task to fix things.
 
 ![Claude Command Center demo](docs/images/demo.gif)
 
+CCC is a local dashboard that latches onto every Claude Code and Codex session on your Mac. Terminal sessions, headless processes, sessions you spawned from the dashboard. It treats Claude Code's on-disk state as the source of truth, so nothing slips through. Spawn the next task while the first is still building. Switch between projects without losing context. Ship multiple things at once.
+
 > **If you install it, I'd love to hear how.** Drop a ⭐, open an issue with
 > what worked or what broke, or just say hi. This is a one-person project
-> built around a specific workflow — outside feedback is the only way I know
-> how widely it lands. — [@amirfish1](https://github.com/amirfish1)
+> built around a specific workflow. Outside feedback is the only way I know
+> how widely it lands. [@amirfish1](https://github.com/amirfish1)
 
 ## Why this exists
 
 Most Claude Code orchestration tools are opinionated wrappers. They want to
-own execution — you launch agents *through* them, and in return you get a
+own execution. You launch agents *through* them, and in return you get a
 dashboard. That's fine until it isn't. The moment you open a terminal,
 `claude --resume` something, and iterate on it by hand, you're outside the
 tool's universe. The dashboard can't see it. The work you just did doesn't
 show up on the kanban, against the issue, in the review queue.
 
 This goes the other way. It treats Claude Code's on-disk state as the
-source of truth — `~/.claude/projects/*.jsonl` transcripts, the
+source of truth: `~/.claude/projects/*.jsonl` transcripts, the
 `~/.claude/sessions/<pid>.json` live registry, and per-tool-call sidecar
 files written by two hooks we install into `~/.claude/settings.json`. If
 Claude Code is running anywhere on your machine, it shows up here. If you
@@ -34,7 +35,7 @@ close the dashboard, your sessions keep running. If you open a terminal and
 iterate by hand, the card updates.
 
 The dashboard also knows how to *spawn* headless sessions (via
-`claude -p --input-format stream-json`) and *resume* dormant ones on demand —
+`claude -p --input-format stream-json`) and *resume* dormant ones on demand,
 but those are additive. The thing it's built around is attaching to work
 that already exists.
 
@@ -47,10 +48,10 @@ Optional: [`gh`](https://cli.github.com/) for GitHub integration, `vercel` for d
 git clone https://github.com/amirfish1/claude-command-center
 cd claude-command-center
 
-# Try it — runs in the foreground until Ctrl-C / terminal close
+# Try it. Runs in the foreground until Ctrl-C / terminal close
 ./run.sh
 
-# Keep it — install as a per-user launchd agent that starts now and at login
+# Keep it. Install as a per-user launchd agent that starts now and at login
 ./run.sh --install-service
 ```
 
@@ -70,7 +71,7 @@ pick up a release that changes the launchd plist itself.
 First launch (foreground or service) copies two hook scripts into
 `~/.claude/command-center/hooks/` and registers them in
 `~/.claude/settings.json`. After that, every Claude Code session on your
-machine — terminal, headless, or dashboard-spawned — writes sidecar state
+machine (terminal, headless, or dashboard-spawned) writes sidecar state
 the UI uses for the kanban.
 
 ## Core concepts
@@ -96,44 +97,44 @@ the UI uses for the kanban.
                               └───────────────────────┘
 ```
 
-- **Session** — any Claude Code transcript on disk, alive or dormant.
-- **Attach** — the server reads Claude's own files + sidecar state the
+- **Session**: any Claude Code transcript on disk, alive or dormant.
+- **Attach**: the server reads Claude's own files + sidecar state the
   installed hooks write after every tool call. Nothing to configure
   per-session.
-- **Columns** — Backlog → Planning → Working → Review → In Testing →
+- **Columns**: Backlog → Planning → Working → Review → In Testing →
   Verified / Inactive / Archived. Columns are derived from session state
   (live? commits? pushed? sidecar activity?), overridable by drag.
-- **Backlog** — open GitHub issues + `TODO.md` entries, surfaced as cards
+- **Backlog**: open GitHub issues + `TODO.md` entries, surfaced as cards
   next to your active sessions so everything lives on one board.
 
 ## Features
 
 - **Kanban** across every session, with drag-drop between columns,
   rubber-band multi-select, and per-column tinting.
-- **Split conversations** — drag any sidebar session onto the right or
+- **Split conversations**: drag any sidebar session onto the right or
   bottom edge of the open conversation to view two transcripts
   side-by-side, each with its own input bar. Closes back to single-pane
   with a click; collapses automatically below 900px.
-- **GitHub integration** — start a session from an issue with one click
+- **GitHub integration**: start a session from an issue with one click
   (auto-adds `claude-in-progress` label + self-assigns). Verify closes the
   issue with a commit-SHA comment. Drag to Archived closes as "not
-  planned". Issue body + comments render inside the dashboard (no iframe —
+  planned". Issue body + comments render inside the dashboard (no iframe;
   GitHub blocks that).
-- **Attach to existing sessions** — terminal `claude` processes show up
+- **Attach to existing sessions**: terminal `claude` processes show up
   automatically. Jump-to-terminal focuses them by TTY; rename/color the
   tab via Claude's own slash commands.
-- **Open in Claude Desktop** (macOS) — third destination button beside
+- **Open in Claude Desktop** (macOS): third destination button beside
   Jump/Launch in the conversation toolbar; resumes the current CLI
   session inside the Claude Desktop app via the `claude://resume` deep
   link.
-- **Headless spawn with follow-up** — launch `claude -p` sessions from the
+- **Headless spawn with follow-up**: launch `claude -p` sessions from the
   dashboard and keep talking to them via an in-browser input bar (no
   terminal needed, stdin pipe stays open).
-- **Resume-on-demand** — injecting into a dormant session auto-spawns a
+- **Resume-on-demand**: injecting into a dormant session auto-spawns a
   headless `claude --resume` to deliver the message.
-- **Auto-fix deploys** — optionally polls Vercel, spawns a `/fix-deploy`
+- **Auto-fix deploys**: optionally polls Vercel, spawns a `/fix-deploy`
   session on new production ERRORs (deduped by commit SHA).
-- **AI-assisted titles** — click ✨ on any card to regenerate its title
+- **AI-assisted titles**: click ✨ on any card to regenerate its title
   via `claude -p` (Haiku by default). Used for cleaning up auto-generated
   session slugs.
 
@@ -159,14 +160,14 @@ curl -s -X POST "$CCC_URL/api/ask" \
 
 Use this for **persistent peer sessions** (a marketing assistant, a deploy
 babysitter) that should survive past the current turn and show up on the
-kanban — not for one-shot internal subtasks (the built-in `Task` tool is
+kanban, not for one-shot internal subtasks (the built-in `Task` tool is
 better for those).
 
 ## Architecture
 
 Two files: a single Python file (stdlib-only HTTP server) and a single HTML
 file (vanilla JS, no framework, no build). State lives in JSON sidecar
-files under `~/.claude/command-center/` — all human-readable, all rewriteable
+files under `~/.claude/command-center/`, all human-readable, all rewriteable
 by hand.
 
 The server has no background workers. Every API request scans Claude's
@@ -190,14 +191,14 @@ For more depth: [`docs/architecture.md`](docs/architecture.md),
 |---|---|---|
 | `PORT` | `8090` | HTTP port |
 | `CCC_CLAUDE_BIN` | *(auto)* | Absolute path to the Claude Code CLI when a launchd service cannot see your shell PATH. Set it before `./run.sh --install-service` to bake it into the agent. |
-| `CCC_BIND_HOST` | `127.0.0.1` | Interface to bind. Set to `0.0.0.0` to expose on the LAN — **no auth, see [`SECURITY.md`](SECURITY.md)** |
-| `CCC_ALLOWED_ORIGIN` | *(empty)* | Comma-separated origins (e.g. `http://my-mac.tailnet.ts.net:8090`) added to the same-origin POST allowlist. Use with `CCC_BIND_HOST=0.0.0.0` to reach the UI from another device on a trusted network (Tailscale / VPN) — **no auth, see [`SECURITY.md`](SECURITY.md)** |
+| `CCC_BIND_HOST` | `127.0.0.1` | Interface to bind. Set to `0.0.0.0` to expose on the LAN. **No auth, see [`SECURITY.md`](SECURITY.md)** |
+| `CCC_ALLOWED_ORIGIN` | *(empty)* | Comma-separated origins (e.g. `http://my-mac.tailnet.ts.net:8090`) added to the same-origin POST allowlist. Use with `CCC_BIND_HOST=0.0.0.0` to reach the UI from another device on a trusted network (Tailscale / VPN). **No auth, see [`SECURITY.md`](SECURITY.md)** |
 | `CCC_TRUST_TAILNET` | *(off)* | When set (`1`/`true`/`yes`/`on`), CCC shells out to `tailscale status --json` at startup and adds the local node's MagicDNS hostname + Tailscale IPs to the allowlist automatically. Same trust caveat as `CCC_ALLOWED_ORIGIN`. |
 | `CCC_TITLE_STRIP` | *(empty)* | Comma-separated prefixes to strip from GitHub issue titles (e.g. `ACME,FOO` strips `[ACME ...]` and `[FOO ...]`) |
 | `CCC_ORG_PATTERNS` | *(empty)* | Multi-tenant org-tagger. Format: `Label1:pat1a\|pat1b;Label2:pat2`. Each issue body is scanned and tagged with the first matching label so the UI can group backlog by org. |
 | `VERCEL_PROJECT` | *(unset)* | Vercel project name. Leave empty to disable deploy polling. |
 
-The `CCC_BIND_HOST`, `CCC_ALLOWED_ORIGIN`, and `CCC_TRUST_TAILNET` knobs can also be set in `~/.claude/command-center/network.json` so they survive shell restarts, or flipped from the **Network access…** entry in the sidebar settings popover. Env vars always win — useful for CI / one-shot overrides. The same security caveats apply: every trusted origin can run commands as you.
+The `CCC_BIND_HOST`, `CCC_ALLOWED_ORIGIN`, and `CCC_TRUST_TAILNET` knobs can also be set in `~/.claude/command-center/network.json` so they survive shell restarts, or flipped from the **Network access…** entry in the sidebar settings popover. Env vars always win, useful for CI / one-shot overrides. The same security caveats apply: every trusted origin can run commands as you.
 
 ## Roadmap
 
@@ -216,7 +217,7 @@ The `CCC_BIND_HOST`, `CCC_ALLOWED_ORIGIN`, and `CCC_TRUST_TAILNET` knobs can als
   anything that writes structured transcripts (Aider, Gemini CLI, etc.),
   but adapters don't exist yet.
 - Code split. `server.py` and `index.html` are each one huge file on
-  purpose — you can read the whole product in an afternoon. That tradeoff
+  purpose, so you can read the whole product in an afternoon. That tradeoff
   bends eventually; it hasn't yet.
 
 **Out of scope**

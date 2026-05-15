@@ -19,6 +19,7 @@
     --red: #f85149;
     --cyan: #39d2c0;
     --accent-contrast: #ffffff;     /* readable text/icon color on var(--accent) */
+    --status-rail-width: 260px;
     /* Inter primary, system stack fallback. Inter is loaded from Google Fonts
        in index.html with `display=swap`, so the system font paints first and
        Inter takes over once it's fetched. The Omnara-style geometric look
@@ -718,6 +719,11 @@
      layout for back-compat with anything that queried by index. */
   .conv-pane > .conv-input-bar     { order: 1; }
   .conv-pane > .conv-input-context { order: 2; }
+  .conv-pane > .conv-input-context.is-new-session {
+    order: 0;
+    border-top: 0;
+    border-bottom: 1px solid var(--border);
+  }
   .conv-pane.is-codex-session {
     box-shadow: inset 4px 0 0 rgba(88, 166, 255, 0.72);
   }
@@ -1722,6 +1728,31 @@
     overflow-y: auto;
   }
   .tool-result-output.is-error { border-left-color: var(--red); color: var(--red); }
+  .tool-result-code-preview {
+    margin: 6px 0 4px 18px;
+    max-width: min(100%, 980px);
+    background: var(--bg);
+  }
+  .tool-result-code-preview .tool-result-code-title {
+    display: flex; align-items: center; gap: 8px; justify-content: space-between;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .tool-result-code-preview .tool-result-code-title code {
+    color: var(--cyan);
+    background: transparent;
+    padding: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tool-result-code-preview pre.cb {
+    max-height: 360px;
+    overflow-y: auto;
+  }
   .conversations-view .tool-call-group-body .event { margin: 4px 0; padding: 2px 0; background: transparent; border: none; }
   .conversations-view .tool-call-group-body .event .line-num,
   .conversations-view .tool-call-group-body .event .msg-ts { display: none; }
@@ -5249,15 +5280,15 @@
    Default layout keeps the sticky-header (Original ask + Earlier ask +
    Session activity) as a horizontal panel at the top of the conv pane.
    When `body.status-pos-right` is set, the conv-pane re-flows into a
-   2-column CSS grid: main content on the left, a 260px status rail on
-   the right. JS (`_applyStickyLayout`) moves `.csh-ask-original` and
+   2-column CSS grid: main content on the left, a resizable status rail on
+   the right. JS (`_applyStatusRailLayout`) moves `.csh-ask-original` and
    `.csh-col-activity` from inside the sticky into the rail; the sticky
    header's `.csh-row` collapses to just `.csh-ask-earlier` at the top.
 
    Body class is restored before paint by the inline script in index.html
    so there's no first-paint flash. */
 /* The right rail is conditional. In TOP mode (default) it's removed
-   entirely — no 260px column eats horizontal space. In RIGHT mode the
+   entirely — no rail column eats horizontal space. In RIGHT mode the
    conv-pane re-flows into a 2-column grid and the rail is visible.
    Important for mobile + narrow windows where 260px is a real cost.
 
@@ -5266,7 +5297,7 @@
    / context / cost / model) is reference info underneath. */
 body.status-pos-right .conv-pane {
   display: grid;
-  grid-template-columns: 1fr 260px;
+  grid-template-columns: minmax(0, 1fr) var(--status-rail-width, 260px);
   grid-template-rows: auto 1fr auto auto;
   grid-template-areas:
     "header  rail"
@@ -5275,6 +5306,13 @@ body.status-pos-right .conv-pane {
     "context rail";
   min-height: 0;
 }
+body.status-pos-right .conv-pane:has(> .conv-input-context.is-new-session) {
+  grid-template-areas:
+    "header  rail"
+    "conv    rail"
+    "context rail"
+    "input   rail";
+}
 body.status-pos-right .conv-pane > .conv-pane-header   { grid-area: header;  min-width: 0; }
 body.status-pos-right .conv-pane > .conversations-view { grid-area: conv;    min-width: 0; min-height: 0; }
 body.status-pos-right .conv-pane > .conv-input-bar     { grid-area: input;   min-width: 0; }
@@ -5282,6 +5320,7 @@ body.status-pos-right .conv-pane > .conv-input-context { grid-area: context; min
 body.status-pos-right .conv-pane > .status-rail {
   grid-area: rail;
   display: flex; flex-direction: column;
+  position: relative;
   border-left: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 60%, var(--bg));
   overflow-y: auto;
@@ -5291,6 +5330,79 @@ body.status-pos-right .conv-pane > .status-rail {
    back to their original toolbar slots in this mode so no functionality
    is lost. */
 .status-rail { display: none; }
+.status-rail-resizer {
+  position: absolute;
+  left: -6px; top: 0; bottom: 0;
+  width: 12px;
+  cursor: col-resize;
+  z-index: 4;
+  background: transparent;
+}
+.status-rail-resizer::before {
+  content: '';
+  position: absolute;
+  left: 4px; top: 50%;
+  width: 4px; height: 44px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  opacity: 0.55;
+  transition: background 0.12s, opacity 0.12s;
+}
+.status-rail-resizer:hover::before,
+.status-rail-resizer.dragging::before {
+  background: var(--accent);
+  opacity: 0.95;
+}
+body.status-rail-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+body.status-rail-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+.status-rail-restore {
+  display: none;
+  position: absolute;
+  right: 0; top: 50%;
+  transform: translateY(-50%);
+  width: 26px; height: 58px;
+  align-items: center; justify-content: center;
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 7px 0 0 7px;
+  background: color-mix(in srgb, var(--surface) 82%, var(--bg));
+  color: var(--text-muted);
+  cursor: pointer;
+  z-index: 5;
+  box-shadow: -4px 0 14px rgba(0,0,0,0.18);
+}
+.status-rail-restore:hover {
+  color: var(--accent);
+  background: var(--surface-2);
+}
+body.status-pos-right.status-rail-collapsed .conv-pane {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "header"
+    "conv"
+    "input"
+    "context";
+}
+body.status-pos-right.status-rail-collapsed .conv-pane:has(> .conv-input-context.is-new-session) {
+  grid-template-areas:
+    "header"
+    "conv"
+    "context"
+    "input";
+}
+body.status-pos-right.status-rail-collapsed .conv-pane > .status-rail {
+  display: none;
+}
+body.status-pos-right.status-rail-collapsed .conv-pane > .status-rail-restore {
+  display: inline-flex;
+}
 
 /* Rail-actions row at the top of the rail — vertical stack of session-
    level buttons. Buttons are re-parented here at boot from `.ccc-topbar`

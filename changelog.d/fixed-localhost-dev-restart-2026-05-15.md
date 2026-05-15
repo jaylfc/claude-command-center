@@ -1,0 +1,1 @@
+- Fixed the localhost dev-server pill for Turbo workspaces: it now targets the selected session cwd, starts scoped apps with `npx turbo dev --filter=<package>`, shows the exact dev command while waiting on a stuck port, and lets a normal click restart matching Next.js processes after a CCC restart.
