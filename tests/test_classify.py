@@ -537,11 +537,11 @@ class TestCodexConversationAdapter(unittest.TestCase):
                             "total_tokens": 1245,
                         },
                         "total_token_usage": {
-                            "input_tokens": 1200,
-                            "cached_input_tokens": 800,
-                            "output_tokens": 45,
-                            "reasoning_output_tokens": 12,
-                            "total_tokens": 1245,
+                            "input_tokens": 10000,
+                            "cached_input_tokens": 7000,
+                            "output_tokens": 450,
+                            "reasoning_output_tokens": 120,
+                            "total_tokens": 10450,
                         },
                         "model_context_window": 258400,
                     },
@@ -752,6 +752,15 @@ class TestCodexConversationAdapter(unittest.TestCase):
         self.assertEqual(result["token_usage"]["cached_input_tokens"], 800)
         self.assertEqual(result["token_usage"]["output_tokens"], 45)
         self.assertEqual(result["token_usage"]["reasoning_output_tokens"], 12)
+
+    def test_codex_usage_uses_last_turn_window_not_cumulative_totals(self):
+        usage = self.server.extract_session_usage(CODEX_SESSION_ID)
+        self.assertEqual(usage["latest_input_tokens"], 1200)
+        self.assertEqual(usage["peak_input_tokens"], 1200)
+        self.assertEqual(usage["total_input_tokens"], 3000)
+        self.assertEqual(usage["total_cache_read_tokens"], 7000)
+        self.assertEqual(usage["total_output_tokens"], 450)
+        self.assertEqual(usage["context_limit"], 258400)
 
     def test_codex_injection_routes_to_codex_resume(self):
         with mock.patch.object(

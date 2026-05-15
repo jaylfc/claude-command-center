@@ -10263,7 +10263,8 @@
     }
     // Click-toggle override: if you're on the 1M variant the server's
     // 200k default is wrong; one click flips and persists.
-    const override = _getCtxLimitOverride();
+    const canToggleContextLimit = engine === 'claude';
+    const override = canToggleContextLimit ? _getCtxLimitOverride() : 0;
     const limit = override || u.context_limit || 200000;
     if (!latest && !peak) {
       if (!modelPill) {
@@ -10279,7 +10280,8 @@
       return;
     }
     const pct = Math.round((latest / limit) * 100);
-    let cls = 'wp-usage-pill wp-usage-clickable';
+    let cls = 'wp-usage-pill';
+    if (canToggleContextLimit) cls += ' wp-usage-clickable';
     if (pct >= 85) cls += ' wp-usage-hot';
     else if (pct >= 60) cls += ' wp-usage-warm';
     const peakNote = peak > latest
@@ -10288,7 +10290,8 @@
     const overrideNote = override ? ' (override)' : '';
     const title = 'Latest assistant turn: ' + latest.toLocaleString() + ' tokens / '
       + limit.toLocaleString() + ' context limit' + overrideNote
-      + ' (' + (u.model || 'model unknown') + ')\n\nClick to toggle between 200k and 1M.';
+      + ' (' + (u.model || 'model unknown') + ')'
+      + (canToggleContextLimit ? '\n\nClick to toggle between 200k and 1M.' : '');
     // Cost pill — Anthropic API list-price equivalent. Subscription users
     // (Pro/Max) pay flat, but the figure is still the cleanest cross-model
     // comparison of "how expensive was this session" so we surface it.
@@ -10312,7 +10315,7 @@
       + '</span>' + peakNote + costPill + modelPill;
     slot.classList.add('visible');
     const pill = uSlot.querySelector('.wp-usage-clickable');
-    if (pill) {
+    if (pill && canToggleContextLimit) {
       pill.addEventListener('click', () => {
         // Toggle between 200k, 1M, and clear (back to server-detected).
         const cur = _getCtxLimitOverride();

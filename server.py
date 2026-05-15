@@ -9816,6 +9816,7 @@ def _extract_codex_usage(session_id):
     if not path:
         return empty
     latest = {}
+    totals = {}
     peak = 0
     context_limit = 0
     model = row.get("model") or ""
@@ -9832,26 +9833,33 @@ def _extract_codex_usage(session_id):
                 if payload.get("type") != "token_count":
                     continue
                 info = payload.get("info") or {}
-                context_limit = info.get("model_context_window") or context_limit
-                usage = info.get("total_token_usage") or info.get("last_token_usage") or {}
+                context_limit = _codex_int(info.get("model_context_window")) or context_limit
+                usage = info.get("last_token_usage") or info.get("total_token_usage") or {}
+                total_usage = info.get("total_token_usage") or usage
                 if not isinstance(usage, dict):
                     continue
+                if isinstance(total_usage, dict):
+                    totals = total_usage
                 latest = usage
-                window = int(usage.get("input_tokens") or 0) + int(usage.get("cached_input_tokens") or 0)
+                # Codex/OpenAI usage reports cached input as a subset of
+                # input_tokens. Adding it again turns cumulative session usage
+                # into impossible context-window numbers.
+                window = _codex_int(usage.get("input_tokens"))
                 peak = max(peak, window)
     except OSError:
         return empty
     if not latest:
         return {**empty, "override": _get_session_override(session_id)}
-    total_input = int(latest.get("input_tokens") or 0)
-    cache_read = int(latest.get("cached_input_tokens") or 0)
-    total_output = int(latest.get("output_tokens") or 0) + int(latest.get("reasoning_output_tokens") or 0)
+    latest_input = _codex_int(latest.get("input_tokens"))
+    total_input = _codex_int(totals.get("input_tokens"))
+    cache_read = _codex_int(totals.get("cached_input_tokens"))
+    total_output = _codex_int(totals.get("output_tokens"))
     return {
         **empty,
-        "latest_input_tokens": total_input + cache_read,
+        "latest_input_tokens": latest_input,
         "peak_input_tokens": peak,
         "total_output_tokens": total_output,
-        "total_input_tokens": total_input,
+        "total_input_tokens": max(total_input - cache_read, 0),
         "total_cache_creation_tokens": 0,
         "total_cache_read_tokens": cache_read,
         "model": model,
