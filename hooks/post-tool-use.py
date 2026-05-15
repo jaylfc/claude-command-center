@@ -3,10 +3,51 @@
 
 import json
 import os
+import re
 import sys
 import time
 
 LIVE_STATE_DIR = os.path.expanduser("~/.claude/command-center/live-state")
+SECRET_RE = re.compile(
+    r"(?i)\b(?:sk-[a-z0-9_-]{16,}|gsk_[a-z0-9_-]{16,}|xox[abprs]-[a-z0-9-]{16,})\b"
+)
+
+
+def prompt_fragment(text, max_len=240):
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r"\s+", " ", text).strip()
+    text = SECRET_RE.sub("[redacted]", text)
+    if len(text) > max_len:
+        return text[: max_len - 3].rstrip() + "..."
+    return text
+
+
+def ask_user_question_payload(tool_input):
+    questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+    if not isinstance(questions, list) or not questions or not isinstance(questions[0], dict):
+        return {}
+    q = questions[0]
+    header = prompt_fragment(q.get("header"), 80)
+    question = prompt_fragment(q.get("question"), 160)
+    options = []
+    for opt in q.get("options") or []:
+        label = opt.get("label") if isinstance(opt, dict) else opt
+        label = prompt_fragment(label, 80)
+        if label:
+            options.append(label)
+    parts = []
+    if header:
+        parts.append(header + ":")
+    if question:
+        parts.append(question)
+    if options:
+        shown = options[:3]
+        parts.append("Options: " + "; ".join(shown) + ("; ..." if len(options) > len(shown) else ""))
+    summary = prompt_fragment(" ".join(parts), 240)
+    if not summary:
+        return {}
+    return {"header": header, "question": question, "options": options, "summary": summary}
 
 
 def main():
@@ -54,6 +95,9 @@ def main():
         if not file_ref:
             cmd = tool_input.get("command") or ""
             file_ref = cmd[:80] if cmd else ""
+        question_payload = ask_user_question_payload(tool_input) if tool_name == "AskUserQuestion" else {}
+        if question_payload:
+            file_ref = question_payload["summary"]
 
         state = {
             "session_id": session_id,
@@ -63,6 +107,7 @@ def main():
             "status": "active",
             "timestamp": time.time(),
         }
+        state.update(question_payload)
 
         state_path = os.path.join(LIVE_STATE_DIR, f"{session_id}.json")
         tmp_path = state_path + ".tmp"

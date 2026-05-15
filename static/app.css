@@ -2027,6 +2027,11 @@
     border-left-color: rgba(88,166,255,0.6);
     animation: pulse 1.2s infinite;
   }
+  .conv-item .conv-live-tool.is-question {
+    color: #58a6ff;
+    background: rgba(88,166,255,0.12);
+    border-left-color: rgba(88,166,255,0.7);
+  }
   /* Compact rows — toggle on the conv list. Forces every card to a
      single line: truncate the title with ellipsis and hide the ask
      preview. Meta + signals stay so you can still scan state. The
@@ -2928,6 +2933,11 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     flex: 1; min-width: 0;
   }
+  .kanban-needs-approval-badge.is-question {
+    color: #58a6ff;
+    background: rgba(88,166,255,0.14);
+    border-color: rgba(88,166,255,0.35);
+  }
   @keyframes kanban-needs-approval-pulse {
     0%, 100% { background: rgba(88,166,255,0.18); }
     50%      { background: rgba(88,166,255,0.32); }
@@ -3533,6 +3543,14 @@
     background: #58a6ff; box-shadow: 0 0 6px rgba(88,166,255,0.7);
     animation: pulse 1.0s infinite;
   }
+  .conv-live-tool-strip.is-question {
+    color: #58a6ff;
+    background: linear-gradient(rgba(88,166,255,0.10), rgba(88,166,255,0.10)), var(--bg);
+    border-bottom-color: rgba(88,166,255,0.35);
+  }
+  .conv-live-tool-strip.is-question .cl-pulse {
+    background: #58a6ff; box-shadow: 0 0 6px rgba(88,166,255,0.7);
+  }
   /* Inline twin of the sticky strip — appended after the last rendered
      event so the user can see "agent is still working" without having
      to scroll up to the sticky strip. Shows whenever the strip shows;
@@ -3549,6 +3567,11 @@
     color: #58a6ff;
     background: linear-gradient(rgba(88,166,255,0.10), rgba(88,166,255,0.10)), var(--bg);
     border-color: rgba(88,166,255,0.35);
+  }
+  .conv-live-tool-inline.is-question {
+    color: #58a6ff;
+    background: linear-gradient(rgba(88,166,255,0.12), rgba(88,166,255,0.12)), var(--bg);
+    border-color: rgba(88,166,255,0.4);
   }
   .conv-live-tool-inline .cl-pulse {
     width: 8px; height: 8px; border-radius: 50%;

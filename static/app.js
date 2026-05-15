@@ -283,7 +283,7 @@
   let sessionSourceByConv = {}; // {convId: 'interactive'|'pkood'|'task'}
   let sessionSpawnPidByConv = {}; // {convId: pid of claude we spawned (stdin inject)}
   // Currently-focused session and its live-process state (per-pane, shimmed via window.currentSession)
-  let liveStatus = { live: false, pid: null, tty: null, terminalApp: null, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false };
+  let liveStatus = { live: false, pid: null, tty: null, terminalApp: null, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
   let liveStatusTimer = null;
   // Separate 1s tick that just re-renders the live-tool strip + inline
   // indicator from the cached liveStatus. The 5s poller refreshes the
@@ -726,7 +726,7 @@
 
   async function refreshLiveStatus() {
     if (!currentSession.id) {
-      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0 };
+      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
       updateJumpButton();
       updateInputBar();
       return;
@@ -750,6 +750,10 @@
         sidecarStatus: data.sidecar_status || null,
         sidecarTs: data.sidecar_ts || 0,
         sidecarInFlight: !!data.sidecar_in_flight,
+        questionWaiting: !!data.question_waiting,
+        questionText: data.question_text || '',
+        questionHeader: data.question_header || '',
+        questionOptions: Array.isArray(data.question_options) ? data.question_options : [],
       };
       // Mirror the freshly-fetched sidecar fields back into the cached
       // sidebar row so the left list catches up to the right pane on
@@ -769,13 +773,17 @@
           row.sidecar_status = data.sidecar_status || null;
           row.sidecar_ts = data.sidecar_ts || 0;
           row.sidecar_in_flight = !!data.sidecar_in_flight;
+          row.question_waiting = !!data.question_waiting;
+          row.question_text = data.question_text || '';
+          row.question_header = data.question_header || '';
+          row.question_options = Array.isArray(data.question_options) ? data.question_options : [];
           if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
             renderSidebar(filterConversations($convSearch.value));
           }
         }
       }
     } catch (err) {
-      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false };
+      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
     }
     updateJumpButton();
     updateInputBar();
@@ -899,7 +907,8 @@
     const tool = liveStatus.sidecarTool;
     const ts = liveStatus.sidecarTs || 0;
     const ageSec = ts ? Math.max(0, Math.floor(Date.now() / 1000 - ts)) : 9999;
-    const shouldShow = liveStatus.live && tool && liveStatus.sidecarStatus === 'active' && ageSec < 300;
+    const isQuestion = tool === 'AskUserQuestion' || !!liveStatus.questionWaiting;
+    const shouldShow = liveStatus.live && tool && liveStatus.sidecarStatus === 'active' && (ageSec < 300 || isQuestion);
     if (!shouldShow) {
       if (strip) strip.remove();
       if (inline) inline.remove();
@@ -909,16 +918,17 @@
     // and the matching "Sending..." pill on the sidebar row.
     clearOptimisticAgentIndicator($view);
     if (currentSession.id) clearSessionSending(currentSession.id);
-    const file = liveStatus.sidecarFile || '';
+    const file = liveStatus.sidecarFile || liveStatus.questionText || '';
     const shortFile = file
       ? (file.length > 60 ? '…' + file.slice(-59) : file)
       : '';
     const dur = ageSec < 2 ? '<1s' : ageSec < 60 ? ageSec + 's' : Math.floor(ageSec / 60) + 'm';
     const inFlight = !!liveStatus.sidecarInFlight;
-    const ageLbl = inFlight ? 'running ' + dur : dur + ' ago';
+    const ageLbl = isQuestion ? 'waiting for answer' : (inFlight ? 'running ' + dur : dur + ' ago');
+    const toolLabel = isQuestion ? 'Question' : tool;
     const html =
         '<span class="cl-pulse"></span>'
-      + '<span class="cl-tool">' + (inFlight ? '▶ ' : '') + escapeHtml(tool) + '</span>'
+      + '<span class="cl-tool">' + (inFlight && !isQuestion ? '▶ ' : '') + escapeHtml(toolLabel) + '</span>'
       + (shortFile ? ' <span class="cl-file">' + escapeHtml(shortFile) + '</span>' : '')
       + '<span class="cl-age">' + ageLbl + '</span>';
     if (!strip) {
@@ -929,6 +939,7 @@
       $view.insertBefore(strip, $view.firstChild);
     }
     strip.classList.toggle('in-flight', inFlight);
+    strip.classList.toggle('is-question', isQuestion);
     strip.innerHTML = html;
     // Inline twin at the bottom of the transcript. Re-append on every
     // refresh so it stays the last child even when new events have
@@ -938,6 +949,7 @@
       inline.className = 'conv-live-tool-inline';
     }
     inline.classList.toggle('in-flight', inFlight);
+    inline.classList.toggle('is-question', isQuestion);
     inline.innerHTML = html;
     if (inline.parentElement !== $view || inline !== $view.lastElementChild) {
       $view.appendChild(inline);
@@ -1030,7 +1042,7 @@
       // Pkood sessions don't need live status polling or resume button
       if (liveStatusTimer) { clearInterval(liveStatusTimer); liveStatusTimer = null; }
       if (liveStatusRenderTicker) { clearInterval(liveStatusRenderTicker); liveStatusRenderTicker = null; }
-      liveStatus = { live: false, pid: null, tty: null, terminalApp: null };
+      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
       updateResumeButton();
       updateAnnounceButton();
       updateJumpButton();
@@ -2851,6 +2863,7 @@
       spawn_pid: pid, pending_spawn: true,
       has_edit: false, has_commit: false, has_push: false,
       sidecar_status: 'active', sidecar_has_writes: false,
+      question_waiting: false, question_text: '', question_header: '', question_options: [],
       modified: Date.now() / 1000, size: 0, branch: '',
       last_event_type: null, pending_tool: null, pending_file: null,
       name_overridden: false,
@@ -4261,7 +4274,7 @@
     // archived session shouldn't get pinned to Waiting because a stale
     // _needs_approval marker is still on disk; otherwise the row-list
     // archive button toggles its icon but the row never leaves "In progress".
-    if (c && c.needs_approval && !c.archived && !c.verified) return 'waiting';
+    if (c && (c.needs_approval || c.question_waiting || (c.is_live && c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion')) && !c.archived && !c.verified) return 'waiting';
     const raw = _classifyKanbanColumnNatural(c);
     return _applyFreshSessionSticky(c, raw);
   }
@@ -4423,7 +4436,7 @@
       { key: 'working',         label: 'In progress',     defaultExpanded: true,
         hint: 'Live or resumable sessions. Idle ones (no commits / no live process) get a blue Idle pill — pick one back up by jumping in.' },
       { key: 'waiting',         label: 'Waiting',         defaultExpanded: true,
-        hint: 'Claude is asking for permission (Notification hook). Approve or deny in the terminal.' },
+        hint: 'Claude is asking a question or requesting permission. Answer in the terminal.' },
       { key: 'review',          label: 'Review',          defaultExpanded: true,
         hint: 'Committed or pushed work waiting for you to read and verify.' },
       { key: 'testing',         label: 'In Testing',      defaultExpanded: true,
@@ -4487,7 +4500,7 @@
           'needs-attention': 'Nothing flagged for triage.',
           'icebox': 'Nothing parked. Drag a card here, or label its issue `icebox`, to park it.',
           'working': 'No live or idle sessions.',
-          'waiting': 'No sessions waiting for approval.',
+          'waiting': 'No sessions waiting for input.',
           'review': 'Nothing waiting for review.',
           'testing': 'Drag cards here to mark as testing.',
           'verified': 'No verified work yet.',
@@ -4768,6 +4781,14 @@
             + '<span class="kanban-needs-approval-label">Needs approval</span>'
             + (shortMsg ? '<span class="kanban-needs-approval-msg">' + escapeHtml(shortMsg) + '</span>' : '')
             + '</div>';
+        } else if (c.question_waiting || (c.is_live && c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion')) {
+          const msg = c.sidecar_file || c.question_text || 'Claude is asking a question';
+          const shortMsg = msg && msg.length <= 110 ? msg : (msg ? msg.slice(0, 107) + '...' : '');
+          html += '<div class="kanban-needs-approval-badge is-question" title="' + escapeHtml(msg) + '">'
+            + '<span class="kanban-needs-approval-icon">?</span>'
+            + '<span class="kanban-needs-approval-label">Question</span>'
+            + (shortMsg ? '<span class="kanban-needs-approval-msg">' + escapeHtml(shortMsg) + '</span>' : '')
+            + '</div>';
         }
         if (issueBadge) {
           html += '<div class="kanban-card-badges">' + issueBadge + '</div>';
@@ -4793,7 +4814,7 @@
         // Live "what's running right now" \u2014 render whenever sidecar shows
         // active work and the data is fresh (<5 min). Closes the Working
         // column gap where the card showed nothing while Claude was busy.
-        if (c.is_live && c.sidecar_status === 'active' && c.sidecar_tool) {
+        if (c.is_live && c.sidecar_status === 'active' && c.sidecar_tool && c.sidecar_tool !== 'AskUserQuestion') {
           const sidecarAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
           if (sidecarAge < 300) {
             const shortFile = c.sidecar_file
@@ -5754,6 +5775,11 @@
         liveToolHtml = '<span class="conv-live-tool sending" title="Sending — waiting for the first response from the agent">'
           + '<span class="conv-live-name">● Sending&hellip;</span>'
           + '</span>';
+      } else if (c.is_live && (c.question_waiting || (c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion'))) {
+        const q = c.sidecar_file || c.question_text || 'Claude is asking a question';
+        liveToolHtml = '<span class="conv-live-tool is-question" title="' + escapeHtml(q) + '">'
+          + '<span class="conv-live-name">Question</span>'
+          + '</span>';
       } else if (c.is_live && c.sidecar_status === 'active' && c.sidecar_tool) {
         const sidecarAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
         if (sidecarAge < 300) {
@@ -5829,7 +5855,8 @@
       const _rowActivityAge = _rowActivityTs ? Math.max(0, Math.floor(Date.now() / 1000 - _rowActivityTs)) : 9999;
       const _midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow) && c.last_event_type === 'user');
       const _isActiveSidecar = c.is_live && c.sidecar_status === 'active';
-      const _isWaitingForUser = c.is_live && (c.needs_approval || c.sidecar_status === 'waiting');
+      const _isQuestionWaiting = c.is_live && (c.question_waiting || (c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion'));
+      const _isWaitingForUser = c.is_live && (c.needs_approval || _isQuestionWaiting || c.sidecar_status === 'waiting');
       const _knownActivityTool = c.sidecar_tool || c.pending_tool || '';
       const _hasLivePendingTool = c.is_live && !!c.pending_tool;
       const _codexHasOpenTool = isCodexRow && !c.sidecar_status && !!c.pending_tool;
@@ -5847,11 +5874,11 @@
         const wipTitle = _knownActivityTool
           ? ((c.sidecar_in_flight ? 'Currently running' : 'Last known tool') + ': ' + _knownActivityTool)
           : (_isWaitingForUser
-              ? (c.needs_approval_message || 'Agent is waiting for your input')
+              ? (c.needs_approval_message || c.sidecar_file || c.question_text || 'Agent is waiting for your input')
               : (c.gh_in_progress
               ? 'Linked GitHub issue is marked in progress'
               : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : 'Agent is working'))));
-        const wipLabel = (_codexOpenTurn || _isWaitingForUser) ? 'WIP' : (_knownActivityTool || 'WIP');
+        const wipLabel = _isQuestionWaiting ? 'QUESTION' : ((_codexOpenTurn || _isWaitingForUser) ? 'WIP' : (_knownActivityTool || 'WIP'));
         signals += '<span class="conv-signal activity-working" title="' + escapeHtml(wipTitle) + '">' + escapeHtml(wipLabel) + '</span>';
       }
       if (c.source === 'pkood') {
@@ -8986,8 +9013,9 @@
           div.className = 'stream-block-tool';
           div.dataset.renderTs = nowStamp();
           const summary = b.summary ? ' — ' + b.summary : '';
+          const toolName = b.name === 'AskUserQuestion' ? 'Question' : (b.name || 'tool');
           div.innerHTML = '<span>⚙</span> <span class="stream-tool-name">'
-            + escapeHtml(b.name || 'tool') + '</span>'
+            + escapeHtml(toolName) + '</span>'
             + '<span style="opacity:0.8;">' + escapeHtml(summary) + '</span>';
           slot.appendChild(div);
         } else if (b.type === 'thinking') {
@@ -10444,7 +10472,8 @@
   function summarizeToolCall(div) {
     const tc = div.querySelector('.tool-call');
     if (!tc) return 'Ran 1 command';
-    const name = (tc.querySelector('.tool-name')?.textContent || '').trim();
+    const nameEl = tc.querySelector('.tool-name');
+    const name = (nameEl?.dataset?.toolName || nameEl?.textContent || '').trim();
     const detail = (tc.querySelector('.tool-detail')?.textContent || '').trim();
     const basename = (s) => {
       if (!s) return '';
@@ -10467,7 +10496,7 @@
       case 'Task':         return detail ? 'Spawned subagent: ' + trunc(detail, 50) : 'Spawned subagent';
       case 'TaskCreate':   return 'Created task';
       case 'TaskUpdate':   return 'Updated task';
-      case 'AskUserQuestion': return 'Asked a question';
+      case 'AskUserQuestion': return detail ? 'Question: ' + trunc(detail, 70) : 'Asked a question';
       case 'ExitPlanMode': return 'Exited plan mode';
       default:             return detail ? 'Ran ' + name + ': ' + trunc(detail, 40) : 'Ran ' + (name || 'tool');
     }
@@ -10705,7 +10734,9 @@
         let hasNonTool = false;
         for (const b of ev.blocks) {
           if (b.kind === 'tool_use') {
-            html += '<div class="tool-call"><span class="arrow">-></span> <span class="tool-name">' + escapeHtml(b.name) + '</span> <span class="tool-detail">' + escapeHtml(b.detail) + '</span></div>';
+            const displayName = b.name === 'AskUserQuestion' ? 'Question' : b.name;
+            const toolClass = b.name === 'AskUserQuestion' ? ' ask-user-question' : '';
+            html += '<div class="tool-call' + toolClass + '"><span class="arrow">-></span> <span class="tool-name" data-tool-name="' + escapeAttr(b.name || '') + '">' + escapeHtml(displayName) + '</span> <span class="tool-detail">' + escapeHtml(b.detail) + '</span></div>';
           } else if (b.kind === 'text') {
             html += '<div class="assistant-text">' + renderMarkdown(b.text) + '</div>';
             hasNonTool = true;
@@ -12246,6 +12277,10 @@
         sidecar_file: null,
         sidecar_has_writes: false,
         sidecar_ts: 0,
+        question_waiting: false,
+        question_text: '',
+        question_header: '',
+        question_options: [],
         // Folder chip — same fields the conversation rows use.
         folder_path: repoPath,
         folder_label: repoLabel,
@@ -12986,6 +13021,10 @@
           sidecar_has_writes: !!c.sidecar_has_writes,
           needs_approval: !!c.needs_approval,
           needs_approval_message: c.needs_approval_message || '',
+          question_waiting: !!c.question_waiting,
+          question_text: c.question_text || '',
+          question_header: c.question_header || '',
+          question_options: Array.isArray(c.question_options) ? c.question_options : [],
           session_cwd: c.session_cwd || c.folder_path,
           session_cwd_exists: !!c.folder_path,
           session_cwd_is_worktree: !!c.session_cwd_is_worktree,
@@ -13041,6 +13080,10 @@
         last_event_type: c.last_event_type || null,
         needs_approval: !!c.needs_approval,
         needs_approval_message: c.needs_approval_message || '',
+        question_waiting: !!c.question_waiting,
+        question_text: c.question_text || '',
+        question_header: c.question_header || '',
+        question_options: Array.isArray(c.question_options) ? c.question_options : [],
         source: c.source || 'interactive',
         session_cwd: c.session_cwd || c.folder_path,
         session_cwd_exists: !folderOrphan,

@@ -241,6 +241,111 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIn("frontmost of first application process whose unix id is prevPid", script)
         self.assertNotIn("tell application prevApp", script)
 
+    def test_ask_user_question_tool_detail_surfaces_prompt(self):
+        ev = {
+            "type": "assistant",
+            "timestamp": "2026-05-15T00:00:00Z",
+            "message": {
+                "id": "msg-question",
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu-question",
+                    "name": "AskUserQuestion",
+                    "input": {
+                        "questions": [{
+                            "header": "Key flow",
+                            "question": "How automated do you want this?",
+                            "options": [
+                                {"label": "Full auto"},
+                                {"label": "Half auto"},
+                                {"label": "Skip Whisper"},
+                            ],
+                        }]
+                    },
+                }],
+            },
+        }
+
+        parsed = self.server._parse_conversation_event(ev, 7)
+
+        self.assertEqual(parsed["type"], "assistant")
+        detail = parsed["blocks"][0]["detail"]
+        self.assertIn("How automated do you want this?", detail)
+        self.assertIn("Full auto", detail)
+        self.assertIn("Half auto", detail)
+
+    def test_pending_ask_user_question_clears_after_answer(self):
+        sid = "00000000-0000-4000-8000-000000000099"
+        project_dir = pathlib.Path(self.tmp_home, ".claude", "projects", "-demo-repo")
+        project_dir.mkdir(parents=True)
+        jsonl = project_dir / f"{sid}.jsonl"
+        ask_event = {
+            "type": "assistant",
+            "timestamp": "2026-05-15T00:00:00Z",
+            "message": {
+                "id": "msg-question",
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu-question",
+                    "name": "AskUserQuestion",
+                    "input": {
+                        "questions": [{
+                            "header": "Key flow",
+                            "question": "How automated do you want this?",
+                            "options": [{"label": "Half auto"}],
+                        }]
+                    },
+                }],
+            },
+        }
+        jsonl.write_text(json.dumps(ask_event) + "\n", encoding="utf-8")
+
+        pending = self.server._pending_ask_user_question_for_session(sid)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["question"], "How automated do you want this?")
+
+        answer_event = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu-question",
+                    "content": "answered",
+                }],
+            },
+        }
+        with jsonl.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(answer_event) + "\n")
+
+        self.assertIsNone(self.server._pending_ask_user_question_for_session(sid))
+
+    def test_inflight_ask_user_question_marks_row_waiting(self):
+        sid = "00000000-0000-4000-8000-000000000100"
+        self.server.SIDECAR_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        marker = {
+            "session_id": sid,
+            "tool": "AskUserQuestion",
+            "file": "Key flow: How automated do you want this?",
+            "question": "How automated do you want this?",
+            "header": "Key flow",
+            "options": ["Half auto"],
+            "started_at": 1778813567.0,
+        }
+        (self.server.SIDECAR_STATE_DIR / f"{sid}_in_flight.json").write_text(
+            json.dumps(marker),
+            encoding="utf-8",
+        )
+
+        entry = {"session_id": sid, "is_live": True}
+        self.server._add_sidecar_fields(entry)
+
+        self.assertEqual(entry["sidecar_tool"], "AskUserQuestion")
+        self.assertTrue(entry["question_waiting"])
+        self.assertEqual(entry["question_text"], "How automated do you want this?")
+
     def test_spawn_session_preflights_missing_claude_cli(self):
         with mock.patch.object(
             self.server,

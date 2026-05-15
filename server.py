@@ -2061,6 +2061,10 @@ def find_all_conversations(limit_per_folder=None):
                 "sidecar_in_flight": False,
                 "needs_approval": False,
                 "needs_approval_message": "",
+                "question_waiting": False,
+                "question_text": "",
+                "question_header": "",
+                "question_options": [],
             }
             if is_live:
                 _entry = {"session_id": session_id, "is_live": True}
@@ -3705,7 +3709,10 @@ def _extract_tail_meta(path):
                         name = block.get("name", "")
                         inp = block.get("input", {})
                         last_tool_name = name
-                        last_tool_file = inp.get("file_path") or inp.get("command", "")[:60] or None
+                        if name == "AskUserQuestion":
+                            last_tool_file = _tool_use_detail(name, inp, max_len=120) or None
+                        else:
+                            last_tool_file = inp.get("file_path") or inp.get("command", "")[:60] or None
                         if name in ("Edit", "Write", "NotebookEdit"):
                             meta["has_edit"] = True
                             meta["last_edit_pos"] = _pos
@@ -6382,6 +6389,10 @@ def _open_pr_archive_row(pr):
         "sidecar_has_writes": False,
         "needs_approval": False,
         "needs_approval_message": "",
+        "question_waiting": False,
+        "question_text": "",
+        "question_header": "",
+        "question_options": [],
         "session_cwd": repo_path,
         "session_cwd_exists": Path(repo_path).is_dir() if repo_path else False,
         "session_cwd_is_worktree": False,
@@ -7502,16 +7513,39 @@ def _add_sidecar_fields(entry):
     notif = _read_notification_state(sid) if is_live else None
     entry["sidecar_status"] = sc.get("status") if sc else None
     entry["sidecar_has_writes"] = sc.get("has_writes", False) if sc else False
+    entry["question_waiting"] = False
+    entry["question_text"] = ""
+    entry["question_header"] = ""
+    entry["question_options"] = []
     if inflight:
         entry["sidecar_tool"] = inflight.get("tool")
         entry["sidecar_file"] = inflight.get("file")
         entry["sidecar_ts"] = inflight.get("started_at", 0)
         entry["sidecar_in_flight"] = True
+        if inflight.get("tool") == "AskUserQuestion":
+            ask_payload = {
+                "header": inflight.get("header") or "",
+                "question": inflight.get("question") or "",
+                "options": inflight.get("options") or [],
+                "summary": inflight.get("summary") or inflight.get("file") or "",
+            }
+            if not ask_payload.get("summary"):
+                ask_payload = _pending_ask_user_question_for_session(sid) or ask_payload
+            entry["question_waiting"] = True
+            entry["question_text"] = ask_payload.get("question") or ""
+            entry["question_header"] = ask_payload.get("header") or ""
+            entry["question_options"] = ask_payload.get("options") or []
+            if not entry.get("sidecar_file"):
+                entry["sidecar_file"] = ask_payload.get("summary") or ""
     else:
         entry["sidecar_tool"] = sc.get("tool") if sc else None
         entry["sidecar_file"] = sc.get("file") if sc else None
         entry["sidecar_ts"] = sc.get("timestamp", 0) if sc else 0
         entry["sidecar_in_flight"] = False
+        if sc and sc.get("tool") == "AskUserQuestion":
+            entry["question_text"] = sc.get("question") or ""
+            entry["question_header"] = sc.get("header") or ""
+            entry["question_options"] = sc.get("options") or []
     # Notification hook signal — precise "Claude is asking for permission"
     # marker, replaces the brittle pending_tool/age heuristic on the UI side.
     entry["needs_approval"] = bool(notif)
@@ -7936,6 +7970,135 @@ def _ffc_flatten_strings(value):
             yield from _ffc_flatten_strings(v)
 
 
+_PROMPT_SECRET_RE = re.compile(
+    r"(?i)\b(?:sk-[a-z0-9_-]{16,}|gsk_[a-z0-9_-]{16,}|xox[abprs]-[a-z0-9-]{16,})\b"
+)
+
+
+def _prompt_fragment(text, max_len=240):
+    """Normalize one UI-safe prompt fragment for status chips."""
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    text = _PROMPT_SECRET_RE.sub("[redacted]", text)
+    if len(text) > max_len:
+        return text[: max_len - 3].rstrip() + "..."
+    return text
+
+
+def _ask_user_question_payload(tool_input, max_options=3):
+    """Return a compact summary of Claude Code's AskUserQuestion input."""
+    if not isinstance(tool_input, dict):
+        return {}
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return {}
+    first = questions[0]
+    if not isinstance(first, dict):
+        return {}
+
+    header = _prompt_fragment(first.get("header"), 80)
+    question = _prompt_fragment(first.get("question"), 160)
+    options = []
+    for opt in first.get("options") or []:
+        label = opt.get("label") if isinstance(opt, dict) else opt
+        label = _prompt_fragment(label, 80)
+        if label:
+            options.append(label)
+
+    parts = []
+    if header:
+        parts.append(header + ":")
+    if question:
+        parts.append(question)
+    if options:
+        shown = options[:max_options]
+        suffix = "; ..." if len(options) > len(shown) else ""
+        parts.append("Options: " + "; ".join(shown) + suffix)
+    summary = _prompt_fragment(" ".join(parts), 240)
+    if not summary:
+        return {}
+    return {
+        "header": header,
+        "question": question,
+        "options": options,
+        "summary": summary,
+    }
+
+
+def _tool_use_detail(name, tool_input, max_len=200):
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    if name == "AskUserQuestion":
+        return _ask_user_question_payload(tool_input).get("summary", "")
+    detail = (
+        tool_input.get("file_path")
+        or tool_input.get("pattern")
+        or tool_input.get("command", "")
+        or tool_input.get("query", "")
+        or tool_input.get("prompt", "")
+        or ""
+    )
+    return _prompt_fragment(detail, max_len)
+
+
+def _pending_ask_user_question_for_session(session_id):
+    """Return the latest unanswered AskUserQuestion payload for a session."""
+    filepath = _resolve_conversation_path(session_id)
+    pending = {}
+    order = []
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                t = ev.get("type", "")
+                msg = _safe_parse_message(ev.get("message", {}))
+                content = msg.get("content")
+                if t == "assistant" and isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") != "tool_use" or block.get("name") != "AskUserQuestion":
+                            continue
+                        payload = _ask_user_question_payload(block.get("input") or {})
+                        if not payload:
+                            continue
+                        tu_id = block.get("id") or f"line:{len(order)}"
+                        pending[tu_id] = payload
+                        order.append(tu_id)
+                elif t == "user" and pending:
+                    if isinstance(content, list):
+                        saw_tool_result = False
+                        for item in content:
+                            if not isinstance(item, dict) or item.get("type") != "tool_result":
+                                continue
+                            saw_tool_result = True
+                            tu_id = item.get("tool_use_id")
+                            if tu_id in pending:
+                                pending.pop(tu_id, None)
+                        if saw_tool_result:
+                            continue
+                    # A plain follow-up from the user answers or supersedes
+                    # the visible prompt, so do not leave stale questions up.
+                    pending.clear()
+    except FileNotFoundError:
+        return None
+
+    for tu_id in reversed(order):
+        payload = pending.get(tu_id)
+        if payload:
+            return payload
+    return None
+
+
 def _extract_files_from_conversation(conversation_id):
     """Walk the JSONL once and return a grouped, de-duped, capped
     payload of file-like artifacts mentioned anywhere in the
@@ -8185,16 +8348,7 @@ def _parse_conversation_event(ev, line_num):
             if btype == "tool_use":
                 inp = block.get("input", {})
                 name = block.get("name", "?")
-                detail = (
-                    inp.get("file_path")
-                    or inp.get("pattern")
-                    or inp.get("command", "")
-                    or inp.get("query", "")
-                    or inp.get("prompt", "")
-                    or ""
-                )
-                if isinstance(detail, str) and len(detail) > 200:
-                    detail = detail[:200] + "..."
+                detail = _tool_use_detail(name, inp, max_len=200)
                 blocks.append({"kind": "tool_use", "name": name, "detail": detail})
             elif btype == "text":
                 txt = block.get("text", "").strip()
@@ -9067,6 +9221,10 @@ def _codex_activity_fields_from_tail(tail, live):
         "sidecar_file": None,
         "sidecar_ts": 0,
         "sidecar_in_flight": False,
+        "question_waiting": False,
+        "question_text": "",
+        "question_header": "",
+        "question_options": [],
     }
     if not live or not tail:
         return fields
@@ -10109,6 +10267,10 @@ def _gemini_activity_fields_from_tail(tail, live):
         "sidecar_file": None,
         "sidecar_ts": 0,
         "sidecar_in_flight": False,
+        "question_waiting": False,
+        "question_text": "",
+        "question_header": "",
+        "question_options": [],
     }
     if not live or not tail:
         return fields
@@ -10303,6 +10465,10 @@ def find_gemini_conversations(repo_path=None, include_old=True, repo_only=True, 
             **gemini_activity,
             "needs_approval": False,
             "needs_approval_message": "",
+            "question_waiting": False,
+            "question_text": "",
+            "question_header": "",
+            "question_options": [],
             "model": tail.get("model") or "",
             "reasoning_effort": "",
         })
@@ -12032,6 +12198,7 @@ def _group_chat_participant_meta(session_id: str) -> dict:
         "pending_tool": None,
         "sidecar_status": None,
         "needs_approval": False,
+        "question_waiting": False,
     }
     if not session_id:
         return meta
@@ -12061,6 +12228,9 @@ def _group_chat_participant_meta(session_id: str) -> dict:
         notif = _read_notification_state(session_id) or {}
         meta["sidecar_status"] = sc.get("status") if sc else None
         meta["pending_tool"] = (inflight or sc).get("tool")
+        meta["question_waiting"] = bool(
+            inflight and inflight.get("tool") == "AskUserQuestion"
+        )
         meta["wip"] = bool(
             sc and sc.get("status") == "active"
             and (inflight or sc.get("tool"))
@@ -14593,15 +14763,18 @@ def _normalize_spawn_event(ev):
         }
     if t == "tool_use":
         params = ev.get("parameters") if isinstance(ev.get("parameters"), dict) else {}
-        summary = params.get("description") or params.get("command") or ""
+        name = ev.get("tool_name") or "tool"
+        summary = _tool_use_detail(name, params, max_len=160)
+        if not summary:
+            summary = params.get("description") or params.get("command") or ""
         return {
             "type": "assistant_block",
             "message_id": "gemini-stream",
             "blocks": [{
                 "type": "tool_use",
-                "name": ev.get("tool_name") or "tool",
+                "name": name,
                 "id": ev.get("tool_id") or "",
-                "summary": str(summary)[:160] if summary else "",
+                "summary": _prompt_fragment(str(summary), 160) if summary else "",
             }],
         }
     if t == "result" and ("status" in ev or "stats" in ev):
@@ -14633,13 +14806,15 @@ def _normalize_spawn_event(ev):
                 # JSONL render at end-of-turn.
                 inp = c.get("input") or {}
                 if isinstance(inp, dict):
-                    summary = (
-                        inp.get("file_path") or inp.get("path")
-                        or inp.get("pattern") or inp.get("command")
-                        or inp.get("description") or ""
-                    )
+                    summary = _tool_use_detail(c.get("name", ""), inp, max_len=160)
+                    if not summary:
+                        summary = (
+                            inp.get("file_path") or inp.get("path")
+                            or inp.get("pattern") or inp.get("command")
+                            or inp.get("description") or ""
+                        )
                     if summary:
-                        tu["summary"] = str(summary)[:160]
+                        tu["summary"] = _prompt_fragment(str(summary), 160)
                 blocks.append(tu)
             elif ct == "thinking":
                 blocks.append({"type": "thinking"})
@@ -17529,24 +17704,59 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             else:
                 sc = _read_sidecar_state(sid) if sid else None
                 inflight = _read_in_flight_state(sid) if sid else None
+                ask_payload = None
                 if inflight:
                     status["sidecar_tool"] = inflight.get("tool")
                     status["sidecar_file"] = inflight.get("file")
                     status["sidecar_status"] = "active"
                     status["sidecar_ts"] = inflight.get("started_at", 0)
                     status["sidecar_in_flight"] = True
+                    if inflight.get("tool") == "AskUserQuestion":
+                        ask_payload = {
+                            "header": inflight.get("header") or "",
+                            "question": inflight.get("question") or "",
+                            "options": inflight.get("options") or [],
+                            "summary": inflight.get("summary") or inflight.get("file") or "",
+                        }
                 elif sc:
                     status["sidecar_tool"] = sc.get("tool")
                     status["sidecar_file"] = sc.get("file")
                     status["sidecar_status"] = sc.get("status")
                     status["sidecar_ts"] = sc.get("timestamp", 0)
                     status["sidecar_in_flight"] = False
+                    if sc.get("tool") == "AskUserQuestion":
+                        ask_payload = {
+                            "header": sc.get("header") or "",
+                            "question": sc.get("question") or "",
+                            "options": sc.get("options") or [],
+                            "summary": sc.get("summary") or sc.get("file") or "",
+                        }
                 else:
                     status["sidecar_tool"] = None
                     status["sidecar_file"] = None
                     status["sidecar_status"] = None
                     status["sidecar_ts"] = 0
                     status["sidecar_in_flight"] = False
+                if status.get("sidecar_tool") == "AskUserQuestion":
+                    if not ask_payload or not ask_payload.get("summary"):
+                        ask_payload = _pending_ask_user_question_for_session(sid) if sid else None
+                    if ask_payload:
+                        status["question_waiting"] = bool(status.get("sidecar_in_flight"))
+                        status["question_text"] = ask_payload.get("question") or ""
+                        status["question_header"] = ask_payload.get("header") or ""
+                        status["question_options"] = ask_payload.get("options") or []
+                        if not status.get("sidecar_file"):
+                            status["sidecar_file"] = ask_payload.get("summary") or ""
+                    else:
+                        status["question_waiting"] = bool(status.get("sidecar_in_flight"))
+                        status["question_text"] = ""
+                        status["question_header"] = ""
+                        status["question_options"] = []
+                else:
+                    status["question_waiting"] = False
+                    status["question_text"] = ""
+                    status["question_header"] = ""
+                    status["question_options"] = []
             status["needs_approval"] = bool(notif)
             status["needs_approval_message"] = notif.get("message", "") if notif else ""
             self.send_json(status)
