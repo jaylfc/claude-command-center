@@ -4726,7 +4726,11 @@ def find_live_codex_processes():
             continue
         pid_s, tty, comm = parts[:3]
         args = parts[3] if len(parts) > 3 else ""
-        if comm.rsplit("/", 1)[-1] != "codex":
+        arg_parts = args.split()
+        basenames = {comm.rsplit("/", 1)[-1]}
+        if arg_parts:
+            basenames.add(arg_parts[0].rsplit("/", 1)[-1])
+        if "codex" not in basenames:
             continue
         try:
             pid = int(pid_s)
@@ -4779,6 +4783,32 @@ def find_live_gemini_processes():
             "command": args,
         })
     return procs
+
+
+def _command_targets_engine_session(command, session_id, engine):
+    if not command or not session_id:
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return False
+    if engine == "codex":
+        # `codex exec ... -- <prompt>` can contain arbitrary UUIDs in prompt
+        # text. Only treat a session id as exact when it belongs to resume args.
+        head = tokens[:tokens.index("--")] if "--" in tokens else tokens
+        return any(tok == session_id and "resume" in head[:idx]
+                   for idx, tok in enumerate(head))
+    if engine == "gemini":
+        return any(
+            tok == session_id and (
+                "--resume" in tokens[:idx] or
+                (idx > 0 and tokens[idx - 1] in ("--resume", "resume"))
+            )
+            for idx, tok in enumerate(tokens)
+        )
+    return False
 
 
 def _load_session_registry():
@@ -4865,18 +4895,36 @@ def session_live_status(session_id, session_cwd):
                 result["recently_written"] = (time.time() - path.stat().st_mtime) < 300
             except OSError:
                 pass
+        registry_known = _spawn_registry_has_session(session_id, "codex")
+        entry = _live_spawn_registry_entry_for_session(session_id, "codex")
+        if entry:
+            pid = entry["pid"]
+            result["pid"] = pid
+            result["tty"] = _process_tty(pid)
+            result["cwd"] = _proc_cwd(pid) or entry.get("cwd") or session_cwd
+            result["terminal_app"], _term_pid = _proc_ancestor_terminal(pid)
+            result["live"] = True
+            result["match_count"] = 1
+            return result
         if not session_cwd:
             session_cwd = find_session_cwd(session_id)
-        matches = []
+        exact_matches = []
+        cwd_matches = []
         for p in find_live_codex_processes():
             cmd = p.get("command") or ""
-            if session_id in cmd or (session_cwd and p.get("cwd") == session_cwd):
-                matches.append(p)
+            if _command_targets_engine_session(cmd, session_id, "codex"):
+                exact_matches.append(p)
+            elif not registry_known and session_cwd and p.get("cwd") == session_cwd:
+                cwd_matches.append(p)
+        matches = exact_matches or cwd_matches
         result["match_count"] = len(matches)
         if not matches:
             return result
         if len(matches) > 1:
-            exact = [p for p in matches if session_id in (p.get("command") or "")]
+            exact = [
+                p for p in matches
+                if _command_targets_engine_session(p.get("command") or "", session_id, "codex")
+            ]
             if len(exact) == 1:
                 matches = exact
             else:
@@ -4896,18 +4944,36 @@ def session_live_status(session_id, session_cwd):
                 result["recently_written"] = (time.time() - path.stat().st_mtime) < 300
             except OSError:
                 pass
+        registry_known = _spawn_registry_has_session(session_id, "gemini")
+        entry = _live_spawn_registry_entry_for_session(session_id, "gemini")
+        if entry:
+            pid = entry["pid"]
+            result["pid"] = pid
+            result["tty"] = _process_tty(pid)
+            result["cwd"] = _proc_cwd(pid) or entry.get("cwd") or session_cwd
+            result["terminal_app"], _term_pid = _proc_ancestor_terminal(pid)
+            result["live"] = True
+            result["match_count"] = 1
+            return result
         if not session_cwd:
             session_cwd = find_session_cwd(session_id)
-        matches = []
+        exact_matches = []
+        cwd_matches = []
         for p in find_live_gemini_processes():
             cmd = p.get("command") or ""
-            if session_id in cmd or (session_cwd and p.get("cwd") == session_cwd):
-                matches.append(p)
+            if _command_targets_engine_session(cmd, session_id, "gemini"):
+                exact_matches.append(p)
+            elif not registry_known and session_cwd and p.get("cwd") == session_cwd:
+                cwd_matches.append(p)
+        matches = exact_matches or cwd_matches
         result["match_count"] = len(matches)
         if not matches:
             return result
         if len(matches) > 1:
-            exact = [p for p in matches if session_id in (p.get("command") or "")]
+            exact = [
+                p for p in matches
+                if _command_targets_engine_session(p.get("command") or "", session_id, "gemini")
+            ]
             if len(exact) == 1:
                 matches = exact
             else:
@@ -11488,6 +11554,44 @@ def _load_spawn_registry():
         print(f"  [spawn-registry] ignoring registry with unexpected shape (not a list)")
         return []
     return data
+
+
+def _live_spawn_registry_entry_for_session(session_id, engine):
+    """Return the live spawned-process registry entry for a session/engine."""
+    if not session_id or engine not in ("codex", "gemini"):
+        return None
+    for entry in _load_spawn_registry():
+        if entry.get("engine") != engine or entry.get("session_id") != session_id:
+            continue
+        try:
+            pid = int(entry.get("pid"))
+        except (TypeError, ValueError):
+            continue
+        if not _pid_is_engine_process(pid, engine):
+            continue
+        return {**entry, "pid": pid}
+    return None
+
+
+def _spawn_registry_has_session(session_id, engine):
+    if not session_id or engine not in ("codex", "gemini"):
+        return False
+    return any(
+        entry.get("engine") == engine and entry.get("session_id") == session_id
+        for entry in _load_spawn_registry()
+    )
+
+
+def _process_tty(pid):
+    try:
+        ps_out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "tty="],
+            capture_output=True, text=True, timeout=1,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    tty = (ps_out.stdout or "").strip()
+    return tty if tty and tty != "??" else None
 
 
 def _save_spawn_registry(entries):

@@ -773,6 +773,93 @@ class TestCodexConversationAdapter(unittest.TestCase):
         self.assertEqual(result["via"], "codex-resume")
         patched.assert_called_once_with(CODEX_SESSION_ID, "follow up")
 
+    def test_codex_live_status_prefers_spawn_registry_session_id(self):
+        with mock.patch.object(
+            self.server,
+            "_load_spawn_registry",
+            return_value=[{
+                "pid": 12345,
+                "session_id": CODEX_SESSION_ID,
+                "engine": "codex",
+                "cwd": str(self.fake_repo),
+            }],
+        ), mock.patch.object(
+            self.server, "_pid_is_engine_process", return_value=True
+        ), mock.patch.object(
+            self.server, "_process_tty", return_value=None
+        ), mock.patch.object(
+            self.server, "_proc_cwd", return_value=str(self.fake_repo)
+        ), mock.patch.object(
+            self.server, "_proc_ancestor_terminal", return_value=(None, None)
+        ):
+            status = self.server.session_live_status(CODEX_SESSION_ID, str(self.fake_repo))
+
+        self.assertTrue(status["live"])
+        self.assertEqual(status["pid"], 12345)
+        self.assertEqual(status["match_count"], 1)
+        self.assertEqual(status["cwd"], str(self.fake_repo))
+
+    def test_live_codex_process_scan_matches_truncated_comm_via_args(self):
+        ps_result = mock.Mock(
+            stdout=(
+                "123 ?? /opt/homebrew/bi /opt/homebrew/bin/codex exec "
+                "resume --json 11111111-1111-4111-8111-111111111111\n"
+            )
+        )
+        with mock.patch.object(
+            self.server.subprocess, "run", return_value=ps_result
+        ), mock.patch.object(
+            self.server, "_proc_cwd", return_value=str(self.fake_repo)
+        ), mock.patch.object(
+            self.server, "_proc_ancestor_terminal", return_value=(None, None)
+        ):
+            rows = self.server.find_live_codex_processes()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["pid"], 123)
+        self.assertIn("codex exec resume", rows[0]["command"])
+
+    def test_codex_exact_session_match_ignores_prompt_text_after_delimiter(self):
+        sid = CODEX_SESSION_ID
+        self.assertTrue(self.server._command_targets_engine_session(
+            f"/opt/homebrew/bin/codex exec resume --json {sid} follow up",
+            sid,
+            "codex",
+        ))
+        self.assertFalse(self.server._command_targets_engine_session(
+            f"/opt/homebrew/bin/codex exec --json -- prompt mentions {sid}",
+            sid,
+            "codex",
+        ))
+
+    def test_dead_spawn_registry_entry_does_not_cwd_match_other_codex_run(self):
+        with mock.patch.object(
+            self.server,
+            "_load_spawn_registry",
+            return_value=[{
+                "pid": 12345,
+                "session_id": CODEX_SESSION_ID,
+                "engine": "codex",
+                "cwd": str(self.fake_repo),
+            }],
+        ), mock.patch.object(
+            self.server, "_pid_is_engine_process", return_value=False
+        ), mock.patch.object(
+            self.server,
+            "find_live_codex_processes",
+            return_value=[{
+                "pid": 23456,
+                "tty": None,
+                "cwd": str(self.fake_repo),
+                "terminal_app": None,
+                "command": "/opt/homebrew/bin/codex exec unrelated prompt",
+            }],
+        ):
+            status = self.server.session_live_status(CODEX_SESSION_ID, str(self.fake_repo))
+
+        self.assertFalse(status["live"])
+        self.assertEqual(status["match_count"], 0)
+
 
 class TestCodexActivityFields(unittest.TestCase):
     """Codex rows synthesize Claude-like live activity chips from rollouts."""
