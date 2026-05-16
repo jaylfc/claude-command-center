@@ -759,7 +759,9 @@ class TestRepoContextHelpers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp).resolve()
             app = root / "apps" / "bookyourmat"
+            finie = root / "apps" / "finie"
             app.mkdir(parents=True)
+            finie.mkdir(parents=True)
             (root / "turbo.json").write_text(json.dumps({"tasks": {"dev": {"persistent": True}}}))
             (root / "package.json").write_text(json.dumps({"workspaces": ["apps/*"]}))
             (app / "package.json").write_text(json.dumps({
@@ -767,14 +769,22 @@ class TestRepoContextHelpers(unittest.TestCase):
                 "scripts": {"dev": "next dev --port 39001"},
                 "dependencies": {"next": "16.1.6"},
             }))
+            (finie / "package.json").write_text(json.dumps({
+                "name": "finie",
+                "scripts": {"dev": "next dev --port 3000"},
+                "dependencies": {"next": "16.1.6"},
+            }))
 
             cmd, cwd = server._resolve_dev_invocation(app)
             (root / ".git").mkdir()
             status = server.nextjs_status(str(root), str(app))
+            root_status = server.nextjs_status(str(root))
 
         self.assertEqual(cmd, ["npx", "turbo", "dev", "--filter=bookyourmat"])
         self.assertEqual(cwd, root)
         self.assertEqual(status["launch_cmd"], "npx turbo dev --filter=bookyourmat")
+        self.assertEqual(root_status["target_path"], str(app))
+        self.assertEqual(root_status["launch_cmd"], "npx turbo dev --filter=bookyourmat")
 
     def test_nextjs_process_match_ignores_prompt_text(self):
         """Process rediscovery must not match an agent command line that

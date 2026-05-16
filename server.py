@@ -14310,6 +14310,29 @@ def _nextjs_dev_script_ports(path: Path):
     return ports
 
 
+def _nextjs_workspace_sort_key(path: Path):
+    data = _read_pkg_json(path) or {}
+    name = data.get("name") if isinstance(data.get("name"), str) else ""
+    return (name.lower() or path.name.lower(), str(path))
+
+
+def _pick_nextjs_workspace(repo_path: Path):
+    """Choose a concrete Next.js app when the selected target is a monorepo root."""
+    workspaces = [ws for ws in _enumerate_workspaces(repo_path) if _has_next_locally(ws)]
+    if not workspaces:
+        return None
+    workspaces = sorted(workspaces, key=_nextjs_workspace_sort_key)
+    if len(workspaces) == 1:
+        return workspaces[0]
+    non_default_port = [
+        ws for ws in workspaces
+        if any(port and port != 3000 for port in _nextjs_dev_script_ports(ws))
+    ]
+    if non_default_port:
+        return non_default_port[0]
+    return workspaces[0]
+
+
 def _nextjs_target_paths(repo_path, cwd=None):
     """Validate a Next.js target cwd inside a repo-scoped request.
 
@@ -14321,6 +14344,10 @@ def _nextjs_target_paths(repo_path, cwd=None):
     target = Path(cwd or repo_root).expanduser().resolve()
     if not target.is_dir():
         raise RepoContextError("invalid_cwd", f"cwd is not a directory: {target}", path=str(target))
+    if target == repo_root:
+        workspace_target = _pick_nextjs_workspace(repo_root)
+        if workspace_target:
+            target = workspace_target.resolve()
     try:
         target.relative_to(repo_root)
     except ValueError:
