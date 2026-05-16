@@ -1,0 +1,1 @@
+- Fixed sends to live headless Claude sessions so prompts queue while a tool subprocess is still running instead of disappearing into the FIFO.

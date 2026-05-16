@@ -23,6 +23,7 @@ import json
 import os
 import platform
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -7788,8 +7789,9 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
             count=len(conversations),
             detail=f"{len(conversations)} interactive session(s); checking live registry.",
         )
-    spawned_pids = {s["pid"] for s in _spawned_sessions if s["proc"].poll() is None}
-    spawned_engine_by_pid = {s["pid"]: s.get("engine", "claude") for s in _spawned_sessions}
+    live_spawns = [s for s in _spawned_sessions if _poll_spawn_entry(s) is None]
+    spawned_pids = {s["pid"] for s in live_spawns}
+    spawned_engine_by_pid = {s["pid"]: s.get("engine", "claude") for s in live_spawns}
     for c in conversations:
         c["source"] = "interactive"
         c["is_live"] = c["session_id"] in live_sids
@@ -9240,7 +9242,7 @@ def _codex_spawn_pid_by_thread_id():
         sid = s.get("resumed_sid") or _extract_codex_thread_id_from_log(s.get("log"))
         if sid and sid not in out:
             try:
-                alive = s["proc"].poll() is None
+                alive = _poll_spawn_entry(s) is None
             except Exception:
                 alive = False
             out[sid] = {"pid": s.get("pid"), "alive": alive}
@@ -9791,8 +9793,54 @@ def _session_status_is_busy(status):
     return (status.get("status") or "").lower() in _BUSY_SESSION_STATUSES
 
 
+def _spawn_entry_active_tool_child(entry):
+    """Return metadata for a transient child tool process under a spawned agent.
+
+    Claude's long-lived MCP servers stay in the Claude process group. Bash/tool
+    subprocesses are launched as their own process group, so a direct child with
+    a different PGID is a strong signal that the session is still busy even when
+    the sidecar says "waiting".
+    """
+    try:
+        parent_pid = int((entry or {}).get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if parent_pid <= 0:
+        return None
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,stat=,command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    for raw in (proc.stdout or "").splitlines():
+        parts = raw.strip().split(None, 4)
+        if len(parts) < 4:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            pgid = int(parts[2])
+        except ValueError:
+            continue
+        if ppid != parent_pid or pgid == parent_pid:
+            continue
+        return {
+            "pid": pid,
+            "pgid": pgid,
+            "stat": parts[3],
+            "command": parts[4] if len(parts) > 4 else "",
+        }
+    return None
+
+
 def _queue_terminal_input(session_id, text, status=None):
-    """Queue input until an interactive Claude CLI reports it is idle again."""
+    """Queue input until a live Claude session reports it is idle again."""
     with _pending_terminal_input_lock:
         queue = _pending_terminal_input_queue.setdefault(session_id, [])
         queue.append(text)
@@ -9824,7 +9872,7 @@ def _start_resume_queue_watcher() -> None:
                 queued_sids = list(_pending_resume_queue.keys())
             for sid in queued_sids:
                 busy = any(
-                    s.get("resumed_sid") == sid and s["proc"].poll() is None
+                    s.get("resumed_sid") == sid and _poll_spawn_entry(s) is None
                     for s in _spawned_sessions
                     if s.get("engine") in ("codex", "gemini")
                 )
@@ -9852,6 +9900,10 @@ def _start_resume_queue_watcher() -> None:
                     status = session_live_status(sid, find_session_cwd(sid))
                     if status.get("live") and status.get("tty") and _session_status_is_busy(status):
                         continue
+                    if status.get("live") and not status.get("tty"):
+                        spawn = _find_live_spawn_entry_for_session(sid)
+                        if spawn is not None and _spawn_entry_active_tool_child(spawn):
+                            continue
                     with _pending_terminal_input_lock:
                         queue = _pending_terminal_input_queue.get(sid, [])
                         if not queue:
@@ -9878,7 +9930,7 @@ def resume_session_codex(session_id, text):
     for s in _spawned_sessions:
         if s.get("engine") == "codex" and s.get("resumed_sid") == session_id:
             try:
-                if s["proc"].poll() is None:
+                if _poll_spawn_entry(s) is None:
                     with _pending_resume_lock:
                         _pending_resume_queue.setdefault(session_id, []).append(text)
                     return {
@@ -10307,7 +10359,7 @@ def _gemini_spawn_pid_by_session_id():
         sid = s.get("resumed_sid") or _extract_gemini_session_id_from_log(s.get("log"))
         if sid and sid not in out:
             try:
-                alive = s["proc"].poll() is None
+                alive = _poll_spawn_entry(s) is None
             except Exception:
                 alive = False
             out[sid] = {
@@ -10955,7 +11007,7 @@ def resume_session_gemini(session_id, text):
     for s in _spawned_sessions:
         if s.get("engine") == "gemini" and s.get("resumed_sid") == session_id:
             try:
-                if s["proc"].poll() is None:
+                if _poll_spawn_entry(s) is None:
                     with _pending_resume_lock:
                         _pending_resume_queue.setdefault(session_id, []).append(text)
                     return {
@@ -11351,11 +11403,11 @@ def _make_stdin_fifo(log_path):
 
 
 def _open_fifo_writer(fifo_path):
-    """Open a FIFO write-only. Returns fd, or None if the FIFO is gone."""
+    """Open a FIFO write-only without blocking. Returns fd, or None."""
     if not fifo_path:
         return None
     try:
-        return os.open(fifo_path, os.O_WRONLY | os.O_CLOEXEC)
+        return os.open(fifo_path, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
 
@@ -11402,15 +11454,115 @@ def _cleanup_finished_entry(entry):
         entry["log_fh"] = None
 
 
+def _retire_unresponsive_spawn_entry(entry, *, terminate=False):
+    """Stop tracking a CCC-owned spawn whose stdin can no longer accept input."""
+    if not isinstance(entry, dict):
+        return
+    pid = entry.get("pid")
+    if terminate and pid is not None:
+        try:
+            os.killpg(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError, ValueError):
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError, ValueError):
+                pass
+    _cleanup_finished_entry(entry)
+    if pid is not None:
+        _remove_spawn_from_registry(pid)
+    try:
+        _spawned_sessions.remove(entry)
+    except ValueError:
+        pass
+
+
+def _poll_spawn_entry(entry):
+    """Poll a tracked spawned child and clean transient handles once it exits."""
+    proc = entry.get("proc") if isinstance(entry, dict) else None
+    try:
+        poll = proc.poll() if proc is not None else -1
+    except Exception:
+        poll = -1
+    if poll is not None and isinstance(entry, dict) and not entry.get("_cleanup_done"):
+        _cleanup_finished_entry(entry)
+        pid = entry.get("pid")
+        if pid is not None:
+            _remove_spawn_from_registry(pid)
+        entry["_cleanup_done"] = True
+    return poll
+
+
+def _set_fd_nonblocking(fd):
+    try:
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        if not (flags & os.O_NONBLOCK):
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _write_fd_nonblocking(fd, line_bytes, timeout=0.25):
+    """Write a complete stream-json line without hanging the request thread."""
+    if fd is None or not _set_fd_nonblocking(fd):
+        return False
+    total = 0
+    deadline = time.monotonic() + timeout
+    while total < len(line_bytes):
+        try:
+            written = os.write(fd, line_bytes[total:])
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                _r, writable, _x = select.select([], [fd], [], min(0.05, remaining))
+            except (OSError, ValueError):
+                return False
+            if not writable:
+                continue
+            continue
+        except InterruptedError:
+            continue
+        except (BrokenPipeError, OSError, ValueError):
+            return False
+        if written <= 0:
+            return False
+        total += written
+    return True
+
+
 def _write_via_pipe(proc, line_bytes):
     if proc is None or getattr(proc, "stdin", None) is None:
         return False
     try:
-        proc.stdin.write(line_bytes)
-        proc.stdin.flush()
-        return True
-    except (BrokenPipeError, OSError):
+        fd = proc.stdin.fileno()
+    except (OSError, ValueError, AttributeError):
         return False
+    return _write_fd_nonblocking(fd, line_bytes)
+
+
+def _write_via_spawn_fd(target, line):
+    fd = target.get("stdin_fd")
+    if fd is not None:
+        if _write_fd_nonblocking(fd, line):
+            return True
+        # Cached fd is either broken or not accepting input. Drop it so
+        # the next attempt reopens the FIFO instead of wedging on the old fd.
+        _close_fd_quiet(fd)
+        target["stdin_fd"] = None
+
+    fifo = target.get("fifo")
+    if fifo:
+        new_fd = _open_fifo_writer(fifo)
+        if new_fd is not None:
+            if _write_fd_nonblocking(new_fd, line):
+                target["stdin_fd"] = new_fd
+                return True
+            _close_fd_quiet(new_fd)
+    return False
 
 
 def _write_stream_json_user_message(target, text):
@@ -11434,26 +11586,8 @@ def _write_stream_json_user_message(target, text):
     line = (json.dumps(msg) + "\n").encode("utf-8")
 
     if isinstance(target, dict):
-        fd = target.get("stdin_fd")
-        if fd is not None:
-            try:
-                os.write(fd, line)
-                return True
-            except (BrokenPipeError, OSError):
-                # Cached fd went bad — drop it and try one fresh open
-                # via the FIFO path before falling back to proc.stdin.
-                _close_fd_quiet(fd)
-                target["stdin_fd"] = None
-        fifo = target.get("fifo")
-        if fifo:
-            new_fd = _open_fifo_writer(fifo)
-            if new_fd is not None:
-                try:
-                    os.write(new_fd, line)
-                    target["stdin_fd"] = new_fd
-                    return True
-                except (BrokenPipeError, OSError):
-                    _close_fd_quiet(new_fd)
+        if _write_via_spawn_fd(target, line):
+            return True
         return _write_via_pipe(target.get("proc"), line)
 
     return _write_via_pipe(target, line)
@@ -11466,7 +11600,7 @@ def inject_into_spawned(pid, text):
         return {"ok": False, "error": "missing text"}
     for s in _spawned_sessions:
         if s["pid"] == pid:
-            if s["proc"].poll() is not None:
+            if _poll_spawn_entry(s) is not None:
                 return {"ok": False, "error": "process exited"}
             ok = _write_stream_json_user_message(s, text)
             return {"ok": ok, "pid": pid}
@@ -11483,7 +11617,7 @@ def _find_live_spawn_entry_for_session(session_id):
         return None
     for s in _spawned_sessions:
         try:
-            if s["proc"].poll() is not None:
+            if _poll_spawn_entry(s) is not None:
                 continue
         except Exception:
             continue
@@ -11508,10 +11642,21 @@ def resume_session_headless(session_id, text):
     if not text:
         return {"ok": False, "error": "missing text"}
     # Reuse existing resumed process
-    for s in _spawned_sessions:
-        if s.get("resumed_sid") == session_id and s["proc"].poll() is None:
+    for s in list(_spawned_sessions):
+        if s.get("resumed_sid") == session_id and _poll_spawn_entry(s) is None:
             ok = _write_stream_json_user_message(s, text)
-            return {"ok": ok, "pid": s["pid"], "resumed": True, "reused": True}
+            if ok:
+                return {"ok": True, "pid": s["pid"], "resumed": True, "reused": True}
+            if not _spawn_entry_active_tool_child(s):
+                _retire_unresponsive_spawn_entry(s, terminate=True)
+                break
+            return {
+                "ok": False,
+                "pid": s["pid"],
+                "resumed": True,
+                "reused": True,
+                "error": "session input pipe is busy",
+            }
 
     try:
         ctx = repo_from_session(session_id)
@@ -11896,9 +12041,8 @@ def list_spawned_sessions():
     forever (the in-memory list keeps them so the UI can still show 'finished'
     state, but persistence only needs the live ones)."""
     result = []
-    finished_pids = []
     for s in _spawned_sessions:
-        poll = s["proc"].poll()
+        poll = _poll_spawn_entry(s)
         result.append({
             "pid": s["pid"],
             "name": s["name"],
@@ -11907,21 +12051,6 @@ def list_spawned_sessions():
             "started": s.get("started", ""),
             "status": "running" if poll is None else f"finished (exit {poll})",
         })
-        if poll is not None:
-            finished_pids.append(s["pid"])
-            # Subprocess died — close our FIFO writer fd and unlink the
-            # node so we don't leak FIFO files in the log dir. The on-disk
-            # log itself stays for forensics.
-            _cleanup_finished_entry(s)
-    if finished_pids:
-        try:
-            entries = _load_spawn_registry()
-            pruned = [e for e in entries if e.get("pid") not in finished_pids]
-            if len(pruned) != len(entries):
-                _save_spawn_registry(pruned)
-        except Exception:
-            # Registry hygiene is best-effort; never break the API response.
-            pass
     return result
 
 
@@ -12971,8 +13100,27 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False):
     if not status.get("live") or not has_tty:
         spawn = _find_live_spawn_entry_for_session(session_id)
         if spawn is not None:
+            if not _from_terminal_queue:
+                active_child = _spawn_entry_active_tool_child(spawn)
+                if _terminal_input_queue_has_pending(session_id) or active_child:
+                    queued_status = dict(status or {})
+                    queued_status["status"] = "busy"
+                    queued_status["pid"] = queued_status.get("pid") or spawn.get("pid")
+                    if active_child:
+                        queued_status["active_child_pid"] = active_child.get("pid")
+                    return _queue_terminal_input(session_id, text, queued_status)
             ok = _write_stream_json_user_message(spawn, text)
-            return {"ok": ok, "pid": spawn["pid"], "via": "spawn-fifo"}
+            if ok:
+                return {"ok": True, "pid": spawn["pid"], "via": "spawn-fifo"}
+            if not _spawn_entry_active_tool_child(spawn):
+                _retire_unresponsive_spawn_entry(spawn, terminate=True)
+                return resume_session_headless(session_id, text)
+            return {
+                "ok": False,
+                "pid": spawn["pid"],
+                "via": "spawn-fifo",
+                "error": "session input pipe is busy",
+            }
         return resume_session_headless(session_id, text)
 
 
@@ -13282,7 +13430,7 @@ def ask_session_and_wait(session_id, text, timeout_ms=30000):
     # resume if we already have one (same path resume_session_headless takes).
     entry = None
     for s in _spawned_sessions:
-        if s.get("resumed_sid") == session_id and s["proc"].poll() is None:
+        if s.get("resumed_sid") == session_id and _poll_spawn_entry(s) is None:
             entry = s
             break
 
@@ -13380,7 +13528,8 @@ def ask_session_and_wait(session_id, text, timeout_ms=30000):
                         }
             else:
                 # No new data — short sleep, then check if subprocess died.
-                if proc.poll() is not None:
+                poll = _poll_spawn_entry(entry)
+                if poll is not None:
                     # Drain anything left and bail.
                     final = fh.read()
                     if final:
@@ -13406,7 +13555,7 @@ def ask_session_and_wait(session_id, text, timeout_ms=30000):
                                 }
                     return {
                         "ok": False,
-                        "error": f"subprocess exited (code {proc.poll()}) before result event",
+                        "error": f"subprocess exited (code {poll}) before result event",
                         "partial": "".join(partial_chunks),
                         "source": "resume-headless",
                     }
@@ -15290,7 +15439,7 @@ def _resolve_spawn_log_for_session(session_id):
             matches = session_id in _log_session_ids(log)
         if matches:
             try:
-                alive = s["proc"].poll() is None
+                alive = _poll_spawn_entry(s) is None
             except Exception:
                 alive = False
             sort_key = s.get("started", "") or os.path.basename(log)
@@ -18093,7 +18242,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         except OSError as e:
                             self.send_json({"ok": False, "error": str(e)}, 500)
                         else:
-                            poll = entry["proc"].poll()
+                            poll = _poll_spawn_entry(entry)
                             self.send_json({
                                 "ok": True,
                                 "pid": pid,
@@ -18339,6 +18488,18 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     status["sidecar_status"] = None
                     status["sidecar_ts"] = 0
                     status["sidecar_in_flight"] = False
+                if status.get("live") and not status.get("tty"):
+                    spawn = _find_live_spawn_entry_for_session(sid)
+                    active_child = _spawn_entry_active_tool_child(spawn) if spawn else None
+                    if active_child:
+                        status["status"] = "busy"
+                        status["sidecar_tool"] = "Bash"
+                        status["sidecar_file"] = (active_child.get("command") or "")[:160]
+                        status["sidecar_status"] = "active"
+                        status["sidecar_ts"] = time.time()
+                        status["sidecar_in_flight"] = True
+                        status["active_child_pid"] = active_child.get("pid")
+                        status["active_child_pgid"] = active_child.get("pgid")
                 if status.get("sidecar_tool") == "AskUserQuestion":
                     if not ask_payload or not ask_payload.get("summary"):
                         ask_payload = _pending_ask_user_question_for_session(sid) if sid else None

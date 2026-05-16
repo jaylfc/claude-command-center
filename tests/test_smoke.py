@@ -4,6 +4,7 @@ Anything Morning-specific lives in `tests/test_morning.py` which is
 gitignored alongside the Morning plugin itself; CI never sees it.
 """
 import importlib
+import fcntl
 import json
 import os
 import pathlib
@@ -314,6 +315,144 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(result["via"], "codex-resume")
         resume.assert_called_once_with(sid, "hello")
         inject.assert_not_called()
+
+    def test_finished_spawn_poll_closes_log_handle(self):
+        proc = mock.Mock()
+        proc.poll.return_value = 0
+        log_fh = mock.Mock()
+        entry = {
+            "pid": 12345,
+            "proc": proc,
+            "log_fh": log_fh,
+            "fifo": None,
+            "stdin_fd": None,
+        }
+
+        with mock.patch.object(self.server, "_remove_spawn_from_registry") as remove:
+            self.assertEqual(self.server._poll_spawn_entry(entry), 0)
+
+        log_fh.close.assert_called_once()
+        remove.assert_called_once_with(12345)
+        self.assertIsNone(entry["log_fh"])
+        self.assertTrue(entry["_cleanup_done"])
+
+    def test_live_headless_spawn_queues_when_tool_child_running(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        spawn = {"pid": 12345}
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue.clear()
+        try:
+            with mock.patch.object(self.server, "_is_codex_session", return_value=False), \
+                 mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+                 mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+                 mock.patch.object(
+                     self.server,
+                     "session_live_status",
+                     return_value={
+                         "live": True,
+                         "tty": None,
+                         "terminal_app": None,
+                         "pid": 12345,
+                     },
+                 ), \
+                 mock.patch.object(
+                     self.server,
+                     "_find_live_spawn_entry_for_session",
+                     return_value=spawn,
+                 ), \
+                 mock.patch.object(
+                     self.server,
+                     "_spawn_entry_active_tool_child",
+                     return_value={"pid": 23456, "command": "grep -r"},
+                 ), \
+                 mock.patch.object(self.server, "_write_stream_json_user_message") as write:
+                result = self.server._inject_text_into_session(sid, "follow up")
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["queued"])
+            self.assertEqual(result["status"], "busy")
+            self.assertEqual(result["via"], "terminal-queued")
+            write.assert_not_called()
+            with self.server._pending_terminal_input_lock:
+                self.assertEqual(
+                    self.server._pending_terminal_input_queue[sid],
+                    ["follow up"],
+                )
+        finally:
+            with self.server._pending_terminal_input_lock:
+                self.server._pending_terminal_input_queue.clear()
+
+    def test_live_headless_spawn_restarts_when_fifo_write_fails(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        spawn = {"pid": 12345}
+        with mock.patch.object(self.server, "_is_codex_session", return_value=False), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={
+                     "live": True,
+                     "tty": None,
+                     "terminal_app": None,
+                     "pid": 12345,
+                 },
+             ), \
+             mock.patch.object(
+                 self.server,
+                 "_find_live_spawn_entry_for_session",
+                 return_value=spawn,
+             ), \
+             mock.patch.object(self.server, "_spawn_entry_active_tool_child", return_value=None), \
+             mock.patch.object(self.server, "_write_stream_json_user_message", return_value=False), \
+             mock.patch.object(self.server, "_retire_unresponsive_spawn_entry") as retire, \
+             mock.patch.object(
+                 self.server,
+                 "resume_session_headless",
+                 return_value={"ok": True, "pid": 67890, "resumed": True},
+             ) as resume:
+            result = self.server._inject_text_into_session(sid, "follow up")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["pid"], 67890)
+        retire.assert_called_once_with(spawn, terminate=True)
+        resume.assert_called_once_with(sid, "follow up")
+
+    def test_fifo_writer_open_does_not_block_without_reader(self):
+        with tempfile.TemporaryDirectory() as td:
+            fifo = pathlib.Path(td) / "stdin.fifo"
+            os.mkfifo(fifo, 0o600)
+            start = time.monotonic()
+            fd = self.server._open_fifo_writer(str(fifo))
+            elapsed = time.monotonic() - start
+
+        self.assertIsNone(fd)
+        self.assertLess(elapsed, 0.5)
+
+    def test_stream_json_fifo_write_does_not_block_when_pipe_full(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+            fcntl.fcntl(write_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            chunk = b"x" * 8192
+            while True:
+                try:
+                    os.write(write_fd, chunk)
+                except BlockingIOError:
+                    break
+            entry = {"stdin_fd": write_fd, "fifo": None, "proc": None}
+            start = time.monotonic()
+            ok = self.server._write_stream_json_user_message(entry, "hello")
+            elapsed = time.monotonic() - start
+            write_fd = None
+
+            self.assertFalse(ok)
+            self.assertIsNone(entry["stdin_fd"])
+            self.assertLess(elapsed, 0.5)
+        finally:
+            os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
 
     def test_terminal_inject_timeout_has_actionable_macos_error(self):
         timeout = subprocess.TimeoutExpired(cmd=["osascript", "-e", "secret"], timeout=5)
