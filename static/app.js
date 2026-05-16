@@ -899,7 +899,10 @@
   function updateLiveToolStrip() {
     const $view = (typeof getConvView === 'function') ? getConvView() : null;
     if (!$view) return;
-    let strip = document.querySelector('.conv-live-tool-strip');
+    document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(node => {
+      if (node.parentElement !== $view) node.remove();
+    });
+    let strip = $view.querySelector('.conv-live-tool-strip');
     // Match only the *real* inline indicator — leave the optimistic
     // twin alone so it lingers until either real data lands or its
     // own 60s safety timeout fires.
@@ -1279,7 +1282,14 @@
   function restoreInputDraft(input, convId) {
     if (!input) return;
     input.value = inputDraftForConversation(convId);
+    moveInputCaretToEnd(input);
     input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function moveInputCaretToEnd(input) {
+    if (!input) return;
+    const end = (input.value || '').length;
+    try { input.setSelectionRange(end, end); } catch (_) {}
   }
 
   function restoreComposerDraftForPane(paneId, convId) {
@@ -1417,8 +1427,7 @@
     const pane = input && input.closest && input.closest('.conv-pane[data-pane-id]');
     const paneId = pane && pane.getAttribute('data-pane-id');
     if (!paneId) return;
-    const idx = paneIndexByPaneId(paneId);
-    if (idx >= 0) splitState.activeIndex = idx;
+    setActivePaneById(paneId);
   }
 
   function slashCommandUnavailableReason() {
@@ -1596,7 +1605,7 @@
         + '<div class="user-msg">' + escapeHtml(text) + '</div>';
       $view.appendChild(pendingDiv);
       showOptimisticAgentIndicator($view);
-      $view.scrollTop = $view.scrollHeight;
+      scrollConversationToEnd($view);
 
       const entry = { text, element: pendingDiv };
       pending.element = pendingDiv;
@@ -1623,13 +1632,13 @@
     if (!$input) return;
     if (($input.value || '').trim()) return;
     $input.value = text;
+    moveInputCaretToEnd($input);
     $input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   async function sendToTerminal(paneId) {
     if (paneId) {
-      const idx = paneIndexByPaneId(paneId);
-      if (idx >= 0) splitState.activeIndex = idx;
+      setActivePaneById(paneId);
     }
     // Look up the input and send-button scoped to the target pane.
     // The static-HTML p1 element retains the global ids; cloned panes
@@ -2752,6 +2761,36 @@
     for (let i = 0; i < splitState.panes.length; i++) if (splitState.panes[i].id === pid) return i;
     return -1;
   }
+  function syncActivePaneChrome(activeConvId) {
+    const activePid = activePaneId();
+    document.querySelectorAll('.conv-pane').forEach(el => {
+      el.classList.toggle('is-active', el.getAttribute('data-pane-id') === activePid);
+    });
+    const convId = arguments.length > 0 ? activeConvId : currentConversation;
+    if ($convList) {
+      $convList.querySelectorAll('.conv-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.id === convId);
+      });
+    }
+    if ($kanbanBoard) {
+      $kanbanBoard.querySelectorAll('.kanban-card').forEach(el => {
+        el.classList.toggle('active', el.dataset.id === convId);
+      });
+    }
+    if ($kanbanBoardSplit) {
+      $kanbanBoardSplit.querySelectorAll('.kanban-card').forEach(el => {
+        el.classList.toggle('active', el.dataset.id === convId);
+      });
+    }
+  }
+  function setActivePaneById(paneId, activeConvId) {
+    const idx = paneIndexByPaneId(paneId);
+    if (idx < 0) return false;
+    splitState.activeIndex = idx;
+    if (arguments.length > 1) syncActivePaneChrome(activeConvId);
+    else syncActivePaneChrome();
+    return true;
+  }
 
   // Compatibility shim — read/write the active pane via the old global names.
   // DO NOT remove without auditing every reference to currentConversation,
@@ -2883,7 +2922,7 @@
       + (meta ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">' + escapeHtml(meta) + '</div>' : '')
       + '</div>';
     showOptimisticAgentIndicator($view);
-    $view.scrollTop = $view.scrollHeight;
+    scrollConversationToEnd($view);
   }
 
   function adoptPendingSpawnPid(tempPid, realPid, logPath) {
@@ -7704,6 +7743,121 @@
     return pane ? pane.querySelector('.conv-input-bar') : null;
   }
 
+  const CONV_BOTTOM_TOLERANCE = 80;
+
+  function conversationDistanceFromBottom(view) {
+    if (!view) return 0;
+    return Math.max(0, view.scrollHeight - view.scrollTop - view.clientHeight);
+  }
+
+  function isConversationAtBottom(view) {
+    return conversationDistanceFromBottom(view) <= CONV_BOTTOM_TOLERANCE;
+  }
+
+  function conversationScrollViews() {
+    const seen = new Set();
+    const views = Array.from(document.querySelectorAll('.conv-pane .conversations-view'));
+    if ($convPanelView) views.push($convPanelView);
+    return views.filter(view => {
+      if (!view || seen.has(view)) return false;
+      seen.add(view);
+      return true;
+    });
+  }
+
+  function positionConversationEndAffordance(view) {
+    const btn = view && view._convEndButton;
+    const host = btn && btn.parentElement;
+    if (!btn || !host || !view.isConnected || !host.isConnected) return;
+    const hostRect = host.getBoundingClientRect();
+    const viewRect = view.getBoundingClientRect();
+    if (!hostRect.width || !hostRect.height || !viewRect.width || !viewRect.height) return;
+    btn.style.bottom = Math.max(12, Math.round(hostRect.bottom - viewRect.bottom + 14)) + 'px';
+    btn.style.right = Math.max(14, Math.round(hostRect.right - viewRect.right + 20)) + 'px';
+  }
+
+  function updateConversationEndAffordance(view) {
+    if (!view) return;
+    if (!view._convEndAffordanceAttached) attachConversationEndAffordance(view);
+    const btn = view._convEndButton;
+    if (!btn) return;
+    const show = view.scrollHeight > view.clientHeight + CONV_BOTTOM_TOLERANCE
+      && !isConversationAtBottom(view);
+    btn.classList.toggle('visible', show);
+    btn.setAttribute('aria-hidden', show ? 'false' : 'true');
+    btn.tabIndex = show ? 0 : -1;
+    positionConversationEndAffordance(view);
+  }
+
+  function scrollConversationToEnd(view, behavior) {
+    if (!view) return;
+    const top = Math.max(0, view.scrollHeight - view.clientHeight);
+    if (behavior === 'smooth' && typeof view.scrollTo === 'function') {
+      view.scrollTo({ top, behavior: 'smooth' });
+    } else {
+      view.scrollTop = top;
+    }
+    updateConversationEndAffordance(view);
+  }
+
+  function attachConversationEndAffordance(view) {
+    if (!view || view._convEndAffordanceAttached) return;
+    const host = view.closest('.conv-pane') || view.closest('.conv-panel');
+    if (!host) return;
+    let btn = host.querySelector(':scope > .conv-scroll-end-btn');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'conv-scroll-end-btn';
+      btn.title = 'Jump to end of conversation';
+      btn.setAttribute('aria-label', 'Jump to end of conversation');
+      btn.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"></path><path d="M6 13l6 6 6-6"></path></svg><span>End</span>';
+      host.appendChild(btn);
+    }
+    btn._convTargetView = view;
+    btn.addEventListener('click', () => {
+      scrollConversationToEnd(btn._convTargetView || view, 'smooth');
+    });
+    view._convEndButton = btn;
+    view._convEndAffordanceAttached = true;
+    view.addEventListener('scroll', () => updateConversationEndAffordance(view), { passive: true });
+    updateConversationEndAffordance(view);
+  }
+
+  function ensureAllConversationEndAffordances() {
+    conversationScrollViews().forEach(attachConversationEndAffordance);
+    conversationScrollViews().forEach(updateConversationEndAffordance);
+  }
+
+  function captureConversationBottomAnchors() {
+    ensureAllConversationEndAffordances();
+    return conversationScrollViews().map(view => ({
+      view,
+      wasAtBottom: isConversationAtBottom(view),
+    }));
+  }
+
+  function restoreConversationBottomAnchors(anchors) {
+    if (!anchors || !anchors.length) {
+      ensureAllConversationEndAffordances();
+      return;
+    }
+    const raf = window.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
+    const restore = () => {
+      for (const anchor of anchors) {
+        if (!anchor.view || !anchor.view.isConnected) continue;
+        if (anchor.wasAtBottom) scrollConversationToEnd(anchor.view);
+        else updateConversationEndAffordance(anchor.view);
+      }
+      ensureAllConversationEndAffordances();
+    };
+    raf(() => {
+      restore();
+      raf(restore);
+    });
+  }
+  ensureAllConversationEndAffordances();
+
   // Build a fresh `.conv-pane` element for paneId, cloning the chrome of
   // pane "p1" so styling / wiring stays in lockstep. Called only when
   // splitting from one pane to two.
@@ -7716,6 +7870,7 @@
     // to p1's element, never the clone's. Task 6 will re-find the cloned
     // chrome elements via class/tag selectors scoped to the clone.
     clone.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+    clone.querySelectorAll('.conv-scroll-end-btn').forEach(el => el.remove());
     // Replace the transcript with a Loading… empty state; the dropped
     // conversation will be loaded by selectConversation(id, paneId)
     // immediately after attach.
@@ -7773,6 +7928,7 @@
   function renderSplitLayout() {
     const $split = document.getElementById('convSplit');
     if (!$split) return;
+    const bottomAnchors = captureConversationBottomAnchors();
     if (!splitState.orientation || splitState.panes.length < 2) {
       $split.setAttribute('data-orientation', '');
       // Drop any stray second pane elements (defensive — should already be 1).
@@ -7788,6 +7944,7 @@
       // that fraction of free space — the remainder stays empty, so the pane
       // would render at the dragged ratio (e.g. half height) instead of full.
       $split.querySelectorAll('.conv-pane').forEach(p => { p.style.flex = ''; });
+      restoreConversationBottomAnchors(bottomAnchors);
       return;
     }
     $split.setAttribute('data-orientation', splitState.orientation);
@@ -7814,11 +7971,9 @@
     // Apply ratio.
     p0.style.flex = `${splitState.ratio} 1 0`;
     p1.style.flex = `${1 - splitState.ratio} 1 0`;
-    // Mark the active pane.
-    $split.querySelectorAll('.conv-pane').forEach(el => {
-      el.classList.toggle('is-active', el.getAttribute('data-pane-id') === activePaneId());
-    });
+    syncActivePaneChrome();
     attachAllPaneDropZones();
+    restoreConversationBottomAnchors(bottomAnchors);
   }
 
   function attachDividerDrag(divider) {
@@ -7827,6 +7982,7 @@
     let startRatio = 0.5;
     let containerSize = 0;
     let isVertical = true;
+    let bottomAnchors = [];
 
     divider.addEventListener('pointerdown', (ev) => {
       const $split = document.getElementById('convSplit');
@@ -7837,6 +7993,7 @@
       dragging = true;
       startPos = isVertical ? ev.clientX : ev.clientY;
       startRatio = splitState.ratio;
+      bottomAnchors = captureConversationBottomAnchors();
       divider.setPointerCapture(ev.pointerId);
       ev.preventDefault();
     });
@@ -7854,6 +8011,8 @@
     });
     divider.addEventListener('pointerup', (ev) => {
       dragging = false;
+      restoreConversationBottomAnchors(bottomAnchors);
+      bottomAnchors = [];
       try { divider.releasePointerCapture(ev.pointerId); } catch (e) {}
     });
   }
@@ -7988,30 +8147,8 @@
     if (!pane) return;
     const pid = pane.getAttribute('data-pane-id');
     const idx = paneIndexByPaneId(pid);
-    if (idx < 0 || idx === splitState.activeIndex) return;
-    splitState.activeIndex = idx;
-    document.querySelectorAll('.conv-pane').forEach(el => {
-      el.classList.toggle('is-active', el.getAttribute('data-pane-id') === pid);
-    });
-    // Sidebar highlight follows the new active pane. Mirrors the inline
-    // toggle in selectConversation (~line 6906-6917) but reads the conv
-    // id from the active pane (via the shim) instead of taking a param.
-    const activeConvId = currentConversation;
-    if ($convList) {
-      $convList.querySelectorAll('.conv-item').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === activeConvId);
-      });
-    }
-    if ($kanbanBoard) {
-      $kanbanBoard.querySelectorAll('.kanban-card').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === activeConvId);
-      });
-    }
-    if ($kanbanBoardSplit) {
-      $kanbanBoardSplit.querySelectorAll('.kanban-card').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === activeConvId);
-      });
-    }
+    if (idx < 0) return;
+    setActivePaneById(pid);
   }, true);
 
   // Open `convId` in a new pane, splitting the existing pane in the
@@ -8036,8 +8173,7 @@
     renderSplitLayout();          // creates the DOM for p2
     attachAllPaneDropZones();     // wire its drop overlay
     // Make p2 active and load the conversation in it.
-    const newIdx = splitState.panes.length - 1;
-    splitState.activeIndex = newIdx;
+    setActivePaneById(newPane.id, convId);
     await selectConversation(convId, newPane.id);
   }
 
@@ -8059,24 +8195,7 @@
     splitState.orientation = null;
     splitState.activeIndex = 0; // survivor is now the only pane
     renderSplitLayout();
-    // Re-render sidebar highlight for the survivor pane (mirrors the
-    // click-pane-active handler's three-block pattern).
-    const activeConvId = currentConversation;
-    if ($convList) {
-      $convList.querySelectorAll('.conv-item').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === activeConvId);
-      });
-    }
-    if ($kanbanBoard) {
-      $kanbanBoard.querySelectorAll('.kanban-card').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === activeConvId);
-      });
-    }
-    if ($kanbanBoardSplit) {
-      $kanbanBoardSplit.querySelectorAll('.kanban-card').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === activeConvId);
-      });
-    }
+    syncActivePaneChrome();
   }
 
   // Show a 2-second floating message anchored to the bottom-center of the viewport.
@@ -8135,6 +8254,9 @@
     }
   }
   window.addEventListener('resize', handleViewportResize);
+  window.addEventListener('resize', () => {
+    restoreConversationBottomAnchors(captureConversationBottomAnchors());
+  });
 
   const STICKY_HEADER_HEIGHT_KEY = 'ccc-sticky-header-height';
   const STICKY_HEADER_MIN_PX = 90;
@@ -8295,6 +8417,7 @@
       html += '</div>';
       $view.innerHTML = html;
       $view.scrollTop = 0;
+      updateConversationEndAffordance($view);
       wireIssueCloseButtons($view, issueNum, concreteRepo);
 
       // Issue-view layout: route the issue header + close actions into the
@@ -8445,7 +8568,6 @@
 
   async function selectConversation(id, paneId) {
     paneId = paneId || activePaneId();
-    const paneIdx = paneIndexByPaneId(paneId);
     const pane = paneByPaneId(paneId);
     if (!pane) return;
     const selectedConv = (conversationsData || []).find(x => x.id === id) || {};
@@ -8453,7 +8575,7 @@
     rememberComposerDraftForPane(paneId);
     // Make this pane active so the existing globals (which proxy through
     // splitState.activeIndex) target the right pane while we run.
-    splitState.activeIndex = paneIdx;
+    setActivePaneById(paneId, id);
     // Stop any existing SSE stream or pollers
     stopConvStream(paneId);
     stopSpawnStream();
@@ -8514,19 +8636,7 @@
     const finishConversationPaneLoad = () => {
       if (conversationPaneLoadToken === loadToken) conversationPaneLoading = false;
     };
-    // Update active state in sidebar (list view)
-    $convList.querySelectorAll('.conv-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.id === id);
-    });
-    // Update active state in kanban views (sidebar + split)
-    $kanbanBoard.querySelectorAll('.kanban-card').forEach(el => {
-      el.classList.toggle('active', el.dataset.id === id);
-    });
-    if ($kanbanBoardSplit) {
-      $kanbanBoardSplit.querySelectorAll('.kanban-card').forEach(el => {
-        el.classList.toggle('active', el.dataset.id === id);
-      });
-    }
+    syncActivePaneChrome(id);
     // Update split panel session ID display
     if ($cpSessionId) {
       const sid = selectedRow && selectedRow.pending_spawn ? '' : (sessionIdByConv[id] || '');
@@ -8599,7 +8709,7 @@
         // backend finds a CCC-spawned headless process for this session.
         // No-op for externally launched, IDE-launched, or pkood sessions.
         const sid = sessionIdByConv[id] || '';
-        if (sid && source !== 'codex' && source !== 'backlog') startSpawnStream(sid);
+        if (sid && source !== 'codex' && source !== 'backlog') startSpawnStream(sid, paneId);
       }
     } finally {
       finishConversationPaneLoad();
@@ -8681,20 +8791,18 @@
   }
 
   function startConvStream(paneId) {
-    if (paneId) {
-      const idx = paneIndexByPaneId(paneId);
-      if (idx >= 0) splitState.activeIndex = idx;
-    }
-    stopConvStream(paneId);
-    if (!currentConversation) return;
+    const streamPaneId = paneId || activePaneId();
+    const streamPane = paneByPaneId(streamPaneId);
+    if (!streamPane || !streamPane.conversationId) return;
+    stopConvStream(streamPaneId);
     // Snapshot the pane and conv id at stream-start time so the SSE
     // event-handler closures always target THIS pane's stream even if
     // the user switches the active pane between SSE events.
-    const streamPaneId = activePaneId();
-    const streamConvId = currentConversation;
-    const url = '/api/conversations/' + streamConvId + '/stream?after=' + convLastLine;
-    convEventSource = new EventSource(url);
-    convEventSource.onmessage = (ev) => {
+    const streamConvId = streamPane.conversationId;
+    const url = '/api/conversations/' + streamConvId + '/stream?after=' + streamPane.lastLine;
+    const source = new EventSource(url);
+    streamPane.eventSource = source;
+    source.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
         if (data.events && data.events.length > 0) {
@@ -8706,7 +8814,7 @@
           // a queued message from the old conversation can write into the
           // new conversation's transcript when the user switches convs in
           // the same pane.
-          if (!streamPane || streamPane.conversationId !== streamConvId) return;
+          if (!streamPane || streamPane.conversationId !== streamConvId || streamPane.eventSource !== source) return;
           const savedIdx = splitState.activeIndex;
           splitState.activeIndex = paneIndexByPaneId(streamPaneId);
           try {
@@ -8726,7 +8834,9 @@
         }
       } catch (err) {}
     };
-    convEventSource.onerror = () => {
+    source.onerror = () => {
+      const pane = paneByPaneId(streamPaneId);
+      if (!pane || pane.eventSource !== source) return;
       stopConvStream(streamPaneId);
       setTimeout(() => startConvStream(streamPaneId), 2000);
     };
@@ -8734,8 +8844,12 @@
 
   function stopConvStream(paneId) {
     if (paneId) {
-      const idx = paneIndexByPaneId(paneId);
-      if (idx >= 0) splitState.activeIndex = idx;
+      const pane = paneByPaneId(paneId);
+      if (pane && pane.eventSource) {
+        pane.eventSource.close();
+        pane.eventSource = null;
+      }
+      return;
     }
     if (convEventSource) {
       convEventSource.close();
@@ -9014,16 +9128,22 @@
     if (b) b.style.display = visible ? '' : 'none';
   }
 
-  async function startSpawnStream(sid) {
+  async function startSpawnStream(sid, paneId) {
     stopSpawnStream();
     if (!sid) return;
+    const streamPaneId = paneId || activePaneId();
+    const streamPane = paneByPaneId(streamPaneId);
+    const streamConvId = streamPane ? streamPane.conversationId : currentConversation;
     let info;
     try {
       const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/spawn-info');
       info = await res.json();
     } catch (_) { return; }
-    // Race guard: user may have switched away while we were fetching.
-    if (currentSession.id !== sid) return;
+    // Race guard: user may have switched panes while we were fetching.
+    // The stream still belongs in the pane that requested it, as long as
+    // that pane is still showing the same conversation/session.
+    const latestPane = paneByPaneId(streamPaneId);
+    if (!latestPane || latestPane.conversationId !== streamConvId || latestPane.currentSession.id !== sid) return;
     if (!info || !info.has_log || !info.alive) return;
     setLiveBadgeVisible(true);
     _spawnLiveSid = sid;
@@ -9032,7 +9152,12 @@
     spawnEventSource.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        if (data && Array.isArray(data.events)) handleSpawnEvents(data.events);
+        const pane = paneByPaneId(streamPaneId);
+        if (!pane || pane.conversationId !== streamConvId || pane.currentSession.id !== sid) {
+          stopSpawnStream();
+          return;
+        }
+        if (data && Array.isArray(data.events)) handleSpawnEvents(data.events, streamPaneId, streamConvId);
       } catch (_) {}
     };
     spawnEventSource.onerror = () => {
@@ -9079,8 +9204,8 @@
     }
   }
 
-  function ensureStreamingBubble(msgId) {
-    const $view = getConvView();
+  function ensureStreamingBubble(msgId, paneId) {
+    const $view = paneId ? getConvViewForPane(paneId) : getConvView();
     if (!$view) return null;
     // Hand-off short-circuit: if the JSONL renderer already painted this
     // message (formatted, with markdown / tool detail / result output), skip
@@ -9121,10 +9246,12 @@
     return _streamingBubble.querySelector('.stream-bubble-blocks');
   }
 
-  function handleSpawnEvents(events) {
+  function handleSpawnEvents(events, paneId, convId) {
     if (!Array.isArray(events)) return;
-    const $view = getConvView();
-    const wasAtBottom = $view && ($view.scrollHeight - $view.scrollTop - $view.clientHeight) < 80;
+    const pane = paneId ? paneByPaneId(paneId) : null;
+    if (paneId && (!pane || (convId && pane.conversationId !== convId))) return;
+    const $view = paneId ? getConvViewForPane(paneId) : getConvView();
+    const wasAtBottom = $view && isConversationAtBottom($view);
     for (const ev of events) {
       if (!ev || typeof ev !== 'object') continue;
       if (ev.type === 'result') {
@@ -9135,7 +9262,7 @@
         continue;
       }
       if (ev.type !== 'assistant_block') continue;
-      const slot = ensureStreamingBubble(ev.message_id);
+      const slot = ensureStreamingBubble(ev.message_id, paneId);
       if (!slot) continue;
       _streamingMsgId = ev.message_id || _streamingMsgId;
       for (const b of (ev.blocks || [])) {
@@ -9175,7 +9302,8 @@
         }
       }
     }
-    if (wasAtBottom && $view) $view.scrollTop = $view.scrollHeight;
+    if (wasAtBottom && $view) scrollConversationToEnd($view);
+    else if ($view) updateConversationEndAffordance($view);
   }
 
   function stopPkoodTailPoller() {
@@ -9191,11 +9319,13 @@
       const res = await fetch('/api/pkood/tail?id=' + encodeURIComponent(agentId));
       const data = await res.json();
       if (data.ok) {
-        const atBottom = $view.scrollHeight - $view.scrollTop - $view.clientHeight < 40;
+        const atBottom = isConversationAtBottom($view);
         $view.innerHTML = '<pre class="pkood-tail-output">' + escapeHtml(data.output || '(no output yet)') + '</pre>';
-        if (atBottom) $view.scrollTop = $view.scrollHeight;
+        if (atBottom) scrollConversationToEnd($view);
+        else updateConversationEndAffordance($view);
       } else {
         $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load agent output: ' + escapeHtml(data.error || 'unknown') + '</div>';
+        updateConversationEndAffordance($view);
       }
     } catch (err) {
       // Keep existing content on transient fetch errors
@@ -9219,6 +9349,7 @@
       const $view = getConvView();
       const engine = card && card.source === 'gemini' ? 'gemini' : 'codex';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Spawning ' + engine + ' run…</div>';
+      updateConversationEndAffordance($view);
       return;
     }
     const $view = getConvView();
@@ -9228,14 +9359,16 @@
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (!data.ok) {
         $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load ' + engine + ' log: ' + escapeHtml(data.error || ('HTTP ' + res.status)) + '</div>';
+        updateConversationEndAffordance($view);
         stopCodexLogPoller();
         return;
       }
-      const atBottom = $view.scrollHeight - $view.scrollTop - $view.clientHeight < 40;
+      const atBottom = isConversationAtBottom($view);
       $view.innerHTML = (data.engine === 'gemini' || engine === 'gemini')
         ? renderGeminiLogHtml(data)
         : renderCodexLogHtml(data);
-      if (atBottom) $view.scrollTop = $view.scrollHeight;
+      if (atBottom) scrollConversationToEnd($view);
+      else updateConversationEndAffordance($view);
       // Process exited — stop polling. Final render already in place.
       if (!data.running) stopCodexLogPoller();
     } catch (err) {
@@ -9694,6 +9827,7 @@
     html += '</div>';
     $view.innerHTML = html;
     $view.scrollTop = 0;
+    updateConversationEndAffordance($view);
   }
 
   // Session-workspace panel — fetched per conversation, rendered in
@@ -10842,7 +10976,7 @@
     // If they've scrolled up to read, leave the scroll position alone so
     // newly-streamed events don't yank them back down. 80px tolerance is
     // generous enough to absorb typical line-height jitter.
-    const wasAtBottom = ($view.scrollHeight - $view.scrollTop - $view.clientHeight) < 80;
+    const wasAtBottom = isConversationAtBottom($view);
     for (const ev of events) {
       const div = document.createElement('div');
       div.className = 'event ' + ev.type;
@@ -11197,9 +11331,6 @@
         $view.appendChild(div);
       }
     }
-    if (events.length > 0 && wasAtBottom) {
-      $view.scrollTop = $view.scrollHeight;
-    }
     // Re-anchor the inline live-tool indicator at the bottom; new events
     // just appended would otherwise push past it.
     if (typeof updateLiveToolStrip === 'function') updateLiveToolStrip();
@@ -11232,6 +11363,11 @@
     // Files-from-conversation pill: the sticky header may have just
     // been created (above) or may already exist. Fire-and-forget; the
     // pill stays hidden if the conversation has no qualifying files.
+    if (events.length > 0 && wasAtBottom) {
+      scrollConversationToEnd($view);
+    } else {
+      updateConversationEndAffordance($view);
+    }
     ffcRefreshForCurrent();
   }
 
@@ -15799,11 +15935,13 @@
   }
 
   function enterNewSessionMode() {
-    rememberComposerDraftForPane(activePaneId());
+    const paneId = activePaneId();
+    rememberComposerDraftForPane(paneId);
     if (typeof stopConvStream === 'function') stopConvStream();
     if (typeof stopSpawnStream === 'function') stopSpawnStream();
     if (typeof stopPkoodTailPoller === 'function') stopPkoodTailPoller();
     currentConversation = '__new__';
+    syncActivePaneChrome('__new__');
     setCurrentSession(null, null, null, false, null);
     // Drop the previous session's workspace/usage data so the input-context
     // strip (WORKTREE pill, ctx/peak token pill) doesn't linger above the
@@ -15837,9 +15975,11 @@
     }
     if (typeof mobileShowForCurrentMode === 'function') mobileShowForCurrentMode();
     setTimeout(() => {
-      if ($convInput) {
-        restoreInputDraft($convInput, '__new__');
-        $convInput.focus();
+      const input = composerInputForPane(paneId) || $convInput;
+      if (input) {
+        restoreInputDraft(input, '__new__');
+        input.focus();
+        moveInputCaretToEnd(input);
       }
     }, 30);
   }
