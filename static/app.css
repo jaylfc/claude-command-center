@@ -2090,6 +2090,10 @@
   }
   .conv-item .conv-live-tool .conv-live-name { font-weight: 600; }
   .conv-item .conv-live-tool .conv-live-file { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+  .conv-item .conv-live-tool .conv-live-file.is-command {
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
   .conv-item .conv-live-tool.in-flight {
     color: #58a6ff;
     background: rgba(88,166,255,0.10);
@@ -3575,6 +3579,10 @@
   }
   .kanban-live-tool .kanban-live-name { font-weight: 600; }
   .kanban-live-tool .kanban-live-file { color: var(--text-muted); }
+  .kanban-live-tool .kanban-live-file.is-command {
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
   .kanban-live-tool .kanban-live-age { color: var(--text-muted); font-size: 10px; margin-left: 4px; }
   /* In-flight: tool is actively running right now (PreToolUse marker) */
   .kanban-live-tool.in-flight {
@@ -3603,6 +3611,10 @@
   }
   .conv-live-tool-strip .cl-tool { font-weight: 600; }
   .conv-live-tool-strip .cl-file { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .conv-live-tool-strip .cl-file.is-command {
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
   .conv-live-tool-strip .cl-age { color: var(--text-muted); font-size: 11px; margin-left: auto; flex: 0 0 auto; }
   .conv-live-tool-strip.in-flight {
     color: #58a6ff;
@@ -3655,6 +3667,10 @@
   }
   .conv-live-tool-inline .cl-tool { font-weight: 600; }
   .conv-live-tool-inline .cl-file { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .conv-live-tool-inline .cl-file.is-command {
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
   .conv-live-tool-inline .cl-age { color: var(--text-muted); font-size: 11px; margin-left: auto; flex: 0 0 auto; }
   /* When the live-tool strip is present above the sticky header, push the
      header down so they don't both stick at y=0 and overlap.

@@ -29,6 +29,92 @@ def prompt_fragment(text, max_len=240):
     return text
 
 
+def shell_preview_parts(command):
+    parts = []
+    buf = []
+    quote = ""
+    escaped = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if command.startswith("&&", i) or command.startswith("||", i):
+            segment = "".join(buf).strip()
+            if segment:
+                parts.append(("segment", segment))
+            parts.append(("op", command[i:i + 2]))
+            buf = []
+            i += 2
+            continue
+        if ch == ";":
+            segment = "".join(buf).strip()
+            if segment:
+                parts.append(("segment", segment))
+            parts.append(("op", ";"))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    segment = "".join(buf).strip()
+    if segment:
+        parts.append(("segment", segment))
+    return parts
+
+
+def shell_wrapper_segment(segment):
+    text = re.sub(r"\s+", " ", segment or "").strip()
+    text = re.sub(r"(?:^|\s+)2>\s*/dev/null\b", "", text).strip()
+    if text in ("true", ":"):
+        return True
+    if re.fullmatch(r"(?:(?:command|builtin)\s+)?(?:setopt|unsetopt)\s+[-A-Za-z0-9_\s]+", text):
+        return True
+    if re.fullmatch(r"(?:(?:command|builtin)\s+)?shopt\s+-[su]\s+[-A-Za-z0-9_\s]+", text):
+        return True
+    return False
+
+
+def shell_command_preview(command, max_len=240):
+    if not isinstance(command, str):
+        return ""
+    raw = SECRET_RE.sub("[redacted]", re.sub(r"\s+", " ", command).strip())
+    if not raw:
+        return ""
+    kept = []
+    for kind, value in shell_preview_parts(raw):
+        if kind == "segment":
+            if shell_wrapper_segment(value):
+                continue
+            if kept and kept[-1][0] == "op":
+                kept.append((kind, value))
+            elif not kept or kept[-1][0] != "segment":
+                kept.append((kind, value))
+            else:
+                kept.append(("op", ";"))
+                kept.append((kind, value))
+            continue
+        if kept and kept[-1][0] == "segment":
+            kept.append((kind, value))
+    while kept and kept[-1][0] == "op":
+        kept.pop()
+    cleaned = " ".join(value for _, value in kept).strip() or raw
+    return prompt_fragment(cleaned, max_len)
+
+
 def ask_user_question_payload(tool_input):
     questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
     if not isinstance(questions, list) or not questions or not isinstance(questions[0], dict):
@@ -73,7 +159,7 @@ def main():
         file_ref = tool_input.get("file_path") or ""
         if not file_ref:
             cmd = tool_input.get("command") or ""
-            file_ref = cmd[:80] if cmd else ""
+            file_ref = shell_command_preview(cmd) if tool_name == "Bash" else prompt_fragment(cmd)
         question_payload = ask_user_question_payload(tool_input) if tool_name == "AskUserQuestion" else {}
         if question_payload:
             file_ref = question_payload["summary"]

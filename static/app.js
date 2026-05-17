@@ -896,6 +896,52 @@
     }
   }
 
+  function isCommandActivityTool(tool) {
+    const name = String(tool || '');
+    return name === 'Bash' || name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command';
+  }
+
+  function liveActivityToolLabel(tool) {
+    const name = String(tool || '');
+    if (name === 'Bash') return 'Bash command';
+    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command') return 'Shell command';
+    if (name === 'Read') return 'Reading file';
+    if (name === 'Edit' || name === 'MultiEdit') return 'Editing file';
+    if (name === 'Write') return 'Writing file';
+    if (name === 'WebFetch') return 'Fetching URL';
+    if (name === 'WebSearch') return 'Searching web';
+    if (name === 'TodoWrite') return 'Updating todos';
+    if (name === 'AskUserQuestion') return 'Question';
+    return name || 'Tool';
+  }
+
+  function liveActivityCompactToolLabel(tool) {
+    const name = String(tool || '');
+    if (name === 'Bash') return 'Bash';
+    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command') return 'Shell';
+    return liveActivityToolLabel(tool);
+  }
+
+  function liveActivityDetailClass(tool) {
+    return isCommandActivityTool(tool) ? ' is-command' : '';
+  }
+
+  function shortenLiveActivityDetail(detail, tool, maxLen) {
+    const value = String(detail || '').replace(/\s+/g, ' ').trim();
+    const n = Number(maxLen) || 80;
+    if (!value || value.length <= n) return value;
+    if (isCommandActivityTool(tool) || !/[\/\\]/.test(value)) {
+      return value.slice(0, Math.max(1, n - 3)).replace(/\s+$/g, '') + '...';
+    }
+    return '...' + value.slice(-(Math.max(1, n - 3))).replace(/^\s+/g, '');
+  }
+
+  function liveActivityTitle(stateLabel, tool, detail) {
+    const bits = [stateLabel, liveActivityToolLabel(tool)].filter(Boolean);
+    const value = String(detail || '').replace(/\s+/g, ' ').trim();
+    return bits.join(': ') + (value ? ': ' + value : '');
+  }
+
   function updateLiveToolStrip() {
     const $view = (typeof getConvView === 'function') ? getConvView() : null;
     if (!$view) return;
@@ -922,17 +968,16 @@
     clearOptimisticAgentIndicator($view);
     if (currentSession.id) clearSessionSending(currentSession.id);
     const file = liveStatus.sidecarFile || liveStatus.questionText || '';
-    const shortFile = file
-      ? (file.length > 60 ? '…' + file.slice(-59) : file)
-      : '';
+    const shortFile = shortenLiveActivityDetail(file, tool, isCommandActivityTool(tool) ? 140 : 80);
     const dur = ageSec < 2 ? '<1s' : ageSec < 60 ? ageSec + 's' : Math.floor(ageSec / 60) + 'm';
     const inFlight = !!liveStatus.sidecarInFlight;
     const ageLbl = isQuestion ? 'waiting for answer' : (inFlight ? 'running ' + dur : dur + ' ago');
-    const toolLabel = isQuestion ? 'Question' : tool;
+    const toolLabel = isQuestion ? 'Question' : liveActivityToolLabel(tool);
+    const title = liveActivityTitle(isQuestion ? 'Waiting for answer' : (inFlight ? 'Currently running' : 'Last completed'), tool, file);
     const html =
         '<span class="cl-pulse"></span>'
       + '<span class="cl-tool">' + (inFlight && !isQuestion ? '▶ ' : '') + escapeHtml(toolLabel) + '</span>'
-      + (shortFile ? ' <span class="cl-file">' + escapeHtml(shortFile) + '</span>' : '')
+      + (shortFile ? ' <span class="cl-file' + liveActivityDetailClass(tool) + '">' + escapeHtml(shortFile) + '</span>' : '')
       + '<span class="cl-age">' + ageLbl + '</span>';
     if (!strip) {
       strip = document.createElement('div');
@@ -943,6 +988,7 @@
     }
     strip.classList.toggle('in-flight', inFlight);
     strip.classList.toggle('is-question', isQuestion);
+    strip.title = title;
     strip.innerHTML = html;
     // Inline twin at the bottom of the transcript. Re-append on every
     // refresh so it stays the last child even when new events have
@@ -953,6 +999,7 @@
     }
     inline.classList.toggle('in-flight', inFlight);
     inline.classList.toggle('is-question', isQuestion);
+    inline.title = title;
     inline.innerHTML = html;
     if (inline.parentElement !== $view || inline !== $view.lastElementChild) {
       $view.appendChild(inline);
@@ -4989,18 +5036,19 @@
         if (c.is_live && c.sidecar_status === 'active' && c.sidecar_tool && c.sidecar_tool !== 'AskUserQuestion') {
           const sidecarAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
           if (sidecarAge < 300) {
-            const shortFile = c.sidecar_file
-              ? (c.sidecar_file.length > 40 ? '\u2026' + c.sidecar_file.slice(-39) : c.sidecar_file)
-              : '';
+            const rawDetail = c.sidecar_file || '';
+            const shortFile = shortenLiveActivityDetail(rawDetail, c.sidecar_tool, isCommandActivityTool(c.sidecar_tool) ? 72 : 40);
             // In-flight = the PreToolUse marker says this tool is *currently*
             // running, so "running 5s" is honest. Otherwise it's the most
             // recent completion, so "5s ago" is honest.
             const dur = sidecarAge < 2 ? '<1s' : sidecarAge < 60 ? sidecarAge + 's' : Math.floor(sidecarAge / 60) + 'm';
             const ageLbl = c.sidecar_in_flight ? 'running ' + dur : dur + ' ago';
             const arrow = c.sidecar_in_flight ? '\u25b6 ' : '';
-            html += '<div class="kanban-live-tool' + (c.sidecar_in_flight ? ' in-flight' : '') + '" title="' + (c.sidecar_in_flight ? 'Currently running' : 'Last completed') + '">'
-              + '<span class="kanban-live-name">' + arrow + escapeHtml(c.sidecar_tool) + '</span>'
-              + (shortFile ? ' <span class="kanban-live-file">' + escapeHtml(shortFile) + '</span>' : '')
+            const toolLabel = liveActivityToolLabel(c.sidecar_tool);
+            const liveTitle = liveActivityTitle(c.sidecar_in_flight ? 'Currently running' : 'Last completed', c.sidecar_tool, rawDetail);
+            html += '<div class="kanban-live-tool' + (c.sidecar_in_flight ? ' in-flight' : '') + '" title="' + escapeAttr(liveTitle) + '">'
+              + '<span class="kanban-live-name">' + arrow + escapeHtml(toolLabel) + '</span>'
+              + (shortFile ? ' <span class="kanban-live-file' + liveActivityDetailClass(c.sidecar_tool) + '">' + escapeHtml(shortFile) + '</span>' : '')
               + '<span class="kanban-live-age">' + ageLbl + '</span>'
               + '</div>';
           }
@@ -5956,16 +6004,16 @@
       } else if (c.is_live && c.sidecar_status === 'active' && c.sidecar_tool) {
         const sidecarAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
         if (sidecarAge < 300) {
-          // Row view stays compact: tool name only, no file path. The
-          // hover title still surfaces the file for quick reference.
-          const shortFile = c.sidecar_file
-            ? (c.sidecar_file.length > 40 ? '…' + c.sidecar_file.slice(-39) : c.sidecar_file)
-            : '';
+          // Row view stays compact: show only a short detail, with the
+          // full file/command available in the hover title.
+          const rawDetail = c.sidecar_file || '';
+          const shortFile = shortenLiveActivityDetail(rawDetail, c.sidecar_tool, isCommandActivityTool(c.sidecar_tool) ? 30 : 40);
           const arrow = c.sidecar_in_flight ? '▶ ' : '';
+          const liveTitle = liveActivityTitle(c.sidecar_in_flight ? 'Currently running' : 'Last completed', c.sidecar_tool, rawDetail);
           liveToolHtml = '<span class="conv-live-tool' + (c.sidecar_in_flight ? ' in-flight' : '') + '" '
-            + 'title="' + (c.sidecar_in_flight ? 'Currently running' : 'Last completed') + ': '
-            + escapeHtml(c.sidecar_tool) + (shortFile ? ' ' + escapeHtml(shortFile) : '') + '">'
-            + '<span class="conv-live-name">' + arrow + escapeHtml(c.sidecar_tool) + '</span>'
+            + 'title="' + escapeAttr(liveTitle) + '">'
+            + '<span class="conv-live-name">' + arrow + escapeHtml(liveActivityCompactToolLabel(c.sidecar_tool)) + '</span>'
+            + (shortFile ? '<span class="conv-live-file' + liveActivityDetailClass(c.sidecar_tool) + '">' + escapeHtml(shortFile) + '</span>' : '')
             + '</span>';
         }
       }

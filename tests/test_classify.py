@@ -1013,6 +1013,38 @@ class TestCodexActivityFields(unittest.TestCase):
         self.assertFalse(dormant["sidecar_in_flight"])
 
 
+class TestShellCommandPreview(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = _fresh_server()
+
+    def test_strips_shell_option_wrapper(self):
+        cmd = (
+            "true && unsetopt NO_EXTENDED_GLOB 2>/dev/null || true && "
+            "setopt NO_EXTENDED_GLOB 2>/dev/null || true && "
+            "python3 -m pytest tests/test_smoke.py"
+        )
+
+        self.assertEqual(
+            self.server._shell_command_preview(cmd),
+            "python3 -m pytest tests/test_smoke.py",
+        )
+
+    def test_keeps_real_command_chain(self):
+        cmd = "cd /tmp/project && npm run build"
+
+        self.assertEqual(
+            self.server._shell_command_preview(cmd),
+            "cd /tmp/project && npm run build",
+        )
+
+    def test_redacts_secrets(self):
+        cmd = "curl -H 'Authorization: Bearer sk-ant-test-XXXXXXXXXXXXXXXX' https://example.test"
+
+        self.assertNotIn("sk-ant-test-XXXXXXXXXXXXXXXX", self.server._shell_command_preview(cmd))
+        self.assertIn("[redacted]", self.server._shell_command_preview(cmd))
+
+
 class TestAddSidecarFields(unittest.TestCase):
     """_add_sidecar_fields() merges PreToolUse/PostToolUse hook output into
     a session card. The kanban relies on these fields (sidecar_status,

@@ -7727,8 +7727,10 @@ def _add_sidecar_fields(entry):
     entry["question_header"] = ""
     entry["question_options"] = []
     if inflight:
-        entry["sidecar_tool"] = inflight.get("tool")
-        entry["sidecar_file"] = inflight.get("file")
+        tool = inflight.get("tool")
+        file_ref = inflight.get("file")
+        entry["sidecar_tool"] = tool
+        entry["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
         entry["sidecar_ts"] = inflight.get("started_at", 0)
         entry["sidecar_in_flight"] = True
         if inflight.get("tool") == "AskUserQuestion":
@@ -7747,8 +7749,10 @@ def _add_sidecar_fields(entry):
             if not entry.get("sidecar_file"):
                 entry["sidecar_file"] = ask_payload.get("summary") or ""
     else:
-        entry["sidecar_tool"] = sc.get("tool") if sc else None
-        entry["sidecar_file"] = sc.get("file") if sc else None
+        tool = sc.get("tool") if sc else None
+        file_ref = sc.get("file") if sc else None
+        entry["sidecar_tool"] = tool
+        entry["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
         entry["sidecar_ts"] = sc.get("timestamp", 0) if sc else 0
         entry["sidecar_in_flight"] = False
         if sc and sc.get("tool") == "AskUserQuestion":
@@ -8196,6 +8200,93 @@ def _prompt_fragment(text, max_len=240):
     if len(text) > max_len:
         return text[: max_len - 3].rstrip() + "..."
     return text
+
+
+def _shell_preview_parts(command):
+    parts = []
+    buf = []
+    quote = ""
+    escaped = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if command.startswith("&&", i) or command.startswith("||", i):
+            segment = "".join(buf).strip()
+            if segment:
+                parts.append(("segment", segment))
+            parts.append(("op", command[i:i + 2]))
+            buf = []
+            i += 2
+            continue
+        if ch == ";":
+            segment = "".join(buf).strip()
+            if segment:
+                parts.append(("segment", segment))
+            parts.append(("op", ";"))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    segment = "".join(buf).strip()
+    if segment:
+        parts.append(("segment", segment))
+    return parts
+
+
+def _shell_preview_wrapper_segment(segment):
+    text = re.sub(r"\s+", " ", segment or "").strip()
+    text = re.sub(r"(?:^|\s+)2>\s*/dev/null\b", "", text).strip()
+    if text in ("true", ":"):
+        return True
+    if re.fullmatch(r"(?:(?:command|builtin)\s+)?(?:setopt|unsetopt)\s+[-A-Za-z0-9_\s]+", text):
+        return True
+    if re.fullmatch(r"(?:(?:command|builtin)\s+)?shopt\s+-[su]\s+[-A-Za-z0-9_\s]+", text):
+        return True
+    return False
+
+
+def _shell_command_preview(command, max_len=240):
+    """Return a readable shell command preview for live activity chips."""
+    if not isinstance(command, str):
+        return ""
+    raw = _PROMPT_SECRET_RE.sub("[redacted]", re.sub(r"\s+", " ", command).strip())
+    if not raw:
+        return ""
+    kept = []
+    for kind, value in _shell_preview_parts(raw):
+        if kind == "segment":
+            if _shell_preview_wrapper_segment(value):
+                continue
+            if kept and kept[-1][0] == "op":
+                kept.append((kind, value))
+            elif not kept or kept[-1][0] != "segment":
+                kept.append((kind, value))
+            else:
+                kept.append(("op", ";"))
+                kept.append((kind, value))
+            continue
+        if kept and kept[-1][0] == "segment":
+            kept.append((kind, value))
+    while kept and kept[-1][0] == "op":
+        kept.pop()
+    cleaned = " ".join(value for _, value in kept).strip() or raw
+    return _prompt_fragment(cleaned, max_len)
 
 
 def _ask_user_question_payload(tool_input, max_options=3):
@@ -8879,7 +8970,7 @@ def _codex_args(raw):
 def _codex_tool_detail(name, args):
     lname = _codex_tool_name(name)
     if lname == "exec_command":
-        return args.get("cmd") or args.get("command") or ""
+        return _shell_command_preview(args.get("cmd") or args.get("command") or "")
     if lname == "write_stdin":
         return args.get("chars") or args.get("session_id") or ""
     for key in ("path", "file_path", "filename", "query", "pattern", "prompt", "message"):
@@ -10312,7 +10403,9 @@ def _gemini_tool_name(call):
 def _gemini_tool_detail(call):
     args = _gemini_tool_args(call)
     cmd = _gemini_tool_command(call)
-    return args.get("description") or cmd or call.get("description") or ""
+    if cmd:
+        return args.get("description") or _shell_command_preview(cmd)
+    return args.get("description") or call.get("description") or ""
 
 
 def _gemini_tool_output(call):
@@ -18457,8 +18550,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 inflight = _read_in_flight_state(sid) if sid else None
                 ask_payload = None
                 if inflight:
-                    status["sidecar_tool"] = inflight.get("tool")
-                    status["sidecar_file"] = inflight.get("file")
+                    tool = inflight.get("tool")
+                    file_ref = inflight.get("file")
+                    status["sidecar_tool"] = tool
+                    status["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
                     status["sidecar_status"] = "active"
                     status["sidecar_ts"] = inflight.get("started_at", 0)
                     status["sidecar_in_flight"] = True
@@ -18470,8 +18565,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             "summary": inflight.get("summary") or inflight.get("file") or "",
                         }
                 elif sc:
-                    status["sidecar_tool"] = sc.get("tool")
-                    status["sidecar_file"] = sc.get("file")
+                    tool = sc.get("tool")
+                    file_ref = sc.get("file")
+                    status["sidecar_tool"] = tool
+                    status["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
                     status["sidecar_status"] = sc.get("status")
                     status["sidecar_ts"] = sc.get("timestamp", 0)
                     status["sidecar_in_flight"] = False
@@ -18494,7 +18591,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     if active_child:
                         status["status"] = "busy"
                         status["sidecar_tool"] = "Bash"
-                        status["sidecar_file"] = (active_child.get("command") or "")[:160]
+                        status["sidecar_file"] = _shell_command_preview(active_child.get("command") or "")
                         status["sidecar_status"] = "active"
                         status["sidecar_ts"] = time.time()
                         status["sidecar_in_flight"] = True
