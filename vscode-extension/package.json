@@ -1,0 +1,75 @@
+{
+  "name": "claude-command-center",
+  "displayName": "Claude Command Center",
+  "description": "Spawn and manage Claude Code sessions from inside VS Code. Talks to a locally running Claude Command Center (CCC) server.",
+  "version": "0.1.0",
+  "publisher": "amirfish",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "agents",
+    "kanban",
+    "ai"
+  ],
+  "homepage": "https://github.com/amirfish1/claude-command-center#readme",
+  "bugs": {
+    "url": "https://github.com/amirfish1/claude-command-center/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/amirfish1/claude-command-center.git",
+    "directory": "vscode-extension"
+  },
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeCommandCenter.spawnSession",
+        "title": "CCC: Spawn session",
+        "category": "Claude Command Center"
+      },
+      {
+        "command": "claudeCommandCenter.openDashboard",
+        "title": "CCC: Open dashboard",
+        "category": "Claude Command Center"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Command Center",
+      "properties": {
+        "claudeCommandCenter.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Host where the local CCC server is listening. Loopback only is recommended (see SECURITY.md in the CCC repo)."
+        },
+        "claudeCommandCenter.port": {
+          "type": "number",
+          "default": 8090,
+          "description": "Port where the local CCC server is listening. Matches the default in CCC's run.sh."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}
