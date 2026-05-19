@@ -2176,6 +2176,34 @@ class TestGroupChatSidecarHelpers(unittest.TestCase):
         self.assertEqual(server._resolve_group_chat_path("../../../tmp/x.md"), "")
 
 
+class TestTemplateGallery(unittest.TestCase):
+    def test_templates_json_parses_and_has_required_shape(self):
+        """The New Session modal's template gallery is driven by
+        static/templates.json. Every template must carry the fields the
+        UI binds to — id, name, description, engine, worktree, prompt —
+        and the JSON must be valid so the gallery doesn't render blank."""
+        path = pathlib.Path(PROJECT_ROOT, "static", "templates.json")
+        self.assertTrue(path.is_file(), "static/templates.json missing")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        templates = data.get("templates")
+        self.assertIsInstance(templates, list)
+        self.assertGreaterEqual(
+            len(templates), 5,
+            "issue #46 ships with at least five starter templates",
+        )
+        seen_ids = set()
+        for t in templates:
+            for key in ("id", "name", "description", "engine", "worktree", "prompt"):
+                self.assertIn(key, t, f"template missing {key!r}: {t.get('id')}")
+            self.assertIsInstance(t["id"], str)
+            self.assertNotIn(t["id"], seen_ids, "duplicate template id")
+            seen_ids.add(t["id"])
+            self.assertIn(t["engine"], ("claude", "codex", "gemini"))
+            self.assertIsInstance(t["worktree"], bool)
+            self.assertIsInstance(t["prompt"], str)
+            self.assertGreater(len(t["prompt"].strip()), 0)
+
+
 class TestHealthcheck(unittest.TestCase):
     def test_healthcheck_returns_structured_result(self):
         """_run_healthcheck must always return a dict with 'checks' and
