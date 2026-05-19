@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -180,6 +181,103 @@ class TestRepoContextHelpers(unittest.TestCase):
     def test_valid_repo_path_is_accepted(self):
         self.assertEqual(self.server.resolve_repo_path(str(self.repo)), str(self.repo))
 
+    def test_session_registry_accepts_native_claude_binary_path(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        sessions_dir = pathlib.Path(self.server.SESSIONS_REGISTRY)
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / "123.json").write_text(json.dumps({
+            "pid": 123,
+            "sessionId": sid,
+            "cwd": str(self.repo),
+            "kind": "bg",
+        }))
+        native_bin = pathlib.Path(
+            self.tmp_home,
+            ".local",
+            "share",
+            "claude",
+            "versions",
+            "2.1.144",
+        )
+
+        def fake_run(args, **kwargs):
+            if args == ["ps", "-A", "-o", "pid=,comm="]:
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=f"123 {native_bin}\n456 /usr/bin/python3\n",
+                    stderr="",
+                )
+            raise AssertionError(f"unexpected command: {args}")
+
+        with mock.patch.object(self.server.subprocess, "run", side_effect=fake_run):
+            registry = self.server._load_session_registry()
+
+        self.assertIn(sid, registry)
+        self.assertEqual(registry[sid]["pid"], 123)
+
+    def test_daemon_socket_allows_claude_tmp_path(self):
+        allowed = f"/tmp/cc-daemon-{os.getuid()}/abc/spare/session.pty.sock"
+        denied = f"/tmp/not-cc-daemon-{os.getuid()}/session.pty.sock"
+
+        self.assertTrue(self.server._daemon_socket_path_allowed(allowed))
+        self.assertFalse(self.server._daemon_socket_path_allowed(denied))
+
+    def test_background_agent_pty_inject_frames_paste_and_submit(self):
+        base = pathlib.Path("/tmp", f"cc-daemon-{os.getuid()}")
+        base.mkdir(parents=True, exist_ok=True)
+        frames = []
+        errors = []
+
+        def recv_exact(conn, n):
+            chunks = []
+            remaining = n
+            while remaining:
+                chunk = conn.recv(remaining)
+                if not chunk:
+                    raise EOFError("socket closed")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+
+        with tempfile.TemporaryDirectory(dir=base) as td:
+            sock_path = pathlib.Path(td, "test.pty.sock")
+            server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_sock.bind(str(sock_path))
+            server_sock.listen(1)
+            server_sock.settimeout(2)
+
+            def accept_frames():
+                try:
+                    conn, _ = server_sock.accept()
+                    with conn:
+                        conn.settimeout(2)
+                        for _ in range(2):
+                            header = recv_exact(conn, 5)
+                            size = int.from_bytes(header[:4], "big")
+                            kind = header[4]
+                            frames.append((kind, recv_exact(conn, size)))
+                except Exception as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=accept_frames)
+            thread.start()
+            try:
+                result = self.server._inject_bg_agent_via_pty_socket(
+                    {"pid": 123, "sessionId": "sid", "ptySock": str(sock_path)},
+                    "hi\x1b\nthere",
+                )
+                thread.join(timeout=2)
+            finally:
+                server_sock.close()
+
+        self.assertFalse(errors)
+        self.assertTrue(result["ok"])
+        self.assertEqual(frames, [
+            (0, b"\x1b[200~hi\nthere\x1b[201~"),
+            (0, b"\r"),
+        ])
+
     def test_strips_ccc_session_state_instruction_from_visible_text(self):
         text = (
             "now to 00000000-0000-4000-8000-000000000001: "
@@ -252,6 +350,83 @@ class TestRepoContextHelpers(unittest.TestCase):
                      },
                  ), \
                  mock.patch.object(self.server, "inject_input_via_keystroke") as inject:
+                result = self.server._inject_text_into_session(sid, "follow up")
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["queued"])
+            self.assertEqual(result["via"], "terminal-queued")
+            inject.assert_not_called()
+            with self.server._pending_terminal_input_lock:
+                self.assertEqual(
+                    self.server._pending_terminal_input_queue[sid],
+                    ["follow up"],
+                )
+        finally:
+            with self.server._pending_terminal_input_lock:
+                self.server._pending_terminal_input_queue.clear()
+
+    def test_live_background_agent_injects_via_daemon_pty(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        worker = {"pid": 12345, "sessionId": sid, "ptySock": "/tmp/cc-daemon-501/x.sock"}
+        with mock.patch.object(self.server, "_is_codex_session", return_value=False), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={
+                     "live": True,
+                     "tty": None,
+                     "terminal_app": None,
+                     "kind": "bg",
+                     "status": "busy",
+                     "job_id": "00000000",
+                     "pid": 54324,
+                 },
+             ), \
+             mock.patch.object(self.server, "_bg_agent_ready_for_input", return_value=True), \
+             mock.patch.object(
+                 self.server,
+                 "_find_live_bg_agent_entry_for_session",
+                 return_value=worker,
+             ) as find_worker, \
+             mock.patch.object(
+                 self.server,
+                 "_inject_bg_agent_via_pty_socket",
+                 return_value={"ok": True, "via": "bg-agent-pty"},
+             ) as inject, \
+             mock.patch.object(self.server, "resume_session_headless") as resume:
+            result = self.server._inject_text_into_session(sid, "follow up")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["via"], "bg-agent-pty")
+        find_worker.assert_called_once_with(sid)
+        inject.assert_called_once_with(worker, "follow up")
+        resume.assert_not_called()
+
+    def test_live_background_agent_queues_until_prompt_ready(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue.clear()
+        try:
+            with mock.patch.object(self.server, "_is_codex_session", return_value=False), \
+                 mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+                 mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+                 mock.patch.object(
+                     self.server,
+                     "session_live_status",
+                     return_value={
+                         "live": True,
+                         "tty": None,
+                         "terminal_app": None,
+                         "kind": "bg",
+                         "status": "busy",
+                         "job_id": "00000000",
+                         "pid": 54324,
+                     },
+                 ), \
+                 mock.patch.object(self.server, "_bg_agent_ready_for_input", return_value=False), \
+                 mock.patch.object(self.server, "_inject_bg_agent_via_pty_socket") as inject:
                 result = self.server._inject_text_into_session(sid, "follow up")
 
             self.assertTrue(result["ok"])
