@@ -1,0 +1,1 @@
+Demo: seed the kanban "In progress" column with live sessions, restore GH issue detail rendering by adding the `/api/issues/_id/details` fixture, and fix the empty conversation pane on archived (and every other) session by giving the transcript fixture the correct event schema (`user_text` + `assistant.blocks[].kind`).
