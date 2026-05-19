@@ -1,0 +1,1 @@
+- Public roadmap at [`docs/roadmap.md`](docs/roadmap.md) — Shipped / In progress / Planned / Under consideration / Out of scope, grounded in real tracking issues, with a stated voting policy. Answers "is this maintained, is the thing I want planned?" in one click. (#50)
