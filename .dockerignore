@@ -1,0 +1,64 @@
+# Keep the build context (and final image) lean. Mirrors .gitignore plus
+# Docker-specific noise. If you add an entry to .gitignore that should also
+# never enter the image, mirror it here.
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Python caches
+__pycache__
+**/__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode
+*.swp
+*~
+
+# Build artifacts (none today, but defensive)
+dist
+build
+node_modules
+
+# Local per-machine state — never source.
+.claude
+*.log
+GROUP_CHAT.md
+group-chats
+sessions_debug.json
+oss-prep
+competitor-analysis
+LINKEDIN-IDEAS.md
+_assets
+nanobanana-output
+*.mp4
+*.mov
+
+# Worktrees from the superpowers skill — definitely not source.
+.worktrees
+
+# Local-only "Morning view" plugin — gitignored, must also stay out of
+# Docker images. The server detects absence at startup and disables the
+# routes.
+morning.py
+morning_store.py
+static/morning
+scripts/ingest_apple_notes.py
+tests/test_morning.py
+ingesters
+
+# Docker meta itself
+Dockerfile
+docker-compose.yml
+.dockerignore

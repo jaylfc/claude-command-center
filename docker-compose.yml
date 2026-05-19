@@ -1,0 +1,36 @@
+# Claude Command Center — single-service compose for trial installs.
+#
+# Usage:
+#   docker compose up --build
+#   open http://localhost:8090
+#
+# This is the "I just want to try it" path. The hero install remains
+# ./run.sh on macOS (see README). macOS-only features (AppleScript
+# jump-to-terminal, attach, Claude Desktop deep links, launchd
+# `--install-service`) do not work inside the container — see docs/docker.md.
+
+services:
+  ccc:
+    build: .
+    image: claude-command-center:local
+    container_name: claude-command-center
+    # Bind only to host loopback. The container itself listens on 0.0.0.0
+    # (see CCC_BIND_HOST in the Dockerfile — required so the published port
+    # is reachable from the host) but the host-side publish stays on
+    # 127.0.0.1 so the dashboard isn't exposed to the LAN. SECURITY.md
+    # explains why: there is no auth, so any reachable peer can run commands.
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      PORT: "8090"
+      # CCC_BIND_HOST is set in the Dockerfile; override here if you know
+      # what you're doing.
+    volumes:
+      # The dashboard exists to surface the host's Claude Code transcripts
+      # and per-user state. Without this mount the container has no sessions
+      # to show and the kanban is empty. Read-write because CCC writes its
+      # own state under ~/.claude/command-center/. If you only want to look,
+      # append `:ro` to make it read-only — the UI will work but writes
+      # (network config, session moves) will fail.
+      - ${HOME}/.claude:/root/.claude
+    restart: unless-stopped
