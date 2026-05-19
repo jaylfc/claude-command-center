@@ -11879,7 +11879,22 @@ class _ReattachedProc:
         if self._cached_exit is not None:
             return self._cached_exit
         try:
+            waited_pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if waited_pid == self.pid:
+                try:
+                    self._cached_exit = os.waitstatus_to_exitcode(status)
+                except (AttributeError, ValueError):
+                    self._cached_exit = -1
+                return self._cached_exit
+        except ChildProcessError:
+            pass
+        except OSError:
+            pass
+        try:
             os.kill(self.pid, 0)
+            if _pid_is_zombie(self.pid):
+                self._cached_exit = -1
+                return self._cached_exit
             return None
         except ProcessLookupError:
             self._cached_exit = -1
@@ -11903,6 +11918,23 @@ def _load_spawn_registry():
         print(f"  [spawn-registry] ignoring registry with unexpected shape (not a list)")
         return []
     return data
+
+
+def _pid_process_state(pid):
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return ""
+    if out.returncode != 0:
+        return ""
+    return (out.stdout or "").strip().split(None, 1)[0]
+
+
+def _pid_is_zombie(pid):
+    return _pid_process_state(pid).upper().startswith("Z")
 
 
 def _live_spawn_registry_entry_for_session(session_id, engine):
@@ -12004,6 +12036,8 @@ def _pid_is_engine_process(pid, engine):
     includes the gemini script path)."""
     if engine not in ("claude", "codex", "gemini"):
         return False
+    if _pid_is_zombie(pid):
+        return False
     try:
         out = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
@@ -12059,6 +12093,13 @@ def _reattach_spawned_orphans():
             # anyway. Drop from registry rather than confuse the UI.
             alive = False
         if not alive:
+            dropped += 1
+            continue
+        if _pid_is_zombie(pid):
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
             dropped += 1
             continue
         # Step 2: is it actually a process of the engine we recorded?

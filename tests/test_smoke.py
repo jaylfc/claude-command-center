@@ -1049,6 +1049,29 @@ class TestRepoContextHelpers(unittest.TestCase):
             self.assertTrue(server._pid_is_engine_process(33333, "gemini"))
             self.assertFalse(server._pid_is_engine_process(33333, "codex"))
 
+    def test_pid_is_engine_process_rejects_zombie(self):
+        """A defunct reattached resume must not keep a Codex card live."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with mock.patch.object(server, "_pid_is_zombie", return_value=True), \
+             mock.patch.object(server.subprocess, "run") as run:
+            self.assertFalse(server._pid_is_engine_process(22222, "codex"))
+        run.assert_not_called()
+
+    def test_reattached_proc_poll_treats_zombie_as_exited(self):
+        """After an in-place server restart, a child may become a zombie
+        without a Popen handle. Polling must release queued resumes."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        proc = server._ReattachedProc(22222)
+        with mock.patch.object(server.os, "waitpid", side_effect=ChildProcessError), \
+             mock.patch.object(server.os, "kill", return_value=None), \
+             mock.patch.object(server, "_pid_is_zombie", return_value=True):
+            self.assertEqual(proc.poll(), -1)
+            self.assertEqual(proc.poll(), -1)
+
     def test_gemini_chat_parsing_usage_and_row_signals(self):
         """Gemini chat JSON should render as a first-class session row."""
         for mod in ("server",):
