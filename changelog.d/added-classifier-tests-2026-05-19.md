@@ -1,0 +1,1 @@
+- Added a 17-test kickoff suite for `_classify_attention`, covering all seven Needs-Your-Attention buckets (pending tool, sidecar waiting, pushed-with-open-issue, uncommitted edits, committed-not-pushed, needs-attention label, open backlog) plus suppression rules (archived, verified, TODO/parking, dormant-waiting-or-done, icebox, in-progress) (#55).
