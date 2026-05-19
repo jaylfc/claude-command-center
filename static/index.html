@@ -479,6 +479,7 @@
         </div>
         <div class="conv-input-context" id="convInputContext" data-role="input-context">
           <span class="wp-row" data-workspace></span>
+          <span id="spawnCwdQuickChips" class="spawn-cwd-quick-chips" aria-label="Recent repositories"></span>
           <!-- New-session-only cwd picker. Visibility controlled by
                .is-new-session on the context strip; populated by
                populateSpawnCwdPicker(); read by spawnFromInlineInput()
@@ -502,7 +503,6 @@
               <div id="spawnCwdMenu" class="spawn-cwd-menu" role="listbox"></div>
             </span>
           </span>
-          <span id="spawnCwdQuickChips" class="spawn-cwd-quick-chips" aria-label="Recent repositories"></span>
           <label class="spawn-worktree-row" title="Spawn the session in a fresh git worktree (`feat/<slug>` branch) so it can't accidentally commit to main.">
             <input type="checkbox" id="inlineWorktreeToggle"> 🌿 worktree
           </label>

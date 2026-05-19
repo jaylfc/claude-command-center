@@ -1416,25 +1416,40 @@
     z-index: 80;
     overflow: visible;
   }
+  .conv-input-context.visible.is-new-session {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "chips chips"
+      "cwd worktree";
+    align-items: center;
+    gap: 7px 12px;
+    white-space: normal;
+  }
   .conv-input-context.is-new-session .spawn-cwd-row {
     display: inline-flex;
+    grid-area: cwd;
+    justify-self: start;
     overflow: visible;
   }
   .conv-input-context .spawn-cwd-quick-chips {
     display: none;
     align-items: center;
     gap: 5px;
-    flex: 1 1 auto;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
     min-width: 0;
-    overflow: hidden;
+    overflow: visible;
   }
   .conv-input-context.is-new-session .spawn-cwd-quick-chips {
-    display: inline-flex;
+    display: flex;
+    grid-area: chips;
+    max-width: none;
   }
   .conv-input-context .spawn-cwd-chip {
     display: inline-flex;
     align-items: center;
-    max-width: 132px;
+    max-width: min(260px, 100%);
     min-width: 0;
     padding: 3px 8px;
     border: 1px solid var(--border);
@@ -1466,7 +1481,11 @@
     font-size: 12px; color: var(--text);
     cursor: pointer; user-select: none;
   }
-  .conv-input-context.is-new-session .spawn-worktree-row { display: inline-flex; }
+  .conv-input-context.is-new-session .spawn-worktree-row {
+    display: inline-flex;
+    grid-area: worktree;
+    justify-self: end;
+  }
   .conv-input-context .spawn-worktree-row input[type="checkbox"] { margin: 0; cursor: pointer; }
   /* Hide the regular workspace + usage pills in new-session mode —
      they reflect a live session's state and have nothing to say about
@@ -1579,9 +1598,13 @@
     color: var(--text-muted);
     font-size: 12px;
   }
-  @media (max-width: 900px) {
+  @media (max-width: 720px) {
     .conv-input-context.is-new-session .spawn-cwd-quick-chips {
       display: none;
+    }
+    .conv-input-context.visible.is-new-session {
+      display: flex;
+      white-space: nowrap;
     }
   }
   .conv-input-context .wp-path {

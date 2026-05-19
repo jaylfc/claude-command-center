@@ -16734,6 +16734,27 @@
     }
   }
 
+  function refreshNewSessionCwdUi(paneId) {
+    if (currentConversation !== '__new__') return;
+    const spawnCwd = getSpawnCwd();
+    updatePaneHeader(paneId || activePaneId(), {
+      source: getSpawnEngine(),
+      display_name: 'New session',
+      folder_label_chip: spawnCwdLabel(spawnCwd),
+    }, { category: 'new session', title: 'New session' });
+    updateNewSessionCwdNotice();
+    updateInputBar();
+  }
+
+  function ensureSpawnCwdOptionsLoaded(paneId) {
+    if (spawnCwdOptions.length || (repoListState && repoListState.repos && repoListState.repos.length)) return;
+    loadRepoList().then(() => {
+      if (currentConversation !== '__new__') return;
+      populateSpawnCwdPicker();
+      refreshNewSessionCwdUi(paneId);
+    }).catch(() => {});
+  }
+
   function isSpawnCwdMenuOpen() {
     const menu = document.getElementById('spawnCwdMenu');
     return !!(menu && menu.classList.contains('open'));
@@ -16928,6 +16949,7 @@
     if ($kanbanBoard) $kanbanBoard.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
     if ($kanbanBoardSplit) $kanbanBoardSplit.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
     populateSpawnCwdPicker();
+    ensureSpawnCwdOptionsLoaded(paneId);
     const spawnCwd = getSpawnCwd();
     updatePaneHeader(paneId, {
       source: getSpawnEngine(),
