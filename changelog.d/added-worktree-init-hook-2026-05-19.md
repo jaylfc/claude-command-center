@@ -1,0 +1,1 @@
+- **Worktree env-setup hook.** When a session is spawned with a worktree, CCC now runs `.ccc/worktree-init` in the new worktree (if present and executable) before launching the session. `CCC_WORKTREE_PATH`, `CCC_SESSION_NAME`, and `CCC_PARENT_REPO` are exported. A failing hook is logged but does not block the spawn. See `.ccc/worktree-init.example` for a starter template. (#47)

@@ -8803,6 +8803,51 @@ def _create_worktree_for_spawn(source_cwd, slug):
     return str(candidate), branch
 
 
+def _run_worktree_init_hook(worktree_path, parent_repo, session_name, log_fh):
+    """If `<worktree_path>/.ccc/worktree-init` exists and is executable,
+    run it once before launching the session in that worktree.
+
+    Tolerant by design: missing hook is silently skipped; a failing hook
+    appends its stderr/stdout to the session's spawn log but never blocks
+    the spawn — the session can still start in the worktree, and the user
+    sees the failure in the log. See `.ccc/worktree-init.example` for the
+    contract (env vars + idempotency expectations).
+    """
+    hook = Path(worktree_path) / ".ccc" / "worktree-init"
+    try:
+        if not (hook.is_file() and os.access(str(hook), os.X_OK)):
+            return
+    except OSError:
+        return
+    env = os.environ.copy()
+    env["CCC_WORKTREE_PATH"] = str(worktree_path)
+    env["CCC_PARENT_REPO"] = str(parent_repo or "")
+    env["CCC_SESSION_NAME"] = session_name or ""
+    log_fh.write(f"[worktree-init] running {hook}\n")
+    log_fh.flush()
+    try:
+        result = subprocess.run(
+            [str(hook)],
+            cwd=str(worktree_path),
+            env=env,
+            capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        log_fh.write(f"[worktree-init] failed to invoke: {e}\n")
+        log_fh.flush()
+        return
+    if result.stdout:
+        log_fh.write(result.stdout)
+        if not result.stdout.endswith("\n"):
+            log_fh.write("\n")
+    if result.stderr:
+        log_fh.write(result.stderr)
+        if not result.stderr.endswith("\n"):
+            log_fh.write("\n")
+    log_fh.write(f"[worktree-init] exit {result.returncode}\n")
+    log_fh.flush()
+
+
 # ---------------------------------------------------------------------------
 # Codex CLI binary resolution
 # ---------------------------------------------------------------------------
@@ -11505,6 +11550,10 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
         except RuntimeError as e:
             return {"ok": False, "error": f"worktree creation failed: {e}"}
     log_fh = open(log_path, "w")
+    # Run a per-repo env-setup hook in fresh worktrees, before the
+    # Claude process starts. No-op when not a worktree spawn. See #47.
+    if worktree_path:
+        _run_worktree_init_hook(worktree_path, ctx["repo_path"], session_name, log_fh)
     fifo_path, child_stdin_fd = _make_stdin_fifo(log_path)
     popen_kwargs = dict(
         stdout=log_fh,

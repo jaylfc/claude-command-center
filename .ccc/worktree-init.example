@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# .ccc/worktree-init — runs once after CCC creates a git worktree for a
+# spawned session, before the session process starts.
+#
+# To enable: copy this file to `.ccc/worktree-init` in your repo, make
+# it executable (`chmod +x .ccc/worktree-init`), and commit it. CCC
+# looks for it in the newly-created worktree's working tree.
+#
+# Environment provided by CCC:
+#   CCC_WORKTREE_PATH   absolute path to the new worktree (also $PWD)
+#   CCC_SESSION_NAME    slug used for the worktree directory + branch
+#   CCC_PARENT_REPO     absolute path to the source repo (toplevel)
+#
+# Conventions:
+#   - Keep it fast. The session waits for this to return.
+#   - Exit 0 even on "nothing to do". A non-zero exit is logged to the
+#     session's spawn log but does NOT block the session from starting.
+#   - Be idempotent. The script may be re-run if a user re-spawns.
+#
+# Below are commented-out examples — uncomment what fits your repo.
+# The default behavior is to do nothing.
+
+set -euo pipefail
+
+# Copy a parent-repo .env into the worktree so dev servers Just Work.
+# if [[ -f "${CCC_PARENT_REPO}/.env" && ! -f "${CCC_WORKTREE_PATH}/.env" ]]; then
+#   cp "${CCC_PARENT_REPO}/.env" "${CCC_WORKTREE_PATH}/.env"
+# fi
+
+# Node projects: install dependencies if a lockfile is present.
+# if [[ -f package.json ]]; then
+#   if   [[ -f pnpm-lock.yaml ]]; then pnpm install --frozen-lockfile
+#   elif [[ -f yarn.lock      ]]; then yarn install --frozen-lockfile
+#   elif [[ -f package-lock.json ]]; then npm ci
+#   fi
+# fi
+
+# Python projects: sync the venv.
+# if [[ -f pyproject.toml && -f uv.lock ]]; then
+#   uv sync
+# fi
+
+exit 0
