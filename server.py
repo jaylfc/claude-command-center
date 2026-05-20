@@ -400,6 +400,12 @@ def _session_load_begin(repo_path=None):
             "state": "pending",
             "detail": "Waiting on transcript metadata.",
         },
+        "antigravity": {
+            "key": "antigravity",
+            "label": "Antigravity sessions",
+            "state": "pending",
+            "detail": "Waiting.",
+        },
         "agents": {
             "key": "agents",
             "label": "Pkood agents",
@@ -453,7 +459,7 @@ def _session_load_begin(repo_path=None):
             "updated_at": now,
             "steps": steps,
             "order": [
-                "repo", "transcripts", "sessions", "agents", "github",
+                "repo", "transcripts", "sessions", "antigravity", "agents", "github",
                 "issue_states", "todo", "parking", "native_tasks", "cards",
             ],
         })
@@ -571,6 +577,7 @@ def _archive_load_begin():
         "infer":       {"key": "infer",       "label": "Inferring active branches",        "state": "pending", "detail": "Walking recent sessions."},
         "worktrees":   {"key": "worktrees",   "label": "Checking worktree status",         "state": "pending", "detail": "git status per recent worktree."},
         "codex":       {"key": "codex",       "label": "Codex / Gemini conversations",     "state": "pending", "detail": "Scanning sibling stores."},
+        "antigravity": {"key": "antigravity", "label": "Antigravity conversations",        "state": "pending", "detail": "Scanning ~/.gemini/antigravity/brain/."},
         "pr_states":   {"key": "pr_states",   "label": "Refreshing pull-request status",   "state": "pending", "detail": "gh pr view per known PR."},
         "issues":      {"key": "issues",      "label": "Refreshing GitHub issues",         "state": "pending", "detail": "gh issue list per repo."},
         "group_chats": {"key": "group_chats", "label": "Cross-repo group chats",           "state": "pending", "detail": "Reading sidecars."},
@@ -584,7 +591,7 @@ def _archive_load_begin():
             "started_at": now,
             "updated_at": now,
             "steps": steps,
-            "order": ["folders", "transcripts", "infer", "worktrees", "codex", "pr_states", "issues", "group_chats"],
+            "order": ["folders", "transcripts", "infer", "worktrees", "codex", "antigravity", "pr_states", "issues", "group_chats"],
         })
 
 
@@ -1142,6 +1149,8 @@ def _detect_session_engine(session_id):
         return "claude"
     if _is_codex_session(session_id):
         return "codex"
+    if _is_antigravity_session(session_id):
+        return "antigravity"
     if _is_gemini_session(session_id):
         return "gemini"
     return "claude"
@@ -1910,8 +1919,7 @@ def find_all_conversations(
     `-` with `/` and verify) or just the raw slug.
     """
     projects_root = Path.home() / ".claude" / "projects"
-    if not projects_root.is_dir():
-        return []
+    projects_root_exists = projects_root.is_dir()
 
     # Build slug → repo_path map for label resolution.
     known_by_slug = {}
@@ -1945,7 +1953,14 @@ def find_all_conversations(
     seen_session_ids = set()
     _now = time.time()
 
-    for project_dir in projects_root.iterdir():
+    project_dirs = []
+    if projects_root_exists:
+        try:
+            project_dirs = list(projects_root.iterdir())
+        except OSError:
+            project_dirs = []
+
+    for project_dir in project_dirs:
         if not project_dir.is_dir():
             continue
         slug = project_dir.name
@@ -2251,6 +2266,19 @@ def find_all_conversations(
     # rows compatible with the archive renderer.
     try:
         out.extend(find_gemini_conversations(
+            include_old=True,
+            repo_only=False,
+            limit=limit_per_folder,
+            resolve_pr_states=resolve_pr_states,
+            resolve_worktree_dirty=resolve_worktree_dirty,
+        ))
+    except Exception:
+        pass
+
+    # Add Antigravity sessions to the archive. Antigravity stores JSONL
+    # transcripts under ~/.gemini/antigravity/brain/<uuid>/.
+    try:
+        out.extend(find_antigravity_conversations(
             include_old=True,
             repo_only=False,
             limit=limit_per_folder,
@@ -5085,6 +5113,15 @@ def session_live_status(session_id, session_cwd):
         result["live"] = True
         return result
 
+    if _is_antigravity_session(session_id):
+        path = _antigravity_transcript_path(session_id)
+        if path:
+            try:
+                result["recently_written"] = (time.time() - path.stat().st_mtime) < 300
+            except OSError:
+                pass
+        return result
+
     # Recency check on the .jsonl file (for the "is actively being used" signal)
     jsonl_name = session_id + ".jsonl"
     recent = False
@@ -5172,10 +5209,20 @@ def _build_resume_command(session_id, cwd, cwd_exists):
     """Same logic as the frontend buildResumeCommand — keep them in sync."""
     is_codex = _is_codex_session(session_id)
     is_gemini = _is_gemini_session(session_id)
+    is_antigravity = _is_antigravity_session(session_id)
     if is_codex:
         resume_cmd = f"codex resume {session_id}"
     elif is_gemini:
         resume_cmd = f"gemini --resume {session_id}"
+    elif is_antigravity:
+        resolved = _resolve_antigravity_bin()
+        if resolved.get("available"):
+            resume_cmd = (
+                "echo " + _shell_quote("CCC: AGY does not expose a session-id resume flag; use /resume inside the TUI.")
+                + " && exec " + _antigravity_shell_command(resolved)
+            )
+        else:
+            resume_cmd = "echo " + _shell_quote(resolved.get("reason") or "Antigravity CLI not found.")
     else:
         resume_cmd = f"claude --resume {session_id} --dangerously-skip-permissions"
     if not cwd:
@@ -5308,6 +5355,7 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
         cwd = ctx["cwd"]
     cwd_exists = bool(cwd and Path(cwd).is_dir())
     is_codex = _is_codex_session(session_id)
+    is_non_claude_engine = is_codex or _is_gemini_session(session_id) or _is_antigravity_session(session_id)
     command = _build_resume_command(session_id, cwd, cwd_exists)
     target = terminal_app or _preferred_terminal_app()
 
@@ -5334,7 +5382,7 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
     rename_target = rename_target.replace('"', '').replace('\\', '').replace("'", "")[:60]
     color = _pick_color_for_session(rename_target)
     if target == "iTerm2":
-        if is_codex:
+        if is_non_claude_engine:
             script = f'''
             tell application "iTerm2"
               activate
@@ -5380,7 +5428,7 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
         # Terminal.app: explicitly create a new window, hold onto it, and keep
         # it frontmost across the keystrokes. `do script` returns a tab whose
         # window we can reference.
-        if is_codex:
+        if is_non_claude_engine:
             script = f'''
             tell application "Terminal"
               activate
@@ -6168,6 +6216,12 @@ def find_session_cwd(session_id):
     gemini_path = _resolve_gemini_chat_path(session_id)
     if gemini_path:
         cwd = _gemini_project_root_for_chat(gemini_path)
+        if cwd:
+            cwd = _resolve_session_cwd(session_id, cwd)
+            _session_cwd_cache[session_id] = cwd
+            return cwd
+    if _is_antigravity_session(session_id):
+        cwd = _extract_antigravity_cwd(session_id)
         if cwd:
             cwd = _resolve_session_cwd(session_id, cwd)
             _session_cwd_cache[session_id] = cwd
@@ -7857,6 +7911,19 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
         if progress:
             progress("gemini", state="error", detail=f"Gemini session scan failed: {exc}")
 
+    if progress:
+        progress("antigravity", state="running", detail="Reading Antigravity sessions.")
+    try:
+        conversations.extend(find_antigravity_conversations(
+            repo_path=repo_path,
+            include_old=include_old,
+            repo_only=True,
+            progress=progress,
+        ))
+    except Exception as exc:
+        if progress:
+            progress("antigravity", state="error", detail=f"Antigravity session scan failed: {exc}")
+
     # Add pkood agents — and merge in their linked claude-session card, if any.
     # Pkood spawns a claude process in a tmux pty, which produces a regular
     # ~/.claude/projects/*/*.jsonl file. Without dedup the kanban would show
@@ -8109,6 +8176,9 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
     codex_path = _resolve_codex_rollout_path(conversation_id)
     if codex_path and codex_path.is_file():
         return codex_path, _parse_codex_event
+    antigravity_path = _antigravity_transcript_path(conversation_id)
+    if antigravity_path and antigravity_path.is_file():
+        return antigravity_path, _parse_antigravity_event
     return claude_path, _parse_conversation_event
 
 
@@ -8116,6 +8186,8 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None):
     """Parse a conversation JSONL file into structured events."""
     if _is_gemini_session(conversation_id):
         return _parse_gemini_conversation(conversation_id, after_line=after_line)
+    if _is_antigravity_session(conversation_id):
+        return _parse_antigravity_conversation(conversation_id, after_line=after_line)
     filepath, parser = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
     events = []
     line_num = 0
@@ -8441,6 +8513,8 @@ def _extract_files_from_conversation(conversation_id):
     """
     if _is_gemini_session(conversation_id):
         return _extract_files_from_gemini_conversation(conversation_id)
+    if _is_antigravity_session(conversation_id):
+        return _extract_files_from_antigravity_conversation(conversation_id)
 
     filepath = _resolve_conversation_path(conversation_id)
     seen = {}  # target -> {label, target, kind, category, first_line}
@@ -10513,6 +10587,8 @@ def _extract_codex_timeline(session_id):
 # ---------------------------------------------------------------------------
 
 GEMINI_HOME = Path.home() / ".gemini"
+ANTIGRAVITY_HOME = GEMINI_HOME / "antigravity"
+ANTIGRAVITY_BRAIN = ANTIGRAVITY_HOME / "brain"
 GEMINI_CONTEXT_LIMIT = 1_000_000
 
 
@@ -10547,6 +10623,54 @@ def _resolve_gemini_bin():
         "code": "gemini_unavailable",
         "reason": "Gemini CLI not found. Install Gemini CLI or set CCC_GEMINI_BIN.",
     }
+
+
+def _resolve_antigravity_bin():
+    """Locate the Antigravity AGY CLI binary.
+
+    Official installs place the executable at ~/.local/bin/agy. Try the
+    environment override first so users can point CCC at pre-release or
+    nonstandard installs without relying on launchd's PATH.
+    """
+    env_bin = os.environ.get("CCC_ANTIGRAVITY_BIN")
+    if env_bin:
+        expanded = os.path.expanduser(env_bin)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return {"available": True, "bin": expanded, "source": "env"}
+        return {
+            "available": False,
+            "bin": None,
+            "code": "antigravity_unavailable",
+            "reason": f"CCC_ANTIGRAVITY_BIN is set to {env_bin!r} but it isn't an executable file",
+        }
+    for cmd in ("agy", "antigravity"):
+        which_bin = shutil.which(cmd)
+        if which_bin:
+            return {"available": True, "bin": which_bin, "source": "path", "command": cmd}
+        for candidate in _iter_common_cli_candidates(cmd):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return {"available": True, "bin": str(candidate), "source": "candidate", "command": cmd}
+    return {
+        "available": False,
+        "bin": None,
+        "code": "antigravity_unavailable",
+        "reason": "Antigravity CLI not found. Install AGY CLI or set CCC_ANTIGRAVITY_BIN.",
+    }
+
+
+def _antigravity_command_words(resolved):
+    words = [resolved["bin"]]
+    raw_args = (os.environ.get("CCC_ANTIGRAVITY_ARGS") or "").strip()
+    if raw_args:
+        try:
+            words.extend(shlex.split(raw_args))
+        except ValueError:
+            pass
+    return words
+
+
+def _antigravity_shell_command(resolved):
+    return " ".join(_shell_quote(word) for word in _antigravity_command_words(resolved))
 
 
 def _gemini_tmp_root():
@@ -11350,6 +11474,870 @@ def _extract_gemini_timeline(session_id):
     return {"events": events, "total_turns": turn}
 
 
+# ---------------------------------------------------------------------------
+# Antigravity integration
+# ---------------------------------------------------------------------------
+
+def _antigravity_transcript_path(session_id):
+    if not session_id:
+        return None
+    sid = str(session_id).strip()
+    if not _SESSION_UUID_RE.match(sid):
+        return None
+    return ANTIGRAVITY_BRAIN / sid / ".system_generated" / "logs" / "transcript.jsonl"
+
+
+def _antigravity_transcript_paths():
+    if not ANTIGRAVITY_BRAIN.is_dir():
+        return []
+    paths = []
+    try:
+        for brain_dir in ANTIGRAVITY_BRAIN.iterdir():
+            if not brain_dir.is_dir():
+                continue
+            transcript = brain_dir / ".system_generated" / "logs" / "transcript.jsonl"
+            if transcript.is_file():
+                paths.append(transcript)
+    except OSError:
+        return []
+    try:
+        paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        paths.sort(key=lambda p: str(p), reverse=True)
+    return paths
+
+
+def _is_antigravity_session(session_id):
+    path = _antigravity_transcript_path(session_id)
+    return bool(path and path.is_file())
+
+
+def _load_antigravity_transcript(session_id):
+    path = _antigravity_transcript_path(session_id)
+    if not path or not path.is_file():
+        return []
+    events = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(ev, dict):
+                    events.append(ev)
+    except OSError:
+        return []
+    return events
+
+
+def _antigravity_unquote(value):
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    text = value.strip()
+    for _ in range(2):
+        if not text:
+            break
+        if text[0] in ("'", '"', "[", "{"):
+            try:
+                parsed = json.loads(text)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                break
+            if isinstance(parsed, str):
+                text = parsed.strip()
+                continue
+            return parsed
+        break
+    return text.strip().strip("`")
+
+
+_ANTIGRAVITY_USER_REQUEST_RE = re.compile(
+    r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>",
+    re.IGNORECASE | re.DOTALL,
+)
+_ANTIGRAVITY_TAG_RE = re.compile(r"<[^>\n]+>")
+_ANTIGRAVITY_FILE_URL_RE = re.compile(r"file://[^\s`'\"<>)\]]+")
+
+
+def _antigravity_user_text(content):
+    if not isinstance(content, str):
+        return ""
+    match = _ANTIGRAVITY_USER_REQUEST_RE.search(content)
+    if match:
+        text = match.group(1)
+    else:
+        # USER_INPUT often wraps the prompt in metadata tags. If no explicit
+        # request block exists, drop tag lines and keep the human-readable text.
+        text = _ANTIGRAVITY_TAG_RE.sub("", content)
+    return _strip_ccc_session_state_instruction(text).strip()
+
+
+def _antigravity_event_epoch(ev):
+    return _iso_ts_epoch((ev or {}).get("created_at"))
+
+
+def _antigravity_event_timestamp(ev):
+    return (ev or {}).get("created_at") or ""
+
+
+def _antigravity_tool_name(call):
+    if not isinstance(call, dict):
+        return "tool"
+    return (call.get("name") or "tool").rsplit(".", 1)[-1]
+
+
+def _antigravity_tool_args(call):
+    args = call.get("args") if isinstance(call, dict) else {}
+    return args if isinstance(args, dict) else {}
+
+
+def _antigravity_arg(args, *keys):
+    for key in keys:
+        if key in args:
+            value = _antigravity_unquote(args.get(key))
+            if isinstance(value, str):
+                return value
+    return ""
+
+
+def _antigravity_tool_command(call):
+    args = _antigravity_tool_args(call)
+    cmd = _antigravity_arg(args, "CommandLine", "command", "Command")
+    return cmd if isinstance(cmd, str) else ""
+
+
+def _antigravity_tool_cwd(call):
+    args = _antigravity_tool_args(call)
+    cwd = _antigravity_arg(args, "Cwd", "cwd", "WorkingDirectory")
+    return cwd if isinstance(cwd, str) else ""
+
+
+def _antigravity_tool_detail(call):
+    args = _antigravity_tool_args(call)
+    cmd = _antigravity_tool_command(call)
+    if cmd:
+        return _shell_command_preview(cmd, max_len=1200)
+    for key in (
+        "TargetFile", "AbsolutePath", "DirectoryPath", "SearchPath", "File",
+        "Path", "Query", "Prompt", "Message", "Description", "Instruction",
+        "toolSummary", "toolAction",
+    ):
+        value = _antigravity_arg(args, key)
+        if isinstance(value, str) and value:
+            return _prompt_fragment(value, 240)
+    return ""
+
+
+def _antigravity_normalize_path(value):
+    raw = _antigravity_unquote(value)
+    if not isinstance(raw, str):
+        return ""
+    raw = raw.strip().strip("`").rstrip(".,;:")
+    if not raw:
+        return ""
+    if raw.startswith("file://"):
+        try:
+            parsed = urllib.parse.urlsplit(raw)
+            raw = urllib.parse.unquote(parsed.path or "")
+        except ValueError:
+            raw = raw[len("file://"):]
+    raw = urllib.parse.unquote(raw)
+    if raw.startswith("~/") or raw == "~":
+        raw = os.path.expanduser(raw)
+    if not os.path.isabs(raw):
+        return ""
+    return raw
+
+
+_antigravity_projects_cache = {"mtime": None, "paths": []}
+
+
+def _antigravity_known_project_paths():
+    path = GEMINI_HOME / "projects.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    if _antigravity_projects_cache.get("mtime") == mtime:
+        return list(_antigravity_projects_cache.get("paths") or [])
+    paths = []
+    try:
+        data = json.loads(path.read_text())
+        projects = data.get("projects") if isinstance(data, dict) else {}
+        if isinstance(projects, dict):
+            for raw in projects.keys():
+                try:
+                    p = Path(raw).expanduser().resolve()
+                except (OSError, ValueError, RuntimeError):
+                    continue
+                if p.is_dir():
+                    paths.append(p)
+    except (OSError, json.JSONDecodeError, ValueError):
+        paths = []
+    paths.sort(key=lambda p: len(str(p)), reverse=True)
+    _antigravity_projects_cache.update({"mtime": mtime, "paths": paths})
+    return list(paths)
+
+
+def _antigravity_path_base(path_text):
+    normalized = _antigravity_normalize_path(path_text)
+    if not normalized:
+        return None
+    p = Path(normalized)
+    try:
+        if p.exists():
+            return p if p.is_dir() else p.parent
+    except OSError:
+        pass
+    suffix = p.suffix
+    return p.parent if suffix else p
+
+
+def _antigravity_infer_cwd_from_candidates(candidates):
+    fallback = ""
+    known_projects = _antigravity_known_project_paths()
+    for raw in candidates or []:
+        base = _antigravity_path_base(raw)
+        if not base:
+            continue
+        try:
+            base_resolved = base.expanduser().resolve(strict=False)
+        except (OSError, ValueError, RuntimeError):
+            base_resolved = base
+        if not fallback:
+            fallback = str(base_resolved)
+        matched_project = None
+        for project in known_projects:
+            try:
+                if base_resolved == project or project in base_resolved.parents:
+                    matched_project = project
+                    break
+            except (OSError, RuntimeError):
+                continue
+        try:
+            home_path = Path.home().resolve()
+        except (OSError, ValueError, RuntimeError):
+            home_path = None
+        if matched_project and matched_project != home_path:
+            return str(matched_project)
+        git_root = _find_git_root(str(base_resolved))
+        if git_root:
+            try:
+                return str(Path(git_root).resolve())
+            except (OSError, ValueError, RuntimeError):
+                return git_root
+        if matched_project:
+            return str(matched_project)
+        marked = _nearest_marked_repo_dir(str(base_resolved))
+        if marked:
+            return marked
+    return fallback
+
+
+def _antigravity_event_path_candidates(ev):
+    candidates = []
+    content = ev.get("content")
+    if isinstance(content, str):
+        for m in _ANTIGRAVITY_FILE_URL_RE.finditer(content):
+            candidates.append(m.group(0))
+    for call in ev.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        args = _antigravity_tool_args(call)
+        for key in (
+            "Cwd", "cwd", "DirectoryPath", "SearchPath", "AbsolutePath",
+            "TargetFile", "File", "Path",
+        ):
+            value = args.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    return candidates
+
+
+def _extract_antigravity_tail_meta(path_or_session_id):
+    path = Path(path_or_session_id) if isinstance(path_or_session_id, (str, Path)) else None
+    if path and not path.is_file():
+        path = _antigravity_transcript_path(path_or_session_id)
+    if not path:
+        return {}
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    cached = _conv_meta_cache.get(str(path))
+    if cached and cached.get("mtime") == mtime and cached.get("engine") == "antigravity":
+        return cached
+
+    meta = {
+        "engine": "antigravity",
+        "mtime": mtime,
+        "first_message": None,
+        "last_prompt": None,
+        "last_assistant_text": None,
+        "last_event_type": None,
+        "last_meaningful_ts": 0,
+        "pending_tool": None,
+        "pending_file": None,
+        "has_edit": False,
+        "has_commit": False,
+        "has_push": False,
+        "last_edit_pos": 0,
+        "last_commit_pos": 0,
+        "last_push_pos": 0,
+        "tail_pr_number": None,
+        "tail_pr_url": None,
+        "tail_branch": None,
+        "tail_worktree_path": None,
+        "has_external_cd": False,
+        "cwd": None,
+        "model": None,
+    }
+    pr_url_re = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d{1,7})")
+    cwd_candidates = []
+    pending_tool = False
+    pos = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                pos += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts_epoch = _antigravity_event_epoch(ev)
+                if ts_epoch:
+                    meta["last_meaningful_ts"] = ts_epoch
+                cwd_candidates.extend(_antigravity_event_path_candidates(ev))
+                ev_type = ev.get("type") or ""
+                source = ev.get("source") or ""
+                if ev_type == "USER_INPUT" and source == "USER_EXPLICIT":
+                    text = _antigravity_user_text(ev.get("content") or "")
+                    if text:
+                        meta["first_message"] = meta["first_message"] or text
+                        meta["last_prompt"] = text
+                    meta["last_event_type"] = "user"
+                    meta["pending_tool"] = None
+                    meta["pending_file"] = None
+                    pending_tool = False
+                    continue
+                if ev_type == "PLANNER_RESPONSE":
+                    content = (ev.get("content") or "").strip()
+                    if content:
+                        meta["last_assistant_text"] = content
+                        meta.update(_extract_codex_summary_signals(content, pr_url_re))
+                    meta["last_event_type"] = "assistant"
+                    calls = [c for c in (ev.get("tool_calls") or []) if isinstance(c, dict)]
+                    for call in calls:
+                        name = _antigravity_tool_name(call)
+                        detail = _antigravity_tool_detail(call)
+                        meta["pending_tool"] = name
+                        meta["pending_file"] = detail[:80] if isinstance(detail, str) else None
+                        pending_tool = True
+                        lname = name.lower()
+                        if lname in ("write_to_file", "replace_file_content", "multi_replace_file_content"):
+                            meta["has_edit"] = True
+                            meta["last_edit_pos"] = pos
+                        cmd = _antigravity_tool_command(call)
+                        if cmd:
+                            signals = _codex_command_signals(
+                                cmd,
+                                base_cwd=_antigravity_tool_cwd(call) or meta.get("cwd"),
+                            )
+                            if signals["edit"]:
+                                meta["has_edit"] = True
+                                meta["last_edit_pos"] = pos
+                            if signals["commit"]:
+                                meta["has_commit"] = True
+                                meta["last_commit_pos"] = pos
+                            if signals["push"]:
+                                meta["has_push"] = True
+                                meta["last_push_pos"] = pos
+                            if signals["external_cd"]:
+                                meta["has_external_cd"] = True
+                            if signals.get("worktree_path"):
+                                meta["tail_worktree_path"] = signals["worktree_path"]
+                            if signals.get("worktree_branch"):
+                                meta["tail_branch"] = signals["worktree_branch"]
+                    continue
+                if ev_type in ("CONVERSATION_HISTORY", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE", "CHECKPOINT"):
+                    continue
+                if pending_tool:
+                    meta["pending_tool"] = None
+                    meta["pending_file"] = None
+                    pending_tool = False
+                if ev_type == "CODE_ACTION":
+                    meta["has_edit"] = True
+                    meta["last_edit_pos"] = pos
+                content = ev.get("content") or ""
+                if isinstance(content, str):
+                    if pr_url_re.search(content):
+                        meta.update(_extract_codex_summary_signals(content, pr_url_re))
+                meta["last_event_type"] = "result"
+    except OSError:
+        return {}
+
+    meta["cwd"] = _antigravity_infer_cwd_from_candidates(cwd_candidates)
+    if not meta.get("last_meaningful_ts"):
+        meta["last_meaningful_ts"] = mtime
+    global _conv_meta_cache_dirty
+    with _conv_meta_cache_lock:
+        _conv_meta_cache[str(path)] = meta
+        _conv_meta_cache_dirty = True
+    return meta
+
+
+def _extract_antigravity_cwd(session_id):
+    path = _antigravity_transcript_path(session_id)
+    if not path or not path.is_file():
+        return ""
+    tail = _extract_antigravity_tail_meta(path) or {}
+    return tail.get("cwd") or ""
+
+
+def _antigravity_activity_fields_from_tail(tail, live):
+    fields = {
+        "sidecar_status": None,
+        "sidecar_has_writes": False,
+        "sidecar_tool": None,
+        "sidecar_file": None,
+        "sidecar_ts": 0,
+        "sidecar_in_flight": False,
+        "question_waiting": False,
+        "question_text": "",
+        "question_header": "",
+        "question_options": [],
+    }
+    if not live or not tail:
+        return fields
+    ts = tail.get("last_meaningful_ts") or 0
+    pending_tool = tail.get("pending_tool")
+    if pending_tool:
+        fields.update({
+            "sidecar_status": "active",
+            "sidecar_tool": pending_tool,
+            "sidecar_file": tail.get("pending_file"),
+            "sidecar_ts": ts,
+            "sidecar_in_flight": True,
+        })
+    return fields
+
+
+def find_antigravity_conversations(
+    repo_path=None,
+    include_old=True,
+    repo_only=True,
+    progress=None,
+    limit=None,
+    resolve_pr_states=True,
+    resolve_worktree_dirty=True,
+):
+    paths = _antigravity_transcript_paths()
+    if not paths:
+        if progress:
+            progress("antigravity", state="done", count=0, total=0, detail="No Antigravity transcripts found.")
+        return []
+    repo_path_obj = None
+    if repo_only:
+        repo_path = resolve_repo_path(repo_path)
+        repo_path_obj = Path(repo_path)
+    try:
+        repo_pins = _load_repo_pins()
+    except Exception:
+        repo_pins = {}
+    try:
+        name_overrides = _load_session_name_overrides()
+    except Exception:
+        name_overrides = {}
+    try:
+        archived_set = set(_load_archived_conversations())
+    except Exception:
+        archived_set = set()
+    try:
+        verified_set = set(_load_verified_conversations())
+    except Exception:
+        verified_set = set()
+    try:
+        last_interactions = _load_last_interactions()
+    except Exception:
+        last_interactions = {}
+
+    cutoff = _session_scan_cutoff_ts(include_old)
+    max_rows = _session_scan_file_limit(include_old)
+    git_top_cache = {}
+    out = []
+    scanned = 0
+    for path in paths:
+        if limit and scanned >= int(limit):
+            break
+        sid = path.parent.parent.parent.name
+        if not sid:
+            continue
+        scanned += 1
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        tail = _extract_antigravity_tail_meta(path) or {}
+        cwd = tail.get("cwd") or ""
+        pinned = repo_pins.get(sid)
+        pinned_repo = False
+        if repo_only:
+            if pinned and pinned != repo_path:
+                continue
+            if pinned == repo_path:
+                pinned_repo = True
+            elif not _codex_cwd_matches_repo(cwd, repo_path_obj, git_top_cache):
+                continue
+        modified = tail.get("last_meaningful_ts") or st.st_mtime
+        freshness = max(modified, last_interactions.get(sid) or 0)
+        if not include_old and cutoff > 0 and freshness < cutoff:
+            continue
+        if not include_old and max_rows > 0 and len(out) >= max_rows:
+            continue
+        first_message = (tail.get("first_message") or "").strip()
+        display_name = (
+            name_overrides.get(sid)
+            or (first_message[:80] if first_message else None)
+            or "Antigravity session"
+        )
+        tail_worktree_path = tail.get("tail_worktree_path") or ""
+        effective_cwd = tail_worktree_path or cwd
+        try:
+            cwd_exists = bool(effective_cwd and Path(effective_cwd).is_dir())
+        except OSError:
+            cwd_exists = False
+        folder_path = pinned or cwd or effective_cwd or ""
+        if folder_path:
+            _git_root = _find_git_root(folder_path)
+            folder_label = _resolve_dir_case(_git_root or folder_path)
+        else:
+            folder_label = "Antigravity"
+        _wt_worktree_label = None
+        _wt_idx = folder_label.find("-wt-")
+        if _wt_idx > 0:
+            _wt_worktree_label = folder_label[_wt_idx + 4:]
+            folder_label = folder_label[:_wt_idx]
+        branch = tail.get("tail_branch") or _git_branch_for_cwd(effective_cwd)
+        out.append({
+            "id": sid,
+            "session_id": sid,
+            "source": "antigravity",
+            "engine": "antigravity",
+            "timestamp": "",
+            "branch": branch,
+            "git_branch": branch,
+            "first_message": first_message[:200],
+            "display_name": display_name,
+            "name_overridden": bool(name_overrides.get(sid)),
+            "last_prompt": (tail.get("last_prompt") or "")[:200],
+            "size": st.st_size,
+            "modified": modified,
+            "modified_human": time.strftime("%Y-%m-%d %H:%M", time.localtime(modified)),
+            "mtime": modified,
+            "jsonl_path": str(path),
+            "folder_label": folder_label,
+            "folder_path": folder_path,
+            "worktree_label": _wt_worktree_label,
+            "session_cwd": effective_cwd,
+            "session_cwd_exists": cwd_exists,
+            "session_cwd_is_worktree": bool(
+                tail_worktree_path or (effective_cwd and (Path(effective_cwd) / ".git").is_file())
+            ),
+            "worktree_dirty": (
+                _worktree_dirty_cached(effective_cwd, modified)
+                if resolve_worktree_dirty and effective_cwd else False
+            ),
+            "effective_branch": tail.get("tail_branch") or None,
+            "effective_kind": "worktree" if tail_worktree_path else None,
+            "has_edit": tail.get("has_edit", False),
+            "has_commit": tail.get("has_commit", False),
+            "has_push": tail.get("has_push", False),
+            "last_edit_pos": tail.get("last_edit_pos", 0),
+            "last_commit_pos": tail.get("last_commit_pos", 0),
+            "last_push_pos": tail.get("last_push_pos", 0),
+            "last_event_type": tail.get("last_event_type"),
+            "pending_tool": tail.get("pending_tool"),
+            "pending_file": tail.get("pending_file"),
+            "last_assistant_text": tail.get("last_assistant_text"),
+            "tail_issue_number": None,
+            "tail_pr_number": tail.get("tail_pr_number"),
+            "tail_pr_url": tail.get("tail_pr_url"),
+            "pr_state": None,
+            "session_state": _parse_session_state(tail.get("last_assistant_text")),
+            "archived": sid in archived_set,
+            "verified": sid in verified_set,
+            "pinned_repo": pinned_repo,
+            "last_interacted": last_interactions.get(sid),
+            "is_live": False,
+            "spawn_pid": None,
+            **_antigravity_activity_fields_from_tail(tail, False),
+            "needs_approval": False,
+            "needs_approval_message": "",
+            "model": tail.get("model") or "",
+            "reasoning_effort": "",
+        })
+    if resolve_pr_states:
+        _prime_pr_states(c.get("tail_pr_url") for c in out)
+        for c in out:
+            if c.get("tail_pr_url"):
+                c["pr_state"] = _get_pr_state(c["tail_pr_url"])
+    out.sort(key=lambda x: x.get("last_interacted") or x.get("modified") or 0, reverse=True)
+    if progress:
+        progress(
+            "antigravity",
+            state="done",
+            count=len(out),
+            total=scanned,
+            detail=f"{len(out)} Antigravity session card(s) ready.",
+        )
+    return out
+
+
+def _parse_antigravity_event(ev, line_num):
+    ev_type = ev.get("type") or ""
+    source = ev.get("source") or ""
+    ts = _antigravity_event_timestamp(ev)
+    if ev_type == "USER_INPUT" and source == "USER_EXPLICIT":
+        text = _antigravity_user_text(ev.get("content") or "")
+        if text:
+            return {"line": line_num, "ts": ts, "type": "user_text", "text": text, "images": []}
+        return None
+    if ev_type == "PLANNER_RESPONSE":
+        blocks = []
+        thinking = (ev.get("thinking") or "").strip()
+        if thinking:
+            preview = thinking[:300] + ("..." if len(thinking) > 300 else "")
+            blocks.append({"kind": "thinking", "text": preview})
+        content = (ev.get("content") or "").strip()
+        if content:
+            blocks.append({"kind": "text", "text": content})
+        for call in ev.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            detail = _antigravity_tool_detail(call)
+            if isinstance(detail, str) and len(detail) > 1200:
+                detail = detail[:1200] + "..."
+            blocks.append({
+                "kind": "tool_use",
+                "name": _antigravity_tool_name(call),
+                "detail": detail or "",
+            })
+        if blocks:
+            return {
+                "line": line_num,
+                "ts": ts,
+                "type": "assistant",
+                "message_id": f"antigravity-{line_num}",
+                "blocks": blocks,
+            }
+        return None
+    if ev_type in ("CONVERSATION_HISTORY", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE", "CHECKPOINT"):
+        return None
+    content = ev.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+    output = content.strip()
+    if len(output) > 800:
+        output = output[:800] + "\n..."
+    return {
+        "line": line_num,
+        "ts": ts,
+        "type": "tool_result",
+        "text": output,
+        "tool_use_id": str(ev.get("step_index") or ""),
+        "is_error": ev.get("status") == "ERROR" or ev_type == "ERROR_MESSAGE",
+    }
+
+
+def _parse_antigravity_conversation(session_id, after_line=0):
+    path = _antigravity_transcript_path(session_id)
+    events = []
+    line_num = 0
+    if not path:
+        return {"events": [], "last_line": 0}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_num += 1
+                if line_num <= after_line:
+                    continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                parsed = _parse_antigravity_event(ev, line_num)
+                if parsed:
+                    events.append(parsed)
+    except OSError:
+        pass
+    return {"events": events, "last_line": line_num}
+
+
+def _extract_antigravity_usage(session_id):
+    empty = {
+        "latest_input_tokens": 0,
+        "peak_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_input_tokens": 0,
+        "total_cache_creation_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "model": "",
+        "context_limit": 0,
+        "cost_usd": 0.0,
+        "cost_breakdown_usd": {"input": 0.0, "cache_creation": 0.0,
+                               "cache_read": 0.0, "output": 0.0},
+    }
+    path = _antigravity_transcript_path(session_id)
+    tail = _extract_antigravity_tail_meta(path) if path else {}
+    return {
+        **empty,
+        "model": (tail or {}).get("model") or "",
+        "engine": "antigravity",
+        "override": _get_session_override(session_id),
+    }
+
+
+def _extract_antigravity_timeline(session_id):
+    path = _antigravity_transcript_path(session_id)
+    if not path:
+        return {"events": [], "total_turns": 0}
+    events = []
+    turn = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = _antigravity_event_timestamp(ev)
+                if ev.get("type") == "PLANNER_RESPONSE" and ev.get("content"):
+                    turn += 1
+                if ev.get("type") != "PLANNER_RESPONSE":
+                    continue
+                for call in ev.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    cmd = _antigravity_tool_command(call)
+                    if not cmd:
+                        continue
+                    kind = None
+                    subject = ""
+                    if _TIMELINE_PR_CREATE_RE.search(cmd):
+                        kind = "pr"
+                        m = _TIMELINE_PR_TITLE_RE.search(cmd)
+                        if m:
+                            subject = m.group(1)
+                    elif _TIMELINE_PUSH_RE.search(cmd):
+                        kind = "push"
+                    elif _TIMELINE_COMMIT_RE.search(cmd):
+                        kind = "commit"
+                        m = _TIMELINE_COMMIT_MSG_RE.search(cmd)
+                        if m:
+                            subject = m.group(1)
+                    if kind:
+                        events.append({
+                            "kind": kind,
+                            "turn": max(turn, 1),
+                            "ts": ts,
+                            "subject": subject,
+                            "success": ev.get("status") != "ERROR",
+                        })
+    except OSError:
+        pass
+    return {"events": events, "total_turns": turn}
+
+
+def _antigravity_consider_text_targets(text, consider, line_num):
+    if not isinstance(text, str) or not text:
+        return
+    for match in _ANTIGRAVITY_FILE_URL_RE.finditer(text):
+        target = _antigravity_normalize_path(match.group(0))
+        if target:
+            consider(target, "path", line_num)
+    for target, kind in _ffc_iter_targets(text):
+        consider(target, kind, line_num)
+
+
+def _extract_files_from_antigravity_conversation(session_id):
+    path = _antigravity_transcript_path(session_id)
+    if not path:
+        return {"count": 0, "truncated": False, "groups": {}}
+    seen = {}
+    truncated = False
+
+    def consider(target, kind, line):
+        nonlocal truncated
+        if not target or target in seen:
+            return
+        category = _categorize_file_target(target)
+        if not category:
+            return
+        if len(seen) >= _FFC_MAX_ENTRIES:
+            truncated = True
+            return
+        if kind == "url":
+            try:
+                parsed = urllib.parse.urlsplit(target)
+                tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                label = tail or parsed.netloc or target
+            except ValueError:
+                label = target
+        else:
+            label = os.path.basename(target) or target
+        seen[target] = {
+            "label": label,
+            "target": target,
+            "kind": kind,
+            "category": category,
+            "first_line": line,
+        }
+
+    line_num = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_num += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                _antigravity_consider_text_targets(ev.get("content"), consider, line_num)
+                for call in ev.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    for raw in _ffc_flatten_strings(_antigravity_tool_args(call)):
+                        unquoted = _antigravity_unquote(raw)
+                        if isinstance(unquoted, str):
+                            normalized = _antigravity_normalize_path(unquoted)
+                            if normalized:
+                                consider(normalized, "path", line_num)
+                            _antigravity_consider_text_targets(unquoted, consider, line_num)
+    except OSError:
+        pass
+
+    groups = {}
+    for row in seen.values():
+        groups.setdefault(row["category"], []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda r: r["first_line"])
+    return {"count": len(seen), "truncated": truncated, "groups": groups}
+
+
 def resume_session_gemini(session_id, text):
     """Resume a Gemini session with a one-shot headless prompt."""
     text = _strip_ccc_session_state_instruction(text)
@@ -11494,6 +12482,92 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
         engine="gemini",
     )
     return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
+
+
+def launch_antigravity_terminal(prompt="", name=None, cwd=None, repo_path=None, terminal_app=None):
+    """Launch AGY in a real terminal for a new Antigravity session.
+
+    AGY is a TUI. Current docs expose resume/switch from inside the running
+    interface, not as a startup flag, so CCC only opens the CLI in the target
+    workspace and records the submitted prompt as a note for the user.
+    """
+    prompt = _strip_ccc_session_state_instruction(prompt or "")
+    resolved = _resolve_antigravity_bin()
+    if not resolved["available"]:
+        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    if sys.platform != "darwin":
+        return {
+            "ok": False,
+            "error": "Antigravity CLI is an interactive TUI; CCC terminal launch is currently macOS-only.",
+            "code": "antigravity_terminal_unavailable",
+        }
+    ctx = _spawn_repo_context(cwd=cwd, repo_path=repo_path)
+    spawn_cwd = ctx["cwd"]
+    session_name = _slugify(name or prompt or "antigravity") or "antigravity"
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    log_dir = repo_log_dir(ctx["repo_path"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"launch-antigravity-{session_name}-{timestamp}.log"
+    prompt_path = None
+    if prompt:
+        prompt_path = log_dir / f"prompt-antigravity-{session_name}-{timestamp}.txt"
+        try:
+            prompt_path.write_text(prompt + "\n", encoding="utf-8")
+        except OSError:
+            prompt_path = None
+
+    bin_and_args = _antigravity_shell_command(resolved)
+    q_cwd = _shell_quote(spawn_cwd)
+    notes = [
+        "echo " + _shell_quote("CCC: starting Antigravity CLI in this workspace."),
+        "echo " + _shell_quote("CCC: use /resume inside AGY to resume or switch sessions."),
+    ]
+    if prompt_path:
+        notes.append("echo " + _shell_quote(f"CCC: prompt note saved at {prompt_path}"))
+    command = f"cd {q_cwd} && " + " && ".join(notes) + f" && exec {bin_and_args}"
+
+    def as_literal(s):
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    cmd_lit = as_literal(command)
+    target = terminal_app or _preferred_terminal_app()
+    if target == "iTerm2":
+        script = f'''
+        tell application "iTerm2"
+          activate
+          set newWin to (create window with default profile)
+          tell current session of newWin
+            write text "{cmd_lit}"
+          end tell
+        end tell
+        return "ok"
+        '''
+    else:
+        script = f'''
+        tell application "Terminal"
+          activate
+          do script "{cmd_lit}"
+        end tell
+        return "ok"
+        '''
+
+    try:
+        lf = open(log_path, "w")
+        proc = subprocess.Popen(["osascript", "-e", script], stdout=lf, stderr=lf)
+    except (FileNotFoundError, OSError) as e:
+        return {"ok": False, "error": str(e), "via": "antigravity-terminal"}
+
+    return {
+        "ok": True,
+        "pid": proc.pid,
+        "name": session_name,
+        "log": str(log_path),
+        "prompt_path": str(prompt_path) if prompt_path else None,
+        "interactive": True,
+        "terminal_app": target,
+        "via": "antigravity-terminal",
+        "note": "Antigravity CLI opened in Terminal; enter the prompt in the AGY TUI.",
+    }
 
 
 def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
@@ -13504,6 +14578,12 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False):
         return resume_session_codex(session_id, text)
     if _is_gemini_session(session_id):
         return resume_session_gemini(session_id, text)
+    if _is_antigravity_session(session_id):
+        return {
+            "ok": False,
+            "error": "Antigravity sessions are read-only in CCC; resume from the Antigravity app.",
+            "via": "antigravity-read-only",
+        }
     if not status.get("live") or not has_tty:
         spawn = _find_live_spawn_entry_for_session(session_id)
         if spawn is not None:
@@ -16111,6 +17191,53 @@ def _scan_session_tool_paths(session_id, max_events=400):
 
     Capped at ~400 assistant events for bounded latency on long sessions.
     """
+    if _is_antigravity_session(session_id):
+        path = _antigravity_transcript_path(session_id)
+        file_paths = []
+        cd_targets = []
+        cd_seen = set()
+        seen_events = 0
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if seen_events >= max_events:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if ev.get("type") != "PLANNER_RESPONSE":
+                        continue
+                    seen_events += 1
+                    for call in ev.get("tool_calls") or []:
+                        if not isinstance(call, dict):
+                            continue
+                        name = _antigravity_tool_name(call).lower()
+                        args = _antigravity_tool_args(call)
+                        for key in ("AbsolutePath", "TargetFile", "File", "Path"):
+                            raw = args.get(key)
+                            path_text = _antigravity_normalize_path(raw)
+                            if path_text:
+                                file_paths.append(path_text)
+                        if name == "run_command":
+                            cmd = _antigravity_tool_command(call)
+                            for m in _BASH_CD_RE.finditer(cmd):
+                                cd_path = _antigravity_normalize_path(m.group(1).strip("'\""))
+                                if cd_path and cd_path not in cd_seen:
+                                    cd_seen.add(cd_path)
+                                    cd_targets.append(cd_path)
+                            for m in _BASH_GIT_C_RE.finditer(cmd):
+                                gc_path = _antigravity_normalize_path(m.group(1).strip("'\""))
+                                if gc_path and gc_path not in cd_seen:
+                                    cd_seen.add(gc_path)
+                                    cd_targets.append(gc_path)
+        except OSError:
+            return [], []
+        return file_paths, cd_targets
+
     if not PROJECTS_ROOT.is_dir():
         return [], []
     jsonl = None
@@ -16604,6 +17731,10 @@ def _session_tail_worktree_hint(session_id):
             path = _resolve_gemini_chat_path(session_id)
             tail = _extract_gemini_tail_meta(path) if path else None
             source = "worktree-add"
+        elif _is_antigravity_session(session_id):
+            path = _antigravity_transcript_path(session_id)
+            tail = _extract_antigravity_tail_meta(path) if path else None
+            source = "worktree-add"
     except Exception:
         tail = None
     if not tail:
@@ -16873,6 +18004,8 @@ def extract_session_timeline(session_id):
         return _extract_codex_timeline(session_id)
     if _is_gemini_session(session_id):
         return _extract_gemini_timeline(session_id)
+    if _is_antigravity_session(session_id):
+        return _extract_antigravity_timeline(session_id)
     if not PROJECTS_ROOT.is_dir():
         return {"events": [], "total_turns": 0}
     jsonl = None
@@ -17091,6 +18224,10 @@ def extract_session_usage(session_id):
     if _is_gemini_session(session_id):
         result = _extract_gemini_usage(session_id)
         result.setdefault("engine", "gemini")
+        return result
+    if _is_antigravity_session(session_id):
+        result = _extract_antigravity_usage(session_id)
+        result.setdefault("engine", "antigravity")
         return result
     desktop_meta = _load_desktop_app_metadata().get(session_id) or {}
     if not PROJECTS_ROOT.is_dir():
@@ -18755,6 +19892,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             info["model"] = os.environ.get("CCC_GEMINI_MODEL", "auto")
             info["approval_mode"] = os.environ.get("CCC_GEMINI_APPROVAL_MODE", "yolo")
             self.send_json(info)
+        elif path == "/api/sessions/spawn-antigravity/availability":
+            info = _resolve_antigravity_bin()
+            info["interactive"] = True
+            info["resume"] = "Use /resume inside AGY CLI."
+            self.send_json(info)
         elif path == "/api/loading-status":
             self.send_json(_session_load_snapshot())
         elif path == "/api/archive/loading-status":
@@ -19430,6 +20572,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 progress_step("infer",       state="running")
                 progress_step("worktrees",   state="running")
                 progress_step("codex",       state="running")
+                progress_step("antigravity", state="running")
                 raw_convs = find_all_conversations(
                     resolve_pr_states=resolve_pr_states,
                     resolve_effective=resolve_effective,
@@ -19447,6 +20590,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     progress_step("worktrees",   state="skipped", detail="Deferred until archive rows are visible.")
                 progress_step("codex",       state="done")
+                progress_step("antigravity", state="done")
                 if include_prs:
                     progress_step("pr_states",   state="running", detail="gh pr view per known PR URL.")
                     convs = conversations_with_open_prs(raw_convs)
@@ -20397,6 +21541,60 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         worktree=bool(payload.get("worktree")),
                     )
                     if result.get("code") == "gemini_unavailable":
+                        self.send_json(result, 503)
+                    else:
+                        self.send_json(result)
+                except RepoContextError as e:
+                    self.send_json(e.as_payload(), e.status)
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/sessions/spawn-antigravity":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            prompt = (payload.get("prompt") or "").strip()
+            name = (payload.get("name") or "").strip() or None
+            cwd_raw = payload.get("cwd")
+            cwd_input = cwd_raw.strip() if isinstance(cwd_raw, str) else ""
+            cwd_resolved = None
+            cwd_error = None
+            if cwd_input:
+                try:
+                    expanded = os.path.expanduser(cwd_input)
+                    candidate = Path(expanded).resolve()
+                except (OSError, RuntimeError) as e:
+                    cwd_error = f"could not resolve path ({e})"
+                else:
+                    home = Path.home().resolve()
+                    try:
+                        st = os.stat(candidate)
+                    except OSError as e:
+                        cwd_error = f"path does not exist ({e.strerror or e})"
+                    else:
+                        if not stat.S_ISDIR(st.st_mode):
+                            cwd_error = f"not a directory: {candidate}"
+                        else:
+                            try:
+                                candidate.relative_to(home)
+                            except ValueError:
+                                cwd_error = f"path is outside $HOME ({home}): {candidate}"
+                            else:
+                                cwd_resolved = candidate
+            if cwd_error:
+                self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
+            else:
+                try:
+                    result = launch_antigravity_terminal(
+                        prompt,
+                        name=name,
+                        cwd=str(cwd_resolved) if cwd_resolved else None,
+                        repo_path=payload.get("repo_path"),
+                        terminal_app=payload.get("terminal_app"),
+                    )
+                    if result.get("code") in ("antigravity_unavailable", "antigravity_terminal_unavailable"):
                         self.send_json(result, 503)
                     else:
                         self.send_json(result)
@@ -21770,16 +22968,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
 
     def _stream_conversation(self, conversation_id, after_line):
         """SSE endpoint for real-time conversation tailing."""
-        if _is_gemini_session(conversation_id):
+        if _is_gemini_session(conversation_id) or _is_antigravity_session(conversation_id):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             last_keepalive = time.time()
+            parse_fn = (
+                _parse_antigravity_conversation
+                if _is_antigravity_session(conversation_id)
+                else _parse_gemini_conversation
+            )
             try:
                 while True:
-                    result = _parse_gemini_conversation(conversation_id, after_line=after_line)
+                    result = parse_fn(conversation_id, after_line=after_line)
                     events = result.get("events") or []
                     if events:
                         after_line = result.get("last_line") or after_line
@@ -22553,7 +23756,7 @@ def _raise_open_file_limit(min_soft=2048):
 #   2. version           — the __version__ string from this file.
 #   3. platform          — sys.platform value ("darwin", "linux", ...).
 #   4. engines           — comma-list of installed CLI engines among
-#                          {claude, codex, gemini}, derived only from
+#                          {claude, codex, gemini, antigravity}, derived only from
 #                          "is the binary available" — NO usage signal,
 #                          NO per-engine counts, NO version probing.
 #   5. last_active_date  — ISO date only (YYYY-MM-DD) of the most recent
@@ -22746,6 +23949,11 @@ def _telemetry_detect_engines():
     try:
         if _resolve_gemini_bin().get("available"):
             out.append("gemini")
+    except Exception:
+        pass
+    try:
+        if _resolve_antigravity_bin().get("available"):
+            out.append("antigravity")
     except Exception:
         pass
     return out

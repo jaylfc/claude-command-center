@@ -515,6 +515,16 @@
     padding: 4px 0; font-size: 14px;
   }
   .tool-call .arrow { color: var(--orange); font-weight: bold; }
+  .tool-call .tool-source {
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 11px;
+    line-height: 18px;
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
   .tool-call .tool-name { color: var(--orange); font-weight: 600; }
   .tool-call.tool-call-ok .tool-name::after {
     content: ' ok';
@@ -796,6 +806,9 @@
   .conv-pane.is-codex-session {
     box-shadow: inset 4px 0 0 rgba(88, 166, 255, 0.72);
   }
+  .conv-pane.is-antigravity-session {
+    box-shadow: inset 4px 0 0 rgba(242, 204, 96, 0.72);
+  }
   .conv-pane-header {
     display: none;            /* shown when a pane has title chrome */
     flex: 0 0 auto;
@@ -854,6 +867,12 @@
     box-shadow:
       inset 0 0 0 1px rgba(88, 166, 255, 0.72),
       inset 4px 0 0 rgba(88, 166, 255, 0.88);
+  }
+  .conv-split[data-orientation="vertical"] .conv-pane.is-active.is-antigravity-session,
+  .conv-split[data-orientation="horizontal"] .conv-pane.is-active.is-antigravity-session {
+    box-shadow:
+      inset 0 0 0 1px rgba(242, 204, 96, 0.72),
+      inset 4px 0 0 rgba(242, 204, 96, 0.86);
   }
   .conv-pane-close {
     background: none;
@@ -2549,6 +2568,11 @@
     background: rgba(192, 132, 252, 0.12);
     border: 1px solid rgba(192, 132, 252, 0.45);
   }
+  .conv-engine-icon.antigravity {
+    color: #f2cc60;
+    background: rgba(242, 204, 96, 0.12);
+    border: 1px solid rgba(242, 204, 96, 0.42);
+  }
   .conv-signal {
     font-size: 10px; padding: 1px 5px; border-radius: 3px;
     font-weight: 600; white-space: nowrap; flex: 0 0 auto;
@@ -2586,6 +2610,7 @@
   .conv-item .source-badge.pkood { background: rgba(210,153,34,0.2); color: var(--orange); }
   .conv-item .source-badge.codex { background: rgba(88,166,255,0.18); color: #79c0ff; }
   .conv-item .source-badge.gemini { background: rgba(122,162,255,0.16); color: #9bb7ff; }
+  .conv-item .source-badge.antigravity { background: rgba(242,204,96,0.14); color: #f2cc60; }
   .pkood-tail-output {
     white-space: pre-wrap; word-break: break-word; font-family: 'SF Mono',SFMono-Regular,Consolas,monospace;
     font-size: 13px; line-height: 1.5; padding: 16px 20px; color: var(--text);

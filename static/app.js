@@ -578,7 +578,11 @@
     const engine = currentSession && currentSession.source;
     const resumeCmd = engine === 'codex'
       ? 'codex resume ' + sid
-      : (engine === 'gemini' ? 'gemini --resume ' + sid : 'claude --resume ' + sid + ' --dangerously-skip-permissions');
+      : (engine === 'gemini'
+        ? 'gemini --resume ' + sid
+        : (engine === 'antigravity'
+          ? "agy  # use /resume inside the TUI"
+          : 'claude --resume ' + sid + ' --dangerously-skip-permissions'));
     if (!cwd) return resumeCmd;
     // Derive worktree branch from a `.claude/worktrees/...` path:
     // e.g. /Users/.../.claude/worktrees/claude-fix/issue-88 -> branch "claude-fix/issue-88"
@@ -625,14 +629,15 @@
   function launchTargetsForCurrentSession() {
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentSession.id || '');
     return [
-      { id: 'terminal', label: 'Terminal', hint: 'default', disabled: false },
+      { id: 'terminal', label: 'Terminal', hint: isAntigravity ? '/resume in AGY' : 'default', disabled: false },
       {
         id: 'desktop',
         label: 'Claude Desktop',
-        hint: (!isCodex && !isGemini && isUuid) ? 'app' : 'Claude only',
-        disabled: isCodex || isGemini || !isUuid,
+        hint: (!isCodex && !isGemini && !isAntigravity && isUuid) ? 'app' : 'Claude only',
+        disabled: isCodex || isGemini || isAntigravity || !isUuid,
       },
       {
         id: 'codex',
@@ -741,7 +746,8 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
-    if (!sid || isPkood || isCodex || isGemini) {
+    const isAntigravity = currentSession.source === 'antigravity';
+    if (!sid || isPkood || isCodex || isGemini || isAntigravity) {
       $announceBtnConv.style.display = 'none';
       delete $announceBtnConv.dataset.sessionId;
       return;
@@ -802,11 +808,12 @@
     const isPkood = currentSession && currentSession.source === 'pkood';
     const isCodex = currentSession && currentSession.source === 'codex';
     const isGemini = currentSession && currentSession.source === 'gemini';
+    const isAntigravity = currentSession && currentSession.source === 'antigravity';
     const repos = (typeof repoListState !== 'undefined' && repoListState.repos) || [];
     const currentCwd = (currentSession && currentSession.cwd) || '';
     let html = '';
     html += '<div class="com-section-label">Move to repo</div>';
-    if (!sid || isPkood || isCodex || isGemini) {
+    if (!sid || isPkood || isCodex || isGemini || isAntigravity) {
       html += '<div class="com-item com-current">No movable session selected</div>';
     } else if (!repos.length) {
       html += '<div class="com-item com-current">No known repos. Add one in the Repo picker.</div>';
@@ -885,6 +892,7 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
     const canJump = live && liveStatus.tty && liveStatus.terminalApp;
     const canShowLaunch = !!sid && !isPkood;
 
@@ -923,7 +931,8 @@
       if (canShowLaunch) {
         btn.style.display = 'inline-flex';
         btn.title = isCodex ? 'Open a Terminal window and run codex resume'
-          : (isGemini ? 'Open a Terminal window and run gemini --resume' : 'Open a Terminal window and run claude --resume');
+          : (isGemini ? 'Open a Terminal window and run gemini --resume'
+            : (isAntigravity ? 'Open AGY in Terminal; use /resume inside the TUI' : 'Open a Terminal window and run claude --resume'));
         btn.querySelector('.jump-label').textContent = 'Launch';
         renderLaunchChoiceMenu($launchChoiceMenuConv);
       } else {
@@ -1164,7 +1173,7 @@
   }
 
   function isCommandActivityTool(tool) {
-    const name = String(tool || '');
+    const name = toolDisplayName(String(tool || ''));
     return name === 'Bash' || name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command';
   }
 
@@ -1440,7 +1449,7 @@
   async function openInClaudeDesktop(ev) {
     const btn = ev && ev.currentTarget;
     if (!btn || !currentSession.id) return;
-    if (currentSession.source === 'codex' || currentSession.source === 'gemini') return;
+    if (currentSession.source === 'codex' || currentSession.source === 'gemini' || currentSession.source === 'antigravity') return;
     const snapshot = actionButtonSnapshot(btn);
     btn.classList.add('opening');
     btn.disabled = true;
@@ -1655,6 +1664,7 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
     const live = liveStatus.live && liveStatus.tty;
     const isConvTab = activeTab === 'sessions';
     const hasSession = !!currentSession.id;
@@ -1672,7 +1682,7 @@
     // the user with Resume/Launch buttons and no way to just send a message.
     // Also show in "new session" mode where the input doubles as the
     // prompt for spawning a fresh agent.
-    if (isConvTab && (hasSession || isNewSession || isBacklogIssue)) {
+    if (isConvTab && ((hasSession && !isAntigravity) || isNewSession || isBacklogIssue)) {
       $convInputBar.classList.add('visible');
       if (isBacklogIssue) {
         const n = (currentBacklogRow && currentBacklogRow.issue_number) || currentConversation.replace('backlog-issue-', '');
@@ -1684,9 +1694,16 @@
         $convTtyLabel.textContent = 'new';
         const cwdForPrompt = (typeof getSpawnCwd === 'function' && getSpawnCwd()) || selectedRepoPath();
         const repoLabel = (typeof spawnCwdLabel === 'function' && spawnCwdLabel(cwdForPrompt)) || _pathLeaf(cwdForPrompt);
-        $convInput.placeholder = repoLabel
-          ? 'Type a prompt to start a new session in ' + repoLabel + '…'
-          : 'Pick a folder before starting a new session…';
+        const spawnEngine = getSpawnEngine();
+        if (spawnEngine === 'antigravity') {
+          $convInput.placeholder = repoLabel
+            ? 'Type a prompt note, then open Antigravity in ' + repoLabel + '…'
+            : 'Pick a folder before opening Antigravity…';
+        } else {
+          $convInput.placeholder = repoLabel
+            ? 'Type a prompt to start a new session in ' + repoLabel + '…'
+            : 'Pick a folder before starting a new session…';
+        }
       } else if (isPkood) {
         $convTtyLabel.textContent = 'pkood';
         $convInput.placeholder = 'Send to pkood agent...';
@@ -1773,6 +1790,7 @@
     const source = currentSession && currentSession.source;
     if (source === 'codex') return 'Codex sessions do not use Claude slash commands';
     if (source === 'gemini') return 'Gemini sessions do not use Claude slash commands';
+    if (source === 'antigravity') return 'Antigravity sessions are read-only in CCC';
     if (source === 'pkood') return 'pkood agents do not use Claude slash commands';
     if (currentConversation === '__new__') {
       const engine = (typeof getSpawnEngine === 'function') ? getSpawnEngine() : 'claude';
@@ -3559,6 +3577,7 @@
     const prompt = (card.first_message || card.prompt || card.display_name || '').trim();
     const engineLabel = card.source === 'codex' ? 'Codex'
       : card.source === 'gemini' ? 'Gemini'
+      : card.source === 'antigravity' ? 'Antigravity'
       : card.source === 'pkood' ? 'pkood'
       : 'Claude';
     const cwd = card.spawn_cwd || card.repo_path || card.folder_path || card.cwd || '';
@@ -3571,6 +3590,7 @@
       + '<span class="label">User</span>'
       + '<div class="user-msg" data-raw-text="' + escapeAttr(prompt || card.display_name || 'New session') + '">' + promptHtml + '</div>'
       + (meta ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">' + escapeHtml(meta) + '</div>' : '')
+      + (card.source === 'antigravity' ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">Antigravity opens in a terminal TUI. Enter this prompt there; use /resume inside AGY to switch sessions.</div>' : '')
       + '</div>';
     showOptimisticAgentIndicator($view);
     scrollConversationToEnd($view);
@@ -3582,7 +3602,7 @@
       || conversationsData.find(x => x && x.id === 'spawning-' + tempPid);
     if (!placeholder) return null;
     placeholder.spawn_pid = realPid;
-    if ((placeholder.source === 'codex' || placeholder.source === 'gemini') && logPath) {
+    if ((placeholder.source === 'codex' || placeholder.source === 'gemini' || placeholder.source === 'antigravity') && logPath) {
       placeholder.agent_log_path = logPath;
       if (placeholder.source === 'codex') placeholder.codex_log_path = logPath;
     }
@@ -3671,7 +3691,7 @@
     const id = 'spawning-' + pid;
     // Backwards-compat: this used to take `usePkood: bool`. Accept
     // either the legacy boolean (true → 'pkood') or a new explicit
-    // string ('claude' | 'codex' | 'pkood' | 'interactive').
+    // string ('claude' | 'codex' | 'gemini' | 'antigravity' | 'pkood' | 'interactive').
     let source;
     if (sourceOrEngine === true) source = 'pkood';
     else if (sourceOrEngine === false || sourceOrEngine == null) source = 'interactive';
@@ -3692,7 +3712,7 @@
       name_overridden: false,
       // Fire-and-watch engines also get durable engine-native sessions; the
       // log path is only a fallback while the real row is materializing.
-      agent_log_path: (source === 'codex' || source === 'gemini') ? (logPath || null) : null,
+      agent_log_path: (source === 'codex' || source === 'gemini' || source === 'antigravity') ? (logPath || null) : null,
       codex_log_path: source === 'codex' ? (logPath || null) : null,
     };
     if (meta && typeof meta === 'object') {
@@ -6674,14 +6694,18 @@
       }
       const isCodexRow = c.source === 'codex' || c.engine === 'codex';
       const isGeminiRow = c.source === 'gemini' || c.engine === 'gemini';
+      const isAntigravityRow = c.source === 'antigravity' || c.engine === 'antigravity';
       let sourceBadge = '';
       if (c.source === 'pkood') sourceBadge = '<span class="source-badge pkood">pkood</span>';
       else if (isCodexRow) sourceBadge = '<span class="source-badge codex">codex</span>';
       else if (isGeminiRow) sourceBadge = '<span class="source-badge gemini">gemini</span>';
+      else if (isAntigravityRow) sourceBadge = '<span class="source-badge antigravity">antigravity</span>';
       const engineIcon = isCodexRow
         ? '<span class="conv-engine-icon codex" title="Codex session" aria-label="Codex session">C</span>'
         : isGeminiRow
           ? '<span class="conv-engine-icon gemini" title="Gemini session" aria-label="Gemini session">G</span>'
+          : isAntigravityRow
+            ? '<span class="conv-engine-icon antigravity" title="Antigravity session" aria-label="Antigravity session">A</span>'
         : '';
       // Prefer "last interacted" (the user's last UI action) over "last
       // event" (which includes Claude's autonomous responses) so the row
@@ -6898,7 +6922,7 @@
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
-      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
+      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
@@ -8604,6 +8628,7 @@
     const source = (row && row.source) || '';
     if (source === 'codex') return 'codex';
     if (source === 'gemini') return 'gemini';
+    if (source === 'antigravity') return 'antigravity';
     if (source === 'pkood') return 'pkood';
     if (source === 'backlog') return row && row.issue_number ? 'issue' : 'backlog';
     if (source === 'github_pr') return 'pull request';
@@ -9582,6 +9607,7 @@
     if (paneEl) {
       paneEl.classList.toggle('is-codex-session', source === 'codex');
       paneEl.classList.toggle('is-gemini-session', source === 'gemini');
+      paneEl.classList.toggle('is-antigravity-session', source === 'antigravity');
     }
     const isPendingSpawn = !!(selectedConv && selectedConv.pending_spawn);
     if (source === 'backlog') {
@@ -9645,7 +9671,7 @@
         // backend finds a CCC-spawned headless process for this session.
         // No-op for externally launched, IDE-launched, or pkood sessions.
         const sid = sessionIdByConv[id] || '';
-        if (sid && source !== 'codex' && source !== 'backlog') startSpawnStream(sid, paneId);
+        if (sid && source !== 'codex' && source !== 'antigravity' && source !== 'backlog') startSpawnStream(sid, paneId);
       }
     } finally {
       finishConversationPaneLoad();
@@ -9662,9 +9688,10 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
     const live = liveStatus.live && liveStatus.tty;
     const hasSession = !!currentSession.id;
-    if (hasSession && kanbanView) {
+    if (hasSession && kanbanView && !isAntigravity) {
       $convPanelInput.classList.add('visible');
       if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (liveStatus.tty || (live ? '' : 'offline'))));
       if ($cpInput) {
@@ -11693,17 +11720,95 @@
     return (nameEl?.dataset?.toolName || nameEl?.textContent || '').trim();
   }
 
+  const KNOWN_TOOL_SOURCE_BY_NAME = {
+    click: 'Computer Use',
+    click_at: 'Computer Use',
+    double_click: 'Computer Use',
+    drag: 'Computer Use',
+    get_app_state: 'Computer Use',
+    hotkey: 'Computer Use',
+    list_apps: 'Computer Use',
+    move_mouse: 'Computer Use',
+    press_key: 'Computer Use',
+    screenshot: 'Computer Use',
+    scroll: 'Computer Use',
+    type_text: 'Computer Use',
+  };
+
+  function splitMcpToolName(rawName) {
+    const value = String(rawName || '').trim();
+    if (!value.startsWith('mcp__')) return null;
+    const rest = value.slice(5);
+    const idx = rest.indexOf('__');
+    if (idx <= 0) return null;
+    return { namespace: rest.slice(0, idx), name: rest.slice(idx + 2) };
+  }
+
+  function toolDisplayName(rawName) {
+    let value = String(rawName || '').trim();
+    const mcp = splitMcpToolName(value);
+    if (mcp) value = mcp.name;
+    const dot = value.lastIndexOf('.');
+    if (dot >= 0) value = value.slice(dot + 1);
+    return value || 'tool';
+  }
+
+  function toolNamespaceLabel(rawNamespace) {
+    const key = String(rawNamespace || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+    return ({
+      browser: 'Browser',
+      chrome: 'Chrome',
+      computer_use: 'Computer Use',
+      github: 'GitHub',
+      gmail: 'Gmail',
+      google_calendar: 'Google Calendar',
+      google_drive: 'Google Drive',
+      image_gen: 'Image Generation',
+      outlook_calendar: 'Outlook Calendar',
+      outlook_email: 'Outlook Email',
+      slack: 'Slack',
+      teams: 'Teams',
+      tool_search: 'Tool Search',
+      zoom: 'Zoom',
+    })[key] || '';
+  }
+
+  function inferredToolSource(rawName) {
+    const value = String(rawName || '').trim();
+    const mcp = splitMcpToolName(value);
+    if (mcp) return toolNamespaceLabel(mcp.namespace);
+    const dot = value.lastIndexOf('.');
+    if (dot > 0) {
+      const source = toolNamespaceLabel(value.slice(0, dot));
+      if (source) return source;
+    }
+    return KNOWN_TOOL_SOURCE_BY_NAME[toolDisplayName(value)] || '';
+  }
+
+  function toolBlockSource(block) {
+    if (!block || typeof block !== 'object') return '';
+    const explicit = block.tool_source || block.toolSource || block.provider || block.namespace || '';
+    if (explicit) return String(toolNamespaceLabel(explicit) || explicit).trim();
+    return inferredToolSource(block.name).trim();
+  }
+
+  function toolCallSource(toolCall) {
+    if (!toolCall) return '';
+    return (toolCall.dataset.toolSource || inferredToolSource(toolCallName(toolCall))).trim();
+  }
+
   function toolCallDetailText(toolCall) {
     if (!toolCall) return '';
     return (toolCall.dataset.toolDetail || toolCall.querySelector('.tool-detail')?.textContent || '').trim();
   }
 
   function isEditToolName(name) {
-    return name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'NotebookEdit';
+    const base = toolDisplayName(name);
+    return base === 'Edit' || base === 'MultiEdit' || base === 'Write' || base === 'NotebookEdit';
   }
 
   function isFileToolName(name) {
-    return isEditToolName(name) || name === 'Read';
+    return isEditToolName(name) || toolDisplayName(name) === 'Read';
   }
 
   function compactPathDetail(detail) {
@@ -11715,12 +11820,13 @@
   }
 
   function formatToolCallDetail(name, detail) {
+    const baseName = toolDisplayName(name);
     const full = String(detail || '').trim();
     if (!full) return { display: '', full: '', className: '' };
-    if (isCommandActivityTool(name)) {
+    if (isCommandActivityTool(baseName)) {
       return { display: full, full, className: ' tool-command' };
     }
-    if (isFileToolName(name)) {
+    if (isFileToolName(baseName)) {
       return { display: compactPathDetail(full), full, className: ' tool-file' };
     }
     return { display: full, full, className: '' };
@@ -11730,6 +11836,8 @@
     const tc = div.querySelector('.tool-call');
     if (!tc) return 'Ran 1 command';
     const name = toolCallName(tc);
+    const displayName = toolDisplayName(name);
+    const source = toolCallSource(tc);
     const detail = toolCallDetailText(tc);
     const basename = (s) => {
       if (!s) return '';
@@ -11738,12 +11846,17 @@
       return parts[parts.length - 1] || cleaned;
     };
     const trunc = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
-    const codeRead = (name === 'Bash' || name === 'exec_command') ? parseCodeReadCommand(detail) : null;
+    const codeRead = (displayName === 'Bash' || displayName === 'exec_command') ? parseCodeReadCommand(detail) : null;
     if (codeRead) {
       const loc = codeRead.start ? ':' + codeRead.start + (codeRead.end && codeRead.end !== codeRead.start ? '-' + codeRead.end : '') : '';
       return 'Viewed ' + _pathBase(codeRead.path) + loc;
     }
-    switch (name) {
+    if (source) {
+      return detail
+        ? 'Used ' + source + ': ' + displayName + ' ' + trunc(detail, 40)
+        : 'Used ' + source + ': ' + displayName;
+    }
+    switch (displayName) {
       case 'Read':         return detail ? 'Read ' + basename(detail) : 'Ran Read';
       case 'Edit':         return detail ? 'Edited ' + basename(detail) : 'Ran Edit';
       case 'Write':        return detail ? 'Wrote ' + basename(detail) : 'Ran Write';
@@ -11759,7 +11872,7 @@
       case 'TaskUpdate':   return 'Updated task';
       case 'AskUserQuestion': return detail ? 'Question: ' + trunc(detail, 70) : 'Asked a question';
       case 'ExitPlanMode': return 'Exited plan mode';
-      default:             return detail ? 'Ran ' + name + ': ' + trunc(detail, 40) : 'Ran ' + (name || 'tool');
+      default:             return detail ? 'Ran ' + displayName + ': ' + trunc(detail, 40) : 'Ran ' + (displayName || 'tool');
     }
   }
 
@@ -11879,7 +11992,7 @@
 
   function toolCallCommandInfo(toolCall) {
     if (!toolCall) return null;
-    const name = toolCallName(toolCall);
+    const name = toolDisplayName(toolCallName(toolCall));
     const detail = toolCallDetailText(toolCall);
     if (name !== 'exec_command' && name !== 'Bash') return null;
     return parseCodeReadCommand(detail);
@@ -11918,7 +12031,21 @@
       if (commands.length) {
         parts.push(commands.length === 1 ? 'ran shell command' : 'ran ' + commands.length + ' shell commands');
       }
-      const accounted = edits.length + commands.length;
+      const sourcedTools = calls.filter(tc =>
+        !isEditToolName(toolCallName(tc))
+        && !isCommandActivityTool(toolCallName(tc))
+        && toolCallSource(tc)
+      );
+      const sourceCounts = {};
+      for (const tc of sourcedTools) {
+        const source = toolCallSource(tc);
+        sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+      }
+      for (const source of Object.keys(sourceCounts).sort()) {
+        const n = sourceCounts[source];
+        parts.push('used ' + n + ' ' + source + ' tool' + (n === 1 ? '' : 's'));
+      }
+      const accounted = edits.length + commands.length + sourcedTools.length;
       const other = Math.max(0, calls.length - accounted);
       if (other) parts.push('ran ' + other + ' other tool' + (other === 1 ? '' : 's'));
       label.textContent = parts.length ? parts.join('; ') : 'Ran ' + count + ' commands';
@@ -12212,11 +12339,17 @@
         let hasNonTool = false;
         for (const b of ev.blocks) {
           if (b.kind === 'tool_use') {
-            const displayName = b.name === 'AskUserQuestion' ? 'Question' : b.name;
-            const toolClass = b.name === 'AskUserQuestion' ? ' ask-user-question' : '';
+            const baseName = toolDisplayName(b.name);
+            const displayName = baseName === 'AskUserQuestion' ? 'Question' : baseName;
+            const source = toolBlockSource(b);
+            const sourceHtml = source
+              ? '<span class="tool-source" title="Tool source">' + escapeHtml(source) + '</span> '
+              : '';
+            const toolClass = baseName === 'AskUserQuestion' ? ' ask-user-question' : '';
             const detail = formatToolCallDetail(b.name, b.detail);
-            html += '<div class="tool-call' + toolClass + detail.className + '" data-tool-detail="' + escapeAttr(detail.full) + '">'
+            html += '<div class="tool-call' + toolClass + detail.className + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '">'
               + '<span class="arrow">-></span> '
+              + sourceHtml
               + '<span class="tool-name" data-tool-name="' + escapeAttr(b.name || '') + '">' + escapeHtml(displayName) + '</span>'
               + (detail.display ? ' <span class="tool-detail" title="' + escapeAttr(detail.full) + '">' + escapeHtml(detail.display) + '</span>' : '')
               + '</div>';
@@ -15386,24 +15519,73 @@
   function getSpawnEngine() {
     try {
       const v = localStorage.getItem('ccc.spawnEngine');
-      if (v === 'claude' || v === 'codex' || v === 'gemini') return v;
+      if (v === 'claude' || v === 'codex' || v === 'gemini' || v === 'antigravity') return v;
     } catch (_) {}
     return 'claude';
   }
+  function spawnEngineLabel(engine) {
+    if (engine === 'codex') return 'Codex';
+    if (engine === 'gemini') return 'Gemini';
+    if (engine === 'antigravity') return 'Antigravity';
+    if (engine === 'pkood') return 'pkood';
+    return 'Claude';
+  }
+  function spawnSourceForEngine(engine) {
+    if (engine === 'codex') return 'codex';
+    if (engine === 'gemini') return 'gemini';
+    if (engine === 'antigravity') return 'antigravity';
+    if (engine === 'pkood') return 'pkood';
+    return 'interactive';
+  }
+  function spawnEndpointForEngine(engine) {
+    if (engine === 'pkood') return '/api/pkood/spawn';
+    if (engine === 'codex') return '/api/sessions/spawn-codex';
+    if (engine === 'gemini') return '/api/sessions/spawn-gemini';
+    if (engine === 'antigravity') return '/api/sessions/spawn-antigravity';
+    return '/api/sessions/spawn';
+  }
+  function spawnSupportsWorktree(engine) {
+    return engine === 'claude' || engine === 'gemini';
+  }
+  function spawnUsesLogPlaceholder(engine) {
+    return engine === 'codex' || engine === 'gemini';
+  }
+  function syncSpawnEngineDependentUi() {
+    const engine = getSpawnEngine();
+    const worktreeSupported = spawnSupportsWorktree(engine);
+    ['inlineWorktreeToggle', 'nsmWorktree', 'kptWorktreeToggle'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.disabled = !worktreeSupported;
+      const label = el.closest('label');
+      if (label) {
+        label.style.opacity = worktreeSupported ? '' : '0.55';
+        label.title = worktreeSupported
+          ? 'Spawn the session in a fresh git worktree (`feat/<slug>` branch) so it cannot accidentally commit to main.'
+          : spawnEngineLabel(engine) + ' sessions do not support CCC-managed worktrees.';
+      }
+    });
+  }
   function setSpawnEngine(v) {
-    if (v !== 'claude' && v !== 'codex' && v !== 'gemini') return;
+    if (v !== 'claude' && v !== 'codex' && v !== 'gemini' && v !== 'antigravity') return;
     try { localStorage.setItem('ccc.spawnEngine', v); } catch (_) {}
     // $nsmEngineSelect is declared further down in this script; by the
     // time any user interaction calls setSpawnEngine() it will exist.
     [$convInputEngineSelect, $kptToolbarEngineSelect,
      (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)]
       .forEach(s => { if (s && s.value !== v) s.value = v; });
+    syncSpawnEngineDependentUi();
+    if (typeof updateInputBar === 'function') updateInputBar();
+    if (currentConversation === '__new__' && typeof enterNewSessionMode === 'function') {
+      enterNewSessionMode();
+    }
   }
   [$convInputEngineSelect, $kptToolbarEngineSelect].forEach(sel => {
     if (!sel) return;
     sel.value = getSpawnEngine();
     sel.addEventListener('change', () => setSpawnEngine(sel.value));
   });
+  syncSpawnEngineDependentUi();
   { const $ia = document.getElementById('convInputIssueAction');
     if ($ia) $ia.addEventListener('change', () => updateInputBar()); }
   // Probe alternate-engine availability so a user with no CLI install sees the
@@ -15431,6 +15613,7 @@
     await Promise.all([
       probe('codex', '/api/sessions/spawn-codex/availability', 'Codex'),
       probe('gemini', '/api/sessions/spawn-gemini/availability', 'Gemini'),
+      probe('antigravity', '/api/sessions/spawn-antigravity/availability', 'Antigravity'),
     ]);
   }
   async function refreshCodexAvailability() {
@@ -15650,20 +15833,14 @@
       // Source for the optimistic card: alternate engines render their chip;
       // 'pkood' keeps the orange pkood chip; 'claude' uses
       // 'interactive' (no chip).
-      const cardSource = engine === 'codex' ? 'codex'
-                       : engine === 'gemini' ? 'gemini'
-                       : engine === 'pkood' ? 'pkood'
-                       : 'interactive';
+      const cardSource = spawnSourceForEngine(engine);
       insertPendingSpawnCard(tempPid, subject, cardSource);
       $kptRunBtn.disabled = true;
-      $kptRunBtn.textContent = 'Spawning...';
+      $kptRunBtn.textContent = engine === 'antigravity' ? 'Opening...' : 'Spawning...';
       try {
-        const endpoint = engine === 'pkood' ? '/api/pkood/spawn'
-                       : engine === 'codex' ? '/api/sessions/spawn-codex'
-                       : engine === 'gemini' ? '/api/sessions/spawn-gemini'
-                       : '/api/sessions/spawn';
-        // pkood and codex don't support the worktree flag — drop it for those.
-        const body = (engine === 'claude' || engine === 'gemini')
+        const endpoint = spawnEndpointForEngine(engine);
+        // pkood, codex, and antigravity don't support CCC-managed worktrees.
+        const body = spawnSupportsWorktree(engine)
           ? { prompt, repo_path: repoPath, worktree: useWorktree }
           : { prompt, repo_path: repoPath };
         const res = await fetch(endpoint, {
@@ -15674,7 +15851,7 @@
         const data = await res.json();
         if (data.ok) {
           $kptNewSession.value = '';
-          $kptRunBtn.textContent = 'Spawned!';
+          $kptRunBtn.textContent = engine === 'antigravity' ? 'Opened!' : 'Spawned!';
           // Swap the temp-pid key for the real pid so the next /api/sessions
           // poll can match by spawn_pid and replace the placeholder with the
           // real card. Without this the placeholder sits on the board until
@@ -15685,7 +15862,7 @@
               placeholder.spawn_pid = data.pid;
               // Fire-and-watch engines stash the log path so the
               // right-pane renderer can fetch /api/sessions/spawned/<pid>/log.
-              if ((engine === 'codex' || engine === 'gemini') && data.log) placeholder.agent_log_path = data.log;
+              if (spawnUsesLogPlaceholder(engine) && data.log) placeholder.agent_log_path = data.log;
               pendingSpawns.delete(tempPid);
               pendingSpawns.set(data.pid, placeholder);
             }
@@ -15698,9 +15875,10 @@
           // If the user picked a fire-and-watch engine, refocus the right pane on the
           // placeholder so log rendering kicks in for the new pid
           // (the auto-select fired when tempPid was still in play).
-          if ((engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+          if (spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
             selectConversation('spawning-' + tempPid);
           }
+          if (engine === 'antigravity') showOpToast('Antigravity opened in Terminal. Enter the prompt in AGY.', 'ok');
         } else {
           $kptRunBtn.textContent = data.error ? 'Failed' : 'Failed';
           // Spawn failed — drop the optimistic placeholder so the board doesn't
@@ -15877,9 +16055,7 @@
     const useWorktree = !!($nsmWorktree && $nsmWorktree.checked);
     $nsmSubmit.disabled = true;
     $nsmSubmit.textContent = 'Launching...';
-    const cardSource = engine === 'codex' ? 'codex'
-                     : engine === 'gemini' ? 'gemini'
-                     : 'interactive';
+    const cardSource = spawnSourceForEngine(engine);
     const tempPid = 'tmp-' + Date.now();
     closeNewSessionModal();
     insertPendingSpawnCard(tempPid, effectiveSubject, cardSource, null, {
@@ -15892,12 +16068,9 @@
       session_cwd_exists: true,
     });
     try {
-      const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
-                     : engine === 'gemini' ? '/api/sessions/spawn-gemini'
-                     : '/api/sessions/spawn';
-      const body = engine === 'codex'
-        ? { prompt, name: effectiveSubject, repo_path: repoPath }
-        : { prompt, name: effectiveSubject, repo_path: repoPath, worktree: useWorktree };
+      const endpoint = spawnEndpointForEngine(engine);
+      const body = { prompt, name: effectiveSubject, repo_path: repoPath };
+      if (spawnSupportsWorktree(engine)) body.worktree = useWorktree;
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body),
@@ -15905,9 +16078,10 @@
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
       if (data.ok) {
         const placeholder = adoptPendingSpawnPid(tempPid, data.pid, data.log);
-        if (placeholder && (engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+        if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
           selectConversation(placeholder.id);
         }
+        if (engine === 'antigravity') showOpToast('Antigravity opened in Terminal. Enter the prompt in AGY.', 'ok');
         // Tight poll schedule so the real card replaces the placeholder fast.
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
@@ -17216,12 +17390,15 @@
     const $view = getConvView();
     if ($view) {
       const spawnEngine = getSpawnEngine();
-      const engineLabel = spawnEngine === 'codex' ? 'Codex' : (spawnEngine === 'gemini' ? 'Gemini' : 'Claude');
+      const engineLabel = spawnEngineLabel(spawnEngine);
       const repoLabel = spawnCwdLabel(spawnCwd) || 'pick a folder below';
+      const newSessionHelp = spawnEngine === 'antigravity'
+        ? 'Type a prompt note below and press Enter to open Antigravity in Terminal. Enter the prompt in the AGY TUI.'
+        : 'Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
         + '<div style="font-size:12px;color:var(--text-muted);">CWD: <span id="newSessionCwdNotice" style="color:var(--text);" title="' + escapeAttr(spawnCwd) + '">' + escapeHtml(repoLabel) + '</span></div>'
-        + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.</div>'
+        + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">' + escapeHtml(newSessionHelp) + '</div>'
         + '</div>';
     }
     updateInputBar();
@@ -17407,9 +17584,7 @@
       $convInput.style.borderColor = 'var(--red)';
       setTimeout(() => { $convInput.style.borderColor = ''; }, 1500);
     };
-    const cardSource = engine === 'codex' ? 'codex'
-      : engine === 'gemini' ? 'gemini'
-      : 'interactive';
+    const cardSource = spawnSourceForEngine(engine);
     const tempPid = 'tmp-' + Date.now();
     insertPendingSpawnCard(tempPid, subject, cardSource, null, {
       first_message: body,
@@ -17433,14 +17608,12 @@
       }, 60);
     };
     try {
-      const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
-                     : engine === 'gemini' ? '/api/sessions/spawn-gemini'
-                     : '/api/sessions/spawn';
+      const endpoint = spawnEndpointForEngine(engine);
       const $inlineWorktree = document.getElementById('inlineWorktreeToggle');
       const useWorktree = !!($inlineWorktree && $inlineWorktree.checked);
       const spawnBody = { prompt, name: subject, cwd: launchCwd };
       if (repoPath) spawnBody.repo_path = repoPath;
-      if (engine !== 'codex') spawnBody.worktree = useWorktree;
+      if (spawnSupportsWorktree(engine)) spawnBody.worktree = useWorktree;
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(spawnBody),
@@ -17451,9 +17624,10 @@
         // Fire-and-watch engines can stream their spawn log once the real pid
         // is known. Re-select the same placeholder id so fetchConversationEvents
         // starts the log poller without making the user click the sidebar row.
-        if (placeholder && (engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+        if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
           selectConversation(placeholder.id);
         }
+        if (engine === 'antigravity') showOpToast('Antigravity opened in Terminal. Enter the prompt in AGY.', 'ok');
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
         setTimeout(refreshConversationList, 3000);
