@@ -374,6 +374,85 @@
   }
   loadAppConfig();
 
+  // ── Anonymous opt-in telemetry bar ──
+  // Defaults OFF. Renders only when the server reports opt_in === null
+  // (never asked) AND the env kill switch is not set. Once the user clicks
+  // any button the bar is hidden forever; the choice is persisted server-
+  // side and mirrored to localStorage so multi-tab dashboards don't double-
+  // prompt during the same session. See docs/telemetry.md for the contract.
+  const TELEMETRY_DISMISSED_LS = 'ccc-telemetry-bar-dismissed';
+  async function loadTelemetryStatus() {
+    let status = null;
+    try {
+      const res = await fetch('/api/telemetry/status');
+      if (!res.ok) return;
+      status = await res.json();
+    } catch (_) {
+      return;
+    }
+    if (!status) return;
+    const $bar = document.getElementById('telemetryOptInBar');
+    if (!$bar) return;
+    // Env kill switch wins — the bar must never appear when telemetry is
+    // disabled at the process level (e.g. corporate policy, CI runs).
+    if (status.env_disabled) { $bar.hidden = true; return; }
+    // null → never asked → show the bar. true/false → already decided → hide.
+    if (status.opt_in !== null && status.opt_in !== undefined) {
+      $bar.hidden = true;
+      return;
+    }
+    let dismissed = false;
+    try { dismissed = localStorage.getItem(TELEMETRY_DISMISSED_LS) === '1'; } catch (_) {}
+    if (dismissed) { $bar.hidden = true; return; }
+    // Wire docs link from server (kept in sync with server-side constant
+    // so a future GH org rename only touches one place).
+    if (status.docs_url) {
+      const $link = document.getElementById('telemetryDetailsLink');
+      if ($link) $link.setAttribute('href', status.docs_url);
+    }
+    $bar.hidden = false;
+  }
+  async function postTelemetryOptIn(enable) {
+    try {
+      const res = await fetch('/api/telemetry/opt-in', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enable: !!enable }),
+      });
+      // Even on failure we hide the bar — the localStorage flag stops it
+      // from coming back this session, and the user can re-open the
+      // settings menu to flip the decision.
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (_) {
+      return null;
+    }
+  }
+  function dismissTelemetryBar() {
+    const $bar = document.getElementById('telemetryOptInBar');
+    if ($bar) $bar.hidden = true;
+    try { localStorage.setItem(TELEMETRY_DISMISSED_LS, '1'); } catch (_) {}
+  }
+  (function wireTelemetryBar() {
+    const $enable = document.getElementById('telemetryEnableBtn');
+    const $skip = document.getElementById('telemetrySkipBtn');
+    if ($enable) {
+      $enable.addEventListener('click', async () => {
+        await postTelemetryOptIn(true);
+        dismissTelemetryBar();
+      });
+    }
+    if ($skip) {
+      $skip.addEventListener('click', async () => {
+        await postTelemetryOptIn(false);
+        dismissTelemetryBar();
+      });
+    }
+    // The "What gets sent?" link is a plain anchor — opens docs/telemetry.md
+    // in a new tab on click; no JS needed beyond the default behaviour.
+  })();
+  loadTelemetryStatus();
+
   // ── Repo selection state ──
   // The repo dropdown is a local archive filter, not a server-side switch.
   // Keep this block early: worktrees, Vercel, terminal, and issue actions

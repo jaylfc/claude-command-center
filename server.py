@@ -18634,6 +18634,20 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(e.as_payload(), e.status)
         elif path == "/api/config":
             self.send_json(get_app_config())
+        elif path == "/api/telemetry/status":
+            # Anonymous-telemetry opt-in state. Drives the dashboard bar:
+            # only render when opt_in is null (never asked) AND not env-disabled.
+            state = _load_telemetry_state()
+            env_disabled = _telemetry_disabled_env()
+            self.send_json({
+                "opt_in": state.get("opt_in"),
+                "asked_at": state.get("asked_at"),
+                "install_id_present": _telemetry_install_id_present(),
+                "env_disabled": env_disabled,
+                "endpoint": _telemetry_resolved_endpoint(),
+                "docs_url": _TELEMETRY_DOCS_URL,
+                "schema_version": _TELEMETRY_SCHEMA_VERSION,
+            })
         elif path == "/api/term/cwd":
             try:
                 qs = urllib.parse.parse_qs(parsed.query)
@@ -19670,6 +19684,42 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 pass
             _schedule_restart()
+            return
+        if path == "/api/telemetry/opt-in":
+            # User clicked Enable / Skip / toggled from Settings. Persists
+            # opt_in (true|false) and asked_at. Same-origin already checked.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({"error": "invalid JSON"}, 400)
+                return
+            if not isinstance(payload, dict):
+                self.send_json({"error": "expected JSON object"}, 400)
+                return
+            enable = payload.get("enable")
+            if not isinstance(enable, bool):
+                self.send_json({"error": "enable must be a boolean"}, 400)
+                return
+            state = _load_telemetry_state()
+            state["opt_in"] = enable
+            state["asked_at"] = datetime.now(tz=timezone.utc).isoformat()
+            state["endpoint"] = _telemetry_resolved_endpoint()
+            if enable:
+                # Ensure the install-id exists so the next ping has something
+                # to send. Generated locally; never derived from machine ID.
+                _telemetry_load_or_init_install_id()
+            saved = _save_telemetry_state(state)
+            tag = "enabled" if enable else "disabled"
+            print(f"  [telemetry] opt-in {tag} via dashboard")
+            self.send_json({
+                "ok": bool(saved),
+                "opt_in": state["opt_in"],
+                "asked_at": state["asked_at"],
+                "install_id_present": _telemetry_install_id_present(),
+                "env_disabled": _telemetry_disabled_env(),
+            })
             return
         if path == "/api/self-update":
             # Pull the latest main into the install dir and restart the server
@@ -22491,6 +22541,378 @@ def _raise_open_file_limit(min_soft=2048):
         print(f"  [limits] could not raise max open files ({e})")
 
 
+# ── Anonymous opt-in telemetry ──────────────────────────────────────────────
+#
+# Five fields. Off by default. Inspectable on disk. See docs/telemetry.md.
+#
+# WHAT IS SENT (the entire payload, no exceptions):
+#   1. install_id        — random UUIDv4, generated locally on first launch.
+#                          Never derived from machine identity (hostname,
+#                          MAC, username, git config, etc.). Stored at
+#                          ~/.config/claude-command-center/install-id (0600).
+#   2. version           — the __version__ string from this file.
+#   3. platform          — sys.platform value ("darwin", "linux", ...).
+#   4. engines           — comma-list of installed CLI engines among
+#                          {claude, codex, gemini}, derived only from
+#                          "is the binary available" — NO usage signal,
+#                          NO per-engine counts, NO version probing.
+#   5. last_active_date  — ISO date only (YYYY-MM-DD) of the most recent
+#                          transcript mtime under ~/.claude/projects/.
+#                          NO clock time, NO session count, NO repo info.
+#
+# WHAT IS NEVER SENT (the trust anchor):
+#   - Prompt content, transcripts, conversation events, tool calls.
+#   - Session counts, usage volume, per-session timing, token counts.
+#   - Repo paths, repo names, file paths, branch names, cwd.
+#   - User identity: name, email, hostname, git config, login, IP.
+#   - Errors, exception traces, log lines, stack traces.
+#   - Anything from the dashboard UI: clicks, searches, navigation.
+#
+# Server-side: the receiving Cloudflare Worker drops the source IP before
+# logging. See docs/telemetry.md for the full contract. This guarantee is
+# not enforced from the client — auditors should read the Worker source
+# under infra/telemetry-worker/.
+#
+# KILL SWITCHES (any one wins, checked at every fire):
+#   1. Env var CCC_TELEMETRY_DISABLED in {"1","true","yes","on"} — no code runs.
+#   2. ~/.config/claude-command-center/telemetry.json opt_in == false.
+#   3. Missing install-id file → skip the ping and re-show the opt-in bar.
+#
+# Cadence: once per UTC day. Background thread checks every hour. First
+# attempt is delayed 30s after server start so the dashboard loads first.
+# Fire-and-forget over urllib (stdlib only); 10s connect / 15s total timeout;
+# no retries. Offline / DNS-fail / non-200 → silent skip, no log spam.
+#
+# All telemetry log lines are tagged `[telemetry]` so users grepping the
+# server log can audit exactly when (and whether) anything fires.
+
+_TELEMETRY_SCHEMA_VERSION = 1
+_TELEMETRY_DEFAULT_ENDPOINT = (
+    "https://telemetry.claude-command-center.workers.dev/v1/ping"
+)
+_TELEMETRY_STATE_DIR_PATH = Path.home() / ".config" / "claude-command-center"
+_TELEMETRY_DOCS_URL = (
+    "https://github.com/amirfish1/claude-command-center/blob/main/docs/telemetry.md"
+)
+_TELEMETRY_INITIAL_DELAY_S = 30
+_TELEMETRY_CHECK_INTERVAL_S = 3600  # 1 hour
+_TELEMETRY_CONNECT_TIMEOUT_S = 10
+_TELEMETRY_TOTAL_TIMEOUT_S = 15
+_TELEMETRY_STATE_LOCK = threading.Lock()
+
+
+def _telemetry_state_dir():
+    """Return the dir holding telemetry state (install-id, opt-in, last-ping).
+
+    Created on first use with mode 0700 so the install-id and consent record
+    aren't world-readable on a shared machine.
+    """
+    d = _TELEMETRY_STATE_DIR_PATH
+    try:
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkdir respects umask — re-chmod to be sure.
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+    except OSError as e:
+        print(f"  [telemetry] could not create state dir {d}: {e}")
+    return d
+
+
+def _telemetry_install_id_path():
+    return _telemetry_state_dir() / "install-id"
+
+
+def _telemetry_state_path():
+    return _telemetry_state_dir() / "telemetry.json"
+
+
+def _telemetry_last_ping_path():
+    return _telemetry_state_dir() / "telemetry-last-ping"
+
+
+def _telemetry_disabled_env():
+    """Env-var kill switch. Liberal: 1/true/yes/on (case-insensitive)."""
+    v = (os.environ.get("CCC_TELEMETRY_DISABLED") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _telemetry_load_or_init_install_id():
+    """Return the UUIDv4 install-id, generating + writing if missing.
+
+    Returns the existing id when present (idempotent). If the file is
+    missing or unreadable, generates a fresh UUIDv4, writes it with mode
+    0600, and returns the new id. Returns None only if disk writes fail.
+    """
+    import uuid
+    p = _telemetry_install_id_path()
+    with _TELEMETRY_STATE_LOCK:
+        try:
+            if p.is_file():
+                txt = p.read_text(encoding="utf-8").strip()
+                if txt:
+                    return txt
+        except OSError:
+            pass
+        new_id = str(uuid.uuid4())
+        try:
+            p.write_text(new_id + "\n", encoding="utf-8")
+            try:
+                os.chmod(p, 0o600)
+            except OSError:
+                pass
+            return new_id
+        except OSError as e:
+            print(f"  [telemetry] could not write install-id ({e})")
+            return None
+
+
+def _telemetry_install_id_present():
+    try:
+        return _telemetry_install_id_path().is_file()
+    except OSError:
+        return False
+
+
+def _load_telemetry_state():
+    """Read the opt-in JSON. Returns a normalized dict; missing == 'not asked'."""
+    p = _telemetry_state_path()
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError:
+        return {"opt_in": None, "asked_at": None, "endpoint": None}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {"opt_in": None, "asked_at": None, "endpoint": None}
+    if not isinstance(data, dict):
+        return {"opt_in": None, "asked_at": None, "endpoint": None}
+    opt_in = data.get("opt_in")
+    if opt_in is not None and not isinstance(opt_in, bool):
+        opt_in = None
+    asked_at = data.get("asked_at")
+    if asked_at is not None and not isinstance(asked_at, str):
+        asked_at = None
+    endpoint = data.get("endpoint")
+    if endpoint is not None and not isinstance(endpoint, str):
+        endpoint = None
+    return {"opt_in": opt_in, "asked_at": asked_at, "endpoint": endpoint}
+
+
+def _save_telemetry_state(state):
+    """Persist the opt-in JSON with mode 0600."""
+    p = _telemetry_state_path()
+    payload = {
+        "opt_in": state.get("opt_in"),
+        "asked_at": state.get("asked_at"),
+        "endpoint": state.get("endpoint"),
+    }
+    with _TELEMETRY_STATE_LOCK:
+        try:
+            _telemetry_state_dir()
+            p.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            try:
+                os.chmod(p, 0o600)
+            except OSError:
+                pass
+            return True
+        except OSError as e:
+            print(f"  [telemetry] could not write state ({e})")
+            return False
+
+
+def _telemetry_resolved_endpoint():
+    return (
+        (os.environ.get("CCC_TELEMETRY_ENDPOINT") or "").strip()
+        or _TELEMETRY_DEFAULT_ENDPOINT
+    )
+
+
+def _telemetry_detect_engines():
+    """List installed engines, in canonical order. 'is the binary available'
+    only — no version probe, no usage signal."""
+    out = []
+    try:
+        if _resolve_claude_bin().get("available"):
+            out.append("claude")
+    except Exception:
+        pass
+    try:
+        if _resolve_codex_bin().get("available"):
+            out.append("codex")
+    except Exception:
+        pass
+    try:
+        if _resolve_gemini_bin().get("available"):
+            out.append("gemini")
+    except Exception:
+        pass
+    return out
+
+
+def _telemetry_last_active_date():
+    """Most recent transcript activity date (YYYY-MM-DD) under PROJECTS_ROOT.
+
+    Returns "" when no transcripts exist. Uses file mtime — no transcript
+    content is opened. Date only; no clock time goes into the payload.
+    """
+    root = PROJECTS_ROOT
+    try:
+        if not root.is_dir():
+            return ""
+    except OSError:
+        return ""
+    newest = 0.0
+    try:
+        for project_dir in root.iterdir():
+            if not project_dir.is_dir():
+                continue
+            try:
+                for jsonl in project_dir.iterdir():
+                    if not jsonl.name.endswith(".jsonl"):
+                        continue
+                    try:
+                        m = jsonl.stat().st_mtime
+                    except OSError:
+                        continue
+                    if m > newest:
+                        newest = m
+            except OSError:
+                continue
+    except OSError:
+        return ""
+    if newest <= 0:
+        return ""
+    try:
+        return datetime.fromtimestamp(newest, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OSError, ValueError):
+        return ""
+
+
+def _build_telemetry_payload():
+    """Assemble the 5-field dict. Returns None when no install-id is available."""
+    install_id = _telemetry_load_or_init_install_id()
+    if not install_id:
+        return None
+    return {
+        "schema_version": _TELEMETRY_SCHEMA_VERSION,
+        "install_id": install_id,
+        "version": __version__,
+        "platform": sys.platform,
+        "engines": ",".join(_telemetry_detect_engines()),
+        "last_active_date": _telemetry_last_active_date(),
+    }
+
+
+def _telemetry_read_last_ping_date():
+    try:
+        s = _telemetry_last_ping_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    # Stored as YYYY-MM-DD; reject anything else.
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return s
+    return ""
+
+
+def _telemetry_write_last_ping_date(date_str):
+    try:
+        _telemetry_state_dir()
+        _telemetry_last_ping_path().write_text(date_str + "\n", encoding="utf-8")
+        try:
+            os.chmod(_telemetry_last_ping_path(), 0o600)
+        except OSError:
+            pass
+        return True
+    except OSError:
+        return False
+
+
+def _send_telemetry_ping(payload, endpoint=None):
+    """POST the payload. Fire-and-forget; returns True on 2xx, False otherwise.
+
+    No retries, no log spam. Network failures / DNS errors / non-200 all
+    return False silently so a missing Worker doesn't fill the log.
+    """
+    if not payload:
+        return False
+    url = endpoint or _telemetry_resolved_endpoint()
+    try:
+        data = json.dumps(payload).encode("utf-8")
+    except (TypeError, ValueError):
+        return False
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"claude-command-center/{__version__} (telemetry)",
+    }
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=_TELEMETRY_TOTAL_TIMEOUT_S) as resp:
+            status = getattr(resp, "status", 0) or 0
+            return 200 <= status < 300
+    except Exception:
+        return False
+
+
+def _maybe_send_telemetry():
+    """Send a daily ping if (and only if) every gate passes.
+
+    Returns one of: "disabled-env", "no-opt-in", "no-install-id",
+    "already-today", "sent", "failed". The string is used by the
+    background loop for log routing only.
+    """
+    if _telemetry_disabled_env():
+        return "disabled-env"
+    state = _load_telemetry_state()
+    if state.get("opt_in") is not True:
+        return "no-opt-in"
+    if not _telemetry_install_id_present():
+        # Treat missing id as "user reset" — fall back to never-asked
+        # behavior. The state JSON is intentionally left alone so the user
+        # can re-opt-in via the dashboard; we just don't ping.
+        return "no-install-id"
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    last = _telemetry_read_last_ping_date()
+    if last and last >= today:
+        return "already-today"
+    payload = _build_telemetry_payload()
+    if not payload:
+        return "no-install-id"
+    ok = _send_telemetry_ping(payload)
+    if ok:
+        _telemetry_write_last_ping_date(today)
+        return "sent"
+    return "failed"
+
+
+def _telemetry_loop():
+    """Background daemon: initial delay, then hourly check + maybe-send.
+
+    Quietly no-ops when telemetry is disabled or the user hasn't opted in.
+    """
+    try:
+        time.sleep(_TELEMETRY_INITIAL_DELAY_S)
+    except Exception:
+        return
+    while True:
+        try:
+            result = _maybe_send_telemetry()
+            if result == "sent":
+                print("  [telemetry] daily ping sent")
+            elif result == "failed":
+                # Don't log every failure — that's log spam if the Worker
+                # isn't deployed. We'd just retry next hour anyway.
+                pass
+        except Exception:
+            # Defensive: never crash the daemon thread.
+            pass
+        try:
+            time.sleep(_TELEMETRY_CHECK_INTERVAL_S)
+        except Exception:
+            return
+
+
 def main():
     import socketserver
     class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -22559,6 +22981,11 @@ def main():
     # Chuck iMessage monitor: polls chat.db every 2 minutes, injects new
     # messages from +17035592946 into the CHUCK session via inject-input.
     threading.Thread(target=_chuck_imessage_poller, daemon=True).start()
+    # Anonymous opt-in telemetry — defaults OFF. The loop self-gates on
+    # CCC_TELEMETRY_DISABLED and the per-user opt-in JSON; starting the
+    # thread here is unconditional but no bytes leave the host unless the
+    # user clicks "Enable" on the dashboard bar. See _telemetry_loop docs.
+    threading.Thread(target=_telemetry_loop, daemon=True, name="ccc-telemetry").start()
     # Recover in-progress group-chat coordinations and start background watcher.
     _start_coordination_watcher()
     _start_resume_queue_watcher()

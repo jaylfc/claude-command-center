@@ -1,0 +1,177 @@
+# Anonymous opt-in telemetry
+
+CCC ships an **anonymous, opt-in, off-by-default** daily ping. This file
+is the trust artifact. It describes the entire payload, the kill
+switches, the consent flow, and the server-side contract. If anything
+in the source diverges from this file, the source is buggy — open an
+issue.
+
+## TL;DR
+
+- **Default state: OFF.** No bytes leave your machine unless you click
+  **Enable** on the dashboard banner (or set the opt-in flag yourself).
+- **Five fields**, all bounded — no free-form strings, no transcripts,
+  no paths, no identity, no IP (server-side drop).
+- **Inspectable locally.** Every piece of state lives in plain text
+  under `~/.config/claude-command-center/`. Read it any time.
+- **Kill switch at every layer:** env var, JSON file, or just delete
+  the install-id file.
+
+## What is sent
+
+The complete payload, in JSON, posted once per UTC day to a single
+HTTPS endpoint:
+
+```json
+{
+  "schema_version": 1,
+  "install_id": "00000000-0000-4000-8000-000000000000",
+  "version": "3.4.0",
+  "platform": "darwin",
+  "engines": "claude,codex",
+  "last_active_date": "2026-05-19"
+}
+```
+
+| field              | type   | example                | source                                                                |
+| ------------------ | ------ | ---------------------- | --------------------------------------------------------------------- |
+| `schema_version`   | int    | `1`                    | constant in `server.py` — bumps if the shape ever changes              |
+| `install_id`       | uuidv4 | random                 | generated locally on first opt-in; never derived from machine identity |
+| `version`          | semver | `3.4.0`                | `__version__` from `server.py`                                        |
+| `platform`         | string | `darwin` / `linux`     | `sys.platform`                                                        |
+| `engines`          | string | `claude,codex,gemini`  | which of {claude,codex,gemini} binaries are on PATH — no usage signal |
+| `last_active_date` | string | `2026-05-19` (or `""`) | newest `~/.claude/projects/**/*.jsonl` mtime, **date only**            |
+
+The HTTP request also carries:
+- `User-Agent: claude-command-center/<version> (telemetry)`.
+- `Content-Type: application/json`.
+
+That's it.
+
+## What is **never** sent
+
+This is the trust anchor. The list is closed; expanding it is a major
+version bump and a documented breaking change.
+
+- Prompt content, transcripts, conversation events, tool calls, tool
+  results, file contents.
+- Session counts, usage volume, message counts, per-session timing,
+  token counts, model names, costs.
+- Repo paths, repo names, branch names, file paths, cwd, project slug.
+- User identity: name, email, hostname, username, login, IP address,
+  git config, system locale.
+- Errors, exception traces, stack traces, server log lines.
+- Anything from the dashboard UI: clicks, keystrokes, searches,
+  navigation, feature usage.
+
+The server-side endpoint additionally drops the source IP **before**
+logging the request. That drop happens in
+[`infra/telemetry-worker/`](../infra/telemetry-worker/) — the source
+ships with the rest of the repo so the guarantee is auditable. As of
+this writing the Worker is **not yet deployed**; see
+[`docs/telemetry-public.md`](telemetry-public.md).
+
+## Kill switches
+
+Three independent layers, in order of precedence. Any one wins.
+
+1. **Env var.** Set `CCC_TELEMETRY_DISABLED=1` (also accepts `true`,
+   `yes`, `on`, case-insensitive) before launching the server. With this
+   set, the telemetry code path never runs — no install-id read, no
+   dashboard bar, no background thread. This is the right knob for
+   corporate fleets and CI runs.
+
+2. **JSON file.** Open `~/.config/claude-command-center/telemetry.json`
+   and set `"opt_in": false`. This is what the **Skip forever** button
+   writes. The background thread reads this on every check (default once
+   per hour).
+
+3. **Delete the install-id.** Remove
+   `~/.config/claude-command-center/install-id`. Without an id the
+   payload can't be assembled and the ping is skipped; the dashboard
+   bar will also re-appear on the next reload so you can confirm a
+   fresh decision.
+
+## State files
+
+All under `~/.config/claude-command-center/` (mode `0700`):
+
+- `install-id` — single line, a random UUIDv4 plus a newline. Mode `0600`.
+  Generated only when the user opts in (or when this file is missing and
+  a fresh opt-in is recorded). Cannot be reconstructed from machine
+  identity.
+- `telemetry.json` — opt-in state. Mode `0600`.
+  ```json
+  {
+    "opt_in": true,
+    "asked_at": "2026-05-19T14:23:01+00:00",
+    "endpoint": "https://telemetry.claude-command-center.workers.dev/v1/ping"
+  }
+  ```
+  `opt_in` is one of `null` (never asked), `true`, or `false`.
+- `telemetry-last-ping` — single line, the UTC date of the last
+  successful ping (YYYY-MM-DD). Mode `0600`. The daily cadence is
+  enforced strictly from this file: if today's date is not strictly
+  greater than the recorded date, no ping is sent.
+
+## Cadence
+
+- Background thread starts 30s after server boot (so the dashboard
+  paints first), then checks every hour.
+- Sends at most once per UTC day.
+- Network: 15s total timeout, 10s connect timeout, **no retries**.
+  Offline / DNS-fail / non-200 → silent skip; the next hourly check
+  retries because the last-ping file wasn't updated.
+- No retries on the same day. If the Worker is unreachable for 24h,
+  that day's signal is simply lost — by design.
+
+## Endpoint
+
+- Default: `https://telemetry.claude-command-center.workers.dev/v1/ping`.
+- Override: set `CCC_TELEMETRY_ENDPOINT=<url>`. Useful for staging,
+  forking, or proxying through a fleet-managed collector.
+- The Worker source is at
+  [`infra/telemetry-worker/`](../infra/telemetry-worker/).
+
+## Consent UX
+
+The first time you open the dashboard with the server installed, a
+small horizontal banner appears above the toolbar:
+
+> _Help the maintainer know CCC is being used? Anonymous daily ping, 5
+> fields, off by default._
+>
+> [Enable] [Skip forever] [What gets sent?]
+
+- **Enable** → writes `opt_in: true` and generates the install-id.
+  The first ping fires within the hour.
+- **Skip forever** → writes `opt_in: false`. The bar never appears
+  again (you can still flip the switch from a future Settings menu
+  entry).
+- **What gets sent?** → opens this file in a new tab.
+
+Any of the three buttons dismisses the bar. The bar is `null`-state
+only — once you've made a choice it never reappears unless you delete
+the install-id.
+
+## Implementation notes
+
+- `server.py` is stdlib-only. Telemetry uses `urllib`, `json`, `uuid`,
+  `pathlib`, `datetime` — nothing else. No pip dependencies at
+  runtime.
+- All telemetry log lines from `server.py` are tagged `[telemetry]`
+  so you can grep them out:
+  ```bash
+  tail -f ~/Library/Logs/ccc.log | grep '\[telemetry\]'
+  ```
+- The endpoint URL the server will use is recorded in `telemetry.json`
+  at opt-in time so a code-side endpoint change is visible in plain
+  text on disk.
+
+## Reporting concerns
+
+If you find a leak — a field being sent that's not on the list above,
+a kill switch that doesn't honor its contract, or a log line that
+carries identifying data — open an issue (or email per `SECURITY.md`
+for anything sensitive). This file is what we promise; deviations are
+bugs, not features.

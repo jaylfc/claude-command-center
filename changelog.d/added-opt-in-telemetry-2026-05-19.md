@@ -1,0 +1,1 @@
+- Anonymous opt-in telemetry — five-field daily ping, off by default, dismissable forever from a one-row dashboard banner. See [`docs/telemetry.md`](docs/telemetry.md) for the full contract. (#48)
