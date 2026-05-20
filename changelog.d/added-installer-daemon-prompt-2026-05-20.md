@@ -1,0 +1,2 @@
+- Prompt the user during the one-command installation process to automatically install the background daemon/service (launchd agent) so that CCC starts automatically on login/reboot.
+- Provide a tip with the `./run.sh --install-service` command if the user chooses not to install the background service during setup.

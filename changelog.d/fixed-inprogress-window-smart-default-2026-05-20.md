@@ -1,0 +1,1 @@
+- Fix the dashboard's "In progress" list starting empty on first load by implementing a smart default fallback (7 days if active sessions exist, otherwise falls back to all).

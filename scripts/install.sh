@@ -136,11 +136,38 @@ open_when_ready() {
   ) &
 }
 
+ask_install_service() {
+  if [ ! -t 1 ] || [ ! -c /dev/tty ]; then
+    return 1
+  fi
+
+  local choice
+  printf 'install: Would you like to install CCC as a system service so it runs automatically in the background? [y/N] '
+  if read -r choice < /dev/tty; then
+    case "$choice" in
+      [yY][eE][sS]|[yY])
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
 launch_server() {
-  printf 'install: launching ./run.sh on port %s\n' "$PORT"
-  open_when_ready
-  cd "$INSTALL_DIR"
-  exec ./run.sh
+  if ask_install_service; then
+    printf 'install: installing launchd service...\n'
+    open_when_ready
+    cd "$INSTALL_DIR"
+    ./run.sh --install-service
+    printf 'install: CCC successfully installed as a background service!\n'
+    exit 0
+  else
+    printf 'install: launching ./run.sh on port %s\n' "$PORT"
+    printf 'install: (Tip: to run CCC in the background and persist after reboot, run: ./run.sh --install-service)\n'
+    open_when_ready
+    cd "$INSTALL_DIR"
+    exec ./run.sh
+  fi
 }
 
 # ---------------------------------------------------------------------------

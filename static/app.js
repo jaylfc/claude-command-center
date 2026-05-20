@@ -6944,10 +6944,14 @@
       if (!_hasFolderChips) return 'all';
       try {
         const value = localStorage.getItem('ccc-inprogress-window');
-        return (value === '1d' || value === '7d' || value === 'all') ? value : '1d';
-      } catch (_) {
-        return '1d';
-      }
+        if (value === '1d' || value === '7d' || value === 'all') return value;
+      } catch (_) {}
+      // Fallback on first load (no user preference saved):
+      // Check if any sessions exist within the last 7 days.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const cutoff7d = nowSec - (7 * 24 * 3600);
+      const has7dConvs = _sessionConvs.some(c => (c.modified || 0) >= cutoff7d);
+      return has7dConvs ? '7d' : 'all';
     })();
     const _ipWindowDays = _ipWindow === '7d' ? 7 : (_ipWindow === '1d' ? 1 : null);
     const _ipWindowCutoff = _ipWindowDays
