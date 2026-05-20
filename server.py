@@ -3466,7 +3466,7 @@ SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
 # Per-session model + context override. Set by the click-to-switch picker
 # in the session card (see /api/session/<sid>/model). Schema:
 #   { "<session_id>": {"model": "...", "context_1m": bool,
-#                       "engine": "claude|codex|gemini",
+#                       "engine": "claude|codex|gemini|antigravity",
 #                       "set_at": "ISO-8601"} }
 # Sticky: stays until the user changes it again or hits "Reset to default".
 # Read by resume_session_{headless,codex,gemini} so a queued change actually
@@ -5218,8 +5218,9 @@ def _build_resume_command(session_id, cwd, cwd_exists):
         resolved = _resolve_antigravity_bin()
         if resolved.get("available"):
             resume_cmd = (
-                "echo " + _shell_quote("CCC: AGY does not expose a session-id resume flag; use /resume inside the TUI.")
+                "echo " + _shell_quote("CCC: opening AGY conversation in the TUI.")
                 + " && exec " + _antigravity_shell_command(resolved)
+                + " --conversation " + _shell_quote(session_id)
             )
         else:
             resume_cmd = "echo " + _shell_quote(resolved.get("reason") or "Antigravity CLI not found.")
@@ -10673,6 +10674,16 @@ def _antigravity_shell_command(resolved):
     return " ".join(_shell_quote(word) for word in _antigravity_command_words(resolved))
 
 
+def _antigravity_has_arg(words, *names):
+    for word in (words or []):
+        text = str(word)
+        if text in names:
+            return True
+        if any(text.startswith(name + "=") for name in names):
+            return True
+    return False
+
+
 def _gemini_tmp_root():
     return GEMINI_HOME / "tmp"
 
@@ -12484,12 +12495,156 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
     return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
 
 
-def launch_antigravity_terminal(prompt="", name=None, cwd=None, repo_path=None, terminal_app=None):
-    """Launch AGY in a real terminal for a new Antigravity session.
+def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None):
+    """Spawn a headless AGY print-mode run and return tracking info."""
+    prompt = _strip_ccc_session_state_instruction(prompt or "")
+    if not prompt:
+        return {"ok": False, "error": "missing prompt"}
+    resolved = _resolve_antigravity_bin()
+    if not resolved["available"]:
+        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    ctx = _spawn_repo_context(cwd=cwd, repo_path=repo_path)
+    spawn_cwd = ctx["cwd"]
+    session_name = _slugify(name or prompt) or "antigravity"
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    log_filename = f"spawn-antigravity-{session_name}-{timestamp}.log"
+    log_dir = repo_log_dir(ctx["repo_path"])
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / log_filename
 
-    AGY is a TUI. Current docs expose resume/switch from inside the running
-    interface, not as a startup flag, so CCC only opens the CLI in the target
-    workspace and records the submitted prompt as a note for the user.
+    cmd = _antigravity_command_words(resolved)
+    user_args = cmd[1:]
+    if (
+        os.environ.get("CCC_ANTIGRAVITY_SKIP_PERMISSIONS", "1").strip().lower()
+        not in ("0", "false", "no", "off")
+        and not _antigravity_has_arg(user_args, "--dangerously-skip-permissions")
+    ):
+        cmd.append("--dangerously-skip-permissions")
+    if not _antigravity_has_arg(user_args, "--add-dir"):
+        cmd.extend(["--add-dir", spawn_cwd])
+    cli_log_path = Path(str(log_path) + ".agy.log")
+    if not _antigravity_has_arg(user_args, "--log-file"):
+        cmd.extend(["--log-file", str(cli_log_path)])
+    cmd.extend(["-p", prompt])
+
+    log_fh = open(log_path, "w")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd=spawn_cwd,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        return {"ok": False, "error": str(e), "via": "antigravity-spawn"}
+
+    entry = {
+        "pid": proc.pid,
+        "name": session_name,
+        "log": str(log_path),
+        "prompt": prompt[:200],
+        "started": timestamp,
+        "proc": proc,
+        "log_fh": log_fh,
+        "fifo": None,
+        "stdin_fd": None,
+        "engine": "antigravity",
+    }
+    _spawned_sessions.append(entry)
+    _record_spawn_to_registry(
+        pid=proc.pid,
+        name=session_name,
+        log_path=log_path,
+        cwd=spawn_cwd,
+        spawned_at=timestamp,
+        command_summary=prompt[:200],
+        fifo=None,
+        engine="antigravity",
+    )
+    return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path), "via": "antigravity-spawn"}
+
+
+def resume_session_antigravity(session_id, text):
+    """Resume an Antigravity conversation with a one-shot AGY print-mode prompt."""
+    text = _strip_ccc_session_state_instruction(text)
+    if not session_id or not text:
+        return {"ok": False, "error": "missing session_id or text"}
+    resolved = _resolve_antigravity_bin()
+    if not resolved["available"]:
+        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    cwd = find_session_cwd(session_id) or str(Path.cwd())
+    if not Path(cwd).is_dir():
+        cwd = str(Path.cwd())
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    log_filename = f"resume-antigravity-{session_id[:8]}-{timestamp}.log"
+    log_dir = repo_log_dir(_git_toplevel_for_existing_dir(cwd) or cwd)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / log_filename
+
+    cmd = _antigravity_command_words(resolved)
+    user_args = cmd[1:]
+    if (
+        os.environ.get("CCC_ANTIGRAVITY_SKIP_PERMISSIONS", "1").strip().lower()
+        not in ("0", "false", "no", "off")
+        and not _antigravity_has_arg(user_args, "--dangerously-skip-permissions")
+    ):
+        cmd.append("--dangerously-skip-permissions")
+    if not _antigravity_has_arg(user_args, "--add-dir"):
+        cmd.extend(["--add-dir", cwd])
+    cli_log_path = Path(str(log_path) + ".agy.log")
+    if not _antigravity_has_arg(user_args, "--log-file"):
+        cmd.extend(["--log-file", str(cli_log_path)])
+    cmd.extend(["--conversation", session_id, "-p", text])
+
+    log_fh = open(log_path, "w")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        return {"ok": False, "error": str(e), "via": "antigravity-resume"}
+
+    entry = {
+        "pid": proc.pid,
+        "name": f"resume-antigravity-{session_id[:8]}",
+        "log": str(log_path),
+        "prompt": text[:200],
+        "started": timestamp,
+        "proc": proc,
+        "log_fh": log_fh,
+        "resumed_sid": session_id,
+        "fifo": None,
+        "stdin_fd": None,
+        "engine": "antigravity",
+    }
+    _spawned_sessions.append(entry)
+    _record_spawn_to_registry(
+        pid=proc.pid,
+        name=entry["name"],
+        log_path=log_path,
+        cwd=cwd,
+        spawned_at=timestamp,
+        command_summary=text[:200],
+        fifo=None,
+        engine="antigravity",
+    )
+    return {"ok": True, "pid": proc.pid, "log": str(log_path), "resumed": True, "via": "antigravity-resume"}
+
+
+def launch_antigravity_terminal(prompt="", name=None, cwd=None, repo_path=None, terminal_app=None):
+    """Launch AGY in a real terminal for manual resume/switch.
+
+    Existing Antigravity session resume is still handled inside the TUI via
+    /resume. New-session spawn uses `agy -p` instead.
     """
     prompt = _strip_ccc_session_state_instruction(prompt or "")
     resolved = _resolve_antigravity_bin()
@@ -13332,7 +13487,7 @@ def _record_spawn_to_registry(pid, name, log_path, cwd, spawned_at, command_summ
     The fifo path is persisted so a fresh CCC instance can reopen the
     write side after a restart and continue injecting messages (Claude
     only — Codex/Gemini headless runs are one-shot).
-    `engine` ("claude", "codex", or "gemini") tells the boot-time reattach sweep
+    `engine` ("claude", "codex", "gemini", or "antigravity") tells the boot-time reattach sweep
     which ps-grep to use and which JSONL ingestion path to skip."""
     entries = _load_spawn_registry()
     entries.append({
@@ -13367,10 +13522,10 @@ def _pid_is_engine_process(pid, engine):
     (any python process whose argv mentions the engine name would otherwise
     pass).
 
-    `engine` is one of "claude", "codex", or "gemini" — the basename we expect
+    `engine` is one of "claude", "codex", "gemini", or "antigravity" — the basename we expect
     at argv[0] (Gemini's npm wrapper may appear as a node process whose argv
     includes the gemini script path)."""
-    if engine not in ("claude", "codex", "gemini"):
+    if engine not in ("claude", "codex", "gemini", "antigravity"):
         return False
     if _pid_is_zombie(pid):
         return False
@@ -13389,10 +13544,15 @@ def _pid_is_engine_process(pid, engine):
     parts = cmd.split()
     if not parts:
         return False
-    if parts[0].rsplit("/", 1)[-1] == engine:
+    first = parts[0].rsplit("/", 1)[-1]
+    if first == engine:
+        return True
+    if engine == "antigravity" and first == "agy":
         return True
     if engine == "gemini":
         return any(p.rsplit("/", 1)[-1] == "gemini" for p in parts[1:4])
+    if engine == "antigravity":
+        return any(p.rsplit("/", 1)[-1] in ("agy", "antigravity") for p in parts[1:4])
     return False
 
 
@@ -14579,11 +14739,7 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False):
     if _is_gemini_session(session_id):
         return resume_session_gemini(session_id, text)
     if _is_antigravity_session(session_id):
-        return {
-            "ok": False,
-            "error": "Antigravity sessions are read-only in CCC; resume from the Antigravity app.",
-            "via": "antigravity-read-only",
-        }
+        return resume_session_antigravity(session_id, text)
     if not status.get("live") or not has_tty:
         spawn = _find_live_spawn_entry_for_session(session_id)
         if spawn is not None:
@@ -19874,7 +20030,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             self.send_json({"ok": False, "error": str(e)}, 500)
                         else:
                             poll = _poll_spawn_entry(entry)
-                            self.send_json({
+                            payload = {
                                 "ok": True,
                                 "pid": pid,
                                 "engine": entry.get("engine", "claude"),
@@ -19882,7 +20038,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                                 "text": text,
                                 "running": poll is None,
                                 "exit_code": poll,
-                            })
+                            }
+                            if entry.get("engine") == "antigravity":
+                                debug_path = str(log_path) + ".agy.log"
+                                payload["debug_log_path"] = debug_path
+                                if os.path.exists(debug_path):
+                                    max_bytes = 24000
+                                    try:
+                                        size = os.path.getsize(debug_path)
+                                        with open(debug_path, "rb") as fh:
+                                            if size > max_bytes:
+                                                fh.seek(-max_bytes, os.SEEK_END)
+                                                raw = fh.read()
+                                                payload["debug_text_truncated"] = True
+                                            else:
+                                                raw = fh.read()
+                                                payload["debug_text_truncated"] = False
+                                        payload["debug_text"] = raw.decode("utf-8", "replace")
+                                    except OSError:
+                                        payload["debug_text"] = ""
+                            self.send_json(payload)
         elif path == "/api/sessions/spawn-codex/availability":
             info = _resolve_codex_bin()
             info["model"] = os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
@@ -19894,8 +20069,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(info)
         elif path == "/api/sessions/spawn-antigravity/availability":
             info = _resolve_antigravity_bin()
-            info["interactive"] = True
-            info["resume"] = "Use /resume inside AGY CLI."
+            info["headless"] = True
+            info["print_mode"] = "-p"
+            info["resume"] = "Use /resume inside AGY CLI for manual TUI resume."
             self.send_json(info)
         elif path == "/api/loading-status":
             self.send_json(_session_load_snapshot())
@@ -21583,18 +21759,19 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                                 cwd_error = f"path is outside $HOME ({home}): {candidate}"
                             else:
                                 cwd_resolved = candidate
-            if cwd_error:
+            if not prompt:
+                self.send_json({"ok": False, "error": "missing prompt"}, 400)
+            elif cwd_error:
                 self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
             else:
                 try:
-                    result = launch_antigravity_terminal(
+                    result = spawn_session_antigravity(
                         prompt,
                         name=name,
                         cwd=str(cwd_resolved) if cwd_resolved else None,
                         repo_path=payload.get("repo_path"),
-                        terminal_app=payload.get("terminal_app"),
                     )
-                    if result.get("code") in ("antigravity_unavailable", "antigravity_terminal_unavailable"):
+                    if result.get("code") == "antigravity_unavailable":
                         self.send_json(result, 503)
                     else:
                         self.send_json(result)

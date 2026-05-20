@@ -581,7 +581,7 @@
       : (engine === 'gemini'
         ? 'gemini --resume ' + sid
         : (engine === 'antigravity'
-          ? "agy  # use /resume inside the TUI"
+          ? 'agy --conversation ' + sid
           : 'claude --resume ' + sid + ' --dangerously-skip-permissions'));
     if (!cwd) return resumeCmd;
     // Derive worktree branch from a `.claude/worktrees/...` path:
@@ -1682,7 +1682,7 @@
     // the user with Resume/Launch buttons and no way to just send a message.
     // Also show in "new session" mode where the input doubles as the
     // prompt for spawning a fresh agent.
-    if (isConvTab && ((hasSession && !isAntigravity) || isNewSession || isBacklogIssue)) {
+    if (isConvTab && (hasSession || isNewSession || isBacklogIssue)) {
       $convInputBar.classList.add('visible');
       if (isBacklogIssue) {
         const n = (currentBacklogRow && currentBacklogRow.issue_number) || currentConversation.replace('backlog-issue-', '');
@@ -1697,8 +1697,8 @@
         const spawnEngine = getSpawnEngine();
         if (spawnEngine === 'antigravity') {
           $convInput.placeholder = repoLabel
-            ? 'Type a prompt note, then open Antigravity in ' + repoLabel + '…'
-            : 'Pick a folder before opening Antigravity…';
+            ? 'Type a prompt to start a headless Antigravity run in ' + repoLabel + '…'
+            : 'Pick a folder before starting Antigravity…';
         } else {
           $convInput.placeholder = repoLabel
             ? 'Type a prompt to start a new session in ' + repoLabel + '…'
@@ -1713,6 +1713,9 @@
       } else if (isGemini) {
         $convTtyLabel.textContent = live ? (liveStatus.tty || 'gemini') : 'gemini';
         $convInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
+      } else if (isAntigravity) {
+        $convTtyLabel.textContent = 'antigravity';
+        $convInput.placeholder = 'Resume Antigravity headlessly and send...';
       } else if (live) {
         $convTtyLabel.textContent = liveStatus.tty;
         $convInput.placeholder = 'Send to terminal...';
@@ -1790,7 +1793,7 @@
     const source = currentSession && currentSession.source;
     if (source === 'codex') return 'Codex sessions do not use Claude slash commands';
     if (source === 'gemini') return 'Gemini sessions do not use Claude slash commands';
-    if (source === 'antigravity') return 'Antigravity sessions are read-only in CCC';
+    if (source === 'antigravity') return 'Antigravity sessions do not use Claude slash commands';
     if (source === 'pkood') return 'pkood agents do not use Claude slash commands';
     if (currentConversation === '__new__') {
       const engine = (typeof getSpawnEngine === 'function') ? getSpawnEngine() : 'claude';
@@ -2065,6 +2068,10 @@
       } else if (res.ok && data.ok) {
         if (data.queued) {
           showOpToast('Queued until the terminal session is idle.');
+        } else if (data.via === 'antigravity-resume') {
+          showOpToast('Antigravity headless follow-up started.');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
         }
       } else {
         removePendingSendEcho(pendingSend);
@@ -3590,7 +3597,7 @@
       + '<span class="label">User</span>'
       + '<div class="user-msg" data-raw-text="' + escapeAttr(prompt || card.display_name || 'New session') + '">' + promptHtml + '</div>'
       + (meta ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">' + escapeHtml(meta) + '</div>' : '')
-      + (card.source === 'antigravity' ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">Antigravity opens in a terminal TUI. Enter this prompt there; use /resume inside AGY to switch sessions.</div>' : '')
+      + (card.source === 'antigravity' ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">Antigravity is running headless with AGY print mode. Use Launch on a completed row for manual /resume in the TUI.</div>' : '')
       + '</div>';
     showOptimisticAgentIndicator($view);
     scrollConversationToEnd($view);
@@ -9691,13 +9698,14 @@
     const isAntigravity = currentSession.source === 'antigravity';
     const live = liveStatus.live && liveStatus.tty;
     const hasSession = !!currentSession.id;
-    if (hasSession && kanbanView && !isAntigravity) {
+    if (hasSession && kanbanView) {
       $convPanelInput.classList.add('visible');
-      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (liveStatus.tty || (live ? '' : 'offline'))));
+      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (isAntigravity ? 'antigravity' : (liveStatus.tty || (live ? '' : 'offline')))));
       if ($cpInput) {
         if (isPkood) $cpInput.placeholder = 'Send to pkood agent...';
         else if (isCodex) $cpInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
         else if (isGemini) $cpInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
+        else if (isAntigravity) $cpInput.placeholder = 'Resume Antigravity headlessly and send...';
         else if (live) $cpInput.placeholder = 'Send to terminal...';
         else $cpInput.placeholder = 'Send to terminal (offline)...';
       }
@@ -10310,13 +10318,13 @@
       // Pre-swap (toolbar Run): spawn_pid is still 'tmp-...'. Show a
       // placeholder until the spawn POST returns and re-selects this card.
       const $view = getConvView();
-      const engine = card && card.source === 'gemini' ? 'gemini' : 'codex';
+      const engine = card && card.source === 'gemini' ? 'gemini' : (card && card.source === 'antigravity' ? 'antigravity' : 'codex');
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Spawning ' + engine + ' run…</div>';
       updateConversationEndAffordance($view);
       return;
     }
     const $view = getConvView();
-    const engine = card.source === 'gemini' ? 'gemini' : 'codex';
+    const engine = card.source === 'gemini' ? 'gemini' : (card.source === 'antigravity' ? 'antigravity' : 'codex');
     try {
       const res = await fetch('/api/sessions/spawned/' + encodeURIComponent(card.spawn_pid) + '/log?_=' + Date.now());
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
@@ -10327,9 +10335,11 @@
         return;
       }
       const atBottom = isConversationAtBottom($view);
-      $view.innerHTML = (data.engine === 'gemini' || engine === 'gemini')
-        ? renderGeminiLogHtml(data)
-        : renderCodexLogHtml(data);
+      $view.innerHTML = (data.engine === 'antigravity' || engine === 'antigravity')
+        ? renderAntigravityLogHtml(data)
+        : ((data.engine === 'gemini' || engine === 'gemini')
+          ? renderGeminiLogHtml(data)
+          : renderCodexLogHtml(data));
       if (atBottom) scrollConversationToEnd($view);
       else updateConversationEndAffordance($view);
       // Process exited — stop polling. Final render already in place.
@@ -10469,6 +10479,39 @@
     return '<div class="codex-log gemini-log" style="padding:16px 20px;">' + headerHtml + msgsHtml + usageHtml + stderrHtml + '</div>';
   }
 
+  function renderAntigravityLogHtml(data) {
+    const text = (data.text || '').trim();
+    const debugText = (data.debug_text || '').trim();
+    const status = data.running
+      ? '<span class="codex-status running" style="color:var(--green);">running</span>'
+      : ('<span class="codex-status finished" style="color:var(--text-muted);">finished' + (data.exit_code != null ? ' (exit ' + data.exit_code + ')' : '') + '</span>');
+    const diagnosticLine = debugText
+      ? ((debugText.split('\n').reverse().find(line => /(RESOURCE_EXHAUSTED|quota|rate limit|auth|error|exception)/i.test(line)) || '').trim())
+      : '';
+    const debugHtml = debugText
+      ? ('<details ' + (text ? '' : 'open ') + 'style="margin-top:14px;font-size:12px;color:var(--text-muted);">'
+        + '<summary style="cursor:pointer;">AGY diagnostic log' + (data.debug_text_truncated ? ' (tail)' : '') + '</summary>'
+        + '<pre style="margin:8px 0 0;padding:8px;background:rgba(139,148,158,0.08);border-radius:4px;white-space:pre-wrap;font-family:var(--font-mono,monospace);max-height:360px;overflow:auto;">' + escapeHtml(debugText) + '</pre>'
+        + '</details>')
+      : '';
+    let bodyHtml = '';
+    if (text) {
+      bodyHtml = '<div class="codex-msg assistant" style="margin-bottom:14px;padding:10px 12px;background:rgba(242,204,96,0.07);border-left:2px solid #f2cc60;border-radius:4px;white-space:pre-wrap;line-height:1.55;">' + escapeHtml(text) + '</div>' + debugHtml;
+    } else if (debugText) {
+      bodyHtml = '<div class="codex-msg system" style="margin-bottom:14px;padding:10px 12px;background:rgba(242,204,96,0.06);border-left:2px solid #f2cc60;border-radius:4px;white-space:pre-wrap;line-height:1.55;">'
+        + escapeHtml(diagnosticLine || 'Antigravity finished without stdout. AGY diagnostics are below.')
+        + '</div>' + debugHtml;
+    } else {
+      bodyHtml = '<div class="empty-state" style="height:auto;padding:24px;color:var(--text-muted);">antigravity is thinking...</div>';
+    }
+    const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
+      + '<span class="source-badge antigravity" style="background:rgba(242,204,96,0.14);color:#f2cc60;padding:2px 8px;border-radius:10px;font-weight:600;">antigravity</span>'
+      + status
+      + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
+      + '</div>';
+    return '<div class="codex-log antigravity-log" style="padding:16px 20px;">' + headerHtml + bodyHtml + '</div>';
+  }
+
   async function fetchConversationEvents(paneId) {
     if (paneId) {
       const idx = paneIndexByPaneId(paneId);
@@ -10497,7 +10540,7 @@
     if (id.startsWith('spawning-')) {
       const c = (conversationsData || []).find(x => x.id === id);
       if (!c) return;
-      if (c && (c.source === 'codex' || c.source === 'gemini') && typeof c.spawn_pid === 'number') {
+      if (c && (c.source === 'codex' || c.source === 'gemini' || c.source === 'antigravity') && typeof c.spawn_pid === 'number') {
         await loadCodexLog(c);
         stopCodexLogPoller();
         codexLogPoller = setInterval(() => {
@@ -15548,7 +15591,7 @@
     return engine === 'claude' || engine === 'gemini';
   }
   function spawnUsesLogPlaceholder(engine) {
-    return engine === 'codex' || engine === 'gemini';
+    return engine === 'codex' || engine === 'gemini' || engine === 'antigravity';
   }
   function syncSpawnEngineDependentUi() {
     const engine = getSpawnEngine();
@@ -15836,7 +15879,7 @@
       const cardSource = spawnSourceForEngine(engine);
       insertPendingSpawnCard(tempPid, subject, cardSource);
       $kptRunBtn.disabled = true;
-      $kptRunBtn.textContent = engine === 'antigravity' ? 'Opening...' : 'Spawning...';
+      $kptRunBtn.textContent = engine === 'antigravity' ? 'Starting...' : 'Spawning...';
       try {
         const endpoint = spawnEndpointForEngine(engine);
         // pkood, codex, and antigravity don't support CCC-managed worktrees.
@@ -15851,7 +15894,7 @@
         const data = await res.json();
         if (data.ok) {
           $kptNewSession.value = '';
-          $kptRunBtn.textContent = engine === 'antigravity' ? 'Opened!' : 'Spawned!';
+          $kptRunBtn.textContent = engine === 'antigravity' ? 'Started!' : 'Spawned!';
           // Swap the temp-pid key for the real pid so the next /api/sessions
           // poll can match by spawn_pid and replace the placeholder with the
           // real card. Without this the placeholder sits on the board until
@@ -15878,7 +15921,7 @@
           if (spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
             selectConversation('spawning-' + tempPid);
           }
-          if (engine === 'antigravity') showOpToast('Antigravity opened in Terminal. Enter the prompt in AGY.', 'ok');
+          if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         } else {
           $kptRunBtn.textContent = data.error ? 'Failed' : 'Failed';
           // Spawn failed — drop the optimistic placeholder so the board doesn't
@@ -16081,7 +16124,7 @@
         if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
           selectConversation(placeholder.id);
         }
-        if (engine === 'antigravity') showOpToast('Antigravity opened in Terminal. Enter the prompt in AGY.', 'ok');
+        if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         // Tight poll schedule so the real card replaces the placeholder fast.
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
@@ -17393,7 +17436,7 @@
       const engineLabel = spawnEngineLabel(spawnEngine);
       const repoLabel = spawnCwdLabel(spawnCwd) || 'pick a folder below';
       const newSessionHelp = spawnEngine === 'antigravity'
-        ? 'Type a prompt note below and press Enter to open Antigravity in Terminal. Enter the prompt in the AGY TUI.'
+        ? 'Type a prompt below and press Enter to spawn a headless Antigravity run with AGY print mode.'
         : 'Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
@@ -17627,7 +17670,7 @@
         if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
           selectConversation(placeholder.id);
         }
-        if (engine === 'antigravity') showOpToast('Antigravity opened in Terminal. Enter the prompt in AGY.', 'ok');
+        if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
         setTimeout(refreshConversationList, 3000);

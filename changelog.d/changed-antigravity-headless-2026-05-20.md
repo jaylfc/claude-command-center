@@ -1,0 +1,1 @@
+- Antigravity new-session launches and follow-ups now use headless AGY print mode instead of opening an external terminal.
