@@ -1,1 +1,0 @@
-- Fixed the localhost pill choosing an unfiltered Turbo root when no session cwd is available; root-level Next.js monorepos now resolve to a concrete workspace app before starting or reporting status.

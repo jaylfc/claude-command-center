@@ -1,1 +1,0 @@
-- Antigravity CLI-only sessions now render their CCC/AGY log details when AGY does not write a transcript JSONL.

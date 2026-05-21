@@ -1,1 +1,0 @@
-- The inline new-session CWD picker now sits above the prompt composer so its folder dropdown is easier to reach before starting a session.

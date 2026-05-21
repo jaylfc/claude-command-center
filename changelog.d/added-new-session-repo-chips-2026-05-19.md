@@ -1,1 +1,0 @@
-- Show recent repository chips in the new-session CWD picker, with the selected folder highlighted for quick switching.

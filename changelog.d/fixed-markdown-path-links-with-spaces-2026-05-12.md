@@ -1,1 +1,0 @@
-- Fix markdown file links whose targets are wrapped in `<...>`, so local paths with spaces open correctly instead of including the angle brackets in `/api/open`.

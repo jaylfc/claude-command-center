@@ -1,1 +1,0 @@
-- Added a smoke-level test that pins the New Session modal's `static/templates.json` shape (id / name / description / engine / worktree / prompt) so a future edit to the gallery JSON can't quietly break the modal. (#46 follow-up)

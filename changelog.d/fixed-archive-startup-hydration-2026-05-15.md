@@ -1,1 +1,0 @@
-- Archive startup now paints transcript rows before PR, issue, and group-chat hydration, and skips expensive effective-repo inference for sessions that never changed directories.

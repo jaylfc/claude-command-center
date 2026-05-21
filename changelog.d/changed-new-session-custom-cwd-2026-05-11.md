@@ -1,1 +1,0 @@
-- New-session mode now accepts typed CWD paths in addition to known folder suggestions.

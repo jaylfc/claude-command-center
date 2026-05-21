@@ -1,1 +1,0 @@
-- Keep the conversation pane on the optimistic new-session prompt with a Sending indicator while the spawned session is materializing.

@@ -1,1 +1,0 @@
-- Fixed spawned-session sends that could hang forever when a reattached headless agent's stdin FIFO stopped accepting writes, retiring the stale worker and resuming the session in a fresh process instead.

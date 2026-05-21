@@ -1,1 +1,0 @@
-- Queue sends to busy live Terminal sessions until Claude Code reports that the session is idle, instead of typing into a prompt that is not ready to accept input.

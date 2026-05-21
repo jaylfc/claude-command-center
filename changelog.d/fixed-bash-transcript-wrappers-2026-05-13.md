@@ -1,1 +1,0 @@
-- Hide Claude Code `<bash-...>` transcript wrapper messages from conversation panes and titles.

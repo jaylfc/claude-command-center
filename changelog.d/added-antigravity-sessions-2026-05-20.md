@@ -1,1 +1,0 @@
-- Antigravity sessions now appear in the sessions view and archive, with read-only transcript rendering from `~/.gemini/antigravity/brain/` and launch support for the AGY CLI.

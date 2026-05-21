@@ -1,1 +1,0 @@
-- Keep conversation search results from jumping back to the top during background refreshes.

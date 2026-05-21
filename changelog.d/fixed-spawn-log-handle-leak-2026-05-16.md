@@ -1,1 +1,0 @@
-- Fixed finished spawned/resumed agent processes leaking log file handles, which could make session send/status requests fail after the server had been running for a long time.

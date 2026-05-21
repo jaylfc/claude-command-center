@@ -1,1 +1,0 @@
-Session commit/push detection now tokenizes shell commands so searches or prose containing `git push` do not make read-only sessions look pushed; sessions that create a worktree with a relative path now update their displayed workspace branch.

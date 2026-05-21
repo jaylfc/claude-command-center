@@ -1,1 +1,0 @@
-- Fixed session input sends to live Claude background agents by routing them through the daemon PTY instead of spawning a failing `claude --resume` process.

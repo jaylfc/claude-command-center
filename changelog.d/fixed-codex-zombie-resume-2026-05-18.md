@@ -1,1 +1,0 @@
-- Treat defunct reattached Codex/Gemini resume processes as exited so follow-up prompts are not queued forever behind a stale run.

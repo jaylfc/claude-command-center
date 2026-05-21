@@ -1,1 +1,0 @@
-**Dockerfile + docker-compose.yml** for a containerized trial install. Single-service compose mounts `~/.claude` from the host so the dashboard can see your transcripts; image stays stdlib-only (no `pip install`). See `docs/docker.md` for feature gaps vs. the native `./run.sh` path on macOS. (#54)

@@ -1,1 +1,0 @@
-- Ready to merge rows now retry transient GitHub PR-state lookup failures quickly and fall back to `gh api`, so already-merged PRs show the merged checkmark and drop out of the Ready to merge section.

@@ -1,1 +1,0 @@
-- Docker-based clean-install smoke test (`tests/install-smoke/Dockerfile` + `scripts/test-install.sh`), wired into a `install-smoke` GitHub Actions workflow that pipes `scripts/install.sh` into bash on a fresh image and verifies the server boots, serves the dashboard, returns `/static/templates.json` as JSON, and persists the attribution channel.

@@ -1,1 +1,0 @@
-- Show pasted-image references as inline images in the Original ask panel instead of leaving them as links or path text.

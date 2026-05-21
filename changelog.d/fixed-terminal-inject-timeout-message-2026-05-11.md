@@ -1,3 +1,0 @@
-- Show an actionable macOS permission message when Terminal injection times out instead of dumping the full `osascript` command into the toast.
-- Strip CCC's session-state reminder from Codex session titles and user-message panels so rows do not show dashboard boilerplate as the task name.
-- Recognize `app_mode_loader` in macOS permission guidance and handle screenshot clipboard images exposed through `clipboardData.files`, not just `clipboardData.items`.
