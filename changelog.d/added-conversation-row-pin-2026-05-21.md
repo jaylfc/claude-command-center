@@ -1,0 +1,1 @@
+- Add a hover pin action for conversation rows so pinned conversations stay at the top of the sidebar until unpinned.

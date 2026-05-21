@@ -2417,15 +2417,29 @@
   }
   .conv-item:hover .conv-edit-btn { opacity: 0.7; }
   .conv-item .conv-edit-btn:hover { opacity: 1; color: var(--accent); background: rgba(88,166,255,0.12); }
+  .conv-item .conv-pin-btn,
   .conv-item .conv-archive-btn {
     opacity: 0; font-size: 13px; cursor: pointer;
     background: none; border: none; color: var(--text-muted);
     padding: 2px 4px; border-radius: 3px; flex-shrink: 0;
     transition: opacity 0.15s, color 0.15s, background 0.15s;
   }
+  .conv-item:hover .conv-pin-btn,
+  .conv-item.active .conv-pin-btn,
+  .conv-item .conv-pin-btn:focus-visible,
   .conv-item:hover .conv-archive-btn,
   .conv-item.active .conv-archive-btn,
   .conv-item .conv-archive-btn:focus-visible { opacity: 0.7; }
+  .conv-item .conv-pin-btn:hover { opacity: 1; color: var(--accent); background: rgba(88,166,255,0.12); }
+  .conv-item .conv-pin-btn.is-unpin { color: var(--accent); }
+  .conv-item .conv-pin-btn .conv-pin-glyph { position: relative; display: inline-block; line-height: 1; }
+  .conv-item .conv-pin-btn.is-unpin .conv-pin-glyph::after {
+    content: '';
+    position: absolute;
+    left: -2px; right: -2px; top: 50%;
+    border-top: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+  }
   .conv-item .conv-archive-btn:hover { opacity: 1; color: var(--orange); background: rgba(255,166,87,0.12); }
   .conv-item .conv-merge-btn {
     opacity: 0; font-size: 13px; cursor: pointer;
@@ -2509,6 +2523,11 @@
   #convList .conv-ghissues-section,
   #convList .conv-readytomerge-section,
   #convList .conv-inprogress-section { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 6px; }
+  #convList .conv-pinned-list {
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
   /* The first section in the list (whichever it is — typically GH Issues,
    * but the next section takes the spot if earlier ones are empty) loses
    * its divider so the list doesn't start with an empty stripe. */

@@ -2021,6 +2021,11 @@ def find_all_conversations(
     except Exception:
         archived_set = set()
     try:
+        pinned_list = _load_pinned_conversations()
+    except Exception:
+        pinned_list = []
+    pinned_rank = _pinned_rank_map(pinned_list)
+    try:
         repo_pins = _load_repo_pins()
     except Exception:
         repo_pins = {}
@@ -2294,6 +2299,8 @@ def find_all_conversations(
                 "display_name": display_name,
                 "name_overridden": bool(display_name),
                 "archived": session_id in archived_set,
+                "pinned": session_id in pinned_rank,
+                "pin_rank": pinned_rank.get(session_id),
                 # State pills + PR# + live flag — sourced from _extract_tail_meta
                 # (per-session JSONL tool-use scan) plus a cached current-
                 # state probe for worktree_dirty.
@@ -2373,7 +2380,9 @@ def find_all_conversations(
             url = r.get("tail_pr_url")
             if url:
                 r["pr_state"] = _get_pr_state(url)
+    _apply_pinned_conversation_fields(out, pinned_list)
     out.sort(key=lambda r: r["mtime"], reverse=True)
+    _sort_pinned_conversations_first(out, pinned_list)
     return out
 
 
@@ -3521,6 +3530,7 @@ LOG_VIEWER_STATE_DIR = COMMAND_CENTER_STATE_DIR
 SESSION_NAMES_FILE = COMMAND_CENTER_STATE_DIR / "session-names.json"  # side-car overrides
 CONVERSATION_ORDER_FILE = COMMAND_CENTER_STATE_DIR / "conversation-order.json"  # [session_id,...]
 ARCHIVED_CONVERSATIONS_FILE = COMMAND_CENTER_STATE_DIR / "archived-conversations.json"  # [session_id,...]
+PINNED_CONVERSATIONS_FILE = COMMAND_CENTER_STATE_DIR / "pinned-conversations.json"  # [session_id,...]
 VERIFIED_CONVERSATIONS_FILE = COMMAND_CENTER_STATE_DIR / "verified-conversations.json"  # [session_id,...]
 # {session_id: epoch_seconds} — last time the user interacted with this card
 # from the UI (typed a message, clicked Approve/Deny, etc.). Drag-drop and
@@ -4061,6 +4071,55 @@ def _save_archived_conversations(archived):
         archived = []
     ARCHIVED_CONVERSATIONS_FILE.write_text(json.dumps(archived, indent=2))
     return archived
+
+
+def _load_pinned_conversations():
+    """Load list of pinned session_ids."""
+    try:
+        data = json.loads(PINNED_CONVERSATIONS_FILE.read_text())
+        if isinstance(data, list):
+            return [s for s in data if isinstance(s, str)]
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def _save_pinned_conversations(pinned):
+    """Persist list of pinned session_ids."""
+    LOG_VIEWER_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if not isinstance(pinned, list):
+        pinned = []
+    PINNED_CONVERSATIONS_FILE.write_text(json.dumps(pinned, indent=2))
+    return pinned
+
+
+def _pinned_rank_map(pinned=None):
+    if pinned is None:
+        pinned = _load_pinned_conversations()
+    return {sid: idx for idx, sid in enumerate(pinned) if isinstance(sid, str)}
+
+
+def _apply_pinned_conversation_fields(rows, pinned=None):
+    """Annotate rows with persistent list-pinning metadata."""
+    ranks = _pinned_rank_map(pinned)
+    for row in rows or []:
+        sid = row.get("session_id") or row.get("id")
+        rank = ranks.get(sid)
+        row["pinned"] = rank is not None
+        row["pin_rank"] = rank
+    return rows
+
+
+def _sort_pinned_conversations_first(rows, pinned=None):
+    """Stable-sort pinned rows before unpinned rows using saved pin order."""
+    ranks = _pinned_rank_map(pinned)
+    rows.sort(
+        key=lambda row: (
+            0 if (row.get("session_id") or row.get("id")) in ranks else 1,
+            ranks.get(row.get("session_id") or row.get("id"), 0),
+        )
+    )
+    return rows
 
 
 def _load_verified_conversations():
@@ -7476,6 +7535,8 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
         return conversations
     name_overrides = _load_session_name_overrides()
     archived_set = set(_load_archived_conversations())
+    pinned_list = _load_pinned_conversations()
+    pinned_rank = _pinned_rank_map(pinned_list)
     verified_set = set(_load_verified_conversations())
     last_interactions = _load_last_interactions()
     if live_sids is None and not include_old:
@@ -7788,6 +7849,8 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             "session_state": _parse_session_state(tail_meta.get("last_assistant_text")),
             "model": tail_meta.get("model"),
             "archived": sid in archived_set,
+            "pinned": sid in pinned_rank,
+            "pin_rank": pinned_rank.get(sid),
             "verified": sid in verified_set,
             # True when this row is showing here because the user pinned the
             # session to this repo (its underlying JSONL lives in another
@@ -7854,6 +7917,7 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             if c["session_id"] not in seen:
                 ordered.append(c)
         conversations = ordered
+    _sort_pinned_conversations_first(conversations, pinned_list)
     if _PROFILE:
         _t_total = time.perf_counter() - _t_start
         print(
@@ -8289,6 +8353,13 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
             if c["session_id"] not in seen:
                 ordered.append(c)
         conversations = ordered
+
+    try:
+        _pinned_list = _load_pinned_conversations()
+    except Exception:
+        _pinned_list = []
+    _apply_pinned_conversation_fields(conversations, _pinned_list)
+    _sort_pinned_conversations_first(conversations, _pinned_list)
 
     if progress:
         progress(
@@ -23112,6 +23183,38 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             result["session_id"] = sid
             result["name"] = name
             self.send_json(result)
+        elif re.match(r"^/api/conversations/[^/]+/pin$", path):
+            conv_id = urllib.parse.unquote(path.split("/")[-2])
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            sid = (payload.get("session_id") or conv_id or "").strip()
+            if not sid:
+                self.send_json({"ok": False, "error": "missing session_id"}, 400)
+                return
+            desired = payload.get("pinned")
+            try:
+                pinned = _load_pinned_conversations()
+                was_pinned = sid in pinned
+                pinned = [x for x in pinned if x != sid]
+                if desired is None:
+                    now_pinned = not was_pinned
+                else:
+                    now_pinned = bool(desired)
+                if now_pinned:
+                    pinned.insert(0, sid)
+                _save_pinned_conversations(pinned)
+                self.send_json({
+                    "ok": True,
+                    "session_id": sid,
+                    "pinned": now_pinned,
+                    "pin_rank": 0 if now_pinned else None,
+                })
+            except OSError as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
         elif re.match(r"^/api/conversations/[a-f0-9-]+/archive$", path) or re.match(r"^/api/conversations/issue-\d+/archive$", path) or re.match(r"^/api/conversations/pkood-[^/]+/archive$", path) or re.match(r"^/api/conversations/backlog-(issue|todo)-\d+/archive$", path) or re.match(r"^/api/conversations/xrepo-issue-[^/]+-\d+/archive$", path):
             conv_id = path.split("/")[-2]
             length = int(self.headers.get("Content-Length", "0"))

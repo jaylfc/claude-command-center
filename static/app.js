@@ -153,7 +153,7 @@
     document.addEventListener('click', function(e) {
       const t = e.target;
       if (!t || !t.closest) return;
-      const trigger = t.closest('[data-action], button.kanban-action, .conv-archive-btn, .conv-verify-btn');
+      const trigger = t.closest('[data-action], button.kanban-action, .conv-pin-btn, .conv-archive-btn, .conv-verify-btn');
       if (!trigger) return;
       // Read-only intents (open issue, jump to terminal, etc.) shouldn't
       // trigger the banner — only mutations do. The fetch wrapper above
@@ -3697,14 +3697,14 @@
     return true;
   }
 
-  // Optimistic state overrides for archived/verified flags. When the user
-  // archives or verifies a card we mutate the in-memory copy, but a /api/sessions
+  // Optimistic state overrides for archived/verified/pinned flags. When the user
+  // archives, verifies, or pins a card we mutate the in-memory copy, but a /api/sessions
   // poll already in flight will return *pre-click* data and overwrite that
   // mutation when it lands — the card briefly reappears in its old column
   // before the next poll picks up the persisted change. This map shields the
   // optimistic value until the server's response agrees, with a 30s TTL so a
   // failed write doesn't pin a stale override forever.
-  const _optimisticOverrides = new Map();  // sid -> {archived?, verified?, ts}
+  const _optimisticOverrides = new Map();  // sid -> {archived?, verified?, pinned?, pin_rank?, ts}
   const _OPTIMISTIC_TTL_MS = 30000;
   function setOptimisticOverride(sid, patch) {
     if (!sid) return;
@@ -3726,6 +3726,12 @@
       }
       if ('verified' in ov) {
         if (c.verified !== ov.verified) { c.verified = ov.verified; allMatch = false; }
+      }
+      if ('pinned' in ov) {
+        if (c.pinned !== ov.pinned) { c.pinned = ov.pinned; allMatch = false; }
+      }
+      if ('pin_rank' in ov) {
+        if (c.pin_rank !== ov.pin_rank) { c.pin_rank = ov.pin_rank; allMatch = false; }
       }
       // Server now agrees on every field we were holding — stop overriding.
       if (allMatch) _optimisticOverrides.delete(c.session_id);
@@ -6847,8 +6853,10 @@
     const _ghIssueConvs = [];
     const _readyToMergeConvs = [];
     const _archivedConvs = [];
+    const _pinnedConvs = [];
     const _inGroupChatIds = new Set(_gcActiveChats.flatMap(c => c.session_ids || []));
     for (const c of convs) {
+      if (c.pinned) { _pinnedConvs.push(c); continue; }
       const col = classifyKanbanColumn(c);
       if (col === 'archived') { _archivedConvs.push(c); continue; }
       if (col === 'backlog') { _ghIssueConvs.push(c); continue; }
@@ -7176,6 +7184,8 @@
 
       let startBtn = '';
       let archiveBtn;
+      const pinTitle = c.pinned ? 'Unpin conversation' : 'Pin conversation';
+      const pinBtn = '<button class="conv-pin-btn' + (c.pinned ? ' is-unpin' : '') + '" data-role="pin" title="' + pinTitle + '" aria-label="' + pinTitle + '"><span class="conv-pin-glyph">&#128204;</span></button>';
       if (isBacklogRow) {
         const _issueAttr = escapeAttr(c.issue_number || '');
         const _titleAttr = escapeAttr(c.display_name || c.first_message || '');
@@ -7247,7 +7257,7 @@
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
-      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
+      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned ? ' is-pinned' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
@@ -7266,7 +7276,7 @@
             // states (CSS uses `position: absolute` for one of them).
             + '<span class="conv-row-end">'
             +   '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
-            +   '<span class="conv-row-actions">' + mergeBtn + startBtn + archiveBtn + '</span>'
+            +   '<span class="conv-row-actions">' + mergeBtn + startBtn + pinBtn + archiveBtn + '</span>'
             + '</span>'
           + '</div>'
         + '</div>'
@@ -7343,6 +7353,9 @@
         return separator + _renderRow(c, opts);
       }).join('');
     };
+    const _pinnedHtml = _pinnedConvs.length
+      ? '<div class="conv-pinned-list">' + _pinnedConvs.map(c => _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter })).join('') + '</div>'
+      : '';
     const _folderGroupStorageKey = (section, key) =>
       'ccc-folder-group-collapsed:' + section + ':' + String(key || '').slice(0, 180);
     const _isFolderGroupCollapsed = (section, key) => {
@@ -7820,9 +7833,9 @@
         + (_gcCount ? '<div class="conv-ingroupchat-list">' + _gcRows + '</div>' : '')
         + '</div>';
     }
-    // Order: In Group Chat (live) → GH Issues (to start) → Ready to merge
-    // (action) → In progress → Archived.
-    $convList.innerHTML = _inGroupChatHtml + _ghIssuesHtml + _readyToMergeHtml + _inProgressHtml + _archivedHtml;
+    // Order: Pinned → In Group Chat (live) → GH Issues (to start) →
+    // Ready to merge (action) → In progress → Archived.
+    $convList.innerHTML = _pinnedHtml + _inGroupChatHtml + _ghIssuesHtml + _readyToMergeHtml + _inProgressHtml + _archivedHtml;
     // Toggle handler for the Archived section header.
     const $archivedToggle = $convList.querySelector('[data-role="archived-toggle"]');
     if ($archivedToggle) {
@@ -8124,7 +8137,7 @@
         // Ignore clicks that started the inline editor, archive button,
         // or that landed on the title (which now triggers rename instead
         // of opening the conversation — the pencil's job moved here).
-        if (ev.target.closest('[data-role="edit"]') || ev.target.closest('[data-role="archive"]') || ev.target.closest('[data-role="merge"]') || ev.target.closest('[data-role="start"]') || ev.target.closest('[data-role="unpin-repo"]') || ev.target.closest('.conv-title-input') || ev.target.closest('[data-role="title"]')) return;
+        if (ev.target.closest('[data-role="edit"]') || ev.target.closest('[data-role="pin"]') || ev.target.closest('[data-role="archive"]') || ev.target.closest('[data-role="merge"]') || ev.target.closest('[data-role="start"]') || ev.target.closest('[data-role="unpin-repo"]') || ev.target.closest('.conv-title-input') || ev.target.closest('[data-role="title"]')) return;
         if (ev.metaKey || ev.ctrlKey || ev.shiftKey) {
           ev.preventDefault();
           if (selectedListIds.has(el.dataset.id)) {
@@ -8219,6 +8232,47 @@
           return;
         }
         startInlineRename(item);
+      });
+    });
+    $convList.querySelectorAll('.conv-pin-btn').forEach(btn => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const item = btn.closest('.conv-item');
+        const convId = item && item.dataset.id;
+        const sessionId = item && item.dataset.sessionId;
+        if (!convId || !sessionId) return;
+        const c = conversationsData.find(x => x.id === convId || x.session_id === sessionId);
+        const nextPinned = !(c && c.pinned);
+        const patchRows = (rows, pinned, rank) => {
+          if (!Array.isArray(rows)) return;
+          for (const row of rows) {
+            if (!row) continue;
+            const rowSid = row.session_id || row.id;
+            if (rowSid === sessionId || row.id === convId) {
+              row.pinned = pinned;
+              row.pin_rank = pinned ? rank : null;
+            } else if (pinned && row.pinned) {
+              const oldRank = Number(row.pin_rank);
+              row.pin_rank = Number.isFinite(oldRank) ? oldRank + 1 : 1;
+            }
+          }
+        };
+        try {
+          const data = await ccPostJson('/api/conversations/' + encodeURIComponent(convId) + '/pin', {
+            session_id: sessionId,
+            pinned: nextPinned,
+          });
+          if (!data.ok) throw new Error(data.error || 'pin failed');
+          const rank = Number.isFinite(Number(data.pin_rank)) ? Number(data.pin_rank) : null;
+          patchRows(conversationsData, !!data.pinned, rank);
+          patchRows(archiveData, !!data.pinned, rank);
+          patchRows(currentRepoBacklogData, !!data.pinned, rank);
+          setOptimisticOverride(sessionId, { pinned: !!data.pinned, pin_rank: rank });
+          renderSidebar(filterConversations($convSearch.value));
+        } catch (err) {
+          showOpToast('Pin failed (' + err.message + ')', 'error');
+        }
       });
     });
     $convList.querySelectorAll('.conv-archive-btn').forEach(btn => {
@@ -8691,9 +8745,19 @@
     return raw.replace(/-/g, ' ').trim().toLowerCase();
   }
 
+  function _pinSortKey(c) {
+    if (!c || !c.pinned) return [1, 0];
+    const rank = Number(c.pin_rank);
+    return [0, Number.isFinite(rank) ? rank : 0];
+  }
+
   function applyConvSort(data) {
     if (convAlphaSort) {
       return [...data].sort((a, b) => {
+        const pa = _pinSortKey(a);
+        const pb = _pinSortKey(b);
+        if (pa[0] !== pb[0]) return pa[0] - pb[0];
+        if (pa[1] !== pb[1]) return pa[1] - pb[1];
         const ta = _convTitleForSort(a);
         const tb = _convTitleForSort(b);
         if (!ta && tb) return 1;
@@ -8706,7 +8770,13 @@
       // session's last meaningful event. Keeps the just-typed card on top
       // even before Claude responds.
       const score = (c) => c.last_interacted || c.modified || 0;
-      return [...data].sort((a, b) => score(b) - score(a));
+      return [...data].sort((a, b) => {
+        const pa = _pinSortKey(a);
+        const pb = _pinSortKey(b);
+        if (pa[0] !== pb[0]) return pa[0] - pb[0];
+        if (pa[1] !== pb[1]) return pa[1] - pb[1];
+        return score(b) - score(a);
+      });
     }
     return data; // custom/default order from server
   }
@@ -15624,6 +15694,8 @@
           folder_path: c.folder_path,
           worktree_label: c.worktree_label || null,
           pinned_repo: !!c.pinned_repo,
+          pinned: !!c.pinned,
+          pin_rank: Number.isFinite(Number(c.pin_rank)) ? Number(c.pin_rank) : null,
         });
       }
       const folderOrphan = (c.folder_path === c.slug);
@@ -15703,6 +15775,8 @@
         // Pinned-to-this-repo flag — server overrides the row's folder
         // bucket. Renderer adds a 📌 indicator + click-to-unpin handler.
         pinned_repo: !!c.pinned_repo,
+        pinned: !!c.pinned,
+        pin_rank: Number.isFinite(Number(c.pin_rank)) ? Number(c.pin_rank) : null,
       };
     });
 

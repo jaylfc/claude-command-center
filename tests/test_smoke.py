@@ -2262,6 +2262,47 @@ class TestModelPicker(unittest.TestCase):
             finally:
                 server.SESSION_OVERRIDES_FILE = orig
 
+    def test_pinned_conversations_roundtrip_and_sort_first(self):
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = pathlib.Path(tmp)
+            path = state_dir / "pinned-conversations.json"
+            orig_file = server.PINNED_CONVERSATIONS_FILE
+            orig_state = server.LOG_VIEWER_STATE_DIR
+            server.PINNED_CONVERSATIONS_FILE = path
+            server.LOG_VIEWER_STATE_DIR = state_dir
+            try:
+                server._save_pinned_conversations(["sid-2", "sid-1"])
+                self.assertEqual(server._load_pinned_conversations(), ["sid-2", "sid-1"])
+                rows = [
+                    {"session_id": "sid-3", "modified": 30},
+                    {"session_id": "sid-1", "modified": 10},
+                    {"session_id": "sid-2", "modified": 20},
+                ]
+                server._apply_pinned_conversation_fields(rows)
+                server._sort_pinned_conversations_first(rows)
+                self.assertEqual([r["session_id"] for r in rows], ["sid-2", "sid-1", "sid-3"])
+                self.assertTrue(rows[0]["pinned"])
+                self.assertEqual(rows[0]["pin_rank"], 0)
+            finally:
+                server.PINNED_CONVERSATIONS_FILE = orig_file
+                server.LOG_VIEWER_STATE_DIR = orig_state
+
+    def test_pin_route_and_row_action_hooks_are_registered(self):
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        src = pathlib.Path(server.__file__).read_text()
+        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
+        css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text()
+        self.assertIn("/api/conversations/[^/]+/pin", src)
+        self.assertIn("class=\"conv-pin-btn", js)
+        self.assertIn("mergeBtn + startBtn + pinBtn + archiveBtn", js)
+        self.assertIn("conv-pinned-list", js)
+        self.assertIn(".conv-item .conv-pin-btn", css)
+
     def test_session_model_route_registered_and_check_same_origin_gates_post(self):
         for mod in ("server",):
             sys.modules.pop(mod, None)
