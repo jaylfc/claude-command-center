@@ -358,6 +358,7 @@
       <div class="attention-list" id="attentionList"></div>
     </div>
 
+
     <!-- Global app-level actions (History indexing pill, Stats, Report a bug,
          Worktrees). Populated at boot by JS that moves these buttons here
          from `.ccc-topbar` in the conversation toolbar — they aren't
@@ -532,6 +533,15 @@
         <aside class="status-rail" id="statusRail" aria-label="Session status rail">
           <div class="status-rail-resizer" id="statusRailResizer" role="separator" aria-orientation="vertical" aria-label="Resize status rail" aria-controls="statusRail" tabindex="0" title="Drag to resize the status rail; drag to the right edge to hide it"></div>
           <div class="rail-actions" id="railActions" data-role="rail-actions"></div>
+          <div class="files-panel" id="filesPanel" style="display: none;">
+            <div class="files-resize-handle" id="filesResizeHandle" title="Drag up to resize · double-click to reset"></div>
+            <div class="files-header">
+              <span class="files-title-label">Files</span>
+              <span class="files-count" id="filesCount"></span>
+              <button class="files-toggle" id="filesToggle" title="Collapse / expand" aria-label="Toggle Files panel">&#9662;</button>
+            </div>
+            <div class="files-list" id="sidebarFilesList"></div>
+          </div>
           <div class="conv-bg-palette" data-role="conv-bg-palette" role="radiogroup" aria-label="Conversation background color"></div>
         </aside>
         <button class="status-rail-restore" id="statusRailRestoreBtn" type="button" title="Show status rail" aria-label="Show status rail" aria-controls="statusRail">

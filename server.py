@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "4.0.0"
+__version__ = "4.1.0"
 
 import ast
 import base64
@@ -21039,7 +21039,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 in_state_paste_dir = True
             except ValueError:
                 in_state_paste_dir = False
-            if not (in_legacy_paste_dir or in_state_paste_dir):
+            in_repo_sandbox = False
+            try:
+                ctx = require_repo_context(query=qs, allow_session=True)
+                rp = resolved.resolve(strict=False)
+                allowed_roots = [Path(ctx["repo_path"]).resolve(), repo_log_dir(ctx["repo_path"]).resolve()]
+                in_repo_sandbox = any(rp == root or root in rp.parents for root in allowed_roots)
+            except Exception:
+                pass
+            if not (in_legacy_paste_dir or in_state_paste_dir or in_repo_sandbox):
                 self.send_json({"error": "forbidden"}, 403)
                 return
             if not resolved.is_file():
@@ -22112,7 +22120,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     ctx = require_repo_context(payload, allow_session=True)
                     rp = Path(target).resolve(strict=False)
-                    allowed_roots = [Path(ctx["repo_path"]).resolve(), repo_log_dir(ctx["repo_path"]).resolve()]
+                    allowed_roots = [
+                        Path(ctx["repo_path"]).resolve(),
+                        repo_log_dir(ctx["repo_path"]).resolve(),
+                        COMMAND_CENTER_STATE_DIR.resolve(),
+                        Path.home() / ".claude",
+                    ]
                     in_sandbox = any(rp == root or root in rp.parents for root in allowed_roots)
                 except RepoContextError as e:
                     self.send_json(e.as_payload(), e.status)

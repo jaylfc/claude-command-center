@@ -1,0 +1,1 @@
+- Surface conversation files in a dedicated sidebar panel, sorted reverse chronologically, with thumbnail previews for images.

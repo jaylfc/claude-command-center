@@ -1,0 +1,1 @@
+- Fix files panel starting in a collapsed state by default, ensuring files are immediately visible on selection.

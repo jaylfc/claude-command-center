@@ -3415,14 +3415,7 @@
      rendered when count > 0. Keeping it inside .csh-row avoids changing the
      sticky header's outer height after the async files request resolves. */
   .ffc-pill {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 3px 10px; margin: 0 0 6px 0;
-    border: 1px solid var(--border, #30363d);
-    border-radius: 999px;
-    background: var(--surface-2, #161b22);
-    color: var(--text, #c9d1d9);
-    font-size: 11px; font-weight: 500; cursor: pointer;
-    line-height: 1.4;
+    display: none !important;
   }
   .conv-sticky-header .csh-col-activity > .ffc-pill {
     flex: 0 0 auto;
@@ -4521,6 +4514,120 @@
     font-size: 12px; cursor: pointer; padding: 2px 6px;
   }
   .attention-panel.collapsed .att-toggle { transform: rotate(-90deg); }
+
+  /* ── Files panel (bottom-mounted, opens upward on demand) ─────────── */
+  .files-panel {
+    flex: 0 0 auto;
+    max-height: 35vh;
+    padding: 6px 12px 8px;
+    background: linear-gradient(rgba(88,166,255,0.03), rgba(88,166,255,0.03)), var(--surface);
+    border-top: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    position: relative;
+    box-sizing: border-box;
+  }
+  .files-panel[style*="height"] { max-height: none; }
+  .files-panel.collapsed { max-height: 32px; height: 32px !important; overflow: hidden; padding-top: 0; padding-bottom: 0; }
+  .files-panel.collapsed .files-list { display: none; }
+  .files-panel.collapsed .files-resize-handle { display: none; }
+  .files-panel.collapsed .files-header { cursor: pointer; }
+  .files-panel.collapsed:hover { background: linear-gradient(rgba(88,166,255,0.06), rgba(88,166,255,0.06)), var(--surface); }
+
+  .files-resize-handle {
+    position: absolute; left: 0; right: 0; top: 0;
+    height: 10px; cursor: ns-resize;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 6; touch-action: none; user-select: none;
+    background: transparent;
+    transition: background 0.12s;
+  }
+  .files-resize-handle::before {
+    content: ''; display: block;
+    width: 40px; height: 3px; border-radius: 2px;
+    background: rgba(139,148,158,0.45);
+    transition: background 0.12s, width 0.12s;
+  }
+  .files-resize-handle:hover::before,
+  .files-resize-handle.is-dragging::before {
+    background: var(--accent);
+    width: 60px;
+  }
+  .files-resize-handle:hover,
+  .files-resize-handle.is-dragging {
+    background: rgba(88,166,255,0.08);
+  }
+
+  .files-header {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; font-weight: 700; text-transform: uppercase;
+    color: var(--text-muted); letter-spacing: 0.5px;
+    padding: 4px 0; position: sticky; top: 0;
+    background: var(--surface);
+  }
+  .files-count {
+    background: rgba(88,166,255,0.18); color: var(--accent, #58a6ff);
+    font-size: 10px; padding: 1px 7px; border-radius: 10px; font-weight: 700;
+  }
+  .files-count:empty { display: none; }
+  .files-toggle {
+    margin-left: auto; background: transparent; border: none; color: var(--text-muted);
+    font-size: 12px; cursor: pointer; padding: 2px 6px;
+  }
+  .files-panel.collapsed .files-toggle { transform: rotate(-90deg); }
+
+  .files-list {
+    display: flex; flex-direction: column; gap: 6px;
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    padding-top: 4px;
+  }
+
+  .sidebar-file-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 6px;
+    cursor: pointer;
+    background: transparent;
+    transition: background 0.15s ease;
+  }
+  .sidebar-file-row:hover {
+    background: var(--surface-2, #161b22);
+  }
+  .sidebar-file-thumb {
+    width: 32px; height: 32px;
+    border-radius: 4px;
+    object-fit: cover;
+    background: var(--surface-3, #21262d);
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .sidebar-file-icon-placeholder {
+    width: 32px; height: 32px;
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface-3, #21262d);
+    border: 1px solid var(--border);
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .sidebar-file-info {
+    flex: 1; min-width: 0;
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .sidebar-file-name {
+    color: var(--text, #c9d1d9); font-size: 12px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .sidebar-file-path {
+    color: var(--text-muted, #8b949e); font-size: 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    cursor: copy;
+  }
+  .sidebar-file-path:hover {
+    color: var(--text, #c9d1d9);
+  }
+  .sidebar-file-toast {
+    color: #f85149; font-size: 10px; margin-top: 1px;
+  }
   .attention-list {
     display: flex; flex-direction: column; gap: 6px;
     flex: 1 1 auto; min-height: 0; overflow-y: auto;

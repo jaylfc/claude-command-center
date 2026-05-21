@@ -1,0 +1,1 @@
+- Relocate the conversation Files Panel from the left sidebar to the right-side status rail (the conversation sidebar).

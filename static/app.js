@@ -459,6 +459,7 @@
   // can all run during startup and need a concrete selected repo when scoped.
   const ARCHIVE_FOLDER_ALL = '__all__';
   const ARCHIVE_FOLDER_FILTER_KEY = 'ccc-archive-folder-filter';
+  const _ARCHIVE_MODE_KEY = 'ccc-archive-mode';
   const $convFolderFilter = document.getElementById('convFolderFilter');
   let repoListState = { repos: [], current: '', recent: [] };
   let archiveFolderFilter = (() => {
@@ -2490,8 +2491,10 @@
   const PASTED_IMG_RE = /(?:file:\/\/)?(\/[^\s<>"']*?\/\.claude\/(?:command-center\/)?pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))/gi;
   const PASTED_IMG_MD_LINK_RE = /!?\[[^\]\n]*\]\((?:file:\/\/)?(\/[^\s<>"')]*?\/\.claude\/(?:command-center\/)?pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))(?:\s+(?:&quot;[^&]*&quot;|'[^']*'))?\)/gi;
   function pastedImageTag(path) {
+    const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
     return '<img class="msg-image pasted-image-inline" src="/api/pasted-image?path='
       + encodeURIComponent(path)
+      + (sid ? '&session_id=' + encodeURIComponent(sid) : '')
       + '" alt="pasted image" loading="lazy">';
   }
   function linkifyPastedImages(escapedHtml) {
@@ -3356,6 +3359,97 @@
     activeIndex: 0,
     ratio: 0.5,
   };
+
+  function getLastConvKey() {
+    return 'ccc-last-conv:' + (selectedRepoPath() || 'all');
+  }
+
+  function getLastConvId() {
+    try {
+      return localStorage.getItem(getLastConvKey()) || localStorage.getItem('ccc-last-conv') || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function getSplitStateKey() {
+    return 'ccc-split-state:' + (selectedRepoPath() || 'all');
+  }
+
+  function saveSplitState() {
+    if (CONV_POPOUT_MODE) return;
+    const key = getSplitStateKey();
+    const data = {
+      orientation: splitState.orientation,
+      ratio: splitState.ratio,
+      activeIndex: splitState.activeIndex,
+      panes: splitState.panes.map(p => ({
+        id: p.id,
+        conversationId: p.conversationId
+      }))
+    };
+    try {
+      localStorage.setItem(key, JSON.stringify(data));
+    } catch (_) {}
+  }
+
+  function restoreSplitState() {
+    if (CONV_POPOUT_MODE) return;
+    const key = getSplitStateKey();
+    let saved = null;
+    try {
+      const val = localStorage.getItem(key);
+      if (val) saved = JSON.parse(val);
+    } catch (_) {}
+
+    if (saved && saved.panes && saved.panes.length > 0) {
+      splitState.orientation = saved.orientation;
+      splitState.ratio = typeof saved.ratio === 'number' ? saved.ratio : 0.5;
+      splitState.activeIndex = typeof saved.activeIndex === 'number' ? saved.activeIndex : 0;
+      splitState.panes = saved.panes.map(p => {
+        const pane = _newPaneState(p.id);
+        pane.conversationId = p.conversationId;
+        return pane;
+      });
+    } else {
+      splitState.orientation = null;
+      splitState.ratio = 0.5;
+      splitState.activeIndex = 0;
+      const pane = _newPaneState('p1');
+      pane.conversationId = getLastConvId() || null;
+      splitState.panes = [pane];
+    }
+    renderSplitLayout();
+  }
+
+  async function restoreLastConversation() {
+    if (CONV_POPOUT_MODE) return;
+    if (!conversationsLoaded) return;
+
+    let anyRestored = false;
+    const savedActiveIndex = splitState.activeIndex;
+
+    for (let i = 0; i < splitState.panes.length; i++) {
+      const pane = splitState.panes[i];
+      if (!pane.conversationId || pane.restored) continue;
+
+      const exists = conversationsData.some(c => c.id === pane.conversationId);
+      if (exists) {
+        pane.restored = true;
+        anyRestored = true;
+        await selectConversation(pane.conversationId, pane.id);
+      } else if (archiveLoaded) {
+        pane.restored = true;
+      }
+    }
+
+    if (anyRestored) {
+      const activePane = splitState.panes[savedActiveIndex];
+      if (activePane) {
+        setActivePaneById(activePane.id);
+      }
+    }
+  }
   function activePaneId() { return splitState.panes[splitState.activeIndex].id; }
   function paneByPaneId(pid) { return splitState.panes.find(p => p.id === pid) || null; }
   function paneIndexByPaneId(pid) {
@@ -3388,6 +3482,7 @@
     const idx = paneIndexByPaneId(paneId);
     if (idx < 0) return false;
     splitState.activeIndex = idx;
+    saveSplitState();
     if (arguments.length > 1) syncActivePaneChrome(activeConvId);
     else syncActivePaneChrome();
     return true;
@@ -3719,7 +3814,13 @@
     const sid = real.session_id || realId;
     if (!realId) return;
     currentConversation = realId;
-    try { if (!CONV_POPOUT_MODE) localStorage.setItem('ccc-last-conv', realId); } catch (_) {}
+    try {
+      if (!CONV_POPOUT_MODE) {
+        localStorage.setItem(getLastConvKey(), realId);
+        localStorage.setItem('ccc-last-conv', realId);
+      }
+    } catch (_) {}
+    saveSplitState();
     if (typeof stopConvStream === 'function') stopConvStream();
     if (typeof stopSpawnStream === 'function') stopSpawnStream();
     setCurrentSession(
@@ -3975,12 +4076,8 @@
       // shouldn't yank a card out from under an active selection.
       if (CONV_POPOUT_MODE) {
         maybeSelectPopoutConversation();
-      } else if (!currentConversation) {
-        let lastId = '';
-        try { lastId = localStorage.getItem('ccc-last-conv') || ''; } catch (_) {}
-        if (lastId && conversationsData.some(c => c.id === lastId)) {
-          selectConversation(lastId);
-        }
+      } else {
+        restoreLastConversation();
       }
     } catch (err) {
       $convList.innerHTML = '<div class="empty-state" style="height:auto;padding:20px;font-size:13px;">Failed to load sessions: ' + escapeHtml(err.message) + '</div>';
@@ -4340,6 +4437,98 @@
         e.preventDefault();
         e.stopPropagation();
         resetAttHeight();
+      });
+    }
+  })();
+
+  // Collapse toggle for the files panel (persisted).
+  (function () {
+    const $panel = document.getElementById('filesPanel');
+    const $toggle = document.getElementById('filesToggle');
+    if (!$panel || !$toggle) return;
+    try {
+      const stored = localStorage.getItem('ccc-files-collapsed');
+      if (stored === '1') {
+        $panel.classList.add('collapsed');
+      } // else (null or '0') → stay expanded (HTML default)
+    } catch (_) {}
+    function setCollapsed(collapsed) {
+      $panel.classList.toggle('collapsed', collapsed);
+      try {
+        localStorage.setItem('ccc-files-collapsed', collapsed ? '1' : '0');
+      } catch (_) {}
+    }
+    $toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setCollapsed(!$panel.classList.contains('collapsed'));
+    });
+    const $header = $panel.querySelector('.files-header');
+    if ($header) {
+      $header.addEventListener('click', (e) => {
+        if (!$panel.classList.contains('collapsed')) return;
+        if (e.target.closest('button')) return;
+        setCollapsed(false);
+      });
+    }
+
+    // Resize handle: drag DOWN to grow the files panel, shrinking kanban below.
+    const FILES_HEIGHT_KEY = 'ccc-files-height';
+    const FILES_MIN_PX = 80;
+    const $handle = document.getElementById('filesResizeHandle');
+
+    function filesMaxPx() {
+      const parent = $panel.parentElement;
+      if (!parent) return 9999;
+      return Math.max(FILES_MIN_PX, Math.floor(parent.clientHeight * 0.7));
+    }
+    function applyFilesHeight(h) {
+      const clamped = Math.max(FILES_MIN_PX, Math.min(filesMaxPx(), h));
+      $panel.style.height = clamped + 'px';
+    }
+    function resetFilesHeight() {
+      $panel.style.height = '';
+      try { localStorage.removeItem(FILES_HEIGHT_KEY); } catch (_) {}
+    }
+    try {
+      const stored = parseInt(localStorage.getItem(FILES_HEIGHT_KEY) || '', 10);
+      if (!isNaN(stored) && stored > 0) {
+        requestAnimationFrame(() => applyFilesHeight(stored));
+      }
+    } catch (_) {}
+
+    if ($handle) {
+      let startY = 0;
+      let startH = 0;
+      let activePointerId = null;
+      $handle.addEventListener('pointerdown', (e) => {
+        if ($panel.classList.contains('collapsed')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        activePointerId = e.pointerId;
+        startY = e.clientY;
+        startH = $panel.getBoundingClientRect().height;
+        $handle.classList.add('is-dragging');
+        try { $handle.setPointerCapture(e.pointerId); } catch (_) {}
+      });
+      $handle.addEventListener('pointermove', (e) => {
+        if (activePointerId !== e.pointerId) return;
+        const dy = e.clientY - startY;
+        applyFilesHeight(startH - dy);
+      });
+      const endDrag = (e) => {
+        if (activePointerId !== e.pointerId) return;
+        $handle.classList.remove('is-dragging');
+        try { $handle.releasePointerCapture(e.pointerId); } catch (_) {}
+        activePointerId = null;
+        const finalH = $panel.getBoundingClientRect().height;
+        try { localStorage.setItem(FILES_HEIGHT_KEY, String(Math.round(finalH))); } catch (_) {}
+      };
+      $handle.addEventListener('pointerup', endDrag);
+      $handle.addEventListener('pointercancel', endDrag);
+      $handle.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        resetFilesHeight();
       });
     }
   })();
@@ -5641,10 +5830,12 @@
         const midTurn = c.last_event_type === 'assistant';
         const _isKanbanCodex = c.source === 'codex' || c.engine === 'codex';
         const _isKanbanGemini = c.source === 'gemini' || c.engine === 'gemini';
+        const _isKanbanAntigravity = c.source === 'antigravity' || c.engine === 'antigravity';
         const _kanbanActivityAge = c.sidecar_ts ? (Date.now() / 1000 - c.sidecar_ts) : (c.last_interacted ? (Date.now() / 1000 - c.last_interacted) : 9999);
         const _codexKanbanWip = _isKanbanCodex && !c.sidecar_status && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60));
         const _geminiKanbanWip = _isKanbanGemini && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
-        const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip ? ' truly-active' : '';
+        const _antigravityKanbanWip = _isKanbanAntigravity && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
+        const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip || _antigravityKanbanWip ? ' truly-active' : '';
         const pendingSpawn = c.pending_spawn ? ' pending-spawn' : '';
         const recentlyBorn = isRecentlyBorn(c.session_id) ? ' recently-born' : '';
         const noEditsAttr = hasNoEdits(c) ? ' no-edits' : '';
@@ -6812,7 +7003,7 @@
       const _activityAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
       const _rowActivityTs = c.sidecar_ts || c.last_interacted || c.modified || 0;
       const _rowActivityAge = _rowActivityTs ? Math.max(0, Math.floor(Date.now() / 1000 - _rowActivityTs)) : 9999;
-      const _midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow) && c.last_event_type === 'user');
+      const _midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow || isAntigravityRow) && c.last_event_type === 'user');
       const _isActiveSidecar = c.is_live && c.sidecar_status === 'active';
       const _isQuestionWaiting = c.is_live && (c.question_waiting || (c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion'));
       const _isWaitingForUser = c.is_live && (c.needs_approval || _isQuestionWaiting);
@@ -6836,7 +7027,7 @@
               ? (c.needs_approval_message || c.sidecar_file || c.question_text || 'Agent is waiting for your input')
               : (c.gh_in_progress
               ? 'Linked GitHub issue is marked in progress'
-              : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : 'Agent is working'))));
+              : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : (isAntigravityRow ? 'Antigravity is working' : 'Agent is working')))));
         const wipLabel = _isQuestionWaiting
           ? 'QUESTION'
           : ((_codexOpenTurn || _isWaitingForUser) ? 'WIP' : (_knownActivityTool || 'WIP'));
@@ -9022,6 +9213,7 @@
       restoreConversationBottomAnchors(bottomAnchors);
       bottomAnchors = [];
       try { divider.releasePointerCapture(ev.pointerId); } catch (e) {}
+      saveSplitState();
     });
   }
 
@@ -9204,6 +9396,7 @@
     splitState.activeIndex = 0; // survivor is now the only pane
     renderSplitLayout();
     syncActivePaneChrome();
+    saveSplitState();
   }
 
   // Show a 2-second floating message anchored to the bottom-center of the viewport.
@@ -9260,6 +9453,7 @@
       splitState.activeIndex = 0;
       renderSplitLayout();
     }
+    saveSplitState();
   }
   window.addEventListener('resize', handleViewportResize);
   window.addEventListener('resize', () => {
@@ -9591,6 +9785,7 @@
     paneId = paneId || activePaneId();
     const pane = paneByPaneId(paneId);
     if (!pane) return;
+    if (typeof ffcUpdateSidebar === 'function') ffcUpdateSidebar(null);
     const selectedConv = (conversationsData || []).find(x => x.id === id) || {};
     const source = sessionSourceByConv[id] || selectedConv.source || 'interactive';
     rememberComposerDraftForPane(paneId);
@@ -9626,7 +9821,14 @@
     // Remember which card was last opened so we can re-open it on the
     // next page load. Reads happen in loadConversationList once the list
     // is populated; misses (id no longer present) just fall through.
-    try { if (id && !CONV_POPOUT_MODE) localStorage.setItem('ccc-last-conv', id); } catch (_) {}
+    try {
+      if (id && !CONV_POPOUT_MODE) {
+        localStorage.setItem(getLastConvKey(), id);
+        localStorage.setItem('ccc-last-conv', id);
+      }
+    } catch (_) {}
+    pane.restored = true;
+    saveSplitState();
     convLastLine = 0;
     _firstUserMsgRendered = false;
     _dynamicAskState = null;  // sticky-header scroll tracker — repopulated when the new sticky is built
@@ -9991,6 +10193,147 @@
     if (currentConversation !== cur) return;
     const sticky = document.querySelector('.conversations-view .conv-sticky-header');
     ffcEnsurePill(sticky, data);
+    ffcUpdateSidebar(data);
+  }
+
+  function ffcUpdateSidebar(data) {
+    const $panel = document.getElementById('filesPanel');
+    const $count = document.getElementById('filesCount');
+    const $list = document.getElementById('sidebarFilesList');
+    if (!$panel || !$count || !$list) return;
+
+    if (!data || !data.count) {
+      $panel.style.display = 'none';
+      $list.innerHTML = '';
+      $count.textContent = '';
+      return;
+    }
+
+    $panel.style.display = '';
+    $count.textContent = data.count;
+    $list.innerHTML = '';
+
+    // Flatten all categories
+    const allFiles = [];
+    for (const cat of FFC_CATEGORY_ORDER) {
+      const rows = (data.groups || {})[cat.key];
+      if (rows && rows.length) {
+        for (const row of rows) {
+          allFiles.push(Object.assign({}, row, { category: cat.key, categoryIcon: cat.icon }));
+        }
+      }
+    }
+
+    // Sort reverse chronologically (by first_line descending)
+    allFiles.sort((a, b) => (b.first_line || 0) - (a.first_line || 0));
+
+    // Render each file
+    for (const row of allFiles) {
+      $list.appendChild(renderSidebarFileRow(row));
+    }
+  }
+
+  function renderSidebarFileRow(row) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'sidebar-file-row';
+    rowEl.title = 'Click to open';
+
+    // Thumbnail / Icon placeholder
+    if (row.category === 'images') {
+      const img = document.createElement('img');
+      img.className = 'sidebar-file-thumb';
+      img.alt = row.label;
+      img.loading = 'lazy';
+      const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
+      img.src = '/api/pasted-image?path=' + encodeURIComponent(row.target) + (sid ? '&session_id=' + encodeURIComponent(sid) : '');
+      img.onerror = () => {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'sidebar-file-icon-placeholder';
+        placeholder.textContent = row.categoryIcon || '📷';
+        if (img.parentNode) {
+          img.parentNode.replaceChild(placeholder, img);
+        }
+      };
+      rowEl.appendChild(img);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'sidebar-file-icon-placeholder';
+      placeholder.textContent = row.categoryIcon || '📄';
+      rowEl.appendChild(placeholder);
+    }
+
+    // Info containing filename and path
+    const info = document.createElement('div');
+    info.className = 'sidebar-file-info';
+
+    const name = document.createElement('div');
+    name.className = 'sidebar-file-name';
+    name.textContent = row.label;
+    info.appendChild(name);
+
+    const pathEl = document.createElement('div');
+    pathEl.className = 'sidebar-file-path';
+    pathEl.textContent = row.target;
+    pathEl.title = 'Click to copy path';
+    pathEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(row.target).then(() => {
+        const orig = pathEl.textContent;
+        pathEl.textContent = 'copied';
+        const origColor = pathEl.style.color;
+        pathEl.style.color = 'var(--accent, #58a6ff)';
+        setTimeout(() => {
+          pathEl.textContent = orig;
+          pathEl.style.color = origColor;
+        }, 900);
+      }).catch(() => {});
+    });
+    info.appendChild(pathEl);
+
+    rowEl.appendChild(info);
+
+    // Row click handles reveal-file or URL redirect
+    if (row.kind === 'url') {
+      rowEl.addEventListener('click', (e) => {
+        if (e.target.closest('.sidebar-file-path')) return;
+        window.open(row.target, '_blank', 'noopener,noreferrer');
+      });
+    } else {
+      rowEl.addEventListener('click', async (e) => {
+        if (e.target.closest('.sidebar-file-path')) return;
+        try {
+          const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
+          const r = await fetch('/api/reveal-file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path: row.target, session_id: sid}),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({error: 'open failed'}));
+            sidebarShowFileToast(rowEl, j.error || ('HTTP ' + r.status));
+          }
+        } catch (err) {
+          sidebarShowFileToast(rowEl, 'network error');
+        }
+      });
+    }
+
+    return rowEl;
+  }
+
+  function sidebarShowFileToast(rowEl, msg) {
+    let info = rowEl.querySelector('.sidebar-file-info');
+    if (!info) return;
+    let toast = info.querySelector('.sidebar-file-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'sidebar-file-toast';
+      info.appendChild(toast);
+    }
+    toast.textContent = msg;
+    setTimeout(() => {
+      if (toast.parentNode === info) info.removeChild(toast);
+    }, 3000);
   }
 
   const FFC_CATEGORY_ORDER = [
@@ -13010,7 +13353,19 @@
           rail.appendChild(liveOrig);
         }
       }
-      if (liveAct) rail.appendChild(liveAct);
+      if (liveAct) {
+        const filesPanel = rail.querySelector('#filesPanel');
+        if (filesPanel) {
+          rail.insertBefore(liveAct, filesPanel);
+        } else {
+          const bgPalette = rail.querySelector('.conv-bg-palette');
+          if (bgPalette) {
+            rail.insertBefore(liveAct, bgPalette);
+          } else {
+            rail.appendChild(liveAct);
+          }
+        }
+      }
     } else if (sticky) {
       const askCol = sticky.querySelector('.csh-col-ask');
       const row = sticky.querySelector('.csh-row');
@@ -14314,7 +14669,23 @@
   }
 
   function setArchiveFolderFilter(value, opts = {}) {
-    archiveFolderFilter = value || ARCHIVE_FOLDER_ALL;
+    const oldRepo = selectedRepoPath();
+    const newValue = value || ARCHIVE_FOLDER_ALL;
+    const newRepo = newValue !== ARCHIVE_FOLDER_ALL ? newValue : '';
+    const repoChanged = oldRepo !== newRepo;
+
+    if (repoChanged) {
+      for (const p of splitState.panes) {
+        if (p.eventSource) {
+          try { p.eventSource.close(); } catch (e) {}
+          p.eventSource = null;
+        }
+      }
+      if (typeof stopSpawnStream === 'function') stopSpawnStream();
+      if (typeof stopCodexLogPoller === 'function') stopCodexLogPoller();
+    }
+
+    archiveFolderFilter = newValue;
     try { localStorage.setItem(ARCHIVE_FOLDER_FILTER_KEY, archiveFolderFilter); } catch (_) {}
     renderArchiveFolderFilter();
     updateRepoPickerVisibility();
@@ -14339,6 +14710,11 @@
     // wireGroupChatPolling() — not here. Calling setInterval inside this
     // handler used to leak a fresh 15s timer on every folder-filter change.
     pollGcActive();
+
+    if (repoChanged) {
+      restoreSplitState();
+      loadConversationList();
+    }
   }
 
   const $gcActiveBtn = document.getElementById('gcActiveBtn');
@@ -15228,6 +15604,8 @@
     }
     if (CONV_POPOUT_MODE) {
       maybeSelectPopoutConversation({ allowMissing: archiveLoaded });
+    } else {
+      restoreLastConversation();
     }
     _finishArchiveRender();
   }
@@ -18270,6 +18648,7 @@
       _markFirstSessionsLoaded();
     });
   } else {
+    restoreSplitState();
     loadConversationList();
   }
   attachAllPaneDropZones();
