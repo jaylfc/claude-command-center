@@ -1,0 +1,1 @@
+- Dropped the gemini option from the engine select dropdowns, mapped the Gemini sparkle SVG shape to the Antigravity engine option, and fixed the double-dropdown visibility bug.

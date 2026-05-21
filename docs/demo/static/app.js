@@ -6641,10 +6641,8 @@
       } else if (isAntigravityRow) {
         iconType = 'antigravity';
         iconTitleType = 'Antigravity';
-        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
-            + '<path d="M8 5.2c-1 0-1.6-.6-2.3-.6-1.4 0-2.2.9-2.2 2.3 0 1.8 1.1 3.2 2.2 3.2.7 0 .9-.4 1.5-.4.6 0 .9.4 1.5.4 1.1 0 2.2-1.4 2.2-3.2 0-1.4-.8-2.3-2.2-2.3-.7 0-1.3.6-2.3.6z" />'
-            + '<path d="M8 4.6c.1-.8.6-1.4 1.2-1.6" />'
-            + '<path d="M5 13.5c2-.7 4-.7 6 0M6.5 15c1-.4 2-.4 3 0" />'
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
+            + '<path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" />'
             + '</svg>';
       } else if (c.source === 'pkood') {
         iconType = 'pkood';
@@ -15856,10 +15854,8 @@
           + '<path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" />'
           + '</svg>';
     } else if (engine === 'antigravity') {
-      return '<svg class="engine-svg-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
-          + '<path d="M8 5.2c-1 0-1.6-.6-2.3-.6-1.4 0-2.2.9-2.2 2.3 0 1.8 1.1 3.2 2.2 3.2.7 0 .9-.4 1.5-.4.6 0 .9.4 1.5.4 1.1 0 2.2-1.4 2.2-3.2 0-1.4-.8-2.3-2.2-2.3-.7 0-1.3.6-2.3.6z" />'
-          + '<path d="M8 4.6c.1-.8.6-1.4 1.2-1.6" />'
-          + '<path d="M5 13.5c2-.7 4-.7 6 0M6.5 15c1-.4 2-.4 3 0" />'
+      return '<svg class="engine-svg-icon" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
+          + '<path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" />'
           + '</svg>';
     } else {
       return '<svg class="engine-svg-icon" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
@@ -15872,6 +15868,8 @@
     if (!selectEl) return;
     if (selectEl.dataset.customInitialized) return;
     selectEl.dataset.customInitialized = "true";
+
+    const initialDisplay = selectEl.style.display;
 
     // Hide original select
     selectEl.style.display = 'none';
@@ -15991,13 +15989,25 @@
     });
 
     const observer = new MutationObserver(() => {
+      const currentDisplay = selectEl.style.display;
+      if (currentDisplay === 'none') {
+        container.style.display = 'none';
+      } else {
+        container.style.display = currentDisplay;
+        observer.disconnect();
+        selectEl.style.display = 'none';
+        observer.observe(selectEl, { attributes: true });
+      }
       updateTrigger();
-      container.style.display = selectEl.style.display;
     });
-    observer.observe(selectEl, { attributes: true, childList: true, subtree: true, characterData: true });
+    observer.observe(selectEl, { attributes: true });
 
     updateTrigger();
-    container.style.display = selectEl.style.display;
+    if (initialDisplay === 'none') {
+      container.style.display = 'none';
+    } else {
+      container.style.display = initialDisplay;
+    }
   }
 
   initCustomEngineSelect($convInputEngineSelect);
