@@ -1,0 +1,1 @@
+- Failed Antigravity sends now clear the optimistic Sending state and app-only sessions no longer enter the AGY CLI send path.

@@ -630,7 +630,7 @@
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
     const isAntigravity = currentSession.source === 'antigravity';
-    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume !== false;
+    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume === true;
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentSession.id || '');
     return [
       { id: 'terminal', label: 'Terminal', hint: isAntigravity ? (antigravityCanResume ? 'AGY conversation' : '/open in AGY') : 'default', disabled: false },
@@ -1666,7 +1666,7 @@
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
     const isAntigravity = currentSession.source === 'antigravity';
-    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume !== false;
+    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume === true;
     const live = liveStatus.live && liveStatus.tty;
     const isConvTab = activeTab === 'sessions';
     const hasSession = !!currentSession.id;
@@ -1988,6 +1988,7 @@
       const idx = pending.list.indexOf(pending.entry);
       if (idx >= 0) pending.list.splice(idx, 1);
     }
+    if (pending.sid) clearSessionSending(pending.sid);
   }
 
   function restoreInputAfterSendFailure($input, text) {
@@ -2040,7 +2041,7 @@
     }
     const sid = currentSession.id;
     if (!sid) return;
-    if (currentSession.source === 'antigravity' && currentSession.can_headless_resume === false) {
+    if (currentSession.source === 'antigravity' && currentSession.can_headless_resume !== true) {
       showOpToast('This Antigravity app session is not available in AGY CLI. Use Launch to open AGY.', 'error');
       return;
     }
@@ -9704,7 +9705,7 @@
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
     const isAntigravity = currentSession.source === 'antigravity';
-    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume !== false;
+    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume === true;
     const live = liveStatus.live && liveStatus.tty;
     const hasSession = !!currentSession.id;
     if (hasSession && kanbanView) {
@@ -16251,7 +16252,7 @@
       const text = ($cpInput.value || '').trim();
       const sid = currentSession.id;
       if (!text || !sid) return;
-      if (currentSession.source === 'antigravity' && currentSession.can_headless_resume === false) {
+      if (currentSession.source === 'antigravity' && currentSession.can_headless_resume !== true) {
         showOpToast('This Antigravity app session is not available in AGY CLI. Use Launch to open AGY.', 'error');
         return;
       }
@@ -16334,7 +16335,7 @@
     // Exposed on the element so sendToSplitTerminal can re-run it after clearing value.
     $cpInput.__cpRefresh = function () {
       const hasText = ($cpInput.value || '').trim().length > 0;
-      const canSend = !(currentSession.source === 'antigravity' && currentSession.can_headless_resume === false);
+      const canSend = !(currentSession.source === 'antigravity' && currentSession.can_headless_resume !== true);
       $cpSendBtn.disabled = !hasText || !currentSession.id || !canSend;
     };
     $cpSendBtn.addEventListener('click', sendToSplitTerminal);
