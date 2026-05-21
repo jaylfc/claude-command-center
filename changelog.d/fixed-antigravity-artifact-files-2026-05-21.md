@@ -1,0 +1,1 @@
+- Allow the Files panel to open same-session Antigravity brain artifacts such as `task.md` without tripping the repo sandbox.

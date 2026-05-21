@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "4.1.0"
+__version__ = "4.2.0"
 
 import ast
 import base64
@@ -213,6 +213,67 @@ def _session_referenced_open_path(session_id, resolved_target):
     return False
 
 
+def _session_artifact_open_path(session_id, resolved_target):
+    """True for files under this session's own agent artifact directory.
+
+    Antigravity keeps task/plan artifacts under
+    ~/.gemini/antigravity[-cli]/brain/<session_id>/. Those are not repo
+    files, but they are displayed by the same session's Files panel and
+    should be readable/revealable subject to the existing extension clamps.
+    """
+    sid = str(session_id or "").strip()
+    if not sid or not re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        sid,
+        re.IGNORECASE,
+    ):
+        return False
+    try:
+        target = Path(resolved_target).expanduser().resolve(strict=False)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    roots = []
+    for name in ("ANTIGRAVITY_BRAIN", "ANTIGRAVITY_CLI_BRAIN"):
+        root = globals().get(name)
+        if root:
+            roots.append(Path(root) / sid)
+    return any(_path_is_within(target, root) for root in roots)
+
+
+def _non_repo_file_sandbox(session_id, resolved_target):
+    try:
+        target = Path(resolved_target).expanduser().resolve(strict=False)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return (
+        _resolve_pasted_image_path(target, require_file=True) is not None
+        or _path_is_within(target, Path.home() / ".claude")
+        or _path_is_within(target, COMMAND_CENTER_STATE_DIR)
+        or _session_artifact_open_path(session_id, target)
+        or _session_referenced_open_path(session_id, target)
+    )
+
+
+def _safe_local_file_open_path(resolved_target, *, categories=None):
+    """True for existing local files with a Files-panel-safe extension.
+
+    These are files the conversation extractor already surfaces in the UI:
+    markdown, images, videos, PDFs, office docs, presentations, and HTML.
+    Keep executable/script types out of FILE_CATEGORIES instead of widening
+    this helper.
+    """
+    try:
+        target = Path(resolved_target).expanduser().resolve(strict=False)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    if not target.is_file():
+        return False
+    category = _categorize_file_target(str(target))
+    if not category:
+        return False
+    return not categories or category in set(categories)
+
+
 def _extract_pasted_image_paths(text):
     """Extract existing CCC-pasted images from prompt text for CLI attachment."""
     out = []
@@ -314,10 +375,22 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
     core_sandbox = _path_is_within(resolved, repo_root) or _path_is_within(resolved, log_root)
     session_sandbox = any(_path_is_within(resolved, root) for root in session_roots)
     pasted_image_sandbox = _resolve_pasted_image_path(resolved, require_file=True) is not None
+    session_artifact_sandbox = _session_artifact_open_path(session_id, resolved)
     session_file_sandbox = False
-    if not core_sandbox and not session_sandbox and not pasted_image_sandbox:
+    if (
+        not core_sandbox
+        and not session_sandbox
+        and not pasted_image_sandbox
+        and not session_artifact_sandbox
+    ):
         session_file_sandbox = _session_referenced_open_path(session_id, resolved)
-    if not core_sandbox and not session_sandbox and not pasted_image_sandbox and not session_file_sandbox:
+    if (
+        not core_sandbox
+        and not session_sandbox
+        and not pasted_image_sandbox
+        and not session_artifact_sandbox
+        and not session_file_sandbox
+    ):
         return {
             "ok": False,
             "error": "path outside repo/session sandbox",
@@ -4892,6 +4965,43 @@ def find_live_gemini_processes():
     return procs
 
 
+def find_live_antigravity_processes():
+    """Return running Antigravity CLI processes with pid, tty, cwd, terminal app, command."""
+    procs = []
+    try:
+        ps_out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,tty=,comm=,args="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return procs
+    for line in ps_out.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 3:
+            continue
+        pid_s, tty, comm = parts[:3]
+        args = parts[3] if len(parts) > 3 else ""
+        arg_parts = args.split()
+        basenames = {comm.rsplit("/", 1)[-1]}
+        basenames.update(p.rsplit("/", 1)[-1] for p in arg_parts[:4])
+        if not ("agy" in basenames or "antigravity" in basenames):
+            continue
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        cwd = _proc_cwd(pid)
+        term_app, _term_pid = _proc_ancestor_terminal(pid)
+        procs.append({
+            "pid": pid,
+            "tty": tty if tty != "??" else None,
+            "cwd": cwd,
+            "terminal_app": term_app,
+            "command": args,
+        })
+    return procs
+
+
 def _command_targets_engine_session(command, session_id, engine):
     if not command or not session_id:
         return False
@@ -4912,6 +5022,14 @@ def _command_targets_engine_session(command, session_id, engine):
             tok == session_id and (
                 "--resume" in tokens[:idx] or
                 (idx > 0 and tokens[idx - 1] in ("--resume", "resume"))
+            )
+            for idx, tok in enumerate(tokens)
+        )
+    if engine == "antigravity":
+        return any(
+            tok == session_id and (
+                "--conversation" in tokens[:idx] or
+                (idx > 0 and tokens[idx - 1] in ("--conversation", "conversation"))
             )
             for idx, tok in enumerate(tokens)
         )
@@ -5123,6 +5241,46 @@ def session_live_status(session_id, session_cwd):
                 result["recently_written"] = (time.time() - path.stat().st_mtime) < 300
             except OSError:
                 pass
+        registry_known = _spawn_registry_has_session(session_id, "antigravity")
+        entry = _live_spawn_registry_entry_for_session(session_id, "antigravity")
+        if entry:
+            pid = entry["pid"]
+            result["pid"] = pid
+            result["tty"] = _process_tty(pid)
+            result["cwd"] = _proc_cwd(pid) or entry.get("cwd") or session_cwd
+            result["terminal_app"], _term_pid = _proc_ancestor_terminal(pid)
+            result["live"] = True
+            result["match_count"] = 1
+            return result
+        if not session_cwd:
+            session_cwd = find_session_cwd(session_id)
+        exact_matches = []
+        cwd_matches = []
+        for p in find_live_antigravity_processes():
+            cmd = p.get("command") or ""
+            if _command_targets_engine_session(cmd, session_id, "antigravity"):
+                exact_matches.append(p)
+            elif not registry_known and session_cwd and p.get("cwd") == session_cwd:
+                cwd_matches.append(p)
+        matches = exact_matches or cwd_matches
+        result["match_count"] = len(matches)
+        if not matches:
+            return result
+        if len(matches) > 1:
+            exact = [
+                p for p in matches
+                if _command_targets_engine_session(p.get("command") or "", session_id, "antigravity")
+            ]
+            if len(exact) == 1:
+                matches = exact
+            else:
+                result["ambiguous"] = True
+                return result
+        match = matches[0]
+        result["pid"] = match["pid"]
+        result["tty"] = match.get("tty")
+        result["terminal_app"] = match.get("terminal_app")
+        result["live"] = True
         return result
 
     # Recency check on the .jsonl file (for the "is actively being used" signal)
@@ -8064,7 +8222,7 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
         )
     desktop_meta = _load_desktop_app_metadata()
     for c in conversations:
-        if c.get("source") not in ("codex", "gemini"):
+        if c.get("source") not in ("codex", "gemini", "antigravity"):
             _add_sidecar_fields(c)
         # Desktop-app metadata decoration: use human-friendly title if present,
         # and flag the session as having been touched by the desktop app.
@@ -8523,6 +8681,8 @@ def _extract_files_from_conversation(conversation_id):
     """
     if _is_gemini_session(conversation_id):
         return _extract_files_from_gemini_conversation(conversation_id)
+    if _is_codex_session(conversation_id):
+        return _extract_files_from_codex_conversation(conversation_id)
     if _is_antigravity_session(conversation_id):
         return _extract_files_from_antigravity_conversation(conversation_id)
 
@@ -8625,6 +8785,85 @@ def _extract_files_from_conversation(conversation_id):
     for rows in groups.values():
         rows.sort(key=lambda r: r["first_line"])
 
+    return {"count": len(seen), "truncated": truncated, "groups": groups}
+
+
+def _extract_files_from_codex_conversation(thread_id):
+    path = _resolve_codex_rollout_path(thread_id)
+    if not path:
+        return {"count": 0, "truncated": False, "groups": {}}
+    seen = {}
+    truncated = False
+
+    def consider(target, kind, line):
+        nonlocal truncated
+        if not target or target in seen:
+            return
+        category = _categorize_file_target(target)
+        if not category:
+            return
+        if len(seen) >= _FFC_MAX_ENTRIES:
+            truncated = True
+            return
+        if kind == "url":
+            try:
+                parsed = urllib.parse.urlsplit(target)
+                tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                label = tail or parsed.netloc or target
+            except ValueError:
+                label = target
+        else:
+            label = os.path.basename(target) or target
+        seen[target] = {
+            "label": label,
+            "target": target,
+            "kind": kind,
+            "category": category,
+            "first_line": line,
+        }
+
+    def consider_text(text, line):
+        if not isinstance(text, str) or not text:
+            return
+        for target, kind in _ffc_iter_targets(text):
+            consider(target, kind, line)
+
+    line_num = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_num += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+                ptype = payload.get("type")
+                if ev.get("type") == "event_msg":
+                    consider_text(payload.get("message"), line_num)
+                    consider_text(payload.get("last_agent_message"), line_num)
+                elif ev.get("type") == "response_item":
+                    if ptype == "function_call":
+                        args = _codex_args(payload.get("arguments"))
+                        for fld in ("path", "file_path", "filename"):
+                            val = args.get(fld) if isinstance(args, dict) else None
+                            if isinstance(val, str) and val.startswith("/"):
+                                consider(val, "path", line_num)
+                        for raw in _ffc_flatten_strings(args):
+                            consider_text(raw, line_num)
+                    elif ptype == "function_call_output":
+                        consider_text(payload.get("output"), line_num)
+    except OSError:
+        pass
+
+    groups = {}
+    for row in seen.values():
+        groups.setdefault(row["category"], []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda r: r["first_line"])
     return {"count": len(seen), "truncated": truncated, "groups": groups}
 
 
@@ -10307,7 +10546,7 @@ def _start_resume_queue_watcher() -> None:
                 busy = any(
                     s.get("resumed_sid") == sid and _poll_spawn_entry(s) is None
                     for s in _spawned_sessions
-                    if s.get("engine") in ("codex", "gemini")
+                    if s.get("engine") in ("codex", "gemini", "antigravity")
                 )
                 if busy:
                     continue
@@ -10324,6 +10563,8 @@ def _start_resume_queue_watcher() -> None:
                         resume_session_codex(sid, text)
                     elif _is_gemini_session(sid):
                         resume_session_gemini(sid, text)
+                    elif _is_antigravity_session(sid):
+                        resume_session_antigravity(sid, text)
                 except Exception:
                     pass
             with _pending_terminal_input_lock:
@@ -10440,6 +10681,7 @@ def resume_session_codex(session_id, text):
         command_summary=text[:200],
         fifo=None,
         engine="codex",
+        session_id=session_id,
     )
     return {"ok": True, "pid": proc.pid, "log": str(log_path), "resumed": True, "via": "codex-resume"}
 
@@ -10697,6 +10939,50 @@ def _antigravity_has_arg(words, *names):
         if any(text.startswith(name + "=") for name in names):
             return True
     return False
+
+
+def _antigravity_arg_values(words, name):
+    values = []
+    words = list(words or [])
+    for idx, word in enumerate(words):
+        text = str(word)
+        if text == name and idx + 1 < len(words):
+            values.append(str(words[idx + 1]))
+        elif text.startswith(name + "="):
+            values.append(text.split("=", 1)[1])
+    return values
+
+
+def _antigravity_add_dirs(cmd, user_args, dirs):
+    seen = set()
+    for raw in _antigravity_arg_values(user_args, "--add-dir"):
+        try:
+            seen.add(str(Path(os.path.expanduser(raw)).resolve(strict=False)))
+        except OSError:
+            seen.add(str(raw))
+    for raw in dirs:
+        if not raw:
+            continue
+        try:
+            resolved = Path(os.path.expanduser(str(raw))).resolve(strict=False)
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        cmd.extend(["--add-dir", key])
+        seen.add(key)
+
+
+def _pasted_image_parent_dirs(text):
+    dirs = []
+    seen = set()
+    for image_path in _extract_pasted_image_paths(text or ""):
+        parent = str(Path(image_path).parent)
+        if parent not in seen:
+            dirs.append(parent)
+            seen.add(parent)
+    return dirs
 
 
 def _gemini_tmp_root():
@@ -12495,15 +12781,24 @@ def _antigravity_activity_fields_from_tail(tail, live):
         "question_header": "",
         "question_options": [],
     }
-    if not live or not tail:
+    if not live:
         return fields
-    ts = tail.get("last_meaningful_ts") or 0
-    pending_tool = tail.get("pending_tool")
+    ts = tail.get("last_meaningful_ts") or int(time.time()) if tail else int(time.time())
+    pending_tool = tail.get("pending_tool") if tail else None
     if pending_tool:
         fields.update({
             "sidecar_status": "active",
             "sidecar_tool": pending_tool,
             "sidecar_file": tail.get("pending_file"),
+            "sidecar_ts": ts,
+            "sidecar_in_flight": True,
+        })
+        return fields
+    if not tail or tail.get("last_event_type") in (None, "user", "assistant"):
+        fields.update({
+            "sidecar_status": "active",
+            "sidecar_tool": "Thinking",
+            "sidecar_file": None,
             "sidecar_ts": ts,
             "sidecar_in_flight": True,
         })
@@ -12788,16 +13083,75 @@ def _extract_antigravity_usage(session_id):
         "total_cache_creation_tokens": 0,
         "total_cache_read_tokens": 0,
         "model": "",
-        "context_limit": 0,
+        "context_limit": 1_000_000,
         "cost_usd": 0.0,
         "cost_breakdown_usd": {"input": 0.0, "cache_creation": 0.0,
                                "cache_read": 0.0, "output": 0.0},
     }
     path = _antigravity_transcript_path(session_id)
     tail = _extract_antigravity_tail_meta(path) if path else {}
+    model = (tail or {}).get("model") or ""
+
+    latest = 0
+    peak = 0
+    total_in = 0
+    total_cached_read = 0
+    total_cached_create = 0
+    total_out = 0
+
+    result = _antigravity_app_rpc(
+        "GetCascadeTrajectory",
+        {"cascadeId": session_id},
+        timeout=5,
+    )
+    if result.get("ok"):
+        trajectory = (result.get("response") or {}).get("trajectory") or {}
+        steps = trajectory.get("steps") or []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            metadata = step.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            usage = metadata.get("modelUsage")
+            if not isinstance(usage, dict):
+                continue
+
+            if usage.get("model"):
+                model = usage.get("model")
+
+            def to_int(val):
+                if isinstance(val, int):
+                    return val
+                if isinstance(val, str) and val.isdigit():
+                    return int(val)
+                return 0
+
+            in_tokens = to_int(usage.get("inputTokens"))
+            out_tokens = to_int(usage.get("outputTokens"))
+            cr_tokens = to_int(usage.get("cacheReadTokens"))
+            cc_tokens = to_int(usage.get("cacheCreationTokens"))
+
+            window = in_tokens + cr_tokens + cc_tokens
+            if window:
+                latest = window
+                if window > peak:
+                    peak = window
+
+            total_in += in_tokens
+            total_cached_read += cr_tokens
+            total_cached_create += cc_tokens
+            total_out += out_tokens
+
     return {
         **empty,
-        "model": (tail or {}).get("model") or "",
+        "latest_input_tokens": latest,
+        "peak_input_tokens": peak,
+        "total_output_tokens": total_out,
+        "total_input_tokens": total_in,
+        "total_cache_creation_tokens": total_cached_create,
+        "total_cache_read_tokens": total_cached_read,
+        "model": model,
         "engine": "antigravity",
         "override": _get_session_override(session_id),
     }
@@ -13011,6 +13365,7 @@ def resume_session_gemini(session_id, text):
         command_summary=text[:200],
         fifo=None,
         engine="gemini",
+        session_id=session_id,
     )
     return {"ok": True, "pid": proc.pid, "log": str(log_path), "resumed": True, "via": "gemini-resume"}
 
@@ -13104,8 +13459,11 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None):
         and not _antigravity_has_arg(user_args, "--dangerously-skip-permissions")
     ):
         cmd.append("--dangerously-skip-permissions")
+    add_dirs = []
     if not _antigravity_has_arg(user_args, "--add-dir"):
-        cmd.extend(["--add-dir", spawn_cwd])
+        add_dirs.append(spawn_cwd)
+    add_dirs.extend(_pasted_image_parent_dirs(prompt))
+    _antigravity_add_dirs(cmd, user_args, add_dirs)
     cli_log_path = Path(str(log_path) + ".agy.log")
     if not _antigravity_has_arg(user_args, "--log-file"):
         cmd.extend(["--log-file", str(cli_log_path)])
@@ -13199,6 +13557,20 @@ def resume_session_antigravity(session_id, text):
     resolved = _resolve_antigravity_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    for s in _spawned_sessions:
+        if s.get("engine") == "antigravity" and s.get("resumed_sid") == session_id:
+            try:
+                if _poll_spawn_entry(s) is None:
+                    with _pending_resume_lock:
+                        _pending_resume_queue.setdefault(session_id, []).append(text)
+                    return {
+                        "ok": True,
+                        "queued": True,
+                        "pid": s.get("pid"),
+                        "via": "antigravity-resume-queued",
+                    }
+            except Exception:
+                pass
     cwd = find_session_cwd(session_id) or str(Path.cwd())
     if not Path(cwd).is_dir():
         cwd = str(Path.cwd())
@@ -13216,8 +13588,11 @@ def resume_session_antigravity(session_id, text):
         and not _antigravity_has_arg(user_args, "--dangerously-skip-permissions")
     ):
         cmd.append("--dangerously-skip-permissions")
+    add_dirs = []
     if not _antigravity_has_arg(user_args, "--add-dir"):
-        cmd.extend(["--add-dir", cwd])
+        add_dirs.append(cwd)
+    add_dirs.extend(_pasted_image_parent_dirs(text))
+    _antigravity_add_dirs(cmd, user_args, add_dirs)
     cli_log_path = Path(str(log_path) + ".agy.log")
     if not _antigravity_has_arg(user_args, "--log-file"):
         cmd.extend(["--log-file", str(cli_log_path)])
@@ -13260,6 +13635,7 @@ def resume_session_antigravity(session_id, text):
         command_summary=text[:200],
         fifo=None,
         engine="antigravity",
+        session_id=session_id,
     )
     return {"ok": True, "pid": proc.pid, "log": str(log_path), "resumed": True, "via": "antigravity-resume"}
 
@@ -14054,7 +14430,7 @@ def _pid_is_zombie(pid):
 
 def _live_spawn_registry_entry_for_session(session_id, engine):
     """Return the live spawned-process registry entry for a session/engine."""
-    if not session_id or engine not in ("codex", "gemini"):
+    if not session_id or engine not in ("codex", "gemini", "antigravity"):
         return None
     for entry in _load_spawn_registry():
         if entry.get("engine") != engine or entry.get("session_id") != session_id:
@@ -14070,7 +14446,7 @@ def _live_spawn_registry_entry_for_session(session_id, engine):
 
 
 def _spawn_registry_has_session(session_id, engine):
-    if not session_id or engine not in ("codex", "gemini"):
+    if not session_id or engine not in ("codex", "gemini", "antigravity"):
         return False
     return any(
         entry.get("engine") == engine and entry.get("session_id") == session_id
@@ -14102,12 +14478,16 @@ def _save_spawn_registry(entries):
         print(f"  [spawn-registry] could not write {SPAWNED_PIDS_FILE} ({e})")
 
 
-def _record_spawn_to_registry(pid, name, log_path, cwd, spawned_at, command_summary, fifo=None, engine="claude"):
+def _record_spawn_to_registry(
+    pid, name, log_path, cwd, spawned_at, command_summary,
+    fifo=None, engine="claude", session_id=None,
+):
     """Append a freshly-spawned session to the on-disk registry. The
-    session_id is filled in lazily by the reattach sweep (it isn't known
-    at fork time — Claude emits it in the first stream-json event, Codex
-    emits it in its `--json` event stream, Gemini emits it in its init
-    stream-json event).
+    session_id is provided for known resume calls and otherwise filled in
+    lazily by the reattach sweep (it isn't known at fork time for fresh
+    spawns — Claude emits it in the first stream-json event, Codex emits it
+    in its `--json` event stream, Gemini emits it in its init stream-json
+    event).
     The fifo path is persisted so a fresh CCC instance can reopen the
     write side after a restart and continue injecting messages (Claude
     only — Codex/Gemini headless runs are one-shot).
@@ -14116,7 +14496,7 @@ def _record_spawn_to_registry(pid, name, log_path, cwd, spawned_at, command_summ
     entries = _load_spawn_registry()
     entries.append({
         "pid": pid,
-        "session_id": None,
+        "session_id": session_id,
         "name": name,
         "log": str(log_path),
         "fifo": str(fifo) if fifo else None,
@@ -20883,11 +21263,21 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # sidecar (most-recently completed). The detail pane uses these
             # to render an in-progress strip without polling /api/sessions.
             is_codex_status = _is_codex_session(sid) if sid else False
-            notif = None if is_codex_status else (_read_notification_state(sid) if sid else None)
+            is_gemini_status = _is_gemini_session(sid) if sid else False
+            is_antigravity_status = _is_antigravity_session(sid) if sid else False
+            notif = None if (is_codex_status or is_gemini_status or is_antigravity_status) else (_read_notification_state(sid) if sid else None)
             if is_codex_status:
                 path = _resolve_codex_rollout_path(sid)
                 tail = _extract_codex_tail_meta(path) if path else {}
                 status.update(_codex_activity_fields_from_tail(tail, status.get("live")))
+            elif is_gemini_status:
+                path = _resolve_gemini_chat_path(sid)
+                tail = _extract_gemini_tail_meta(path) if path else {}
+                status.update(_gemini_activity_fields_from_tail(tail, status.get("live")))
+            elif is_antigravity_status:
+                path = _antigravity_transcript_path(sid)
+                tail = _extract_antigravity_tail_meta(path) if path else {}
+                status.update(_antigravity_activity_fields_from_tail(tail, status.get("live")))
             else:
                 sc = _read_sidecar_state(sid) if sid else None
                 inflight = _read_in_flight_state(sid) if sid else None
@@ -21588,6 +21978,20 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 pass
             _schedule_restart()
             return
+        if path == "/api/template-gallery/open":
+            # Open the editable gallery source for the local CCC install.
+            # Same-origin POST checking above is the boundary; the target is
+            # fixed to this app's static/templates.json, not client-provided.
+            target = STATIC_DIR / "templates.json"
+            if not target.is_file():
+                self.send_json({"ok": False, "error": "templates.json missing"}, 404)
+                return
+            try:
+                subprocess.Popen(["open", str(target)])
+                self.send_json({"ok": True, "path": str(target)})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+            return
         if path == "/api/network-config":
             # SECURITY: localhost-only — even if the user has allowlisted a
             # tailnet origin, that peer must NOT be able to expand its own
@@ -22096,14 +22500,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 handler = nextjs_stop
             result, status = handler(ctx["repo_path"], ctx.get("cwd"))
             self.send_json(result, status)
-        elif path == "/api/reveal-file":
-            # SECURITY: macOS `open` will execute apps and scripts. Unlike
-            # /api/open, this launches the file directly, so it clamps to the
-            # repo/session context AND requires an allowlisted extension.
-            # The whitelist excludes .app, .sh,
-            # .command, .py, etc., so subprocess.Popen(["open", path])
-            # cannot trigger code execution. Adding executable types to
-            # FILE_CATEGORIES would re-introduce the RCE risk.
+        elif path == "/api/read-file":
+            # SECURITY: Allows reading safe markdown files from the sandbox.
+            # Requires session context and validates that target path is within allowed_roots.
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
             try:
@@ -22117,6 +22516,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "path must be absolute"}, 400)
             else:
                 ext = os.path.splitext(target)[1].lower()
+                sid = payload.get("session_id", "")
                 try:
                     ctx = require_repo_context(payload, allow_session=True)
                     rp = Path(target).resolve(strict=False)
@@ -22126,10 +22526,90 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         COMMAND_CENTER_STATE_DIR.resolve(),
                         Path.home() / ".claude",
                     ]
-                    in_sandbox = any(rp == root or root in rp.parents for root in allowed_roots)
+                    in_sandbox = (
+                        any(rp == root or root in rp.parents for root in allowed_roots)
+                        or _non_repo_file_sandbox(sid, rp)
+                        or _safe_local_file_open_path(rp, categories={"markdown"})
+                    )
                 except RepoContextError as e:
-                    self.send_json(e.as_payload(), e.status)
-                    return
+                    # No repo context -- still allow pasted images,
+                    # global safe paths, session-referenced files, and
+                    # safe markdown files surfaced by the Files panel.
+                    in_sandbox = False
+                    rp = Path(target).resolve(strict=False)
+                    if _non_repo_file_sandbox(sid, rp) or _safe_local_file_open_path(rp, categories={"markdown"}):
+                        in_sandbox = True
+                    else:
+                        self.send_json(e.as_payload(), e.status)
+                        return
+                except OSError:
+                    in_sandbox = False
+
+                if ext not in {".md", ".mdx", ".markdown"}:
+                    self.send_json(
+                        {"ok": False, "error": "extension not allowed", "ext": ext},
+                        403,
+                    )
+                elif not in_sandbox:
+                    self.send_json({"ok": False, "error": "path outside repo/session sandbox", "path": target}, 403)
+                elif not os.path.exists(target):
+                    self.send_json({"ok": False, "error": "not found", "path": target}, 404)
+                elif os.path.isdir(target):
+                    self.send_json({"ok": False, "error": "target is a directory"}, 400)
+                else:
+                    try:
+                        with open(target, "r", encoding="utf-8", errors="replace") as fh:
+                            content = fh.read()
+                        self.send_json({"ok": True, "content": content})
+                    except Exception as e:
+                        self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/reveal-file":
+            # SECURITY: macOS `open` will execute apps and scripts. Unlike
+            # /api/open, this launches the file directly, so it clamps to the
+            # repo/session context AND requires an allowlisted extension.
+            # The whitelist excludes .app, .sh,
+            # .command, .py, etc., so subprocess.Popen(["open", path])
+            # cannot trigger code execution. Adding executable types to
+            # FILE_EXT_TO_CATEGORY would re-introduce the RCE risk.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            target = (payload.get("path") or "").strip()
+            if not target:
+                self.send_json({"ok": False, "error": "missing path"}, 400)
+            elif not os.path.isabs(target):
+                self.send_json({"ok": False, "error": "path must be absolute"}, 400)
+            else:
+                ext = os.path.splitext(target)[1].lower()
+                sid = payload.get("session_id", "")
+                try:
+                    ctx = require_repo_context(payload, allow_session=True)
+                    rp = Path(target).resolve(strict=False)
+                    allowed_roots = [
+                        Path(ctx["repo_path"]).resolve(),
+                        repo_log_dir(ctx["repo_path"]).resolve(),
+                        COMMAND_CENTER_STATE_DIR.resolve(),
+                        Path.home() / ".claude",
+                    ]
+                    in_sandbox = (
+                        any(rp == root or root in rp.parents for root in allowed_roots)
+                        or _non_repo_file_sandbox(sid, rp)
+                        or _safe_local_file_open_path(rp)
+                    )
+                except RepoContextError as e:
+                    # No repo context -- still allow pasted images,
+                    # global safe paths, session-referenced files, and
+                    # safe local document/media files surfaced by the Files panel.
+                    in_sandbox = False
+                    rp = Path(target).resolve(strict=False)
+                    if _non_repo_file_sandbox(sid, rp) or _safe_local_file_open_path(rp):
+                        in_sandbox = True
+                    else:
+                        self.send_json(e.as_payload(), e.status)
+                        return
                 except OSError:
                     in_sandbox = False
                 if ext not in FILE_EXT_TO_CATEGORY:

@@ -29,7 +29,7 @@ See the [engine support matrix](#engine-support) below for what's first-class vs
 
 - **2026-05-21** — **v4.0.0** — Antigravity (Google DeepMind) joins the dashboard as a first-class engine alongside Claude Code and Codex.
 - **2026-05-21** — Drag any conversation row outside the window to pop it into a focused side pane, with 24 per-conversation accent colors.
-- **2026-05-19** — Template gallery in the new-session modal (five starter prompts, edit `static/templates.json` to add more). ([#46](https://github.com/amirfish1/claude-command-center/issues/46))
+- **2026-05-19** — Template gallery mechanism for reusable new-session prompts, driven by `static/templates.json`. ([#46](https://github.com/amirfish1/claude-command-center/issues/46))
 - **2026-05-19** — VS Code extension v0.1.0 published — spawn a session from the active workspace folder. ([#52](https://github.com/amirfish1/claude-command-center/issues/52))
 - **2026-05-19** — One-command `curl | bash` installer; `git clone` demoted to a "From source" section. ([#58](https://github.com/amirfish1/claude-command-center/pull/58))
 - **2026-05-19** — Static GitHub Pages demo with seeded mock data (no install required). ([#49](https://github.com/amirfish1/claude-command-center/issues/49))

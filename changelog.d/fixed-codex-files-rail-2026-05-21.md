@@ -1,0 +1,1 @@
+- Populated the right-rail Files panel for Codex sessions.

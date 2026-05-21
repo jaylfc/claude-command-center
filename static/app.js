@@ -817,6 +817,25 @@
     $convOverflowMenu.setAttribute('aria-hidden', 'true');
     if ($convOverflowBtn) $convOverflowBtn.setAttribute('aria-expanded', 'false');
   }
+  function _convOverflowHasActions() {
+    const sid = currentSession && currentSession.id;
+    const source = currentSession && currentSession.source;
+    return !!sid && !['pkood', 'codex', 'gemini', 'antigravity'].includes(source);
+  }
+  function updateConvOverflowButton() {
+    const wrap = $convOverflowBtn && $convOverflowBtn.closest('.conv-overflow-wrap');
+    if (!wrap) return;
+    const hasActions = _convOverflowHasActions();
+    wrap.style.display = hasActions ? '' : 'none';
+    wrap.setAttribute('aria-hidden', hasActions ? 'false' : 'true');
+    if ($convOverflowBtn) {
+      $convOverflowBtn.disabled = !hasActions;
+      $convOverflowBtn.title = hasActions
+        ? 'More actions for this session'
+        : 'No extra actions for this session';
+    }
+    if (!hasActions) _closeConvOverflow();
+  }
   function _renderConvOverflowMenu() {
     if (!$convOverflowMenu) return;
     const sid = currentSession && currentSession.id;
@@ -880,6 +899,10 @@
   if ($convOverflowBtn) {
     $convOverflowBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!_convOverflowHasActions()) {
+        updateConvOverflowButton();
+        return;
+      }
       const isOpen = $convOverflowMenu.classList.contains('open');
       if (isOpen) {
         _closeConvOverflow();
@@ -1090,10 +1113,10 @@
     liveStatusRenderTicker = setInterval(updateLiveToolStrip, 1000);
   }
 
-  // Render a live "what's running right now" strip docked above the
-  // conversation transcript. Reads from liveStatus (refreshed every 5s
-  // by /api/session-status) so the chat pane shows the same in-progress
-  // signal the kanban card now shows.
+  // Render a live "what's running right now" indicator at the bottom of the
+  // conversation transcript. Reads from liveStatus (refreshed every 5s by
+  // /api/session-status) so the chat pane shows the same in-progress signal
+  // the kanban card now shows without duplicating it at the top.
   // Optimistic "agent starting" indicator. Rendered the moment the user
   // hits send so they see motion before /api/session-status (5s poll)
   // catches up to the real sidecar event. Auto-removed once the real
@@ -1257,7 +1280,8 @@
     document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(node => {
       if (node.parentElement !== $view) node.remove();
     });
-    let strip = $view.querySelector('.conv-live-tool-strip');
+    const strip = $view.querySelector('.conv-live-tool-strip');
+    if (strip) strip.remove();
     // Match only the *real* inline indicator — leave the optimistic
     // twin alone so it lingers until either real data lands or its
     // own 60s safety timeout fires.
@@ -1268,7 +1292,6 @@
     const isQuestion = tool === 'AskUserQuestion' || !!liveStatus.questionWaiting;
     const shouldShow = liveStatus.live && tool && liveStatus.sidecarStatus === 'active' && (ageSec < 300 || isQuestion);
     if (!shouldShow) {
-      if (strip) strip.remove();
       if (inline) inline.remove();
       updateLiveStripOffset($view, null);
       return;
@@ -1291,19 +1314,8 @@
       + '<span class="cl-tool">' + (inFlight && !isQuestion ? '▶ ' : '') + escapeHtml(toolLabel) + '</span>'
       + (shortFile ? ' <span class="cl-file' + liveActivityDetailClass(tool) + '">' + escapeHtml(shortFile) + '</span>' : '')
       + '<span class="cl-age">' + ageLbl + '</span>';
-    if (!strip) {
-      strip = document.createElement('div');
-      strip.className = 'conv-live-tool-strip';
-      $view.insertBefore(strip, $view.firstChild);
-    } else if (strip.parentElement !== $view) {
-      $view.insertBefore(strip, $view.firstChild);
-    }
-    strip.classList.toggle('in-flight', inFlight);
-    strip.classList.toggle('is-question', isQuestion);
-    strip.title = title;
-    strip.innerHTML = html;
-    updateLiveStripOffset($view, strip);
-    // Inline twin at the bottom of the transcript. Re-append on every
+    updateLiveStripOffset($view, null);
+    // Inline indicator at the bottom of the transcript. Re-append on every
     // refresh so it stays the last child even when new events have
     // streamed in since the last poll.
     if (!inline) {
@@ -1409,6 +1421,7 @@
       if (_cic) _cic.classList.remove('is-new-session');
     }
     setCopyableSessionId($convSessionId, sid);
+    updateConvOverflowButton();
     if (source === 'pkood') {
       // Pkood sessions don't need live status polling or resume button
       if (liveStatusTimer) { clearInterval(liveStatusTimer); liveStatusTimer = null; }
@@ -6950,13 +6963,70 @@
       else if (isCodexRow) sourceBadge = '<span class="source-badge codex">codex</span>';
       else if (isGeminiRow) sourceBadge = '<span class="source-badge gemini">gemini</span>';
       else if (isAntigravityRow) sourceBadge = '<span class="source-badge antigravity">antigravity</span>';
-      const engineIcon = isCodexRow
-        ? '<span class="conv-engine-icon codex" title="Codex session" aria-label="Codex session">C</span>'
-        : isGeminiRow
-          ? '<span class="conv-engine-icon gemini" title="Gemini session" aria-label="Gemini session">G</span>'
-          : isAntigravityRow
-            ? '<span class="conv-engine-icon antigravity" title="Antigravity session" aria-label="Antigravity session">A</span>'
-        : '';
+      let iconType = 'claude';
+      let iconTitleType = 'Claude';
+      let svgMarkup = '';
+
+      if (isCodexRow) {
+        iconType = 'codex';
+        iconTitleType = 'Codex';
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
+            + '<path d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z" />'
+            + '</svg>';
+      } else if (isGeminiRow) {
+        iconType = 'gemini';
+        iconTitleType = 'Gemini';
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
+            + '<path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" />'
+            + '</svg>';
+      } else if (isAntigravityRow) {
+        iconType = 'antigravity';
+        iconTitleType = 'Antigravity';
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+            + '<path d="M8 5.2c-1 0-1.6-.6-2.3-.6-1.4 0-2.2.9-2.2 2.3 0 1.8 1.1 3.2 2.2 3.2.7 0 .9-.4 1.5-.4.6 0 .9.4 1.5.4 1.1 0 2.2-1.4 2.2-3.2 0-1.4-.8-2.3-2.2-2.3-.7 0-1.3.6-2.3.6z" />'
+            + '<path d="M8 4.6c.1-.8.6-1.4 1.2-1.6" />'
+            + '<path d="M5 13.5c2-.7 4-.7 6 0M6.5 15c1-.4 2-.4 3 0" />'
+            + '</svg>';
+      } else if (c.source === 'pkood') {
+        iconType = 'pkood';
+        iconTitleType = 'Pkood';
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+            + '<circle cx="8" cy="4" r="1.5" />'
+            + '<circle cx="4" cy="11.5" r="1.5" />'
+            + '<circle cx="12" cy="11.5" r="1.5" />'
+            + '<path d="M8 5.5v2.5M8 8H5.5M8 8h2.5" />'
+            + '</svg>';
+      } else if (isBacklogRow) {
+        iconType = 'backlog';
+        iconTitleType = 'Backlog issue';
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+            + '<rect x="2.5" y="2.5" width="11" height="11" rx="2" />'
+            + '<path d="m5.5 8 1.5 1.5 3.5-3.5" />'
+            + '</svg>';
+      } else if (isGithubPrRow) {
+        iconType = 'github-pr';
+        iconTitleType = 'GitHub Pull Request';
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+            + '<circle cx="5" cy="4" r="1.5" />'
+            + '<circle cx="5" cy="12" r="1.5" />'
+            + '<circle cx="11" cy="12" r="1.5" />'
+            + '<path d="M5 5.5v5M11 10.5v-2A2.5 2.5 0 0 0 8.5 6H5" />'
+            + '</svg>';
+      } else {
+        iconType = 'claude';
+        iconTitleType = 'Claude';
+        svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
+            + '<path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" />'
+            + '</svg>';
+      }
+
+      const isLive = !!c.is_live;
+      const stateClass = isLive ? 'is-live' : 'is-dead';
+      const liveTitle = isLive ? 'live — actively polled' : 'offline';
+      const iconTitle = iconTitleType + ' session (' + liveTitle + ')';
+      const sessionIconHtml = '<span class="conv-session-icon ' + iconType + ' ' + stateClass + '" title="' + escapeAttr(iconTitle) + '" aria-hidden="true">'
+          + svgMarkup
+          + '</span>';
       // Prefer "last interacted" (the user's last UI action) over "last
       // event" (which includes Claude's autonomous responses) so the row
       // time mirrors the user's mental model: when did *I* last touch this?
@@ -7139,13 +7209,6 @@
         ? '<span class="conv-wt-badge" title="Worktree: wt-' + escapeAttr(c.worktree_label) + '">wt-' + escapeHtml(c.worktree_label) + '</span>'
         : '';
 
-      // Live dot — sits in a reserved gutter before the title when this session
-      // is actively being polled (sidecar marker exists). Helps the user
-      // see at a glance which rows can change in real time.
-      const liveDotHtml = c.is_live
-        ? '<span class="conv-live-dot" title="Live — actively polled"></span>'
-        : '';
-
       // Pin indicator — shown when the row's repo bucket has been
       // overridden by the user. Click unpins via /api/repo/pin.
       const pinnedHtml = c.pinned_repo
@@ -7176,9 +7239,8 @@
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
-            + '<span class="conv-live-slot" aria-hidden="true">' + liveDotHtml + '</span>'
+            + sessionIconHtml
             + leftFolderChipHtml
-            + engineIcon
             + titleFolderChipHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
             + historyBadgeHtml
@@ -7351,9 +7413,6 @@
         localStorage.setItem(_FOLDER_ORDER_KEY, JSON.stringify(_newOrder));
       } catch (_) { /* localStorage quota / disabled — degrade silently */ }
       const _renderFolderEntry = ([folder, cards]) => {
-        if (cards.length === 1) {
-          return _renderRow(cards[0], { folderChipBeforeTitle: true });
-        }
         const hue = (cards[0].folder_chip_hue | 0);
         const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
         const dropPath = cards[0].folder_path || '';
@@ -7366,11 +7425,7 @@
           + cards.map(c => _renderRow(c, { suppressFolderChip: true })).join('')
           + '</div>';
       };
-      // Named groups (2+ sessions) first, single-session orphans below.
-      const _namedGroups = _folderEntries.filter(([, cards]) => cards.length > 1);
-      const _orphanEntries = _folderEntries.filter(([, cards]) => cards.length === 1);
-      const _groupHtml = _namedGroups.map(_renderFolderEntry).join('')
-        + (_orphanEntries.length ? _orphanEntries.map(_renderFolderEntry).join('') : '');
+      const _groupHtml = _folderEntries.map(_renderFolderEntry).join('');
       _activeRowsHtml = _isSpecificFolderFilter
         ? _flatRowsWithSeparators(_visibleSessionConvs, { suppressFolderChip: true })
         : _groupHtml;
@@ -9786,6 +9841,7 @@
     const pane = paneByPaneId(paneId);
     if (!pane) return;
     if (typeof ffcUpdateSidebar === 'function') ffcUpdateSidebar(null);
+    if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
     const selectedConv = (conversationsData || []).find(x => x.id === id) || {};
     const source = sessionSourceByConv[id] || selectedConv.source || 'interactive';
     rememberComposerDraftForPane(paneId);
@@ -10233,6 +10289,21 @@
     }
   }
 
+  function closeStatusRailFileViewer() {
+    const rail = document.getElementById('statusRail');
+    if (rail) {
+      rail.classList.remove('file-viewer-active');
+    }
+    const bodyEl = document.getElementById('fileViewerBody');
+    if (bodyEl) {
+      bodyEl.innerHTML = '';
+    }
+    const filenameEl = document.getElementById('fileViewerFilename');
+    if (filenameEl) {
+      filenameEl.textContent = '';
+    }
+  }
+
   function renderSidebarFileRow(row) {
     const rowEl = document.createElement('div');
     rowEl.className = 'sidebar-file-row';
@@ -10301,6 +10372,45 @@
     } else {
       rowEl.addEventListener('click', async (e) => {
         if (e.target.closest('.sidebar-file-path')) return;
+
+        const isMarkdown = row.category === 'markdown' || (typeof _isMarkdownPath === 'function' && _isMarkdownPath(row.target));
+        if (isMarkdown) {
+          try {
+            const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
+            const r = await fetch('/api/read-file', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({path: row.target, session_id: sid}),
+            });
+            if (r.ok) {
+              const res = await r.json();
+              if (res.ok) {
+                const rail = document.getElementById('statusRail');
+                const bodyEl = document.getElementById('fileViewerBody');
+                const filenameEl = document.getElementById('fileViewerFilename');
+                if (bodyEl) {
+                  bodyEl.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(res.content) : res.content;
+                }
+                if (filenameEl) {
+                  filenameEl.textContent = row.label;
+                }
+                if (rail) {
+                  rail.classList.add('file-viewer-active');
+                }
+                return;
+              } else {
+                sidebarShowFileToast(rowEl, res.error || 'load failed');
+              }
+            } else {
+              const j = await r.json().catch(() => ({error: 'load failed'}));
+              sidebarShowFileToast(rowEl, j.error || ('HTTP ' + r.status));
+            }
+          } catch (err) {
+            sidebarShowFileToast(rowEl, 'network error');
+          }
+          return;
+        }
+
         try {
           const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
           const r = await fetch('/api/reveal-file', {
@@ -11127,20 +11237,32 @@
   function _updateStickyAskSlots() {
     const sticky = document.querySelector('.conv-sticky-header');
     if (!sticky) return;
+    const rail = document.getElementById('statusRail');
+    const inRightRail = document.body.classList.contains('status-pos-right');
     const askCol = sticky.querySelector('.csh-col-ask');
-    const actCol = sticky.querySelector('.csh-col-activity');
-    const earlier = sticky.querySelector('.csh-ask-earlier');
+    const actCol = sticky.querySelector('.csh-col-activity')
+      || (rail && rail.querySelector(':scope > .csh-col-activity'));
+    const earlier = sticky.querySelector('.csh-ask-earlier')
+      || (actCol && actCol.querySelector('.csh-ask-earlier'));
     if (!askCol || !actCol || !earlier) return;
     const earlierFirst = earlier.querySelector('[data-earlier-first]');
     const earlierHasText = !!(earlierFirst && (earlierFirst.textContent || '').trim());
     const timeline = actCol.querySelector('[data-timeline]');
-    const activityHasContent = !!(timeline && timeline.querySelector('.stl-row'));
+    const activityHasContent = !!(timeline && timeline.querySelector('.stl-row, .stl-empty'));
     earlier.style.display = earlierHasText ? '' : 'none';
     // Tag the sticky so right-rail-mode CSS can hide the whole panel when
     // there's no earlier-ask to show. In right-rail mode the original-ask
     // and activity have been moved into the side rail, so an empty earlier
     // means the sticky has nothing useful left at the top.
     sticky.classList.toggle('is-earlier-empty', !earlierHasText);
+    if (inRightRail) {
+      // In right-rail mode the progress timeline belongs in the rail, while
+      // Earlier ask stays above the conversation pane. Do not promote the
+      // earlier block into the activity column there.
+      if (earlier.parentNode !== askCol) askCol.appendChild(earlier);
+      actCol.style.display = activityHasContent ? '' : 'none';
+      return;
+    }
     if (earlierHasText && !activityHasContent) {
       if (earlier.parentNode !== actCol) actCol.appendChild(earlier);
       actCol.style.display = '';
@@ -11251,6 +11373,25 @@
     // Conversation transcripts can contain literal CCC HTML snippets with
     // ids like `convInputContext`; scope to pane chrome, not message content.
     return document.querySelector('#convSplit > .conv-pane[data-pane-id="p1"] > .conv-input-context[data-role="input-context"]');
+  }
+  let _inputContextFitRaf = 0;
+  function _fitInputContextStrip() {
+    _inputContextFitRaf = 0;
+    const slot = getInputContextSlot();
+    if (!slot) return;
+    slot.classList.remove('hide-cotenants');
+    const co = slot.querySelector('.wp-cotenants');
+    if (!co || !slot.classList.contains('visible')) return;
+    const path = slot.querySelector('.wp-path');
+    const rowOverflow = slot.scrollWidth > slot.clientWidth + 1;
+    const pathTruncated = !!(path && path.scrollWidth > path.clientWidth + 1);
+    if (rowOverflow || pathTruncated) {
+      slot.classList.add('hide-cotenants');
+    }
+  }
+  function scheduleInputContextFit() {
+    if (_inputContextFitRaf) return;
+    _inputContextFitRaf = requestAnimationFrame(_fitInputContextStrip);
   }
   async function fetchSessionWorkspace(sid) {
     _workspaceSessionId = sid;
@@ -11363,6 +11504,7 @@
 
     wsSlot.innerHTML = parts.join(' ');
     slot.classList.add('visible');
+    scheduleInputContextFit();
   }
 
   // Shared renderer for the worktrees modal. Used by both the per-session
@@ -11823,6 +11965,7 @@
     if (!latest && !peak) {
       if (!modelPill) {
         uSlot.innerHTML = '';
+        scheduleInputContextFit();
         return;
       }
       const title = 'No token usage samples were found for this session.\n'
@@ -11831,6 +11974,7 @@
         + 'ctx unavailable'
         + '</span>' + modelPill;
       slot.classList.add('visible');
+      scheduleInputContextFit();
       return;
     }
     const pct = Math.round((latest / limit) * 100);
@@ -11868,6 +12012,7 @@
       + ' <span class="wp-usage-pct">(' + pct + '%)</span>'
       + '</span>' + peakNote + costPill + modelPill;
     slot.classList.add('visible');
+    scheduleInputContextFit();
     const pill = uSlot.querySelector('.wp-usage-clickable');
     if (pill && canToggleContextLimit) {
       pill.addEventListener('click', () => {
@@ -12102,7 +12247,8 @@
   }
 
   function renderSessionTimelineIntoSticky() {
-    const slot = document.querySelector('.conv-sticky-header [data-timeline]');
+    const slot = document.querySelector('.conv-sticky-header [data-timeline]')
+      || document.querySelector('#statusRail .csh-col-activity [data-timeline]');
     if (!slot || !_timelineData) return;
     const evs = _timelineData.events || [];
     const total = _timelineData.total_turns || 0;
@@ -12112,7 +12258,10 @@
     // hidden, so we can't unconditionally hide here.
     const col = slot.closest('.csh-col-activity');
     if (!evs.length) {
-      slot.innerHTML = '';
+      slot.innerHTML =
+        '<div class="stl-header"><span class="stl-title">Session activity</span>'
+        + '<span class="stl-counter">0 events · ' + total + ' turns</span></div>'
+        + '<div class="stl-empty">No commits, pushes, or PRs yet.</div>';
       _updateStickyAskSlots();
       return;
     }
@@ -13391,6 +13540,13 @@
     }
     if (!CONV_POPOUT_MODE) _hiStartPolling();
 
+    const $fileViewerClose = document.getElementById('fileViewerCloseBtn');
+    if ($fileViewerClose) {
+      $fileViewerClose.addEventListener('click', () => {
+        if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
+      });
+    }
+
     // Status-position toggle. Two states: top (default) and right (resizable
     // rail beside the conversation pane). Body class is restored before
     // paint by the inline script in index.html; here we only wire the
@@ -13558,6 +13714,7 @@
             && !document.body.classList.contains('status-rail-collapsed')) {
           _setStatusRailWidth($statusRail.getBoundingClientRect().width || _savedStatusRailWidth(), false);
         }
+        scheduleInputContextFit();
       });
     }
     // Chip color toggle — flips body.chips-muted, persists, no re-render
@@ -16467,15 +16624,20 @@
     return String(s).replace(/["\\]/g, '\\$&');
   }
 
-  async function _renderNsmGallery() {
-    if (!$nsmGallery) return;
-    const templates = await _loadNsmTemplates();
-    if (!templates.length) {
-      $nsmGallery.style.display = 'none';
-      $nsmGallery.innerHTML = '';
-      return;
-    }
-    $nsmGallery.innerHTML = templates.map(t => {
+  function _nsmTemplateCardsHtml(templates) {
+    const blankCard = ''
+      + '<button type="button" class="nsm-gallery-card" data-template-action="blank">'
+      + '<div class="nsm-gallery-card-title">Blank session</div>'
+      + '<div class="nsm-gallery-card-desc">Start from an empty prompt and use the engine/cwd you already selected.</div>'
+      + '<div class="nsm-gallery-card-meta"><span class="nsm-gallery-chip">empty</span></div>'
+      + '</button>';
+    const editCard = ''
+      + '<button type="button" class="nsm-gallery-card" data-template-action="edit-templates">'
+      + '<div class="nsm-gallery-card-title">Add your own</div>'
+      + '<div class="nsm-gallery-card-desc">Open templates.json and add a reusable prompt by hand.</div>'
+      + '<div class="nsm-gallery-card-meta"><span class="nsm-gallery-chip">templates.json</span></div>'
+      + '</button>';
+    const templateCards = (templates || []).map(t => {
       const id = escapeAttr(t.id);
       const name = escapeHtml(t.name || t.id);
       const desc = escapeHtml(t.description || '');
@@ -16490,14 +16652,105 @@
         + '</div>'
         + '</button>';
     }).join('');
-    $nsmGallery.style.display = '';
-    $nsmGallery.querySelectorAll('.nsm-gallery-card').forEach(el => {
+    return blankCard + templateCards + editCard;
+  }
+
+  async function openTemplateGallerySource() {
+    try {
+      await fetch('/api/template-gallery/open', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}',
+      });
+    } catch (_) {}
+  }
+
+  function _clearNsmTemplateSelection(gallery) {
+    if (!gallery) return;
+    const prev = gallery.querySelector('.nsm-gallery-card.is-selected');
+    if (prev) prev.classList.remove('is-selected');
+  }
+
+  function _wireTemplateGalleryCards(gallery, applyTemplate, clearBlank) {
+    if (!gallery) return;
+    gallery.querySelectorAll('.nsm-gallery-card').forEach(el => {
       el.addEventListener('click', () => {
+        const action = el.getAttribute('data-template-action');
+        if (action === 'blank') {
+          _clearNsmTemplateSelection(gallery);
+          el.classList.add('is-selected');
+          clearBlank();
+          return;
+        }
+        if (action === 'edit-templates') {
+          openTemplateGallerySource();
+          return;
+        }
         const tplId = el.getAttribute('data-template-id');
         const tpl = (_nsmTemplatesCache || []).find(t => t.id === tplId);
-        _applyNsmTemplate(tpl);
+        applyTemplate(tpl, el);
       });
     });
+  }
+
+  async function _renderNsmGallery() {
+    if (!$nsmGallery) return;
+    const templates = await _loadNsmTemplates();
+    if (!templates.length) {
+      $nsmGallery.style.display = 'none';
+      $nsmGallery.innerHTML = '';
+      return;
+    }
+    $nsmGallery.innerHTML = _nsmTemplateCardsHtml(templates);
+    $nsmGallery.style.display = '';
+    _wireTemplateGalleryCards(
+      $nsmGallery,
+      (tpl) => _applyNsmTemplate(tpl),
+      () => {
+        $nsmBody.value = '';
+        $nsmBody.focus();
+      },
+    );
+  }
+
+  async function renderInlineNewSessionTemplates() {
+    const gallery = document.getElementById('inlineNewSessionTemplates');
+    if (!gallery) return;
+    const templates = await _loadNsmTemplates();
+    if (currentConversation !== '__new__') return;
+    if (!templates.length) {
+      gallery.style.display = 'none';
+      gallery.innerHTML = '';
+      return;
+    }
+    gallery.innerHTML = _nsmTemplateCardsHtml(templates);
+    gallery.style.display = '';
+    _wireTemplateGalleryCards(
+      gallery,
+      (tpl, el) => {
+        if (!tpl) return;
+        _clearNsmTemplateSelection(gallery);
+        if (el) el.classList.add('is-selected');
+        if (tpl.engine) setSpawnEngine(tpl.engine);
+        const worktree = document.getElementById('inlineWorktreeToggle');
+        if (worktree && typeof tpl.worktree === 'boolean') worktree.checked = tpl.worktree;
+        const input = (typeof composerInputForPane === 'function' && composerInputForPane(activePaneId())) || $convInput;
+        if (input) {
+          input.value = tpl.prompt || '';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.focus();
+          try { input.setSelectionRange(input.value.length, input.value.length); } catch (_) {}
+        }
+      },
+      () => {
+        const input = (typeof composerInputForPane === 'function' && composerInputForPane(activePaneId())) || $convInput;
+        if (input) {
+          input.value = '';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.focus();
+        }
+      },
+    );
   }
   // Modal selector participates in the same shared-state sync as the
   // inline ones — change it here and the inline selectors update too.
@@ -17882,6 +18135,7 @@
     if (typeof stopConvStream === 'function') stopConvStream();
     if (typeof stopSpawnStream === 'function') stopSpawnStream();
     if (typeof stopPkoodTailPoller === 'function') stopPkoodTailPoller();
+    if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
     currentConversation = '__new__';
     refreshConversationBackgroundForPane(paneId);
     syncActivePaneChrome('__new__');

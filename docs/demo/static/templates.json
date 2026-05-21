@@ -2,49 +2,76 @@
   "version": 1,
   "templates": [
     {
-      "id": "fix-issue-and-pr",
-      "name": "Fix a GitHub issue → PR",
-      "description": "Pull the issue, plan, implement with tests, push, open the PR.",
+      "id": "screenshot-ui-bug",
+      "name": "Fix a screenshot-reported UI bug",
+      "description": "Use a screenshot or short symptom report to root-cause and fix a UI issue.",
       "engine": "claude",
       "worktree": true,
       "cwd": "",
-      "prompt": "Pick up GitHub issue #<NUMBER> in this repo.\n\n1. Read the issue and any linked discussion so you understand the scope.\n2. Sketch a short implementation plan (files touched, public API changes, risk).\n3. Implement the change. Keep commits small and conventional (`fix:` / `feat:` etc.).\n4. Add or update tests so the failure mode in the issue can't silently come back.\n5. Run the test suite. Don't move on if anything fails.\n6. Push the branch and open a PR that links the issue (`Closes #<NUMBER>`). Title and body should explain the *why*, not just the *what*."
+      "prompt": "Fix a UI bug from a screenshot or short report.\n\nBefore editing, answer these from the repo and UI:\n- Which screen or component is affected?\n- What should the user see or be able to do?\n- What is currently happening instead?\n\nThen implement the smallest fix. Use existing styles and patterns. If this app has a local dev server, run it and verify with a browser or screenshot when feasible.\n\nFinish with: changed files, root cause, verification, and any remaining risk."
     },
     {
-      "id": "refactor-with-tests",
-      "name": "Refactor under test coverage",
-      "description": "Tests-first refactor. Behavior preserved, small commits, no scope creep.",
+      "id": "read-only-root-cause",
+      "name": "Investigate before changing code",
+      "description": "Read-only diagnosis for a bug, confusing state, or suspicious data flow.",
+      "engine": "codex",
+      "worktree": false,
+      "cwd": "",
+      "prompt": "Read-only investigation. Do not edit files, commit, push, or run destructive commands.\n\nQuestion to answer:\n- What behavior or state am I trying to understand?\n- What screenshot, session id, issue number, log, or file should you start from?\n- What would count as a convincing explanation?\n\nInspect the code, data, and logs safely. Report: observed facts, likely root cause, exact files/functions involved, smallest reproduction if available, proposed fix, confidence level, and what not to touch."
+    },
+    {
+      "id": "scoped-owned-files-fix",
+      "name": "Finish a scoped change",
+      "description": "Implement a narrow change with explicit owned files and concurrent-work guardrails.",
       "engine": "claude",
       "worktree": true,
       "cwd": "",
-      "prompt": "Refactor <TARGET> in this repo.\n\nGround rules:\n- Behavior is not allowed to change. If you find a bug, stop and surface it separately.\n- Cover the target with tests BEFORE you touch it. If coverage already exists, run it and confirm it's green.\n- Make the smallest change that achieves the refactor, then commit. One concern per commit.\n- Re-run the tests after every commit.\n- No drive-by cleanups in unrelated files. Stay in scope.\n\nFinish with a short summary of what changed, what you deliberately left alone, and which tests cover the change."
+      "prompt": "Finish a scoped implementation.\n\nPlease fill in:\n- Repo/app area:\n- Owned files you may edit:\n- Desired behavior:\n- Files or areas you must not touch:\n- Verification command to try, if known:\n\nRules:\n- Read repo instructions first.\n- Do not revert unrelated user or agent changes.\n- Stay inside the owned files unless you find a blocker and explain it.\n- Keep the change minimal and run focused verification if feasible.\n\nFinal response: changed files, exact behavior change, verification, and any follow-up needed."
     },
     {
-      "id": "investigate-failing-ci",
-      "name": "Investigate failing CI (read-only)",
-      "description": "Diagnose a red build. No code changes — just a written postmortem.",
-      "engine": "claude",
+      "id": "session-engine-rescue",
+      "name": "Rescue a stuck session",
+      "description": "Diagnose a stalled Claude, Codex, Gemini, or Antigravity session and plan a handoff.",
+      "engine": "codex",
       "worktree": false,
       "cwd": "",
-      "prompt": "CI is failing on this branch. You are in READ-ONLY mode — do not edit code, do not push, do not run destructive commands.\n\n1. Find the failing job(s). Use `gh run list --branch $(git rev-parse --abbrev-ref HEAD)` and drill into the latest red run.\n2. Pull the failing logs. Identify the first real failure (ignore cascading downstream noise).\n3. Reproduce locally if you can do it without side effects (read-only commands, dry runs).\n4. Write a postmortem with: (a) what failed, (b) the smallest reproduction, (c) the suspected root cause, (d) a proposed fix, (e) confidence level.\n\nDo not implement the fix. The goal of this session is a clean diagnosis the next session can act on."
+      "prompt": "Diagnose a stuck or unusable agent session.\n\nConcrete details:\n- Which engine is stuck?\n- What session id or visible card should you inspect?\n- What symptom do I see: no input, no output, quota, loading forever, missing transcript, or wrong status?\n- Should this stay read-only, or may you implement a fix in this repo?\n\nStart by inspecting local session metadata/logs safely. Do not expose private transcript content. Summarize what state the session is in, whether another engine can pick it up, and the safest next action."
     },
     {
-      "id": "review-pr",
-      "name": "Review a pull request",
-      "description": "Independent review. Inline comments only — never approves, never merges.",
+      "id": "browser-verified-ui-polish",
+      "name": "Polish and verify UI behavior",
+      "description": "Make a small UI/UX improvement and verify it in the browser.",
       "engine": "claude",
-      "worktree": false,
+      "worktree": true,
       "cwd": "",
-      "prompt": "Review PR #<NUMBER> in this repo as an independent reviewer.\n\nGuard-rails:\n- You may read code, run tests, and check out the PR branch locally.\n- You MUST NOT approve, request changes, merge, or push.\n- All feedback goes in as inline review comments (`gh pr review --comment` with line-anchored notes).\n\nLook for: correctness, test coverage, security (input validation, auth, secrets), API/contract changes, perf regressions, dead code, and whether the PR description matches the diff.\n\nFinish with a top-level summary comment listing the highest-impact items and any blocking concerns. Leave the human author to make the merge call."
+      "prompt": "Polish a UI behavior and verify it.\n\nPlease answer:\n- Which screen or workflow feels wrong?\n- What should feel clearer, faster, or more consistent?\n- Are there screenshots or exact steps to reproduce?\n\nImplement a focused change using existing UI conventions. Check desktop and narrow/mobile layout if relevant. Verify with the local app/browser when feasible.\n\nFinal response: what changed, before/after behavior, verification steps, and any edge cases."
     },
     {
-      "id": "scout-codebase",
-      "name": "Scout the codebase (audit brief)",
-      "description": "Read-only audit. Output is a markdown brief of how the codebase is organised.",
-      "engine": "claude",
+      "id": "data-flow-audit",
+      "name": "Audit a data or business workflow",
+      "description": "Map a backend/data flow and propose guardrails without changing code.",
+      "engine": "codex",
       "worktree": false,
       "cwd": "",
-      "prompt": "Produce an audit brief of this codebase. READ-ONLY — no edits, no commits.\n\nThe brief should answer:\n- What does this project do (one paragraph, plain language)?\n- Entry points (CLI, server, library — whichever apply).\n- Module map: top-level directories and what each is responsible for.\n- Runtime dependencies and the smallest set needed to boot it locally.\n- Test strategy: where the tests live, what they cover, what they don't.\n- Notable conventions (commit style, branch model, CI gates) — point to the files that document them.\n- Risks I'd watch for if I were inheriting this repo tomorrow.\n\nWrite the brief to `docs/audit-<YYYY-MM-DD>.md`. Keep it under ~500 lines. Link to specific files with `path:line` so a reader can jump straight to the evidence."
+      "prompt": "Read-only data/workflow audit. Do not edit files.\n\nPlease specify:\n- What workflow or state is suspicious?\n- Which user-visible symptom, record type, or report started this?\n- Which tables, routes, or services seem relevant, if known?\n\nTrace the flow from UI/API through services/storage. If local data is queried, avoid exposing private values in the final answer. Report invariants, failure modes, where audit/logging should happen, minimal implementation steps, and confidence."
+    },
+    {
+      "id": "ship-demo-docs-install",
+      "name": "Ship docs/demo/install polish",
+      "description": "Improve README, demo, install flow, changelog, or release readiness.",
+      "engine": "claude",
+      "worktree": true,
+      "cwd": "",
+      "prompt": "Ship a focused docs/demo/install improvement.\n\nPlease answer:\n- What artifact should improve: README, demo page, install script, changelog, release notes, or video/demo asset?\n- What user confusion or credibility gap are we fixing?\n- What exact assets, issue numbers, or commands are relevant?\n\nFollow repo release/changelog conventions. Keep public OSS hygiene: no private paths, secrets, client names, or PII. Verify links/files/scripts where feasible.\n\nFinal response: changed files, public-facing impact, verification, and release/changelog note."
+    },
+    {
+      "id": "parallel-agent-brief",
+      "name": "Brief a sibling agent",
+      "description": "Produce a handoff prompt for another agent to implement or investigate.",
+      "engine": "codex",
+      "worktree": false,
+      "cwd": "",
+      "prompt": "Create a concise handoff brief for a sibling agent.\n\nPlease answer:\n- What should the sibling agent do?\n- Should it be read-only or allowed to edit?\n- Which repo/folder and files should it focus on?\n- What context must it know from this session?\n- What output format do you want back?\n\nDo not edit files. Produce a ready-to-paste prompt with guardrails, scope, verification expectations, and privacy/public-OSS constraints."
     }
   ]
 }

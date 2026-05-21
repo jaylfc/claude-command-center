@@ -1,0 +1,1 @@
+- Extract and display real-time token usage and context window consumption for Antigravity sessions using the local language server trajectory RPC.

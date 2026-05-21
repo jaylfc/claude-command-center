@@ -1,0 +1,1 @@
+- Added Blank session and Add your own options to the template gallery.

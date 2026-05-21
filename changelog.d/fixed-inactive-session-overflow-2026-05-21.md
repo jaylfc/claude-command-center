@@ -1,0 +1,1 @@
+- Hide the session overflow menu when the selected engine has no overflow actions, avoiding a dead `...` button on Antigravity, Codex, Gemini, and pkood sessions.

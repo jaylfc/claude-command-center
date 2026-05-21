@@ -1400,6 +1400,7 @@
   .conv-input-context .wp-behind { color: var(--orange); }
   .conv-input-context .wp-even { color: var(--text-muted); opacity: 0.6; }
   .conv-input-context .wp-cotenants { color: var(--red); margin-left: auto; font-weight: 500; }
+  .conv-input-context.hide-cotenants .wp-cotenants { display: none; }
 
   /* Spawn cwd picker — appears in the context strip ONLY when in
    * new-session mode (currentConversation === '__new__'). Replaces the
@@ -1614,6 +1615,7 @@
     word-break: break-all; overflow-wrap: anywhere;
   }
   .conv-input-context .wp-cotenants ~ .wp-path { margin-left: 8px; }
+  .conv-input-context.hide-cotenants .wp-cotenants ~ .wp-path { margin-left: auto; }
   .conv-input-context .wp-eff-divider {
     flex: 0 0 100%;
     height: 1px;
@@ -2006,7 +2008,7 @@
   }
   .font-size-btn:hover { color: var(--text); background: var(--surface-2); }
   .conv-item {
-    --conv-dot-col: 9px;
+    --conv-dot-col: 16px;
     --conv-time-col: 43px;
     /* Bumped vertical padding (4 → 6) and tightened the row left/right
        (10 → 12) for the Omnara-style breathing room — rows feel less
@@ -2156,25 +2158,14 @@
     flex: 0 0 auto;            /* override the column-width flex from the base rule */
     transition: opacity 0.12s ease;
   }
-  .conv-item .conv-live-slot {
+  .conv-item .conv-session-icon {
     width: var(--conv-dot-col);
+    height: 16px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex: 0 0 var(--conv-dot-col);
-  }
-  .conv-live-slot .conv-live-dot { margin-right: 0; }
-  /* Default: every row gets a muted bullet at the left, so the column
-     reads as a consistent visual anchor (à la Omnara). When the row goes
-     live, the slot gets filled with `.conv-live-dot` and the pseudo-
-     element disappears. */
-  .conv-item .conv-live-slot:empty::before {
-    content: '';
-    display: inline-block;
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--text-muted);
-    opacity: 0.45;
+    vertical-align: middle;
   }
   .conv-item .conv-title {
     /* Omnara-style: slightly larger and looser line-height than the old

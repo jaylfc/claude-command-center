@@ -1,0 +1,1 @@
+- Replaced generic template-gallery prompts with workflow templates based on common session patterns.

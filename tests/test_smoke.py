@@ -1292,10 +1292,12 @@ class TestRepoContextHelpers(unittest.TestCase):
                     pid=99999, name="t", log_path=pathlib.Path(tmp) / "x.log",
                     cwd=tmp, spawned_at="20260430T000000",
                     command_summary="test", fifo=None, engine="codex",
+                    session_id="known-session-id",
                 )
                 with registry_file.open() as f:
                     rows = json.load(f)
                 self.assertEqual(rows[-1]["engine"], "codex")
+                self.assertEqual(rows[-1]["session_id"], "known-session-id")
             finally:
                 server.SPAWNED_PIDS_FILE = orig
 
@@ -1937,6 +1939,81 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--image") + 1], str(image))
         self.assertIn(sid, cmd)
 
+    def test_resume_antigravity_adds_pasted_image_dir(self):
+        """AGY needs pasted-image folders in its repeatable --add-dir workspace."""
+        server = self.server
+        paste_dir = server.COMMAND_CENTER_PASTED_IMAGES_DIR
+        paste_dir.mkdir(parents=True)
+        image = paste_dir / "paste-123.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        sid = "00000000-0000-4000-8000-000000000004"
+        conv = pathlib.Path(self.tmp_home) / "ag.pb"
+        conv.write_bytes(b"pb")
+        proc = mock.Mock(pid=4244)
+        original_spawns = list(server._spawned_sessions)
+        server._spawned_sessions.clear()
+        try:
+            with mock.patch.object(
+                server,
+                "_resolve_antigravity_bin",
+                return_value={"available": True, "bin": "/usr/bin/agy-test"},
+            ), mock.patch.object(server, "_antigravity_cli_conversation_path", return_value=conv), \
+                 mock.patch.object(server, "find_session_cwd", return_value=str(self.repo)), \
+                 mock.patch.object(server, "_git_toplevel_for_existing_dir", return_value=str(self.repo)), \
+                 mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
+                 mock.patch.object(server, "_record_spawn_to_registry"):
+                result = server.resume_session_antigravity(sid, f"look at {image}")
+        finally:
+            for entry in server._spawned_sessions:
+                fh = entry.get("log_fh")
+                if fh:
+                    fh.close()
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+
+        self.assertTrue(result["ok"])
+        cmd = popen.call_args.args[0]
+        add_dirs = [cmd[i + 1] for i, word in enumerate(cmd[:-1]) if word == "--add-dir"]
+        self.assertIn(str(self.repo), add_dirs)
+        self.assertIn(str(paste_dir.resolve()), add_dirs)
+
+    def test_resume_antigravity_queues_when_resume_already_running(self):
+        """A second AGY follow-up should queue instead of spawning parallel resumes."""
+        server = self.server
+        sid = "00000000-0000-4000-8000-000000000004"
+        conv = pathlib.Path(self.tmp_home) / "ag.pb"
+        conv.write_bytes(b"pb")
+        original_spawns = list(server._spawned_sessions)
+        with server._pending_resume_lock:
+            original_queue = dict(server._pending_resume_queue)
+            server._pending_resume_queue.clear()
+        server._spawned_sessions[:] = [{
+            "engine": "antigravity",
+            "resumed_sid": sid,
+            "pid": 4245,
+        }]
+        try:
+            with mock.patch.object(
+                server,
+                "_resolve_antigravity_bin",
+                return_value={"available": True, "bin": "/usr/bin/agy-test"},
+            ), mock.patch.object(server, "_antigravity_cli_conversation_path", return_value=conv), \
+                 mock.patch.object(server, "_poll_spawn_entry", return_value=None), \
+                 mock.patch.object(server.subprocess, "Popen") as popen:
+                result = server.resume_session_antigravity(sid, "second")
+        finally:
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["via"], "antigravity-resume-queued")
+        popen.assert_not_called()
+        with server._pending_resume_lock:
+            self.assertEqual(server._pending_resume_queue.get(sid), ["second"])
+            server._pending_resume_queue.clear()
+            server._pending_resume_queue.update(original_queue)
+
     def test_open_target_blocks_executable_session_cwd_files(self):
         """Session-cwd fallback must not turn /api/open into script launch/reveal."""
         for mod in ("server",):
@@ -2341,6 +2418,72 @@ class TestModelPicker(unittest.TestCase):
         # peak resets at the boundary, so it's the post-compact peak — NOT the big pre-compact value
         self.assertEqual(usage["peak_input_tokens"], 1_200 + 9_000)
         self.assertEqual(usage["compact_count"], 1)
+
+    def test_extract_antigravity_usage_rpc(self):
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        sid = "22222222-3333-4444-5555-777777777777"
+        
+        # Test case 1: RPC succeeds and returns usage metrics
+        fake_response = {
+            "trajectory": {
+                "steps": [
+                    {
+                        "metadata": {
+                            "modelUsage": {
+                                "model": "gemini-1.5-pro",
+                                "inputTokens": "5000",
+                                "outputTokens": "150",
+                                "cacheReadTokens": "1000",
+                            }
+                        }
+                    },
+                    {
+                        "metadata": {
+                            "modelUsage": {
+                                "model": "gemini-1.5-pro",
+                                "inputTokens": "6000",
+                                "outputTokens": "200",
+                                "cacheReadTokens": "1200",
+                                "cacheCreationTokens": 100,
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+        
+        with mock.patch.object(server, "_antigravity_app_rpc", return_value={"ok": True, "response": fake_response}), \
+             mock.patch.object(server, "_is_antigravity_session", return_value=True), \
+             mock.patch.object(server, "_antigravity_transcript_path", return_value=None), \
+             mock.patch.object(server, "_get_session_override", return_value=None):
+            
+            usage = server.extract_session_usage(sid)
+            
+            # check stats for second step: input (6000) + cacheRead (1200) + cacheCreation (100) = 7300
+            self.assertEqual(usage["latest_input_tokens"], 7300)
+            self.assertEqual(usage["peak_input_tokens"], 7300)
+            self.assertEqual(usage["total_input_tokens"], 5000 + 6000)
+            self.assertEqual(usage["total_cache_read_tokens"], 1000 + 1200)
+            self.assertEqual(usage["total_cache_creation_tokens"], 100)
+            self.assertEqual(usage["total_output_tokens"], 150 + 200)
+            self.assertEqual(usage["model"], "gemini-1.5-pro")
+            self.assertEqual(usage["engine"], "antigravity")
+            self.assertEqual(usage["context_limit"], 1_000_000)
+
+        # Test case 2: RPC fails, it should fall back to empty defaults
+        with mock.patch.object(server, "_antigravity_app_rpc", return_value={"ok": False}), \
+             mock.patch.object(server, "_is_antigravity_session", return_value=True), \
+             mock.patch.object(server, "_antigravity_transcript_path", return_value=None), \
+             mock.patch.object(server, "_get_session_override", return_value=None):
+            
+            usage = server.extract_session_usage(sid)
+            self.assertEqual(usage["latest_input_tokens"], 0)
+            self.assertEqual(usage["peak_input_tokens"], 0)
+            self.assertEqual(usage["model"], "")
+            self.assertEqual(usage["engine"], "antigravity")
+
 
 
 class TestGroupChatSidecarHelpers(unittest.TestCase):

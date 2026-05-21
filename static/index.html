@@ -542,6 +542,16 @@
             </div>
             <div class="files-list" id="sidebarFilesList"></div>
           </div>
+          <div class="status-rail-file-viewer" id="statusRailFileViewer" style="display: none;">
+            <div class="file-viewer-header">
+              <div class="file-viewer-title-group">
+                <span class="file-viewer-title" id="fileViewerTitle">File Preview</span>
+                <span class="file-viewer-filename" id="fileViewerFilename"></span>
+              </div>
+              <button class="file-viewer-close" id="fileViewerCloseBtn" title="Close preview" aria-label="Close preview">&times;</button>
+            </div>
+            <div class="file-viewer-body markdown-body assistant-text" id="fileViewerBody"></div>
+          </div>
           <div class="conv-bg-palette" data-role="conv-bg-palette" role="radiogroup" aria-label="Conversation background color"></div>
         </aside>
         <button class="status-rail-restore" id="statusRailRestoreBtn" type="button" title="Show status rail" aria-label="Show status rail" aria-controls="statusRail">

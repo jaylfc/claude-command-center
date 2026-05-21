@@ -1425,6 +1425,7 @@
   .conv-input-context .wp-behind { color: var(--orange); }
   .conv-input-context .wp-even { color: var(--text-muted); opacity: 0.6; }
   .conv-input-context .wp-cotenants { color: var(--red); margin-left: auto; font-weight: 500; }
+  .conv-input-context.hide-cotenants .wp-cotenants { display: none; }
 
   /* Spawn cwd picker — appears in the context strip ONLY when in
    * new-session mode (currentConversation === '__new__'). Replaces the
@@ -1639,6 +1640,7 @@
     word-break: break-all; overflow-wrap: anywhere;
   }
   .conv-input-context .wp-cotenants ~ .wp-path { margin-left: 8px; }
+  .conv-input-context.hide-cotenants .wp-cotenants ~ .wp-path { margin-left: auto; }
   .conv-input-context .wp-eff-divider {
     flex: 0 0 100%;
     height: 1px;
@@ -1901,7 +1903,7 @@
      promoted Earlier-ask block sitting next to it gets the full column
      height and renders top-aligned (instead of being pushed into the
      bottom half by the empty timeline's `flex: 1 1 auto`). */
-  .conv-sticky-header .csh-col-activity .session-timeline:empty {
+  .csh-col-activity .session-timeline:empty {
     display: none;
   }
   .conv-sticky-header .csh-col-activity .session-timeline .stl-body {
@@ -1932,6 +1934,12 @@
   .session-timeline .stl-body {
     display: flex; flex-direction: column; gap: 2px;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  .session-timeline .stl-empty {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.4;
+    opacity: 0.75;
   }
   .session-timeline .stl-row {
     display: flex; align-items: center; gap: 8px;
@@ -2031,7 +2039,7 @@
   }
   .font-size-btn:hover { color: var(--text); background: var(--surface-2); }
   .conv-item {
-    --conv-dot-col: 9px;
+    --conv-dot-col: 16px;
     --conv-time-col: 43px;
     /* Bumped vertical padding (4 → 6) and tightened the row left/right
        (10 → 12) for the Omnara-style breathing room — rows feel less
@@ -2181,25 +2189,14 @@
     flex: 0 0 auto;            /* override the column-width flex from the base rule */
     transition: opacity 0.12s ease;
   }
-  .conv-item .conv-live-slot {
+  .conv-item .conv-session-icon {
     width: var(--conv-dot-col);
+    height: 16px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     flex: 0 0 var(--conv-dot-col);
-  }
-  .conv-live-slot .conv-live-dot { margin-right: 0; }
-  /* Default: every row gets a muted bullet at the left, so the column
-     reads as a consistent visual anchor (à la Omnara). When the row goes
-     live, the slot gets filled with `.conv-live-dot` and the pseudo-
-     element disappears. */
-  .conv-item .conv-live-slot:empty::before {
-    content: '';
-    display: inline-block;
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--text-muted);
-    opacity: 0.45;
+    vertical-align: middle;
   }
   .conv-item .conv-title {
     /* Omnara-style: slightly larger and looser line-height than the old
@@ -2341,6 +2338,16 @@
     padding-top: 4px;
     padding-bottom: 4px;
     border-radius: 4px;
+  }
+  .conv-folder-group:not(.collapsed) .conv-item.is-grouped-row::before {
+    content: '';
+    position: absolute;
+    left: var(--folder-tree-x);
+    top: 50%;
+    width: 9px;
+    height: 1px;
+    background: var(--folder-tree-color);
+    pointer-events: none;
   }
   .conv-folder-group .conv-item.is-grouped-row .conv-title {
     flex: 0 1 auto;
@@ -2551,33 +2558,54 @@
     background: var(--green); animation: pulse 2s infinite;
     display: inline-block; flex-shrink: 0;
   }
-  .conv-engine-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 1px 5px;
-    border-radius: 4px;
-    flex: 0 0 auto;
-    font-family: ui-monospace, SFMono-Regular, "SF Mono", monospace;
-    font-size: 10px;
-    font-weight: 700;
-    line-height: 1.4;
-    letter-spacing: 0.02em;
+  .conv-session-icon {
+    transition: opacity 0.25s, transform 0.25s, filter 0.25s;
   }
-  .conv-engine-icon.codex {
+  .conv-session-icon.is-live {
+    filter: drop-shadow(0 0 3px var(--icon-shadow-color));
+    animation: ccc-icon-pulse 2.8s ease-in-out infinite;
+  }
+  .conv-session-icon.is-dead {
+    opacity: 0.45;
+    filter: grayscale(0.75);
+  }
+  @keyframes ccc-icon-pulse {
+    0% { transform: scale(1); filter: drop-shadow(0 0 2px var(--icon-shadow-color)); }
+    50% { transform: scale(1.08); filter: drop-shadow(0 0 6px var(--icon-shadow-color)); }
+    100% { transform: scale(1); filter: drop-shadow(0 0 2px var(--icon-shadow-color)); }
+  }
+  .conv-session-icon.claude {
+    color: #e28767;
+    --icon-shadow-color: rgba(226, 135, 103, 0.45);
+  }
+  .conv-session-icon.codex {
     color: #3dd68c;
-    background: rgba(61, 214, 140, 0.12);
-    border: 1px solid rgba(61, 214, 140, 0.45);
+    --icon-shadow-color: rgba(61, 214, 140, 0.45);
   }
-  .conv-engine-icon.gemini {
+  .conv-session-icon.gemini {
     color: #c084fc;
-    background: rgba(192, 132, 252, 0.12);
-    border: 1px solid rgba(192, 132, 252, 0.45);
+    --icon-shadow-color: rgba(192, 132, 252, 0.45);
   }
-  .conv-engine-icon.antigravity {
+  .conv-session-icon.antigravity {
     color: #f2cc60;
-    background: rgba(242, 204, 96, 0.12);
-    border: 1px solid rgba(242, 204, 96, 0.42);
+    --icon-shadow-color: rgba(242, 204, 96, 0.42);
+  }
+  .conv-session-icon.pkood {
+    color: #58a6ff;
+    --icon-shadow-color: rgba(88, 166, 255, 0.45);
+  }
+  .conv-session-icon.backlog {
+    color: #8b949e;
+    --icon-shadow-color: rgba(139, 148, 158, 0.25);
+  }
+  .conv-session-icon.github-pr {
+    color: #bc8cff;
+    --icon-shadow-color: rgba(188, 140, 255, 0.4);
+  }
+  .conv-session-icon svg {
+    width: 100%;
+    height: 100%;
+    display: block;
   }
   .conv-signal {
     font-size: 10px; padding: 1px 5px; border-radius: 3px;
@@ -3409,6 +3437,23 @@
     border-radius: 3px; padding: 1px 6px;
   }
   .nsm-gallery-chip.is-wt { color: var(--green); }
+  .new-session-template-wrap {
+    width: min(760px, 100%);
+    margin-top: 18px;
+    text-align: left;
+  }
+  .new-session-template-title {
+    margin: 0 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .inline-new-session-templates {
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    max-height: none;
+  }
 
   /* --- Files-from-conversation (pill + modal) ----------------------- */
   /* Pill lives inside the sticky header's fixed-height activity column; only
@@ -4141,32 +4186,49 @@
     color: var(--text-muted) !important;
     border-color: var(--border) !important;
   }
+  body.chips-muted .conv-folder-group-header {
+    border-left-color: var(--border) !important;
+  }
   .conv-folder-chip.is-orphan {
     opacity: 0.55;
     font-style: italic;
   }
   /* Folder group header + divider used by the In Progress section in
-   * multi-repo mode: cards from the last 24h are grouped under a small
-   * folder chip header so "what's hot in chuck right now" reads as a
-   * cluster. Older cards drop below a divider and resume the flat chrono
-   * list with gap separators. */
+   * multi-repo mode. Every project, including a one-session project, renders
+   * through this structure so the list has one consistent visual hierarchy. */
+  .conv-folder-group {
+    --folder-tree-x: 17px;
+    --folder-tree-color: rgba(139,148,158,0.26);
+    position: relative;
+  }
+  .conv-folder-group:not(.collapsed)::before {
+    content: '';
+    position: absolute;
+    left: var(--folder-tree-x);
+    top: 28px;
+    bottom: 10px;
+    width: 1px;
+    background: var(--folder-tree-color);
+    pointer-events: none;
+  }
   .conv-folder-group-header {
     --chip-hue: 0;
-    --conv-dot-col: 9px;
+    --conv-dot-col: 16px;
     --conv-time-col: 43px;
     display: grid;
     grid-template-columns: var(--conv-dot-col) var(--conv-time-col) auto auto minmax(0, 1fr);
     column-gap: 3px;
     align-items: center;
-    padding: 2px 10px 1px;
+    padding: 3px 10px 3px;
     font-size: 11px;
     color: var(--text-muted);
     cursor: pointer;
     border-radius: 4px;
-    border-left: 3px solid transparent;
+    border-left: 3px solid hsla(var(--chip-hue), 55%, 50%, 0.42);
     user-select: none;
     margin-top: 3px;
     border-top: 1px solid rgba(139,148,158,0.12);
+    background: rgba(139,148,158,0.035);
   }
   .conv-folder-group-header:first-child { margin-top: 0; border-top: none; }
   .conv-folder-group-header:hover { background: rgba(139,148,158,0.08); color: var(--text); }
@@ -4188,20 +4250,20 @@
     grid-column: 2 / 4;
     justify-self: start;
     min-width: 0;
-    padding: 2px 9px;
-    border-radius: 10px;
+    padding: 2px 8px;
+    border-radius: 3px;
     font-size: 11px;
     font-weight: 600;
-    background: hsla(var(--chip-hue), 60%, 50%, 0.18);
+    background: hsla(var(--chip-hue), 55%, 50%, 0.14);
     color: hsl(var(--chip-hue), 55%, 65%);
-    border: 1px solid hsla(var(--chip-hue), 55%, 50%, 0.35);
+    border: 1px solid hsla(var(--chip-hue), 45%, 50%, 0.42);
     white-space: nowrap;
   }
   .conv-folder-group-chip.is-orphan { opacity: 0.55; font-style: italic; }
   .conv-folder-group + .conv-folder-group {
     border-top: 1px solid var(--border);
-    margin-top: 2px;
-    padding-top: 2px;
+    margin-top: 4px;
+    padding-top: 4px;
   }
   .conv-folder-group-count {
     grid-column: 4;
@@ -4610,7 +4672,7 @@
   }
   .sidebar-file-info {
     flex: 1; min-width: 0;
-    display: flex; flex-direction: column; gap: 1px;
+    display: flex; flex-direction: column; gap: 2px;
   }
   .sidebar-file-name {
     color: var(--text, #c9d1d9); font-size: 12px; font-weight: 500;
@@ -4624,6 +4686,102 @@
   }
   .sidebar-file-path:hover {
     color: var(--text, #c9d1d9);
+  }
+
+  /* Status Rail File Viewer */
+  #statusRail.file-viewer-active > :not(#statusRailResizer):not(#statusRailFileViewer) {
+    display: none !important;
+  }
+  #statusRail.file-viewer-active #statusRailFileViewer {
+    display: flex !important;
+  }
+
+  .status-rail-file-viewer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    flex: 1 1 auto;
+    background: var(--bg);
+  }
+  .file-viewer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    gap: 12px;
+  }
+  .file-viewer-title-group {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 2px;
+  }
+  .file-viewer-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted, #8b949e);
+    font-weight: 600;
+  }
+  .file-viewer-filename {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text, #c9d1d9);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .file-viewer-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted, #8b949e);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+  }
+  .file-viewer-close:hover {
+    background: var(--surface-2, #161b22);
+    color: var(--text, #c9d1d9);
+  }
+  .file-viewer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text, #c9d1d9);
+    min-height: 0;
+  }
+  .file-viewer-body.markdown-body {
+    word-break: break-word;
+  }
+  .file-viewer-body.markdown-body pre {
+    background: var(--surface-2, #161b22);
+    border: 1px solid var(--border);
+    padding: 8px;
+    border-radius: 6px;
+    overflow-x: auto;
+  }
+  .file-viewer-body.markdown-body code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    background: var(--surface-2, #161b22);
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .file-viewer-body.markdown-body pre code {
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
   }
   .sidebar-file-toast {
     color: #f85149; font-size: 10px; margin-top: 1px;
@@ -5940,9 +6098,9 @@ body.status-pos-right.status-rail-collapsed .conv-pane > .status-rail-restore {
    parents (e.g. `.toolbar .launch-btn`, `.ccc-topbar .topbar-btn`) so
    they pick up no styling once moved. We re-declare the look here. */
 .rail-actions {
-  display: flex; flex-direction: column;
-  gap: 6px;
-  padding: 12px 12px 10px;
+  display: flex; flex-flow: row wrap;
+  gap: 4px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
 }
 .rail-actions:empty { display: none; }
@@ -5954,18 +6112,19 @@ body.status-pos-right.status-rail-collapsed .conv-pane > .status-rail-restore {
 .rail-actions .bug-link,
 .rail-actions .announce-btn-conv {
   display: inline-flex; align-items: center; justify-content: flex-start;
-  width: 100%;
+  width: auto;
+  flex: 0 1 auto;
   margin: 0;
-  padding: 6px 10px;
+  padding: 4px 8px;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
-  font-size: 12px; font-weight: 500; font-family: inherit;
+  font-size: 11px; font-weight: 500; font-family: inherit;
   text-align: left;
   cursor: pointer;
   text-decoration: none;
-  gap: 6px;
+  gap: 4px;
   white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
 }
