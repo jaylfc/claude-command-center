@@ -4933,6 +4933,7 @@
     .kanban-panel-toolbar #kptRunBtn,
     .kanban-panel-toolbar #kptRecentBtn,
     .kanban-panel-toolbar #kptToolbarEngineSelect,
+    .kanban-panel-toolbar #kptToolbarEngineSelectCustom,
     .kanban-panel-toolbar #kptGitOnlyToggle,
     .kanban-panel-toolbar #kptDescToggle,
     .kanban-panel-toolbar .kpt-label,
@@ -6648,3 +6649,153 @@ body.status-pos-right .conv-sticky-header .csh-col-ask {
   text-underline-offset: 2px;
 }
 .telemetry-bar__link:hover { color: var(--text); }
+
+/* Custom select dropdown styling */
+.custom-select-container {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+}
+.custom-select-trigger {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s, background-color 0.15s;
+  box-sizing: border-box;
+  outline: none;
+  font-family: inherit;
+  height: 24px;
+  line-height: 1;
+}
+.custom-select-trigger:hover {
+  border-color: var(--accent, var(--text-muted));
+  background: var(--surface, rgba(255, 255, 255, 0.02));
+}
+.custom-select-trigger-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.custom-select-trigger-icon {
+  display: inline-flex;
+  align-items: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+.custom-select-trigger-icon svg,
+.custom-select-option-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.custom-select-trigger-icon.claude,
+.custom-select-option-icon.claude {
+  color: #e28767;
+}
+.custom-select-trigger-icon.codex,
+.custom-select-option-icon.codex {
+  color: #3dd68c;
+}
+.custom-select-trigger-icon.gemini,
+.custom-select-option-icon.gemini {
+  color: #c084fc;
+}
+.custom-select-trigger-icon.antigravity,
+.custom-select-option-icon.antigravity {
+  color: #f2cc60;
+}
+.custom-select-trigger-label {
+  display: inline-block;
+}
+.custom-select-arrow {
+  margin-left: 2px;
+  font-size: 9px;
+  opacity: 0.6;
+  display: inline-block;
+  transform: translateY(0.5px);
+}
+.custom-select-menu {
+  position: absolute;
+  z-index: 1000;
+  display: none;
+  background: var(--surface, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  min-width: 140px;
+  padding: 4px;
+  box-sizing: border-box;
+  flex-direction: column;
+  gap: 2px;
+}
+.custom-select-container.open .custom-select-menu {
+  display: flex;
+}
+
+/* Placement rules based on element location */
+.conv-input-bar .custom-select-container .custom-select-menu {
+  bottom: calc(100% + 4px);
+  right: 0;
+}
+.kanban-panel-toolbar .custom-select-container .custom-select-menu {
+  top: calc(100% + 4px);
+  right: 0;
+}
+.nsm-actions .custom-select-container .custom-select-menu {
+  bottom: calc(100% + 4px);
+  left: 0;
+}
+
+.custom-select-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background-color 0.15s, color 0.15s;
+  user-select: none;
+  color: var(--text-muted);
+}
+.custom-select-option:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.05));
+  color: var(--text);
+}
+.custom-select-option.selected {
+  color: var(--text);
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.02);
+}
+.custom-select-option-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.custom-select-option-label {
+  flex-grow: 1;
+  text-align: left;
+}
+.custom-select-option-check {
+  color: var(--green, #3dd68c);
+  font-weight: bold;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.custom-select-option.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
