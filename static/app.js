@@ -1371,6 +1371,12 @@
   });
 
   function setCurrentSession(source, sid, cwd, cwdExists, spawnPid, repoPath) {
+    const row = (Array.isArray(conversationsData) ? conversationsData : []).find(c => (
+      c && (
+        (sid && (c.session_id === sid || c.id === sid))
+        || (currentConversation && c.id === currentConversation)
+      )
+    )) || null;
     currentSession = {
       id: sid || null,
       cwd: cwd || null,
@@ -1378,6 +1384,7 @@
       source: source,
       spawnPid: spawnPid || null,
       repoPath: repoPath || null,
+      can_headless_resume: source === 'antigravity' ? !!(row && row.can_headless_resume === true) : true,
     };
     // Leaving new-session mode (sid set) drops the .is-new-session class
     // so the spawn-cwd picker hides and the workspace pill returns. The
@@ -3757,7 +3764,7 @@
     // Auto-cleanup after 30s for Claude placeholders. Fire-and-watch placeholders
     // stick around until the durable thread row appears, with the spawn log
     // as a fallback if the CLI exits before creating a thread.
-    if (source !== 'codex' && source !== 'gemini') {
+    if (source !== 'codex' && source !== 'gemini' && source !== 'antigravity') {
       setTimeout(() => {
         const direct = pendingSpawns.has(pid) ? [pid, pendingSpawns.get(pid)] : null;
         const adopted = direct || Array.from(pendingSpawns.entries()).find(([, c]) => c && c.id === id);
@@ -11405,16 +11412,23 @@
       const modelTip = displayModel
         + (isOneM ? '\n(1M context window — anthropic-beta: context-1m)' : '')
         + (queued ? '\n(Applied on next ask — change is queued)' : '')
-        + '\n\nClick to change model';
-      modelPill = ' <button type="button" class="wp-model-pill" data-model-picker'
-        + ' data-engine="' + escapeHtml(engine) + '"'
-        + ' data-current="' + escapeHtml(displayModel) + '"'
-        + ' data-1m="' + (isOneM ? '1' : '0') + '"'
-        + ' title="' + escapeHtml(modelTip) + '">'
-        + escapeHtml(shortModel)
+        + (engine === 'antigravity' ? '' : '\n\nClick to change model');
+      const modelInner = escapeHtml(shortModel)
         + (isOneM ? ' <span class="wp-model-1m">1M</span>' : '')
-        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '')
-        + '</button>';
+        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '');
+      if (engine === 'antigravity') {
+        modelPill = ' <span class="wp-model-pill is-static" title="' + escapeHtml(modelTip) + '">'
+          + modelInner
+          + '</span>';
+      } else {
+        modelPill = ' <button type="button" class="wp-model-pill" data-model-picker'
+          + ' data-engine="' + escapeHtml(engine) + '"'
+          + ' data-current="' + escapeHtml(displayModel) + '"'
+          + ' data-1m="' + (isOneM ? '1' : '0') + '"'
+          + ' title="' + escapeHtml(modelTip) + '">'
+          + modelInner
+          + '</button>';
+      }
     }
     // Click-toggle override: if you're on the 1M variant the server's
     // 200k default is wrong; one click flips and persists.
@@ -11427,7 +11441,7 @@
         return;
       }
       const title = 'No token usage samples were found for this session.\n'
-        + 'Model: ' + u.model;
+        + 'Model: ' + (displayModel || u.model || 'unknown');
       uSlot.innerHTML = '<span class="wp-usage-pill wp-usage-missing" title="' + escapeHtml(title) + '">'
         + 'ctx unavailable'
         + '</span>' + modelPill;

@@ -11273,12 +11273,16 @@ def find_gemini_conversations(
             "reasoning_effort": "",
         })
     seen_ids = {c.get("id") for c in out}
+    antigravity_spawn_by_sid = _antigravity_spawn_pid_by_session_id()
     for log_path in _antigravity_cli_log_paths(repo_path if repo_only else None):
         if limit and scanned >= int(limit):
             break
         meta = _antigravity_cli_log_meta(log_path)
         sid = meta.get("session_id") or ""
         if not sid or sid in seen_ids:
+            continue
+        transcript = _antigravity_transcript_path(sid)
+        if transcript and transcript.is_file():
             continue
         cli_conversation = _antigravity_cli_conversation_path(sid)
         if not cli_conversation or not cli_conversation.is_file():
@@ -11321,7 +11325,15 @@ def find_gemini_conversations(
             folder_label = _resolve_dir_case(_git_root or folder_path)
         else:
             folder_label = "Antigravity CLI"
-        display_name = name_overrides.get(sid) or _antigravity_log_display_name(log_path)
+        spawn_info = antigravity_spawn_by_sid.get(sid) or {}
+        spawn_pid = spawn_info.get("pid")
+        spawn_alive = bool(spawn_info.get("alive"))
+        first_message = (spawn_info.get("prompt") or "").strip()
+        display_name = (
+            name_overrides.get(sid)
+            or (first_message[:80] if first_message else None)
+            or _antigravity_log_display_name(log_path)
+        )
         branch = _git_branch_for_cwd(effective_cwd)
         out.append({
             "id": sid,
@@ -11331,10 +11343,10 @@ def find_gemini_conversations(
             "timestamp": "",
             "branch": branch,
             "git_branch": branch,
-            "first_message": "",
+            "first_message": first_message[:200],
             "display_name": display_name,
             "name_overridden": bool(name_overrides.get(sid)),
-            "last_prompt": "",
+            "last_prompt": first_message[:200],
             "size": st.st_size,
             "modified": modified,
             "modified_human": time.strftime("%Y-%m-%d %H:%M", time.localtime(modified)),
@@ -11372,13 +11384,13 @@ def find_gemini_conversations(
             "verified": sid in verified_set,
             "pinned_repo": pinned_repo,
             "last_interacted": last_interactions.get(sid),
-            "is_live": False,
-            "spawn_pid": None,
+            "is_live": spawn_alive,
+            "spawn_pid": spawn_pid,
             "can_headless_resume": True,
-            **_antigravity_activity_fields_from_tail({}, False),
+            **_antigravity_activity_fields_from_tail({}, spawn_alive),
             "needs_approval": False,
             "needs_approval_message": "",
-            "model": "",
+            "model": meta.get("model") or spawn_info.get("model") or "",
             "reasoning_effort": "",
         })
         seen_ids.add(sid)
@@ -11722,6 +11734,19 @@ _ANTIGRAVITY_CLI_CONVERSATION_RE = re.compile(
 _ANTIGRAVITY_CLI_WORKSPACE_RE = re.compile(
     r"Initializing CLI store manager for workspace ([^\n]+)"
 )
+_ANTIGRAVITY_MODEL_SELECTION_RE = re.compile(
+    r"Model Selection`\s+from\s+.*?\s+to\s+(.+?)(?:\.\s+No need|\n|</USER_SETTINGS_CHANGE>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_ANTIGRAVITY_MODEL_LABEL_RE = re.compile(
+    r"Propagating selected model override to backend:\s+label=\"([^\"]+)\"",
+    re.IGNORECASE,
+)
+_ANTIGRAVITY_PRINT_MODEL_RE = re.compile(
+    r"Print mode:\s+starting\s+\([^\n)]*model=\"([^\"]*)\"",
+    re.IGNORECASE,
+)
+_ANTIGRAVITY_META_VERSION = 2
 
 
 def _antigravity_read_log_tail(path, max_bytes=64000):
@@ -11746,7 +11771,55 @@ def _antigravity_cli_log_meta(path):
     workspace = ""
     for match in _ANTIGRAVITY_CLI_WORKSPACE_RE.finditer(text):
         workspace = match.group(1).strip().strip('"')
-    return {"session_id": session_id, "cwd": workspace}
+    model = _antigravity_model_from_text(text)
+    return {"session_id": session_id, "cwd": workspace, "model": model}
+
+
+def _antigravity_model_from_text(text):
+    if not isinstance(text, str) or not text:
+        return ""
+    model = ""
+    for match in _ANTIGRAVITY_MODEL_SELECTION_RE.finditer(text):
+        candidate = " ".join((match.group(1) or "").split())
+        if candidate:
+            model = candidate
+    for match in _ANTIGRAVITY_MODEL_LABEL_RE.finditer(text):
+        candidate = " ".join((match.group(1) or "").split())
+        if candidate:
+            model = candidate
+    for match in _ANTIGRAVITY_PRINT_MODEL_RE.finditer(text):
+        candidate = " ".join((match.group(1) or "").split())
+        if candidate:
+            model = candidate
+    return model
+
+
+def _antigravity_spawn_pid_by_session_id():
+    out = {}
+    for s in _spawned_sessions:
+        if s.get("engine") != "antigravity":
+            continue
+        meta = {}
+        log = s.get("log") or ""
+        if log:
+            meta = _antigravity_cli_log_meta(str(log) + ".agy.log")
+            if not (meta.get("session_id") or meta.get("cwd") or meta.get("model")):
+                meta = _antigravity_cli_log_meta(log)
+        sid = s.get("resumed_sid") or meta.get("session_id") or ""
+        if not sid or sid in out:
+            continue
+        try:
+            alive = _poll_spawn_entry(s) is None
+        except Exception:
+            alive = False
+        out[sid] = {
+            "pid": s.get("pid"),
+            "alive": alive,
+            "log": log,
+            "prompt": s.get("prompt") or "",
+            "model": meta.get("model") or "",
+        }
+    return out
 
 
 def _antigravity_cli_log_paths(repo_path=None):
@@ -11865,6 +11938,8 @@ def _parse_antigravity_cli_log_conversation(session_id, after_line=0):
             })
     debug_text = _antigravity_read_log_tail(log_path, max_bytes=24000)
     diagnostic = _antigravity_cli_log_diagnostic(debug_text)
+    if stdout_text and diagnostic.startswith("AGY print mode created"):
+        diagnostic = ""
     if diagnostic:
         line_num += 1
         if line_num > after_line:
@@ -12084,11 +12159,17 @@ def _extract_antigravity_tail_meta(path_or_session_id):
     except OSError:
         return {}
     cached = _conv_meta_cache.get(str(path))
-    if cached and cached.get("mtime") == mtime and cached.get("engine") == "antigravity":
+    if (
+        cached
+        and cached.get("mtime") == mtime
+        and cached.get("engine") == "antigravity"
+        and cached.get("meta_version") == _ANTIGRAVITY_META_VERSION
+    ):
         return cached
 
     meta = {
         "engine": "antigravity",
+        "meta_version": _ANTIGRAVITY_META_VERSION,
         "mtime": mtime,
         "first_message": None,
         "last_prompt": None,
@@ -12132,6 +12213,10 @@ def _extract_antigravity_tail_meta(path_or_session_id):
                 cwd_candidates.extend(_antigravity_event_path_candidates(ev))
                 ev_type = ev.get("type") or ""
                 source = ev.get("source") or ""
+                content_text = ev.get("content") if isinstance(ev.get("content"), str) else ""
+                selected_model = _antigravity_model_from_text(content_text)
+                if selected_model:
+                    meta["model"] = selected_model
                 if ev_type == "USER_INPUT" and source == "USER_EXPLICIT":
                     text = _antigravity_user_text(ev.get("content") or "")
                     if text:
@@ -12190,7 +12275,7 @@ def _extract_antigravity_tail_meta(path_or_session_id):
                 if ev_type == "CODE_ACTION":
                     meta["has_edit"] = True
                     meta["last_edit_pos"] = pos
-                content = ev.get("content") or ""
+                content = content_text
                 if isinstance(content, str):
                     if pr_url_re.search(content):
                         meta.update(_extract_codex_summary_signals(content, pr_url_re))
@@ -12283,6 +12368,7 @@ def find_antigravity_conversations(
 
     cutoff = _session_scan_cutoff_ts(include_old)
     max_rows = _session_scan_file_limit(include_old)
+    spawn_by_sid = _antigravity_spawn_pid_by_session_id()
     git_top_cache = {}
     out = []
     scanned = 0
@@ -12298,7 +12384,11 @@ def find_antigravity_conversations(
         except OSError:
             continue
         tail = _extract_antigravity_tail_meta(path) or {}
+        cli_meta = {}
         cwd = tail.get("cwd") or ""
+        if not cwd or not tail.get("model"):
+            cli_meta = _antigravity_cli_log_meta_for_session(sid, repo_path if repo_only else None)
+            cwd = cwd or cli_meta.get("cwd") or ""
         pinned = repo_pins.get(sid)
         pinned_repo = False
         if repo_only:
@@ -12308,9 +12398,17 @@ def find_antigravity_conversations(
                 pinned_repo = True
             elif not _codex_cwd_matches_repo(cwd, repo_path_obj, git_top_cache):
                 continue
+        spawn_info = spawn_by_sid.get(sid) or {}
+        spawn_pid = spawn_info.get("pid")
+        spawn_alive = bool(spawn_info.get("alive"))
         modified = tail.get("last_meaningful_ts") or st.st_mtime
+        if spawn_info.get("log"):
+            try:
+                modified = max(modified, Path(spawn_info["log"]).stat().st_mtime)
+            except OSError:
+                pass
         freshness = max(modified, last_interactions.get(sid) or 0)
-        if not include_old and cutoff > 0 and freshness < cutoff:
+        if not include_old and sid not in spawn_by_sid and cutoff > 0 and freshness < cutoff:
             continue
         if not include_old and max_rows > 0 and len(out) >= max_rows:
             continue
@@ -12318,6 +12416,7 @@ def find_antigravity_conversations(
         display_name = (
             name_overrides.get(sid)
             or (first_message[:80] if first_message else None)
+            or ((spawn_info.get("prompt") or "").strip()[:80] if spawn_info.get("prompt") else None)
             or "Antigravity session"
         )
         tail_worktree_path = tail.get("tail_worktree_path") or ""
@@ -12388,16 +12487,16 @@ def find_antigravity_conversations(
             "verified": sid in verified_set,
             "pinned_repo": pinned_repo,
             "last_interacted": last_interactions.get(sid),
-            "is_live": False,
-            "spawn_pid": None,
+            "is_live": spawn_alive,
+            "spawn_pid": spawn_pid,
             "can_headless_resume": bool(
                 _antigravity_cli_conversation_path(sid)
                 and _antigravity_cli_conversation_path(sid).is_file()
             ),
-            **_antigravity_activity_fields_from_tail(tail, False),
+            **_antigravity_activity_fields_from_tail(tail, spawn_alive),
             "needs_approval": False,
             "needs_approval_message": "",
-            "model": tail.get("model") or "",
+            "model": tail.get("model") or cli_meta.get("model") or spawn_info.get("model") or "",
             "reasoning_effort": "",
         })
     if resolve_pr_states:

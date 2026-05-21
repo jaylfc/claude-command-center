@@ -1,0 +1,1 @@
+- Antigravity sessions now reuse the real CLI transcript row after spawn, show detected model labels when token samples are unavailable, and keep the workspace/status strip attached to the input card.

@@ -796,8 +796,8 @@
      both modes. DOM order kept the historical "context above input"
      layout for back-compat with anything that queried by index. */
   .conv-pane > .conv-input-bar     { order: 1; }
-  .conv-pane > .conv-input-hint    { order: 1; }
   .conv-pane > .conv-input-context { order: 2; }
+  .conv-pane > .conv-input-hint    { order: 3; }
   .conv-pane > .conv-input-context.is-new-session {
     order: 0;
     border-top: 0;
@@ -1327,6 +1327,12 @@
     border: none;
   }
   .conv-input-context .wp-model-pill:hover { background: rgba(88,166,255,0.18); }
+  .conv-input-context .wp-model-pill.is-static {
+    cursor: default;
+    display: inline-flex;
+    align-items: center;
+  }
+  .conv-input-context .wp-model-pill.is-static:hover { background: rgba(88,166,255,0.10); }
   .conv-input-context .wp-model-1m {
     margin-left: 4px;
     padding: 0 4px;
@@ -2643,6 +2649,24 @@
     transition: border-color 0.15s, box-shadow 0.15s;
     border-top: 1px solid var(--border);
   }
+  .conv-input-bar.visible:has(+ .conv-input-hint + .conv-input-context.visible) {
+    margin-bottom: 0;
+    border-bottom-color: transparent;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .conv-input-bar.visible + .conv-input-hint + .conv-input-context.visible {
+    margin: 0 14px 2px;
+    padding: 0 14px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-top: 0;
+    border-radius: 0 0 14px 14px;
+  }
+  .conv-input-bar.visible:focus-within + .conv-input-hint + .conv-input-context.visible {
+    border-color: var(--accent);
+    box-shadow: 0 3px 0 0 rgba(110,140,175,0.16);
+  }
   .conv-input-bar.visible:focus-within {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(110,140,175,0.16);
@@ -2798,8 +2822,8 @@
      the card so it doesn't take horizontal space on the input row. */
   .conv-input-hint {
     display: flex; align-items: center; gap: 10px;
-    padding: 4px 22px 0;
-    margin-top: -2px;
+    padding: 2px 22px 6px;
+    margin-top: 0;
     font-size: 10px; color: var(--text-muted); opacity: 0.6;
   }
   .conv-input-hint:empty,
@@ -5668,7 +5692,7 @@
    Important for mobile + narrow windows where 260px is a real cost.
 
    Status row order in right-rail mode: header → conversation → INPUT BAR
-   → keyboard hint → status row. Input reads as the primary action; the
+   → status row → keyboard hint. Input reads as the primary action; the
    status (worktree / context / cost / model) is reference info underneath. */
 body.status-pos-right .conv-pane {
   display: grid;
@@ -5678,8 +5702,8 @@ body.status-pos-right .conv-pane {
     "header  rail"
     "conv    rail"
     "input   rail"
-    "hint    rail"
-    "context rail";
+    "context rail"
+    "hint    rail";
   min-height: 0;
 }
 body.status-pos-right .conv-pane:has(> .conv-input-context.is-new-session) {
