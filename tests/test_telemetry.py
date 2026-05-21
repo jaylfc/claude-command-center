@@ -196,10 +196,12 @@ class TestPayloadShape(TelemetryTestBase):
              mock.patch.object(self.server, "_resolve_codex_bin",
                                return_value={"available": False}), \
              mock.patch.object(self.server, "_resolve_gemini_bin",
+                               return_value={"available": True}), \
+             mock.patch.object(self.server, "_resolve_antigravity_bin",
                                return_value={"available": True}):
             payload = self.server._build_telemetry_payload()
-        # claude,gemini — order preserved, codex absent.
-        self.assertEqual(payload["engines"], "claude,gemini")
+        # claude,gemini,antigravity — order preserved, codex absent.
+        self.assertEqual(payload["engines"], "claude,gemini,antigravity")
 
     def test_payload_last_active_date_is_iso_date_only(self):
         self.server._telemetry_load_or_init_install_id()

@@ -626,14 +626,27 @@
   function allLaunchChoiceMenus() { return [$launchChoiceMenuConv, document.getElementById('cpLaunchChoiceMenu')].filter(Boolean); }
   function allDesktopButtons() { return []; }
 
+  function antigravityCanSend(session) {
+    return !session
+      || session.source !== 'antigravity'
+      || session.can_headless_resume === true
+      || session.can_app_resume === true;
+  }
+
+  function antigravityInputPlaceholder(session) {
+    if (session && session.can_headless_resume === true) return 'Resume Antigravity headlessly and send...';
+    if (session && session.can_app_resume === true) return 'Send to running Antigravity app...';
+    return 'Open Antigravity to continue this app session...';
+  }
+
   function launchTargetsForCurrentSession() {
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
     const isAntigravity = currentSession.source === 'antigravity';
-    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume === true;
+    const antigravityTerminalHint = currentSession.can_headless_resume === true ? 'AGY conversation' : '/open in AGY';
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentSession.id || '');
     return [
-      { id: 'terminal', label: 'Terminal', hint: isAntigravity ? (antigravityCanResume ? 'AGY conversation' : '/open in AGY') : 'default', disabled: false },
+      { id: 'terminal', label: 'Terminal', hint: isAntigravity ? antigravityTerminalHint : 'default', disabled: false },
       {
         id: 'desktop',
         label: 'Claude Desktop',
@@ -1385,6 +1398,7 @@
       spawnPid: spawnPid || null,
       repoPath: repoPath || null,
       can_headless_resume: source === 'antigravity' ? !!(row && row.can_headless_resume === true) : true,
+      can_app_resume: source === 'antigravity' ? !!(row && row.can_app_resume === true) : false,
     };
     // Leaving new-session mode (sid set) drops the .is-new-session class
     // so the spawn-cwd picker hides and the workspace pill returns. The
@@ -1673,7 +1687,7 @@
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
     const isAntigravity = currentSession.source === 'antigravity';
-    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume === true;
+    const antigravityCanSendNow = antigravityCanSend(currentSession);
     const live = liveStatus.live && liveStatus.tty;
     const isConvTab = activeTab === 'sessions';
     const hasSession = !!currentSession.id;
@@ -1724,9 +1738,7 @@
         $convInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
       } else if (isAntigravity) {
         $convTtyLabel.textContent = 'antigravity';
-        $convInput.placeholder = antigravityCanResume
-          ? 'Resume Antigravity headlessly and send...'
-          : 'Open Antigravity to continue this app session...';
+        $convInput.placeholder = antigravityInputPlaceholder(currentSession);
       } else if (live) {
         $convTtyLabel.textContent = liveStatus.tty;
         $convInput.placeholder = 'Send to terminal...';
@@ -1734,7 +1746,7 @@
         $convTtyLabel.textContent = 'dormant';
         $convInput.placeholder = 'Resume and send…';
       }
-      const canSend = !(isAntigravity && !antigravityCanResume);
+      const canSend = !isAntigravity || antigravityCanSendNow;
       if ($convInput) {
         $convInput.readOnly = !canSend;
         $convInput.classList.toggle('is-readonly', !canSend);
@@ -2065,7 +2077,7 @@
     }
     const sid = currentSession.id;
     if (!sid) return;
-    if (currentSession.source === 'antigravity' && currentSession.can_headless_resume !== true) {
+    if (currentSession.source === 'antigravity' && !antigravityCanSend(currentSession)) {
       if ($input) $input.blur();
       return;
     }
@@ -2103,6 +2115,10 @@
           showOpToast('Queued until the terminal session is idle.');
         } else if (data.via === 'antigravity-resume') {
           showOpToast('Antigravity headless follow-up started.');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
+        } else if (data.via === 'antigravity-app') {
+          showOpToast('Sent to Antigravity app.');
           setTimeout(refreshConversationList, 1500);
           setTimeout(refreshConversationList, 3500);
         }
@@ -9735,7 +9751,7 @@
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
     const isAntigravity = currentSession.source === 'antigravity';
-    const antigravityCanResume = !isAntigravity || currentSession.can_headless_resume === true;
+    const antigravityCanSendNow = antigravityCanSend(currentSession);
     const live = liveStatus.live && liveStatus.tty;
     const hasSession = !!currentSession.id;
     if (hasSession && kanbanView) {
@@ -9745,11 +9761,11 @@
         if (isPkood) $cpInput.placeholder = 'Send to pkood agent...';
         else if (isCodex) $cpInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
         else if (isGemini) $cpInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
-        else if (isAntigravity) $cpInput.placeholder = antigravityCanResume ? 'Resume Antigravity headlessly and send...' : 'Open Antigravity to continue this app session...';
+        else if (isAntigravity) $cpInput.placeholder = antigravityInputPlaceholder(currentSession);
         else if (live) $cpInput.placeholder = 'Send to terminal...';
         else $cpInput.placeholder = 'Send to terminal (offline)...';
-        $cpInput.readOnly = isAntigravity && !antigravityCanResume;
-        $cpInput.classList.toggle('is-readonly', isAntigravity && !antigravityCanResume);
+        $cpInput.readOnly = isAntigravity && !antigravityCanSendNow;
+        $cpInput.classList.toggle('is-readonly', isAntigravity && !antigravityCanSendNow);
       }
     } else {
       $convPanelInput.classList.remove('visible');
@@ -15050,6 +15066,7 @@
           question_header: c.question_header || '',
           question_options: Array.isArray(c.question_options) ? c.question_options : [],
           can_headless_resume: c.can_headless_resume === true,
+          can_app_resume: c.can_app_resume === true,
           session_cwd: c.session_cwd || c.folder_path,
           session_cwd_exists: !!c.folder_path,
           session_cwd_is_worktree: !!c.session_cwd_is_worktree,
@@ -15112,6 +15129,7 @@
         question_options: Array.isArray(c.question_options) ? c.question_options : [],
         source: c.source || 'interactive',
         can_headless_resume: c.can_headless_resume === true,
+        can_app_resume: c.can_app_resume === true,
         session_cwd: c.session_cwd || c.folder_path,
         session_cwd_exists: !folderOrphan,
         // #4 worktree leaf — the renderer reads session_cwd_is_worktree.
@@ -16299,7 +16317,7 @@
       const text = ($cpInput.value || '').trim();
       const sid = currentSession.id;
       if (!text || !sid) return;
-      if (currentSession.source === 'antigravity' && currentSession.can_headless_resume !== true) {
+      if (currentSession.source === 'antigravity' && !antigravityCanSend(currentSession)) {
         $cpInput.blur();
         return;
       }
@@ -16355,6 +16373,10 @@
             showOpToast('Antigravity headless follow-up started.');
             setTimeout(refreshConversationList, 1500);
             setTimeout(refreshConversationList, 3500);
+          } else if (data.via === 'antigravity-app') {
+            showOpToast('Sent to Antigravity app.');
+            setTimeout(refreshConversationList, 1500);
+            setTimeout(refreshConversationList, 3500);
           }
         } else {
           removePendingSendEcho(pendingSend);
@@ -16382,7 +16404,7 @@
     // Exposed on the element so sendToSplitTerminal can re-run it after clearing value.
     $cpInput.__cpRefresh = function () {
       const hasText = ($cpInput.value || '').trim().length > 0;
-      const canSend = !(currentSession.source === 'antigravity' && currentSession.can_headless_resume !== true);
+      const canSend = !(currentSession.source === 'antigravity' && !antigravityCanSend(currentSession));
       $cpSendBtn.disabled = !hasText || !currentSession.id || !canSend;
       $cpSendBtn.title = canSend ? 'Send' : 'Open Antigravity to continue this app session';
     };

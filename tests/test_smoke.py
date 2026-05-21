@@ -491,6 +491,110 @@ class TestRepoContextHelpers(unittest.TestCase):
         resume.assert_called_once_with(sid, "hello")
         inject.assert_not_called()
 
+    def test_antigravity_resume_falls_back_to_app_when_cli_missing(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        with mock.patch.object(
+            self.server,
+            "_antigravity_cli_conversation_path",
+            return_value=None,
+        ), \
+             mock.patch.object(
+                 self.server,
+                 "_resume_session_antigravity_app",
+                 return_value={"ok": True, "via": "antigravity-app"},
+             ) as app_resume:
+            result = self.server.resume_session_antigravity(sid, "hello")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["via"], "antigravity-app")
+        app_resume.assert_called_once_with(sid, "hello")
+
+    def test_antigravity_app_resume_records_interaction_on_success(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        user_config = {
+            "plannerConfig": {
+                "requestedModel": {"model": "MODEL_PLACEHOLDER_TEST"},
+            },
+        }
+        with mock.patch.object(
+            self.server,
+            "_antigravity_app_conversation_path",
+            return_value=pathlib.Path("/tmp/session.db"),
+        ), \
+             mock.patch.object(
+                 self.server,
+                 "_antigravity_latest_user_config",
+                 return_value=user_config,
+             ), \
+             mock.patch.object(
+                 self.server,
+                 "_antigravity_app_rpc",
+                 return_value={"ok": True, "port": 1234},
+             ) as rpc, \
+             mock.patch.object(self.server, "_record_interaction") as record:
+            result = self.server._resume_session_antigravity_app(sid, "hello")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["resumed"])
+        self.assertEqual(result["via"], "antigravity-app")
+        self.assertEqual(result["port"], 1234)
+        record.assert_called_once_with(sid)
+        rpc.assert_called_once_with(
+            "SendUserCascadeMessage",
+            {
+                "cascadeId": sid,
+                "items": [{"text": "hello"}],
+                "cascadeConfig": user_config,
+            },
+            timeout=10,
+        )
+
+    def test_antigravity_app_resume_requires_model_config(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        with mock.patch.object(
+            self.server,
+            "_antigravity_app_conversation_path",
+            return_value=pathlib.Path("/tmp/session.db"),
+        ), \
+             mock.patch.object(
+                 self.server,
+                 "_antigravity_latest_user_config",
+                 return_value=None,
+             ), \
+             mock.patch.object(self.server, "_antigravity_app_rpc") as rpc:
+            result = self.server._resume_session_antigravity_app(sid, "hello")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "antigravity_app_model_config_missing")
+        rpc.assert_not_called()
+
+    def test_antigravity_latest_user_config_reuses_last_valid_model(self):
+        config = {
+            "plannerConfig": {
+                "requestedModel": {"model": "MODEL_PLACEHOLDER_TEST"},
+            },
+        }
+        trajectory = {
+            "steps": [
+                {"userInput": {"userConfig": {"plannerConfig": {}}}},
+                {"userInput": {"lastUserConfig": config}},
+            ],
+        }
+        with mock.patch.object(
+            self.server,
+            "_antigravity_app_rpc",
+            return_value={"ok": True, "response": {"trajectory": trajectory}},
+        ) as rpc:
+            result = self.server._antigravity_latest_user_config("sid")
+
+        self.assertEqual(result, config)
+        self.assertIsNot(result, config)
+        rpc.assert_called_once_with(
+            "GetCascadeTrajectory",
+            {"cascadeId": "sid"},
+            timeout=5,
+        )
+
     def test_finished_spawn_poll_closes_log_handle(self):
         proc = mock.Mock()
         proc.poll.return_value = 0

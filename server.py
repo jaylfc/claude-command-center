@@ -35,7 +35,10 @@ import sys
 import tempfile
 import threading
 import time
+import ssl
+import copy
 import urllib.parse
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -10596,9 +10599,12 @@ def _extract_codex_timeline(session_id):
 GEMINI_HOME = Path.home() / ".gemini"
 ANTIGRAVITY_HOME = GEMINI_HOME / "antigravity"
 ANTIGRAVITY_BRAIN = ANTIGRAVITY_HOME / "brain"
+ANTIGRAVITY_CONVERSATIONS = ANTIGRAVITY_HOME / "conversations"
 ANTIGRAVITY_CLI_HOME = GEMINI_HOME / "antigravity-cli"
 ANTIGRAVITY_CLI_BRAIN = ANTIGRAVITY_CLI_HOME / "brain"
 ANTIGRAVITY_CLI_CONVERSATIONS = ANTIGRAVITY_CLI_HOME / "conversations"
+ANTIGRAVITY_MAIN_LOG = Path.home() / "Library" / "Logs" / "Antigravity" / "main.log"
+ANTIGRAVITY_APP_LS_SERVICE = "exa.language_server_pb.LanguageServerService"
 GEMINI_CONTEXT_LIMIT = 1_000_000
 
 
@@ -11387,6 +11393,7 @@ def find_gemini_conversations(
             "is_live": spawn_alive,
             "spawn_pid": spawn_pid,
             "can_headless_resume": True,
+            "can_app_resume": False,
             **_antigravity_activity_fields_from_tail({}, spawn_alive),
             "needs_approval": False,
             "needs_approval_message": "",
@@ -11642,6 +11649,19 @@ def _antigravity_cli_conversation_path(session_id):
     return ANTIGRAVITY_CLI_CONVERSATIONS / f"{sid}.pb"
 
 
+def _antigravity_app_conversation_path(session_id):
+    if not session_id:
+        return None
+    sid = str(session_id).strip()
+    if not _SESSION_UUID_RE.match(sid):
+        return None
+    for suffix in (".db", ".pb"):
+        candidate = ANTIGRAVITY_CONVERSATIONS / f"{sid}{suffix}"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _antigravity_transcript_paths():
     paths = []
     seen = set()
@@ -11671,7 +11691,10 @@ def _is_antigravity_session(session_id):
     if path and path.is_file():
         return True
     cli_path = _antigravity_cli_conversation_path(session_id)
-    return bool(cli_path and cli_path.is_file())
+    if cli_path and cli_path.is_file():
+        return True
+    app_path = _antigravity_app_conversation_path(session_id)
+    return bool(app_path and app_path.is_file())
 
 
 def _load_antigravity_transcript(session_id):
@@ -11746,6 +11769,11 @@ _ANTIGRAVITY_PRINT_MODEL_RE = re.compile(
     r"Print mode:\s+starting\s+\([^\n)]*model=\"([^\"]*)\"",
     re.IGNORECASE,
 )
+_ANTIGRAVITY_APP_LS_URL_RE = re.compile(r"https://127\.0\.0\.1:(\d+)/")
+_ANTIGRAVITY_APP_LS_TOKEN_RE = re.compile(
+    r"--csrf_token\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
 _ANTIGRAVITY_META_VERSION = 2
 
 
@@ -11759,6 +11787,157 @@ def _antigravity_read_log_tail(path, max_bytes=64000):
         return raw.decode("utf-8", "replace")
     except OSError:
         return ""
+
+
+def _antigravity_app_ls_candidates():
+    text = _antigravity_read_log_tail(ANTIGRAVITY_MAIN_LOG, max_bytes=512000)
+    tokens = _ANTIGRAVITY_APP_LS_TOKEN_RE.findall(text or "")
+    latest_token = tokens[-1] if tokens else ""
+    candidates = []
+    current_token = ""
+    for line in (text or "").splitlines():
+        token_match = _ANTIGRAVITY_APP_LS_TOKEN_RE.search(line)
+        if token_match:
+            current_token = token_match.group(1)
+        url_match = _ANTIGRAVITY_APP_LS_URL_RE.search(line)
+        if url_match and current_token:
+            candidates.append({"port": url_match.group(1), "token": current_token})
+
+    if latest_token:
+        try:
+            lsof = subprocess.run(
+                ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            for line in (lsof.stdout or "").splitlines():
+                if "language_" not in line:
+                    continue
+                match = re.search(r"127\.0\.0\.1:(\d+)\s+\(LISTEN\)", line)
+                if match:
+                    candidates.append({"port": match.group(1), "token": latest_token})
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    seen = set()
+    out = []
+    for candidate in reversed(candidates):
+        port = str(candidate.get("port") or "")
+        token = str(candidate.get("token") or "")
+        if not port.isdigit() or not token:
+            continue
+        key = (port, token)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "base_url": f"https://127.0.0.1:{port}",
+            "token": token,
+            "port": int(port),
+        })
+    return out
+
+
+def _antigravity_app_rpc(method, payload, timeout=8):
+    method = (method or "").strip().strip("/")
+    if not method:
+        return {"ok": False, "error": "missing Antigravity RPC method"}
+    candidates = _antigravity_app_ls_candidates()
+    if not candidates:
+        return {
+            "ok": False,
+            "error": "Antigravity app language server is not running. Open Antigravity, then retry.",
+            "code": "antigravity_app_unavailable",
+            "via": "antigravity-app",
+        }
+    data = json.dumps(payload or {}).encode("utf-8")
+    last_error = ""
+    ctx = ssl._create_unverified_context()
+    for candidate in candidates:
+        url = f"{candidate['base_url']}/{ANTIGRAVITY_APP_LS_SERVICE}/{method}"
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "x-codeium-csrf-token": candidate["token"],
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                body = {"raw": raw}
+            return {
+                "ok": True,
+                "response": body,
+                "via": "antigravity-app",
+                "port": candidate["port"],
+            }
+        except urllib.error.HTTPError as exc:
+            raw = ""
+            try:
+                raw = exc.read().decode("utf-8", "replace")
+            except OSError:
+                pass
+            error = raw.strip() or str(exc)
+            try:
+                parsed = json.loads(raw) if raw else {}
+                error = parsed.get("message") or parsed.get("error") or error
+                code = parsed.get("code") or "antigravity_app_rpc_error"
+            except json.JSONDecodeError:
+                code = "antigravity_app_rpc_error"
+            if exc.code in (404, 405):
+                last_error = error
+                continue
+            return {
+                "ok": False,
+                "error": error,
+                "code": code,
+                "status": exc.code,
+                "via": "antigravity-app",
+            }
+        except (OSError, TimeoutError) as exc:
+            last_error = str(exc)
+            continue
+    return {
+        "ok": False,
+        "error": last_error or "Antigravity app language server is unreachable. Open Antigravity, then retry.",
+        "code": "antigravity_app_unavailable",
+        "via": "antigravity-app",
+    }
+
+
+def _antigravity_user_config_has_model(config):
+    if not isinstance(config, dict):
+        return False
+    planner = config.get("plannerConfig")
+    if not isinstance(planner, dict):
+        return False
+    return bool(planner.get("requestedModel") or planner.get("planModel"))
+
+
+def _antigravity_latest_user_config(session_id):
+    result = _antigravity_app_rpc(
+        "GetCascadeTrajectory",
+        {"cascadeId": session_id},
+        timeout=5,
+    )
+    if not result.get("ok"):
+        return None
+    trajectory = (result.get("response") or {}).get("trajectory") or {}
+    steps = trajectory.get("steps") or []
+    for step in reversed(steps):
+        user_input = (step or {}).get("userInput") or {}
+        for key in ("userConfig", "lastUserConfig"):
+            config = user_input.get(key)
+            if _antigravity_user_config_has_model(config):
+                return copy.deepcopy(config)
+    return None
 
 
 def _antigravity_cli_log_meta(path):
@@ -12493,6 +12672,7 @@ def find_antigravity_conversations(
                 _antigravity_cli_conversation_path(sid)
                 and _antigravity_cli_conversation_path(sid).is_file()
             ),
+            "can_app_resume": bool(_antigravity_app_conversation_path(sid)),
             **_antigravity_activity_fields_from_tail(tail, spawn_alive),
             "needs_approval": False,
             "needs_approval_message": "",
@@ -12971,19 +13151,51 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None):
     return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path), "via": "antigravity-spawn"}
 
 
+def _resume_session_antigravity_app(session_id, text):
+    if not _antigravity_app_conversation_path(session_id):
+        return {
+            "ok": False,
+            "error": "Antigravity app session is not in the app conversation store.",
+            "code": "antigravity_app_conversation_missing",
+            "via": "antigravity-app",
+        }
+    user_config = _antigravity_latest_user_config(session_id)
+    if not user_config:
+        return {
+            "ok": False,
+            "error": "Antigravity app session has no reusable model config. Open the session in Antigravity, select a model, then retry.",
+            "code": "antigravity_app_model_config_missing",
+            "via": "antigravity-app",
+        }
+    result = _antigravity_app_rpc(
+        "SendUserCascadeMessage",
+        {
+            "cascadeId": session_id,
+            "items": [{"text": text}],
+            "cascadeConfig": user_config,
+        },
+        timeout=10,
+    )
+    if not result.get("ok"):
+        result.setdefault("via", "antigravity-app")
+        return result
+    _record_interaction(session_id)
+    return {
+        "ok": True,
+        "resumed": True,
+        "via": "antigravity-app",
+        "port": result.get("port"),
+    }
+
+
 def resume_session_antigravity(session_id, text):
-    """Resume an Antigravity conversation with a one-shot AGY print-mode prompt."""
+    """Resume an Antigravity conversation through AGY CLI or the running app."""
     text = _strip_ccc_session_state_instruction(text)
     if not session_id or not text:
         return {"ok": False, "error": "missing session_id or text"}
     cli_conversation = _antigravity_cli_conversation_path(session_id)
     if not cli_conversation or not cli_conversation.is_file():
-        return {
-            "ok": False,
-            "error": "Antigravity session is not in the AGY CLI conversation store; open it in Antigravity to continue.",
-            "code": "antigravity_cli_conversation_missing",
-            "via": "antigravity-resume",
-        }
+        return _resume_session_antigravity_app(session_id, text)
     resolved = _resolve_antigravity_bin()
     if not resolved["available"]:
         return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}

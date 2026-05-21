@@ -1,0 +1,1 @@
+- Allow Antigravity app-only sessions to receive follow-up input through the running Antigravity app instead of requiring an AGY CLI conversation.
