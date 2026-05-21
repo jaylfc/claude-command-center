@@ -8270,6 +8270,7 @@
           patchRows(currentRepoBacklogData, !!data.pinned, rank);
           setOptimisticOverride(sessionId, { pinned: !!data.pinned, pin_rank: rank });
           renderSidebar(filterConversations($convSearch.value));
+          scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest');
         } catch (err) {
           showOpToast('Pin failed (' + err.message + ')', 'error');
         }
@@ -15351,6 +15352,24 @@
     return Math.max(0, Math.min(top, Math.max(0, $list.scrollHeight - $list.clientHeight)));
   }
 
+  function _findConversationRowElement(convId) {
+    if (!convId) return null;
+    const list = document.getElementById('convList');
+    if (!list) return null;
+    if (window.CSS && CSS.escape) {
+      return list.querySelector('.conv-item[data-id="' + CSS.escape(convId) + '"]');
+    }
+    return Array.from(list.querySelectorAll('.conv-item[data-id]'))
+      .find(row => row.dataset.id === convId) || null;
+  }
+
+  function scrollConversationRowIntoView(convId, block = 'nearest') {
+    requestAnimationFrame(() => {
+      const row = _findConversationRowElement(convId);
+      if (row) row.scrollIntoView({ block, inline: 'nearest' });
+    });
+  }
+
   function _restoreArchiveListScroll(state, $list) {
     if (!state || !$list) return;
     requestAnimationFrame(() => {
@@ -15811,6 +15830,7 @@
         .toLowerCase().includes(q);
     });
     const rowsForRender = pendingRows.concat(shaped);
+    applyOptimisticOverrides(rowsForRender);
 
     // The click-to-currentSession bridge uses sessionIdByConv et al., which
     // are normally populated inside loadConversationList() — a path archive
