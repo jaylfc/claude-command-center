@@ -1,0 +1,1 @@
+- Typing in the conversation composer no longer hitches every few seconds when the conversation list refreshes — the row-reorder animation now skips its layout-measuring snapshot while any text input is focused.

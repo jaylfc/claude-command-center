@@ -7978,8 +7978,17 @@
     // Rows that didn't exist in the prior render just appear. Used
     // to make a row moving to the top of its section after a fresh
     // mtime feel like a deliberate hand-off instead of a flicker.
+    //
+    // Skip the snapshot entirely while the user is typing in an input
+    // or textarea — each getBoundingClientRect call forces a layout
+    // flush, and over hundreds of rows that visibly stalls keystrokes
+    // every refresh tick. The user is looking at the input, not the
+    // list, so missing the animation is the right trade.
     const _flipBefore = new Map();
-    if ($convList && !document.hidden) {
+    const _activeEl = document.activeElement;
+    const _userIsTyping = !!(_activeEl && (_activeEl.tagName === 'TEXTAREA'
+      || (_activeEl.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_activeEl.type || 'text'))));
+    if ($convList && !document.hidden && !_userIsTyping) {
       for (const row of $convList.querySelectorAll('[data-id]')) {
         const id = row.getAttribute('data-id');
         if (id) _flipBefore.set(id, row.getBoundingClientRect().top);
