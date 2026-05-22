@@ -17929,6 +17929,7 @@
       if ($bugSubmitBtn) { $bugSubmitBtn.disabled = true; $bugSubmitBtn.textContent = 'Sent'; }
       if ($bugCancelBtn) { $bugCancelBtn.disabled = false; $bugCancelBtn.textContent = 'Close'; }
       try { showOpToast('Bug report filed', 'success'); } catch (_) {}
+      setTimeout(() => { bugCloseModal(); }, 2000);
       return;
     }
     // Failure path. If the server returned `markdown` we offer a copy-
