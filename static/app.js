@@ -2058,7 +2058,7 @@
     // (built by buildPaneElement) had their ids stripped, so we have
     // to query by class/tag scoped to the pane element.
     const _paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId || activePaneId()}"]`);
-    const $input = (_paneEl && _paneEl.querySelector('textarea, input[type="text"]')) || $convInput;
+    const $input = (_paneEl && _paneEl.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]')) || $convInput;
     const $sendBtn = (_paneEl && _paneEl.querySelector('.send-btn')) || $convSendBtn;
     const text = ($input && $input.value || '').trim();
     const draftConversation = currentConversation;
@@ -4481,6 +4481,18 @@
       e.stopPropagation();
       setCollapsed(!$panel.classList.contains('collapsed'));
     });
+    const $searchInput = document.getElementById('filesSearchInput');
+    if ($searchInput) {
+      $searchInput.addEventListener('input', (e) => {
+        const term = e.target.value.toLowerCase();
+        const rows = document.querySelectorAll('#sidebarFilesList .sidebar-file-row');
+        for (const row of rows) {
+          const text = row.textContent.toLowerCase();
+          row.style.display = text.includes(term) ? '' : 'none';
+        }
+      });
+      $searchInput.addEventListener('click', (e) => e.stopPropagation());
+    }
     const $header = $panel.querySelector('.files-header');
     if ($header) {
       $header.addEventListener('click', (e) => {
@@ -9241,7 +9253,7 @@
     // Wire the cloned input bar to send into this specific pane.
     const sendBtn = clone.querySelector('.send-btn');
     const ttsBtn = clone.querySelector('.tts-btn');
-    const input = clone.querySelector('textarea, input[type="text"]');
+    const input = clone.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]');
     if (sendBtn) {
       sendBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
@@ -10383,6 +10395,12 @@
     // Render each file
     for (const row of allFiles) {
       $list.appendChild(renderSidebarFileRow(row));
+    }
+    
+    // Apply any active search filter
+    const $searchInput = document.getElementById('filesSearchInput');
+    if ($searchInput && $searchInput.value) {
+      $searchInput.dispatchEvent(new Event('input'));
     }
   }
 
