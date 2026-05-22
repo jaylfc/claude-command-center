@@ -1896,5 +1896,16 @@
 })();
 </script>
 
+<!-- Fixed bottom-left pill that signals when background timer-driven
+     refreshes are firing. Hidden via CSS :has() when any textarea or
+     text-like input is focused (which is when setInterval callbacks
+     are globally muted). Lets the user confirm at a glance that the
+     "muted while typing" optimization isn't permanently stuck on. -->
+<div id="liveRefreshPill" class="live-refresh-pill" role="status" aria-live="off"
+     title="Background refresh is running. Pauses automatically while you're typing to keep the input smooth.">
+  <span class="live-refresh-dot" aria-hidden="true"></span>
+  <span class="live-refresh-label">Live refresh</span>
+</div>
+
 </body>
 </html>

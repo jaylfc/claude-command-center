@@ -1096,6 +1096,52 @@
     line-height: 1;
   }
 
+  /* Bottom-left "Live refresh" pill: shows when setInterval callbacks
+     are firing normally, hides when the user is typing (matching the
+     global setInterval mute in app.js). Gives a small but constant
+     reassurance that the auto-refresh isn't permanently disabled. */
+  .live-refresh-pill {
+    position: fixed; left: 10px; bottom: 10px;
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(0, 0, 0, 0.55);
+    color: var(--text-muted, #8b949e);
+    font-size: 10px; line-height: 1;
+    padding: 5px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    z-index: 100;
+    pointer-events: auto;
+    user-select: none;
+    transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+    backdrop-filter: blur(4px);
+  }
+  .live-refresh-pill .live-refresh-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--green, #4ade80);
+    box-shadow: 0 0 4px var(--green, #4ade80);
+    animation: live-refresh-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes live-refresh-pulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.85); }
+    50%      { opacity: 1.0;  transform: scale(1.0); }
+  }
+  /* Hide the pill whenever a text input is focused — that's exactly
+     when setInterval callbacks are muted in app.js. Uses :has() so no
+     JS state needs to track focus changes. */
+  body:has(textarea:focus) .live-refresh-pill,
+  body:has(input[type="text"]:focus) .live-refresh-pill,
+  body:has(input[type="search"]:focus) .live-refresh-pill,
+  body:has(input[type="email"]:focus) .live-refresh-pill,
+  body:has(input[type="url"]:focus) .live-refresh-pill,
+  body:has(input[type="tel"]:focus) .live-refresh-pill,
+  body:has(input[type="password"]:focus) .live-refresh-pill,
+  body:has(input:not([type]):focus) .live-refresh-pill {
+    opacity: 0;
+    transform: translateY(4px);
+    pointer-events: none;
+  }
+
   /* Conversations view */
   .conversations-view {
     flex: 1; overflow-y: auto; padding: 0 20px 16px; position: relative;
