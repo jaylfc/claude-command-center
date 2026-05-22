@@ -1,0 +1,1 @@
+- The right-rail markdown viewer can now resize up to 1600px wide (was 520) so longer files breathe, and it gained an "Open" button in its header that launches the file in the system's default app.

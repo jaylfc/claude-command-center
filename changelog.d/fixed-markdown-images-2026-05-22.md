@@ -1,0 +1,1 @@
+- Fixed an issue where markdown images (`![alt](url)`) in conversation history were incorrectly parsed as standard links preceded by an exclamation mark, preventing generated mockups from rendering.

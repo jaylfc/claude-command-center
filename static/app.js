@@ -2976,6 +2976,11 @@
     });
     // Bold **x**
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Images ![alt](url)
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) => {
+      const target = normalizeMarkdownLinkTarget(url);
+      return '<img src="' + escapeAttr(target) + '" alt="' + escapeHtml(alt) + '" class="msg-image" loading="lazy">';
+    });
     // Markdown links [text](url)
     s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, url) => {
       const target = normalizeMarkdownLinkTarget(url);
@@ -4612,7 +4617,13 @@
     const $list = document.getElementById('convList');
     return !!($list && $list.querySelector('.conv-title-input'));
   }
+  function filterGhIssues(convs) {
+    if (getViewGhPref() !== 'hide') return convs;
+    return (convs || []).filter(c => !(c.source === 'github' || c.backlog_type === 'github' || c.source === 'github_pr' || c.issue_number || c.linked_issue));
+  }
+
   function renderKanbanSidebar(convs) {
+    convs = filterGhIssues(convs);
     const $kanbanBoard = document.getElementById('kanbanBoard');
     const $convList = document.getElementById('convList');
     if (!$kanbanBoard) return;
@@ -5639,6 +5650,7 @@
   }
 
   function renderKanbanBoard(convs, targetEl, isSplit) {
+    convs = filterGhIssues(convs);
     if (!targetEl) targetEl = $kanbanBoard;
     const defaultColumns = [
       { key: 'backlog',         label: 'GH Issues',       defaultExpanded: true,
@@ -6859,6 +6871,7 @@
   }
 
   function renderConversationList(convs) {
+    convs = filterGhIssues(convs);
     convs = (Array.isArray(convs) ? convs : []).filter(c => !_isOptimisticallyStartedIssueRow(c));
     _applyOptimisticTouches(convs);
     if (!convs.length) {
@@ -10630,11 +10643,15 @@
                 const rail = document.getElementById('statusRail');
                 const bodyEl = document.getElementById('fileViewerBody');
                 const filenameEl = document.getElementById('fileViewerFilename');
+                const viewer = document.getElementById('statusRailFileViewer');
                 if (bodyEl) {
                   bodyEl.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(res.content) : res.content;
                 }
                 if (filenameEl) {
                   filenameEl.textContent = row.label;
+                }
+                if (viewer) {
+                  viewer.setAttribute('data-current-path', row.target);
                 }
                 if (rail) {
                   rail.classList.add('file-viewer-active');
@@ -13886,6 +13903,31 @@
         if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
       });
     }
+    const $fileViewerOpenExt = document.getElementById('fileViewerOpenExternalBtn');
+    if ($fileViewerOpenExt) {
+      $fileViewerOpenExt.addEventListener('click', async () => {
+        const viewer = document.getElementById('statusRailFileViewer');
+        const path = viewer && viewer.getAttribute('data-current-path');
+        if (!path) return;
+        const sid = (currentSession && currentSession.id) || '';
+        $fileViewerOpenExt.disabled = true;
+        try {
+          const r = await fetch('/api/reveal-file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path, session_id: sid }),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({ error: 'open failed' }));
+            showOpToast('Open failed: ' + (j.error || ('HTTP ' + r.status)), 'error');
+          }
+        } catch (err) {
+          showOpToast('Open failed: ' + (err && err.message || 'network error'), 'error');
+        } finally {
+          $fileViewerOpenExt.disabled = false;
+        }
+      });
+    }
 
     // Status-position toggle. Two states: top (default) and right (resizable
     // rail beside the conversation pane). Body class is restored before
@@ -13899,7 +13941,11 @@
     const $statusRailRestore = document.getElementById('statusRailRestoreBtn');
     const STATUS_RAIL_DEFAULT_WIDTH = 260;
     const STATUS_RAIL_MIN_WIDTH = 220;
-    const STATUS_RAIL_MAX_WIDTH = 520;
+    // Generous cap so the rail can host the MD file viewer at a
+    // readable width on big screens. The natural ceiling is
+    // (paneWidth - 260) so the conversation never shrinks below
+    // ~260px of legible space.
+    const STATUS_RAIL_MAX_WIDTH = 1600;
     const STATUS_RAIL_COLLAPSE_WIDTH = 130;
     const _syncStatusIcon = () => {
       if (!$statusIcon) return;
@@ -17208,8 +17254,15 @@
 
     const initialDisplay = selectEl.style.display;
 
-    // Hide original select
-    selectEl.style.display = 'none';
+    // Hide original select visually but let style.display be used for logical visibility
+    selectEl.style.position = 'absolute';
+    selectEl.style.opacity = '0';
+    selectEl.style.pointerEvents = 'none';
+    selectEl.style.width = '0';
+    selectEl.style.height = '0';
+    selectEl.style.margin = '0';
+    selectEl.style.padding = '0';
+    selectEl.style.border = 'none';
 
     const container = document.createElement('div');
     container.className = 'custom-select-container';
@@ -17326,15 +17379,7 @@
     });
 
     const observer = new MutationObserver(() => {
-      const currentDisplay = selectEl.style.display;
-      if (currentDisplay === 'none') {
-        container.style.display = 'none';
-      } else {
-        container.style.display = currentDisplay;
-        observer.disconnect();
-        selectEl.style.display = 'none';
-        observer.observe(selectEl, { attributes: true });
-      }
+      container.style.display = selectEl.style.display;
       updateTrigger();
     });
     observer.observe(selectEl, { attributes: true });
@@ -19456,6 +19501,10 @@
     } else {
       document.body.classList.remove('hide-gh-issues');
     }
+    if (typeof conversationsData !== 'undefined') {
+      if (typeof renderKanbanSidebar === 'function') renderKanbanSidebar(conversationsData);
+      if (typeof renderConversationList === 'function') renderConversationList(conversationsData);
+    }
   }
   function refreshAppearanceChecks() {
     const t = getThemePref();
@@ -19467,10 +19516,18 @@
       el.textContent = el.getAttribute('data-check-font') === f ? '✓' : '';
     });
     const v = getViewGhPref();
-    if (window.$settingsPopover) {
-      window.$settingsPopover.querySelectorAll('[data-check-view-gh]').forEach(el => {
-        el.textContent = el.getAttribute('data-check-view-gh') === v ? '✓' : '';
-      });
+    if ($settingsPopover) {
+      const btnShow = $settingsPopover.querySelector('#btnShowGhIssues');
+      const btnHide = $settingsPopover.querySelector('#btnHideGhIssues');
+      if (btnShow && btnHide) {
+        if (v === 'hide') {
+          btnShow.style.display = '';
+          btnHide.style.display = 'none';
+        } else {
+          btnShow.style.display = 'none';
+          btnHide.style.display = '';
+        }
+      }
     }
   }
   // Live-update when the user has 'system' selected and OS theme flips.

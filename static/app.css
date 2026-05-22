@@ -4972,6 +4972,25 @@
     background: var(--surface-2, #161b22);
     color: var(--text, #c9d1d9);
   }
+  .file-viewer-open-external {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted, #8b949e);
+    font-size: 11px; line-height: 1;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .file-viewer-open-external:hover {
+    background: var(--surface-2, #161b22);
+    color: var(--text, #c9d1d9);
+    border-color: rgba(255,255,255,0.18);
+  }
+  .file-viewer-open-external:disabled { opacity: 0.5; pointer-events: none; }
+  .file-viewer-open-external svg { display: block; }
   .file-viewer-body {
     flex: 1;
     overflow-y: auto;
