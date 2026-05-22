@@ -21315,9 +21315,26 @@ def _tts_say(text):
 # ---------------------------------------------------------------------------
 
 _INDEX_HTML_PATH = STATIC_DIR / "index.html"
+def _static_asset_url(name):
+    try:
+        stamp = str(int((STATIC_DIR / name).stat().st_mtime))
+    except OSError:
+        stamp = __version__
+    return f"/static/{name}?v={stamp}"
+
+
 def _load_index_html():
     try:
-        return _INDEX_HTML_PATH.read_text()
+        html_text = _INDEX_HTML_PATH.read_text()
+        html_text = html_text.replace(
+            'href="/static/app.css"',
+            f'href="{_static_asset_url("app.css")}"',
+        )
+        html_text = html_text.replace(
+            'src="/static/app.js"',
+            f'src="{_static_asset_url("app.js")}"',
+        )
+        return html_text
     except OSError as e:
         return "<h1>index.html missing</h1><pre>" + str(e) + "</pre>"
 HTML_PAGE = _load_index_html()
