@@ -1,0 +1,1 @@
+- Bolded the user's messages in the conversation pane and in the sticky top-bar "last user message" so they stand out from assistant text at a glance.

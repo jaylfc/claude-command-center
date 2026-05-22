@@ -1070,6 +1070,7 @@
   }
   .conv-sticky-header .user-msg {
     font-size: 14px; color: var(--text); line-height: 1.4;
+    font-weight: 700;
     flex: 1 1 auto; min-height: 0;
   }
   .conv-sticky-header .label { color: var(--green); font-weight: 600; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
@@ -1166,7 +1167,7 @@
     line-height: 1.6;
     color: var(--accent);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
-    font-weight: 400;
+    font-weight: 700;
   }
   .conv-pane.has-conv-bg .conversations-view .event.user_text {
     background: var(--conv-user-bg);
