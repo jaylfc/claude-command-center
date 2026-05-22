@@ -2386,6 +2386,283 @@ def find_all_conversations(
     return out
 
 
+_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 1
+_ARCHIVE_RESPONSE_CACHE_FILE = COMMAND_CENTER_STATE_DIR / "archive-conversations-cache.json"
+_ARCHIVE_RESPONSE_CACHE_FRESH_TTL = 30
+_ARCHIVE_RESPONSE_CACHE_LOCK = threading.Lock()
+_ARCHIVE_RESPONSE_CACHE_LOADED = False
+_ARCHIVE_RESPONSE_CACHE = {}
+_ARCHIVE_RESPONSE_REFRESHING = set()
+
+
+def _archive_response_cache_key(
+    *,
+    include_prs=False,
+    resolve_pr_states=False,
+    resolve_effective=False,
+    resolve_worktree_dirty=False,
+):
+    return (
+        f"include_prs={int(bool(include_prs))};"
+        f"resolve_prs={int(bool(resolve_pr_states))};"
+        f"resolve_effective={int(bool(resolve_effective))};"
+        f"resolve_worktrees={int(bool(resolve_worktree_dirty))}"
+    )
+
+
+def _load_archive_response_cache():
+    global _ARCHIVE_RESPONSE_CACHE_LOADED
+    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+        if _ARCHIVE_RESPONSE_CACHE_LOADED:
+            return
+        _ARCHIVE_RESPONSE_CACHE_LOADED = True
+    try:
+        with _ARCHIVE_RESPONSE_CACHE_FILE.open("r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    if data.get("schema_version") != _ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION:
+        return
+    entries = data.get("entries")
+    if not isinstance(entries, dict):
+        return
+    keep = {}
+    for key, entry in entries.items():
+        if not isinstance(key, str) or not isinstance(entry, dict):
+            continue
+        if not isinstance(entry.get("conversations"), list):
+            continue
+        keep[key] = {
+            "cached_at": float(entry.get("cached_at") or 0),
+            "conversations": entry.get("conversations") or [],
+        }
+    if keep:
+        with _ARCHIVE_RESPONSE_CACHE_LOCK:
+            _ARCHIVE_RESPONSE_CACHE.update(keep)
+
+
+def _save_archive_response_cache():
+    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+        snapshot = {
+            "schema_version": _ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION,
+            "entries": dict(_ARCHIVE_RESPONSE_CACHE),
+        }
+    try:
+        _ARCHIVE_RESPONSE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ARCHIVE_RESPONSE_CACHE_FILE.with_suffix(".json.tmp")
+        with tmp.open("w") as f:
+            json.dump(snapshot, f)
+        tmp.replace(_ARCHIVE_RESPONSE_CACHE_FILE)
+    except OSError as e:
+        print(f"  [archive-cache] save failed: {e}")
+
+
+def _archive_response_cache_get(key):
+    _load_archive_response_cache()
+    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+        entry = _ARCHIVE_RESPONSE_CACHE.get(key)
+        if not entry:
+            return None
+        return {
+            "cached_at": float(entry.get("cached_at") or 0),
+            "conversations": [dict(r) for r in (entry.get("conversations") or []) if isinstance(r, dict)],
+        }
+
+
+def _archive_response_cache_put(key, conversations):
+    rows = [dict(r) for r in (conversations or []) if isinstance(r, dict)]
+    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+        _ARCHIVE_RESPONSE_CACHE[key] = {
+            "cached_at": time.time(),
+            "conversations": rows,
+        }
+    _save_archive_response_cache()
+
+
+def _archive_response_cache_is_stale(entry):
+    return (time.time() - float(entry.get("cached_at") or 0)) > _ARCHIVE_RESPONSE_CACHE_FRESH_TTL
+
+
+def _archive_response_refreshing(key):
+    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+        return key in _ARCHIVE_RESPONSE_REFRESHING
+
+
+def _archive_response_refresh_begin(key):
+    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+        if key in _ARCHIVE_RESPONSE_REFRESHING:
+            return False
+        _ARCHIVE_RESPONSE_REFRESHING.add(key)
+        return True
+
+
+def _archive_response_refresh_end(key):
+    with _ARCHIVE_RESPONSE_CACHE_LOCK:
+        _ARCHIVE_RESPONSE_REFRESHING.discard(key)
+
+
+_ARCHIVE_SIDECAR_DEFAULTS = {
+    "sidecar_status": None,
+    "sidecar_has_writes": False,
+    "sidecar_tool": None,
+    "sidecar_file": None,
+    "sidecar_ts": 0,
+    "sidecar_in_flight": False,
+    "needs_approval": False,
+    "needs_approval_message": "",
+    "question_waiting": False,
+    "question_text": "",
+    "question_header": "",
+    "question_options": [],
+}
+
+
+def _rehydrate_archive_cached_rows(rows):
+    """Apply fast-changing state to cached archive rows before responding."""
+    try:
+        name_overrides = _load_session_name_overrides()
+    except Exception:
+        name_overrides = {}
+    try:
+        archived_set = set(_load_archived_conversations())
+    except Exception:
+        archived_set = set()
+    try:
+        verified_set = set(_load_verified_conversations())
+    except Exception:
+        verified_set = set()
+    try:
+        pinned_list = _load_pinned_conversations()
+    except Exception:
+        pinned_list = []
+    pinned_rank = _pinned_rank_map(pinned_list)
+
+    hydrated = []
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        sid = row.get("session_id") or row.get("id")
+        if sid:
+            override = name_overrides.get(sid)
+            if override:
+                row["display_name"] = override
+                row["name_overridden"] = True
+            elif (row.get("source") or "interactive") == "interactive":
+                row["display_name"] = None
+                row["name_overridden"] = False
+            else:
+                row["name_overridden"] = False
+
+            row["archived"] = sid in archived_set
+            row["verified"] = sid in verified_set
+            row["pinned"] = sid in pinned_rank
+            row["pin_rank"] = pinned_rank.get(sid)
+
+            is_live = _archive_session_is_live(sid)
+            row["is_live"] = is_live
+            for k, v in _ARCHIVE_SIDECAR_DEFAULTS.items():
+                row[k] = copy.deepcopy(v)
+            if is_live:
+                live_row = {"session_id": sid, "is_live": True}
+                try:
+                    _add_sidecar_fields(live_row)
+                    for k in _ARCHIVE_SIDECAR_DEFAULTS:
+                        if k in live_row:
+                            row[k] = live_row[k]
+                except Exception:
+                    pass
+        hydrated.append(row)
+
+    _apply_pinned_conversation_fields(hydrated, pinned_list)
+    hydrated.sort(key=lambda r: r.get("mtime") or r.get("modified") or 0, reverse=True)
+    _sort_pinned_conversations_first(hydrated, pinned_list)
+    return hydrated
+
+
+def _archive_cached_payload(key):
+    entry = _archive_response_cache_get(key)
+    if not entry:
+        return None
+    rows = _rehydrate_archive_cached_rows(entry.get("conversations") or [])
+    return {
+        "conversations": rows,
+        "count": len(rows),
+        "cached": True,
+        "stale": _archive_response_cache_is_stale(entry),
+        "refreshing": _archive_response_refreshing(key),
+        "cached_at": entry.get("cached_at") or 0,
+    }
+
+
+def _build_archive_conversations(
+    *,
+    include_prs=False,
+    resolve_pr_states=False,
+    resolve_effective=False,
+    resolve_worktree_dirty=False,
+    progress_step=None,
+):
+    def progress(key, **kwargs):
+        if progress_step:
+            progress_step(key, **kwargs)
+
+    progress("folders",     state="running")
+    progress("transcripts", state="running")
+    progress("infer",       state="running")
+    progress("worktrees",   state="running")
+    progress("codex",       state="running")
+    progress("antigravity", state="running")
+    raw_convs = find_all_conversations(
+        resolve_pr_states=resolve_pr_states,
+        resolve_effective=resolve_effective,
+        resolve_worktree_dirty=resolve_worktree_dirty,
+    )
+    count = len(raw_convs or [])
+    progress("folders",     state="done")
+    progress("transcripts", state="done", count=count, total=count, detail=f"{count} conversations parsed.")
+    if resolve_effective:
+        progress("infer",       state="done")
+    else:
+        progress("infer",       state="skipped", detail="Deferred until archive rows are visible.")
+    if resolve_worktree_dirty:
+        progress("worktrees",   state="done")
+    else:
+        progress("worktrees",   state="skipped", detail="Deferred until archive rows are visible.")
+    progress("codex",       state="done")
+    progress("antigravity", state="done")
+    if include_prs:
+        progress("pr_states",   state="running", detail="gh pr view per known PR URL.")
+        convs = conversations_with_open_prs(raw_convs)
+        progress("pr_states",   state="done")
+    else:
+        convs = raw_convs
+        progress("pr_states",   state="skipped", detail="Deferred until archive rows are visible.")
+    progress("issues",      state="skipped", detail="Loaded by /api/issues/all.")
+    progress("group_chats", state="skipped", detail="Loaded by /api/group-chats/archived.")
+    return convs
+
+
+def _archive_refresh_response_cache_async(key, options):
+    if not _archive_response_refresh_begin(key):
+        return False
+
+    def refresh():
+        try:
+            convs = _build_archive_conversations(**options)
+            _archive_response_cache_put(key, convs)
+            _save_conv_meta_cache()
+        except Exception as e:
+            print(f"  [archive-cache] background refresh failed: {e}")
+        finally:
+            _archive_response_refresh_end(key)
+
+    threading.Thread(target=refresh, daemon=True).start()
+    return True
+
+
 def load_known_repos():
     """Auto-detect projects for the picker by scanning $HOME.
 
@@ -21830,50 +22107,43 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             resolve_effective = qs.get("resolve_effective", ["0"])[0] in ("1", "true")
             resolve_worktrees = qs.get("resolve_worktrees", ["0"])[0] in ("1", "true")
             background = qs.get("background", ["0"])[0] in ("1", "true")
+            stale_ok = qs.get("stale_ok", ["0"])[0] in ("1", "true")
+            cache_key = _archive_response_cache_key(
+                include_prs=include_prs,
+                resolve_pr_states=resolve_pr_states,
+                resolve_effective=resolve_effective,
+                resolve_worktree_dirty=resolve_worktrees,
+            )
+            cache_options = {
+                "include_prs": include_prs,
+                "resolve_pr_states": resolve_pr_states,
+                "resolve_effective": resolve_effective,
+                "resolve_worktree_dirty": resolve_worktrees,
+            }
+            if stale_ok:
+                cached = _archive_cached_payload(cache_key)
+                if cached:
+                    if cached.get("stale"):
+                        _archive_refresh_response_cache_async(cache_key, cache_options)
+                        cached["refreshing"] = True
+                    self.send_json(cached)
+                    return
             if not background:
                 _archive_load_begin()
             def progress_step(*args, **kwargs):
                 if not background:
                     _archive_load_set_step(*args, **kwargs)
             try:
-                progress_step("folders",     state="running")
-                progress_step("transcripts", state="running")
-                progress_step("infer",       state="running")
-                progress_step("worktrees",   state="running")
-                progress_step("codex",       state="running")
-                progress_step("antigravity", state="running")
-                raw_convs = find_all_conversations(
+                convs = _build_archive_conversations(
+                    include_prs=include_prs,
                     resolve_pr_states=resolve_pr_states,
                     resolve_effective=resolve_effective,
                     resolve_worktree_dirty=resolve_worktrees,
+                    progress_step=progress_step,
                 )
-                count = len(raw_convs or [])
-                progress_step("folders",     state="done")
-                progress_step("transcripts", state="done", count=count, total=count, detail=f"{count} conversations parsed.")
-                if resolve_effective:
-                    progress_step("infer",       state="done")
-                else:
-                    progress_step("infer",       state="skipped", detail="Deferred until archive rows are visible.")
-                if resolve_worktrees:
-                    progress_step("worktrees",   state="done")
-                else:
-                    progress_step("worktrees",   state="skipped", detail="Deferred until archive rows are visible.")
-                progress_step("codex",       state="done")
-                progress_step("antigravity", state="done")
-                if include_prs:
-                    progress_step("pr_states",   state="running", detail="gh pr view per known PR URL.")
-                    convs = conversations_with_open_prs(raw_convs)
-                    progress_step("pr_states",   state="done")
-                else:
-                    convs = raw_convs
-                    progress_step("pr_states",   state="skipped", detail="Deferred until archive rows are visible.")
-                # Issues / group-chats run via separate endpoints; mark them
-                # skipped here so the stage list renders complete (○/✓ only
-                # applies to stages this endpoint actually owns).
-                progress_step("issues",      state="skipped", detail="Loaded by /api/issues/all.")
-                progress_step("group_chats", state="skipped", detail="Loaded by /api/group-chats/archived.")
                 if not background:
                     _archive_load_complete(convs)
+                _archive_response_cache_put(cache_key, convs)
                 _save_conv_meta_cache()
                 self.send_json({"conversations": convs, "count": len(convs)})
             except Exception as e:

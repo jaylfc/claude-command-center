@@ -8899,7 +8899,7 @@
     if (isInlineRenameInProgress()) return;
     if ($convRefreshBtn) $convRefreshBtn.classList.add('spinning');
     conversationsLoaded = false;
-    await refreshArchiveData();
+    await refreshArchiveData({ force: true });
     renderArchiveList($convSearch ? $convSearch.value : '');
     if (selectedRepoPath()) await loadConversationList();
     setTimeout(() => {
@@ -15399,6 +15399,9 @@
   async function loadArchiveAll(opts = {}) {
     try {
       const params = new URLSearchParams();
+      if (opts.staleOk !== false) {
+        params.set('stale_ok', '1');
+      }
       if (opts.includePrs) {
         params.set('include_prs', '1');
         params.set('resolve_prs', '1');
@@ -15410,6 +15413,9 @@
       const r = await fetch(url);
       if (!r.ok) return [];
       const d = await r.json();
+      if (d && d.cached && d.stale && d.refreshing) {
+        _scheduleArchiveStaleRetry();
+      }
       return Array.isArray(d.conversations) ? d.conversations : [];
     } catch (_) { return []; }
   }
@@ -15478,6 +15484,7 @@
   let _archiveProgressPollId = null;
   let _archiveSideDataPromise = null;
   let _archivePrHydratePromise = null;
+  let _archiveStaleRetryId = null;
   let _archiveSideDataHydratedAt = 0;
   let _archivePrHydratedAt = 0;
   const ARCHIVE_HYDRATE_TTL_MS = 5 * 60 * 1000;
@@ -15488,6 +15495,15 @@
     if (!archiveLoaded) return;
     renderArchiveFolderFilter();
     renderArchiveList(_archiveQuery());
+  }
+  function _scheduleArchiveStaleRetry() {
+    if (_archiveStaleRetryId) return;
+    _archiveStaleRetryId = setTimeout(() => {
+      _archiveStaleRetryId = null;
+      refreshArchiveData({ staleOk: true })
+        .then(() => renderArchiveList(_archiveQuery()))
+        .catch(() => {});
+    }, 2500);
   }
   function _hydrateArchiveSideData(force = false) {
     if (_archiveSideDataPromise) return _archiveSideDataPromise;
@@ -15545,12 +15561,12 @@
   }
 
   let _archiveRefreshPromise = null;
-  async function refreshArchiveData() {
+  async function refreshArchiveData(opts = {}) {
     if (_archiveRefreshPromise) return _archiveRefreshPromise;
     _startArchiveProgressPoll();
     _archiveRefreshPromise = (async () => {
       try {
-        const convs = await loadArchiveAll();
+        const convs = await loadArchiveAll({ staleOk: opts.staleOk !== false && !opts.force });
         archiveData = _mergeArchivePrSnapshot(convs, archiveData);
         archiveLoaded = true;
         renderArchiveFolderFilter();
