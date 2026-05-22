@@ -1,0 +1,1 @@
+Launch on an Antigravity app session (one not in the AGY CLI conversation store) now opens Antigravity.app and drops the Terminal into a login shell at the session's cwd, instead of execing into a fresh `agy` chat with a confusing "not in conversation store" message.

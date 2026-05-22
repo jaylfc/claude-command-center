@@ -5745,21 +5745,59 @@ def _build_resume_command(session_id, cwd, cwd_exists):
     elif is_gemini:
         resume_cmd = f"gemini --resume {session_id}"
     elif is_antigravity:
+        # Two flavors of Antigravity session live on disk:
+        #   1. AGY CLI sessions — have a `.pb` in ~/.gemini/antigravity-cli/
+        #      conversations/. `agy --conversation <sid>` can resume them.
+        #   2. Antigravity App sessions — live in ~/.gemini/antigravity/
+        #      conversations/ only. The CLI cannot import these; running
+        #      `agy --conversation <sid>` against them silently starts a
+        #      fresh AGY chat with a confusing "not in conversation store"
+        #      message. For app-only sessions we instead open Antigravity.app
+        #      (so the user can pick up the session there) and drop the user
+        #      into a login shell at the session's cwd — useful starting
+        #      point, no misleading auto-exec into a stranger AGY chat.
         resolved = _resolve_antigravity_bin()
-        if resolved.get("available"):
-            if _antigravity_cli_conversation_path(session_id) and _antigravity_cli_conversation_path(session_id).is_file():
-                resume_cmd = (
-                    "echo " + _shell_quote("CCC: opening AGY conversation in the TUI.")
-                    + " && exec " + _antigravity_shell_command(resolved)
-                    + " --conversation " + _shell_quote(session_id)
+        cli_conversation = _antigravity_cli_conversation_path(session_id)
+        cli_resumable = bool(cli_conversation and cli_conversation.is_file())
+        if cli_resumable and resolved.get("available"):
+            resume_cmd = (
+                "echo " + _shell_quote("CCC: opening AGY conversation in the TUI.")
+                + " && exec " + _antigravity_shell_command(resolved)
+                + " --conversation " + _shell_quote(session_id)
+            )
+        elif _antigravity_app_conversation_path(session_id):
+            # App-only session — open Antigravity.app (best-effort) and leave
+            # the user at a shell. We deliberately do NOT exec into `agy`:
+            # `agy --conversation <sid>` against an app-only id silently
+            # starts a fresh AGY chat which is more confusing than helpful.
+            # Always reach the final `exec`, even if `open -a Antigravity`
+            # fails (no app installed), hence `; ` before exec.
+            resume_cmd = (
+                "echo " + _shell_quote(
+                    "CCC: this Antigravity session lives in the app, not the AGY CLI. "
+                    "Opening Antigravity.app so you can resume it there. "
+                    "Shell stays at the session cwd."
                 )
-            else:
-                resume_cmd = (
-                    "echo " + _shell_quote("CCC: this Antigravity app session is not in the AGY CLI conversation store; use /open inside AGY.")
-                    + " && exec " + _antigravity_shell_command(resolved)
+                + "; open -a Antigravity >/dev/null 2>&1 || true"
+                + "; exec ${SHELL:-/bin/zsh} -l"
+            )
+        elif resolved.get("available"):
+            # Antigravity session but neither CLI-store nor App-store has it
+            # (rare — e.g. brain-only transcript). Skip the auto-exec into
+            # AGY entirely so the user doesn't end up in an unrelated chat.
+            resume_cmd = (
+                "echo " + _shell_quote(
+                    "CCC: this Antigravity session has no resumable conversation "
+                    "(neither AGY CLI nor the app store has it). "
+                    "Open Antigravity manually if you want to continue it."
                 )
+                + "; exec ${SHELL:-/bin/zsh} -l"
+            )
         else:
-            resume_cmd = "echo " + _shell_quote(resolved.get("reason") or "Antigravity CLI not found.")
+            resume_cmd = (
+                "echo " + _shell_quote(resolved.get("reason") or "Antigravity CLI not found.")
+                + "; exec ${SHELL:-/bin/zsh} -l"
+            )
     else:
         resume_cmd = f"claude --resume {session_id} --dangerously-skip-permissions"
     if not cwd:
