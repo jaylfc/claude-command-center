@@ -524,7 +524,7 @@ class TestRepoContextHelpers(unittest.TestCase):
              mock.patch.object(
                  self.server,
                  "_antigravity_latest_user_config",
-                 return_value=user_config,
+                 return_value={"ok": True, "config": user_config},
              ), \
              mock.patch.object(
                  self.server,
@@ -550,6 +550,8 @@ class TestRepoContextHelpers(unittest.TestCase):
         )
 
     def test_antigravity_app_resume_requires_model_config(self):
+        """When trajectory loads but has no model picked, surface the
+        'pick a model in Antigravity' error (not the RPC-failure error)."""
         sid = "00000000-0000-4000-8000-000000000001"
         with mock.patch.object(
             self.server,
@@ -559,13 +561,41 @@ class TestRepoContextHelpers(unittest.TestCase):
              mock.patch.object(
                  self.server,
                  "_antigravity_latest_user_config",
-                 return_value=None,
+                 return_value={"ok": False, "rpc": None},
              ), \
              mock.patch.object(self.server, "_antigravity_app_rpc") as rpc:
             result = self.server._resume_session_antigravity_app(sid, "hello")
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "antigravity_app_model_config_missing")
+        rpc.assert_not_called()
+
+    def test_antigravity_app_resume_passes_through_rpc_failure(self):
+        """When the trajectory RPC itself failed (app not running, etc.),
+        surface the actual RPC error instead of the misleading
+        'no reusable model config' message."""
+        sid = "00000000-0000-4000-8000-000000000001"
+        rpc_failure = {
+            "ok": False,
+            "error": "Antigravity app language server is not running. Open Antigravity, then retry.",
+            "code": "antigravity_app_unavailable",
+            "via": "antigravity-app",
+        }
+        with mock.patch.object(
+            self.server,
+            "_antigravity_app_conversation_path",
+            return_value=pathlib.Path("/tmp/session.db"),
+        ), \
+             mock.patch.object(
+                 self.server,
+                 "_antigravity_latest_user_config",
+                 return_value={"ok": False, "rpc": rpc_failure},
+             ), \
+             mock.patch.object(self.server, "_antigravity_app_rpc") as rpc:
+            result = self.server._resume_session_antigravity_app(sid, "hello")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "antigravity_app_unavailable")
         rpc.assert_not_called()
 
     def test_antigravity_latest_user_config_reuses_last_valid_model(self):
@@ -587,8 +617,9 @@ class TestRepoContextHelpers(unittest.TestCase):
         ) as rpc:
             result = self.server._antigravity_latest_user_config("sid")
 
-        self.assertEqual(result, config)
-        self.assertIsNot(result, config)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["config"], config)
+        self.assertIsNot(result["config"], config)
         rpc.assert_called_once_with(
             "GetCascadeTrajectory",
             {"cascadeId": "sid"},

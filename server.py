@@ -12672,22 +12672,31 @@ def _antigravity_user_config_has_model(config):
 
 
 def _antigravity_latest_user_config(session_id):
-    result = _antigravity_app_rpc(
+    """Find the most recent userConfig with a model in the App's trajectory.
+
+    Returns a dict with either {"ok": True, "config": <cfg>} on success,
+    {"ok": False, "rpc": <rpc-result>} when the RPC itself failed (app
+    not running, session not loaded, etc.), or {"ok": False, "rpc": None}
+    when the RPC succeeded but the trajectory has no usable model — the
+    session is loaded but the user never picked one. The caller uses the
+    distinction to surface the right error.
+    """
+    rpc_result = _antigravity_app_rpc(
         "GetCascadeTrajectory",
         {"cascadeId": session_id},
         timeout=5,
     )
-    if not result.get("ok"):
-        return None
-    trajectory = (result.get("response") or {}).get("trajectory") or {}
+    if not rpc_result.get("ok"):
+        return {"ok": False, "rpc": rpc_result}
+    trajectory = (rpc_result.get("response") or {}).get("trajectory") or {}
     steps = trajectory.get("steps") or []
     for step in reversed(steps):
         user_input = (step or {}).get("userInput") or {}
         for key in ("userConfig", "lastUserConfig"):
             config = user_input.get(key)
             if _antigravity_user_config_has_model(config):
-                return copy.deepcopy(config)
-    return None
+                return {"ok": True, "config": copy.deepcopy(config)}
+    return {"ok": False, "rpc": None}
 
 
 def _antigravity_cli_log_meta(path):
@@ -13981,14 +13990,24 @@ def _resume_session_antigravity_app(session_id, text):
             "code": "antigravity_app_conversation_missing",
             "via": "antigravity-app",
         }
-    user_config = _antigravity_latest_user_config(session_id)
-    if not user_config:
+    cfg_result = _antigravity_latest_user_config(session_id)
+    if not cfg_result.get("ok"):
+        rpc = cfg_result.get("rpc")
+        if rpc and not rpc.get("ok"):
+            # Pass through the actual RPC failure (app not running,
+            # session not loaded into the app's cascade store, etc.) —
+            # the generic "no reusable model" error misled users into
+            # thinking the fix was always "pick a model in Antigravity"
+            # when the real cause was "Antigravity itself isn't ready".
+            rpc.setdefault("via", "antigravity-app")
+            return rpc
         return {
             "ok": False,
             "error": "Antigravity app session has no reusable model config. Open the session in Antigravity, select a model, then retry.",
             "code": "antigravity_app_model_config_missing",
             "via": "antigravity-app",
         }
+    user_config = cfg_result["config"]
     result = _antigravity_app_rpc(
         "SendUserCascadeMessage",
         {
