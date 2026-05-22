@@ -13048,11 +13048,35 @@
               : '';
             const toolClass = baseName === 'AskUserQuestion' ? ' ask-user-question' : '';
             const detail = formatToolCallDetail(b.name, b.detail);
+            const askQ = baseName === 'AskUserQuestion' && b.question && typeof b.question === 'object' ? b.question : null;
+            let askBody = '';
+            if (askQ) {
+              const headerHtml = askQ.header
+                ? '<span class="ask-user-header">' + escapeHtml(askQ.header) + '</span>'
+                : '';
+              const questionHtml = askQ.question
+                ? '<div class="ask-user-question-text">' + escapeHtml(askQ.question) + '</div>'
+                : '';
+              const opts = Array.isArray(askQ.options) ? askQ.options : [];
+              const optsHtml = opts.length
+                ? '<ul class="ask-user-options">' + opts.map(function (o) {
+                    const lbl = (o && typeof o === 'object') ? (o.label || '') : String(o || '');
+                    const desc = (o && typeof o === 'object') ? (o.description || '') : '';
+                    return '<li>'
+                      + '<span class="ask-user-option-label">' + escapeHtml(lbl) + '</span>'
+                      + (desc ? '<span class="ask-user-option-desc"> — ' + escapeHtml(desc) + '</span>' : '')
+                      + '</li>';
+                  }).join('') + '</ul>'
+                : '';
+              askBody = headerHtml + questionHtml + optsHtml;
+            }
             html += '<div class="tool-call' + toolClass + detail.className + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '">'
               + '<span class="arrow">-></span> '
               + sourceHtml
               + '<span class="tool-name" data-tool-name="' + escapeAttr(b.name || '') + '">' + escapeHtml(displayName) + '</span>'
-              + (detail.display ? ' <span class="tool-detail" title="' + escapeAttr(detail.full) + '">' + escapeHtml(detail.display) + '</span>' : '')
+              + (askBody
+                  ? askBody
+                  : (detail.display ? ' <span class="tool-detail" title="' + escapeAttr(detail.full) + '">' + escapeHtml(detail.display) + '</span>' : ''))
               + '</div>';
           } else if (b.kind === 'text') {
             html += '<div class="assistant-text">' + renderMarkdown(b.text) + '</div>';

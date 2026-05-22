@@ -8944,6 +8944,33 @@ def _ask_user_question_payload(tool_input, max_options=3):
     }
 
 
+def _ask_user_question_structured(tool_input):
+    """Full header/question/options for rich client rendering (no truncation cap)."""
+    if not isinstance(tool_input, dict):
+        return {}
+    questions = tool_input.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return {}
+    first = questions[0]
+    if not isinstance(first, dict):
+        return {}
+    header = _prompt_fragment(first.get("header"), 120)
+    question = _prompt_fragment(first.get("question"), 400)
+    options = []
+    for opt in first.get("options") or []:
+        if isinstance(opt, dict):
+            label = _prompt_fragment(opt.get("label"), 120)
+            description = _prompt_fragment(opt.get("description"), 240)
+        else:
+            label = _prompt_fragment(opt, 120)
+            description = ""
+        if label:
+            options.append({"label": label, "description": description})
+    if not (header or question or options):
+        return {}
+    return {"header": header, "question": question, "options": options}
+
+
 def _tool_use_detail(name, tool_input, max_len=200):
     if not isinstance(tool_input, dict):
         tool_input = {}
@@ -9361,7 +9388,12 @@ def _parse_conversation_event(ev, line_num):
                 name = block.get("name", "?")
                 detail_max = 1200 if name == "Bash" else 240
                 detail = _tool_use_detail(name, inp, max_len=detail_max)
-                blocks.append({"kind": "tool_use", "name": name, "detail": detail})
+                tool_block = {"kind": "tool_use", "name": name, "detail": detail}
+                if name == "AskUserQuestion":
+                    ask = _ask_user_question_structured(inp)
+                    if ask:
+                        tool_block["question"] = ask
+                blocks.append(tool_block)
             elif btype == "text":
                 txt = block.get("text", "").strip()
                 if txt:
