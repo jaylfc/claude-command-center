@@ -1788,8 +1788,8 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertTrue(result["session_file_sandbox"])
         self.assertTrue(server._open_launch_allowed(result))
 
-    def test_open_target_blocks_unreferenced_file_outside_cwd(self):
-        """The session tool exception is exact-path, not a directory escape."""
+    def test_open_target_allows_files_outside_sandbox(self):
+        """Post-sandbox-removal: any resolvable path is allowed through /api/open."""
         for mod in ("server",):
             sys.modules.pop(mod, None)
         import server
@@ -1817,12 +1817,12 @@ class TestRepoContextHelpers(unittest.TestCase):
                     repo_path=str(repo),
                 )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], 403)
-        self.assertIn("outside repo/session sandbox", result["error"])
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["core_sandbox"])
+        self.assertFalse(result["session_sandbox"])
 
-    def test_open_launch_blocks_non_markdown_session_cwd_files(self):
-        """Launching outside the repo/log sandbox stays limited to markdown."""
+    def test_open_launch_allowed_for_any_resolved_target(self):
+        """Post-sandbox-removal: _open_launch_allowed returns True unconditionally."""
         for mod in ("server",):
             sys.modules.pop(mod, None)
         import server
@@ -1847,7 +1847,7 @@ class TestRepoContextHelpers(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertFalse(result["core_sandbox"])
-        self.assertFalse(server._open_launch_allowed(result))
+        self.assertTrue(server._open_launch_allowed(result))
 
     def test_open_target_allows_command_center_pasted_images(self):
         """CCC-uploaded pasted images should be revealable from transcript links."""
@@ -1867,7 +1867,7 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertFalse(result["core_sandbox"])
         self.assertFalse(result["session_sandbox"])
         self.assertTrue(result["pasted_image_sandbox"])
-        self.assertFalse(server._open_launch_allowed(result))
+        self.assertTrue(server._open_launch_allowed(result))
 
     def test_spawn_codex_attaches_command_center_pasted_images(self):
         """Pasted image paths in Codex prompts should be sent as --image args."""
@@ -2014,8 +2014,8 @@ class TestRepoContextHelpers(unittest.TestCase):
             server._pending_resume_queue.clear()
             server._pending_resume_queue.update(original_queue)
 
-    def test_open_target_blocks_executable_session_cwd_files(self):
-        """Session-cwd fallback must not turn /api/open into script launch/reveal."""
+    def test_open_target_allows_executable_session_cwd_files(self):
+        """Post-sandbox-removal: scripts in the session cwd resolve cleanly."""
         for mod in ("server",):
             sys.modules.pop(mod, None)
         import server
@@ -2038,9 +2038,8 @@ class TestRepoContextHelpers(unittest.TestCase):
                     repo_path=str(repo),
                 )
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], 403)
-        self.assertIn("extension not allowed", result["error"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(server._open_launch_allowed(result))
 
     def test_markdown_path_links_request_external_open(self):
         """The transcript click handler asks /api/open to launch markdown."""
