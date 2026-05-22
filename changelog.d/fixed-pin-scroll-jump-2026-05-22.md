@@ -1,0 +1,1 @@
+- Keep the conversation list from jumping when pinning or unpinning a row.

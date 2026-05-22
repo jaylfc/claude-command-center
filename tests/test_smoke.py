@@ -2306,7 +2306,7 @@ class TestModelPicker(unittest.TestCase):
         self.assertIn("if (c.pinned) return true", js)
         self.assertIn("c.pinned ||", js)
         self.assertIn("applyOptimisticOverrides(rowsForRender)", js)
-        self.assertIn("scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest')", js)
+        self.assertNotIn("scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest')", js)
         self.assertIn(".conv-item .conv-pin-btn", css)
         self.assertIn(".conv-item.is-pinned:not(:hover):not(:focus-within) .conv-row-actions:not(:empty)", css)
         self.assertIn(".conv-item.is-pinned:not(:hover):not(:focus-within) .conv-pin-btn.is-unpin", css)

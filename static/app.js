@@ -8282,7 +8282,6 @@
           patchRows(currentRepoBacklogData, !!data.pinned, rank);
           setOptimisticOverride(sessionId, { pinned: !!data.pinned, pin_rank: rank });
           renderSidebar(filterConversations($convSearch.value));
-          scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest');
           showOpToast(data.pinned ? 'Pinned to top' : 'Unpinned');
         } catch (err) {
           showOpToast('Pin failed (' + err.message + ')', 'error');
