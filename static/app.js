@@ -2961,6 +2961,9 @@
   function renderInline(s) {
     // Escape HTML first
     s = escapeHtml(s);
+    // Expand pasted images before other markdown formatting so their paths 
+    // don't get wrapped in backticks or a-tags by later rules.
+    s = linkifyPastedImages(s);
     // Inline code `x` (also make paths inside code clickable)
     s = s.replace(/`([^`]+)`/g, (m, inner) => {
       if (/^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/.test(inner)) {
