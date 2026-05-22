@@ -1,0 +1,1 @@
+- Pauses the 1-second live-tool ticker while typing, and adds `contain: layout style` to the conversations view so streaming-event reflows can't ripple into the composer. Together with the prior 10s-refresh skip, the input-box hitches should be gone.

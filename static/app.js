@@ -1275,6 +1275,15 @@
   }
 
   function updateLiveToolStrip() {
+    // Skip while the user is typing into a textarea / text input. This
+    // runs on a 1s ticker; each pass does a document.querySelectorAll
+    // plus an innerHTML write that can stall typing by tens of ms on
+    // a deep conv view. The strip catches up on the next tick.
+    const _ae = document.activeElement;
+    if (_ae && (_ae.tagName === 'TEXTAREA'
+      || (_ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_ae.type || 'text')))) {
+      return;
+    }
     const $view = (typeof getConvView === 'function') ? getConvView() : null;
     if (!$view) return;
     document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(node => {
