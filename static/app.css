@@ -2524,9 +2524,15 @@
   #convList .conv-readytomerge-section,
   #convList .conv-inprogress-section { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 6px; }
   #convList .conv-pinned-section {
+    position: sticky;
+    top: 0;
+    z-index: 30;
     margin-bottom: 12px;
+    padding-top: 4px;
     padding-bottom: 8px;
     border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    box-shadow: 0 8px 16px rgba(0,0,0,0.18);
   }
   #convList .conv-pinned-header {
     width: 100%; display: flex; align-items: center; gap: 8px;

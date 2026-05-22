@@ -2303,9 +2303,13 @@ class TestModelPicker(unittest.TestCase):
         self.assertIn("conv-pinned-list", js)
         self.assertIn("conv-pinned-header", js)
         self.assertIn("Pinned to top", js)
+        self.assertIn("if (c.pinned) return true", js)
+        self.assertIn("c.pinned ||", js)
         self.assertIn("applyOptimisticOverrides(rowsForRender)", js)
         self.assertIn("scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest')", js)
         self.assertIn(".conv-item .conv-pin-btn", css)
+        self.assertIn("#convList .conv-pinned-section", css)
+        self.assertIn("position: sticky", css)
 
     def test_session_model_route_registered_and_check_same_origin_gates_post(self):
         for mod in ("server",):
