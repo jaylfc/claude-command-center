@@ -17740,6 +17740,14 @@
 		    if (activeTab !== 'sessions') return;
 		    if (isInlineRenameInProgress()) return;
 		    if (conversationPaneLoading) return;
+    // Skip the rerender if the user is actively typing into the
+    // composer — innerHTML on the full conv list pauses the main
+    // thread long enough to swallow keystrokes. The next 10s tick
+    // catches up as soon as the input loses focus or the user pauses.
+    const _ae = document.activeElement;
+    const _typing = !!(_ae && (_ae.tagName === 'TEXTAREA'
+      || (_ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_ae.type || 'text'))));
+    if (_typing) return;
     // Refresh /api/conversations/all and re-render — cheap because
     // _extract_tail_meta is mtime-cached server-side; only changed
     // JSONLs get re-scanned.

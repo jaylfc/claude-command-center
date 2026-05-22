@@ -1,0 +1,1 @@
+- Pauses the 10s conversation-list auto-refresh while the user is typing in a text input or textarea. The full innerHTML rebuild on a long list was stalling keystrokes every ten seconds; the refresh resumes as soon as the input loses focus or the user stops typing for a tick.
