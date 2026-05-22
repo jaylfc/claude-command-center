@@ -17811,7 +17811,7 @@
     const ampm = h >= 12 ? 'PM' : 'AM';
     h = h % 12; if (h === 0) h = 12;
     const min = pad(d.getMinutes());
-    return `${day}/${mon}/${yr}-${pad(h)}:${min}${ampm}`;
+    return `${mon}/${day}/${yr}-${pad(h)}:${min}${ampm}`;
   }
 
   (async () => {

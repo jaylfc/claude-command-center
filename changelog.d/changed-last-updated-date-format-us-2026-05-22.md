@@ -1,0 +1,1 @@
+- The "Last updated" line under the sidebar title now uses mm/dd/yy formatting instead of dd/mm/yy.
