@@ -572,24 +572,37 @@
   .hide-tools .tool-call { display: none !important; }
   .hide-tools .event.tool-only { display: none !important; }
 
-  /* AskUserQuestion: stack header + question + options instead of mashing
-     them into one comma-jammed line next to the tool name. */
+  /* AskUserQuestion is a prompt directed AT the user, not a side-effect
+     tool. Keep it visible even when the reader's "hide tools" toggle is
+     on, and stack each question (the array can carry up to 4) as its own
+     callout block with header + question + bulleted options. */
   .tool-call.ask-user-question { align-items: flex-start; }
+  .hide-tools .tool-call.ask-user-question { display: flex !important; }
+  .hide-tools .event.tool-only:has(.tool-call.ask-user-question) { display: block !important; }
+  .tool-call.ask-user-question .ask-user-block {
+    flex-basis: 100%;
+    margin: 4px 0 0 0;
+    padding: 8px 10px;
+    border-left: 3px solid var(--accent, var(--orange));
+    background: var(--surface-2);
+    border-radius: 4px;
+  }
+  .tool-call.ask-user-question .ask-user-block + .ask-user-block {
+    margin-top: 6px;
+  }
   .tool-call.ask-user-question .ask-user-header {
     color: var(--text);
     font-weight: 600;
     font-size: 13px;
+    margin-bottom: 2px;
   }
   .tool-call.ask-user-question .ask-user-question-text {
-    flex-basis: 100%;
     color: var(--text);
     font-size: 13px;
-    margin-top: 2px;
     line-height: 1.4;
   }
   .tool-call.ask-user-question .ask-user-options {
-    flex-basis: 100%;
-    margin: 4px 0 0 18px;
+    margin: 6px 0 0 20px;
     padding: 0;
     list-style: disc;
     color: var(--text-muted);
@@ -597,10 +610,11 @@
     line-height: 1.45;
   }
   .tool-call.ask-user-question .ask-user-options li {
-    margin: 0 0 2px 0;
+    margin: 0 0 3px 0;
   }
   .tool-call.ask-user-question .ask-user-option-label {
     color: var(--text);
+    font-weight: 500;
   }
   .tool-call.ask-user-question .ask-user-option-desc {
     color: var(--text-muted);
