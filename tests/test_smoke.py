@@ -2308,6 +2308,10 @@ class TestModelPicker(unittest.TestCase):
         self.assertIn("applyOptimisticOverrides(rowsForRender)", js)
         self.assertIn("scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest')", js)
         self.assertIn(".conv-item .conv-pin-btn", css)
+        self.assertIn(".conv-item.is-pinned:not(:hover):not(:focus-within) .conv-row-actions:not(:empty)", css)
+        self.assertIn(".conv-item.is-pinned:not(:hover):not(:focus-within) .conv-pin-btn.is-unpin", css)
+        self.assertIn(".conv-item .conv-pin-btn.is-unpin:hover .conv-pin-glyph::before", css)
+        self.assertIn(".conv-item .conv-pin-btn.is-unpin:hover .conv-pin-glyph::after", css)
         self.assertNotIn("#convList .conv-pinned-section", css)
 
     def test_session_model_route_registered_and_check_same_origin_gates_post(self):

@@ -2181,6 +2181,15 @@
     opacity: 1;
     pointer-events: auto;
   }
+  .conv-item.is-pinned:not(:hover):not(:focus-within) .conv-row-actions:not(:empty) {
+    opacity: 1;
+    pointer-events: auto;
+    background: transparent;
+  }
+  .conv-item.is-pinned:not(:hover):not(:focus-within) .conv-row-actions > :not(.conv-pin-btn) {
+    opacity: 0;
+    pointer-events: none;
+  }
   .conv-item:hover .conv-row-end > .conv-rel,
   .conv-item:focus-within .conv-row-end > .conv-rel {
     opacity: 0;
@@ -2432,13 +2441,25 @@
   .conv-item .conv-archive-btn:focus-visible { opacity: 0.7; }
   .conv-item .conv-pin-btn:hover { opacity: 1; color: var(--accent); background: rgba(88,166,255,0.12); }
   .conv-item .conv-pin-btn.is-unpin { color: var(--accent); }
+  .conv-item.is-pinned:not(:hover):not(:focus-within) .conv-pin-btn.is-unpin { opacity: 0.9; }
   .conv-item .conv-pin-btn .conv-pin-glyph { position: relative; display: inline-block; line-height: 1; }
+  .conv-item .conv-pin-btn.is-unpin:hover { background: rgba(248,81,73,0.12); }
+  .conv-item .conv-pin-btn.is-unpin .conv-pin-glyph::before,
   .conv-item .conv-pin-btn.is-unpin .conv-pin-glyph::after {
     content: '';
     position: absolute;
-    left: -2px; right: -2px; top: 50%;
-    border-top: 1.5px solid currentColor;
-    transform: rotate(-45deg);
+    left: -3px; right: -3px; top: 50%;
+    border-top: 1.5px solid var(--red);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+  .conv-item .conv-pin-btn.is-unpin .conv-pin-glyph::before { transform: translateY(-50%) rotate(45deg); }
+  .conv-item .conv-pin-btn.is-unpin .conv-pin-glyph::after { transform: translateY(-50%) rotate(-45deg); }
+  .conv-item .conv-pin-btn.is-unpin:hover .conv-pin-glyph::before,
+  .conv-item .conv-pin-btn.is-unpin:hover .conv-pin-glyph::after,
+  .conv-item .conv-pin-btn.is-unpin:focus-visible .conv-pin-glyph::before,
+  .conv-item .conv-pin-btn.is-unpin:focus-visible .conv-pin-glyph::after {
+    opacity: 1;
   }
   .conv-item .conv-archive-btn:hover { opacity: 1; color: var(--orange); background: rgba(255,166,87,0.12); }
   .conv-item .conv-merge-btn {
