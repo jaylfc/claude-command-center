@@ -5837,7 +5837,7 @@
             dateInfo = '<span style="font-size:10px;color:var(--text-muted);">' +
                        escapeHtml(abs) + ' &middot; ' + escapeHtml(relativeTime(c.modified)) + '</span>';
           }
-          html += '<div class="kanban-card backlog-card" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="backlog">';
+          html += '<div class="kanban-card backlog-card' + (c.backlog_type === 'github' ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="backlog">';
           // Unified badges row — matches session-card layout: GH chip, state, labels, source.
           const badgeRow = backlogIssueBadge + stateBadge + labels + sourceTag;
           if (badgeRow) html += '<div class="kanban-card-badges">' + badgeRow + '</div>';
@@ -5906,7 +5906,8 @@
         const recentlyBorn = isRecentlyBorn(c.session_id) ? ' recently-born' : '';
         const noEditsAttr = hasNoEdits(c) ? ' no-edits' : '';
         const readOnlyAttr = hasReadOnlyWork(c) ? ' read-only' : '';
-        html += '<div class="kanban-card' + active + trulyActive + pendingSpawn + recentlyBorn + noEditsAttr + readOnlyAttr + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="' + colKey + '">';
+        const isGithubColIssue = c.backlog_type === 'github' || c.issue_number || c.linked_issue;
+        html += '<div class="kanban-card' + active + trulyActive + pendingSpawn + recentlyBorn + noEditsAttr + readOnlyAttr + (isGithubColIssue ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="' + colKey + '">';
         // Create-issue button only when no issue is linked. The "view issue" link
         // was removed — tapping the #NNN badge in the title opens the issue.
         const linkedIssue = c.linked_issue || c.issue_number || '';
@@ -7302,7 +7303,7 @@
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
-      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned ? ' is-pinned' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
+      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned ? ' is-pinned' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + ((c.backlog_type === 'github' || isGithubPrRow) ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
@@ -11103,7 +11104,7 @@
         + '</details>')
       : '';
     const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
-      + '<span class="source-badge codex" style="background:rgba(63,185,80,0.2);color:var(--green);padding:2px 8px;border-radius:10px;font-weight:600;">codex</span>'
+      + '<span class="source-badge codex" style="display:inline-flex;align-items:center;gap:4px;background:rgba(63,185,80,0.2);color:var(--green);padding:2px 8px;border-radius:10px;font-weight:600;"><span style="width:12px;height:12px;display:flex;">' + getEngineSvg('codex') + '</span>codex</span>'
       + status
       + (threadId ? '<span style="font-family:var(--font-mono,monospace);">thread ' + escapeHtml(threadId.slice(0, 8)) + '…</span>' : '')
       + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
@@ -11166,7 +11167,7 @@
         + '</details>')
       : '';
     const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
-      + '<span class="source-badge gemini" style="background:rgba(122,162,255,0.16);color:#9bb7ff;padding:2px 8px;border-radius:10px;font-weight:600;">gemini</span>'
+      + '<span class="source-badge gemini" style="display:inline-flex;align-items:center;gap:4px;background:rgba(122,162,255,0.16);color:#9bb7ff;padding:2px 8px;border-radius:10px;font-weight:600;"><span style="width:12px;height:12px;display:flex;">' + getEngineSvg('gemini') + '</span>gemini</span>'
       + status
       + (sessionId ? '<span style="font-family:var(--font-mono,monospace);">session ' + escapeHtml(sessionId.slice(0, 8)) + '…</span>' : '')
       + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
@@ -11200,7 +11201,7 @@
       bodyHtml = '<div class="empty-state" style="height:auto;padding:24px;color:var(--text-muted);">antigravity is thinking...</div>';
     }
     const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
-      + '<span class="source-badge antigravity" style="background:rgba(242,204,96,0.14);color:#f2cc60;padding:2px 8px;border-radius:10px;font-weight:600;">antigravity</span>'
+      + '<span class="source-badge antigravity" style="display:inline-flex;align-items:center;gap:4px;background:rgba(242,204,96,0.14);color:#f2cc60;padding:2px 8px;border-radius:10px;font-weight:600;"><span style="width:12px;height:12px;display:flex;">' + getEngineSvg('antigravity') + '</span>antigravity</span>'
       + status
       + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
       + '</div>';
@@ -19368,6 +19369,7 @@
 
   function getThemePref() { return localStorage.getItem('ccc-theme') || 'system'; }
   function getFontPref() { return localStorage.getItem('ccc-font') || 'system'; }
+  function getViewGhPref() { return localStorage.getItem('ccc-view-gh') || 'show'; }
 
   function applyTheme(pref) {
     let resolved = pref;
@@ -19387,6 +19389,13 @@
       document.documentElement.removeAttribute('data-font');
     }
   }
+  function applyViewGh(pref) {
+    if (pref === 'hide') {
+      document.body.classList.add('hide-gh-issues');
+    } else {
+      document.body.classList.remove('hide-gh-issues');
+    }
+  }
   function refreshAppearanceChecks() {
     const t = getThemePref();
     const f = getFontPref();
@@ -19396,6 +19405,12 @@
     $appearancePopover.querySelectorAll('[data-check-font]').forEach(el => {
       el.textContent = el.getAttribute('data-check-font') === f ? '✓' : '';
     });
+    const v = getViewGhPref();
+    if (window.$settingsPopover) {
+      window.$settingsPopover.querySelectorAll('[data-check-view-gh]').forEach(el => {
+        el.textContent = el.getAttribute('data-check-view-gh') === v ? '✓' : '';
+      });
+    }
   }
   // Live-update when the user has 'system' selected and OS theme flips.
   _systemThemeMQ.addEventListener && _systemThemeMQ.addEventListener('change', () => {
@@ -19443,6 +19458,17 @@
       }
     });
   }
+  if ($settingsPopover) {
+    $settingsPopover.addEventListener('click', (e) => {
+      const viewGhBtn = e.target.closest('[data-view-gh]');
+      if (viewGhBtn) {
+        const v = viewGhBtn.getAttribute('data-view-gh');
+        localStorage.setItem('ccc-view-gh', v);
+        applyViewGh(v);
+        refreshAppearanceChecks();
+      }
+    });
+  }
   // Click-outside / Esc closes the popovers.
   document.addEventListener('click', (e) => {
     if ($appearancePopover && $appearancePopover.classList.contains('open')
@@ -19462,6 +19488,7 @@
   // and re-apply (no-op) for clarity.
   applyTheme(getThemePref());
   applyFont(getFontPref());
+  applyViewGh(getViewGhPref());
 
   // ── ⌘K / ⌘P session search modal ──────────────────────────────
   const $cmdkModal = document.getElementById('cmdkModal');

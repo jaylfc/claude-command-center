@@ -10360,7 +10360,7 @@
         + '</details>')
       : '';
     const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
-      + '<span class="source-badge codex" style="background:rgba(63,185,80,0.2);color:var(--green);padding:2px 8px;border-radius:10px;font-weight:600;">codex</span>'
+      + '<span class="source-badge codex" style="display:inline-flex;align-items:center;gap:4px;background:rgba(63,185,80,0.2);color:var(--green);padding:2px 8px;border-radius:10px;font-weight:600;"><span style="width:12px;height:12px;display:flex;">' + getEngineSvg('codex') + '</span>codex</span>'
       + status
       + (threadId ? '<span style="font-family:var(--font-mono,monospace);">thread ' + escapeHtml(threadId.slice(0, 8)) + '…</span>' : '')
       + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
@@ -10423,7 +10423,7 @@
         + '</details>')
       : '';
     const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
-      + '<span class="source-badge gemini" style="background:rgba(122,162,255,0.16);color:#9bb7ff;padding:2px 8px;border-radius:10px;font-weight:600;">gemini</span>'
+      + '<span class="source-badge gemini" style="display:inline-flex;align-items:center;gap:4px;background:rgba(122,162,255,0.16);color:#9bb7ff;padding:2px 8px;border-radius:10px;font-weight:600;"><span style="width:12px;height:12px;display:flex;">' + getEngineSvg('gemini') + '</span>gemini</span>'
       + status
       + (sessionId ? '<span style="font-family:var(--font-mono,monospace);">session ' + escapeHtml(sessionId.slice(0, 8)) + '…</span>' : '')
       + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
