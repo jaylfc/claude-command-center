@@ -7944,7 +7944,57 @@
     // Order: GH Issues (to start) → Ready to merge (action) → In
     // progress (which now also contains the group-chat rows at the
     // top) → Archived.
+    //
+    // FLIP-style reorder animation: capture each existing row's top
+    // BEFORE the innerHTML reset, then on the new DOM, translate
+    // each row from its old top to its new top with a CSS transition.
+    // Rows that didn't exist in the prior render just appear. Used
+    // to make a row moving to the top of its section after a fresh
+    // mtime feel like a deliberate hand-off instead of a flicker.
+    const _flipBefore = new Map();
+    if ($convList && !document.hidden) {
+      for (const row of $convList.querySelectorAll('[data-id]')) {
+        const id = row.getAttribute('data-id');
+        if (id) _flipBefore.set(id, row.getBoundingClientRect().top);
+      }
+    }
     $convList.innerHTML = _ghIssuesHtml + _readyToMergeHtml + _inProgressHtml + _archivedHtml;
+    if (_flipBefore.size > 0 && !document.hidden) {
+      const _flipNewRows = $convList.querySelectorAll('[data-id]');
+      const _flipMoves = [];
+      for (const row of _flipNewRows) {
+        const id = row.getAttribute('data-id');
+        if (!id) continue;
+        const oldTop = _flipBefore.get(id);
+        if (oldTop === undefined) continue;
+        const newTop = row.getBoundingClientRect().top;
+        const delta = oldTop - newTop;
+        if (Math.abs(delta) < 1) continue;
+        _flipMoves.push({ row, delta });
+      }
+      if (_flipMoves.length > 0) {
+        for (const m of _flipMoves) {
+          m.row.style.transition = 'none';
+          m.row.style.transform = `translateY(${m.delta}px)`;
+        }
+        // Force a single style flush so the browser commits the
+        // translate before we replace it with the animated 0.
+        // eslint-disable-next-line no-unused-expressions
+        $convList.offsetHeight;
+        requestAnimationFrame(() => {
+          for (const m of _flipMoves) {
+            m.row.style.transition = 'transform 280ms cubic-bezier(0.2, 0.7, 0.3, 1)';
+            m.row.style.transform = '';
+            const _cleanup = (ev) => {
+              if (ev.propertyName !== 'transform') return;
+              m.row.style.transition = '';
+              m.row.removeEventListener('transitionend', _cleanup);
+            };
+            m.row.addEventListener('transitionend', _cleanup);
+          }
+        });
+      }
+    }
     // Toggle handler for the Archived section header.
     const $archivedToggle = $convList.querySelector('[data-role="archived-toggle"]');
     if ($archivedToggle) {
