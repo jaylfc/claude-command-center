@@ -1097,7 +1097,14 @@
   }
 
   /* Conversations view */
-  .conversations-view { flex: 1; overflow-y: auto; padding: 0 20px 16px; position: relative; }
+  .conversations-view {
+    flex: 1; overflow-y: auto; padding: 0 20px 16px; position: relative;
+    /* Isolate transcript layout/paint from siblings so streaming
+       updates inside it don't force reflow on the composer below.
+       Was visible as typing hitches while sessions streamed or the
+       1s live-tool ticker re-rendered the inline status pill. */
+    contain: layout style;
+  }
   .conv-sticky-header {
     /* Sits at top:0 of conversations-view (its scroll container). The
        :has() rule below pushes it to top:30px when the live-tool strip
