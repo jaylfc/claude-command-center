@@ -7354,7 +7354,14 @@
       }).join('');
     };
     const _pinnedHtml = _pinnedConvs.length
-      ? '<div class="conv-pinned-list">' + _pinnedConvs.map(c => _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter })).join('') + '</div>'
+      ? '<div class="conv-pinned-section">'
+        + '<div class="conv-pinned-header">'
+        +   '<span class="conv-pinned-arrow">&#128204;</span>'
+        +   '<span class="conv-pinned-label">Pinned</span>'
+        +   '<span class="conv-pinned-count">' + _pinnedConvs.length + '</span>'
+        + '</div>'
+        + '<div class="conv-pinned-list">' + _pinnedConvs.map(c => _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter })).join('') + '</div>'
+      + '</div>'
       : '';
     const _folderGroupStorageKey = (section, key) =>
       'ccc-folder-group-collapsed:' + section + ':' + String(key || '').slice(0, 180);
@@ -8271,6 +8278,7 @@
           setOptimisticOverride(sessionId, { pinned: !!data.pinned, pin_rank: rank });
           renderSidebar(filterConversations($convSearch.value));
           scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest');
+          showOpToast(data.pinned ? 'Pinned to top' : 'Unpinned');
         } catch (err) {
           showOpToast('Pin failed (' + err.message + ')', 'error');
         }

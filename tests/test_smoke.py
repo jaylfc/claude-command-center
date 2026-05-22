@@ -2301,6 +2301,8 @@ class TestModelPicker(unittest.TestCase):
         self.assertIn("class=\"conv-pin-btn", js)
         self.assertIn("mergeBtn + startBtn + pinBtn + archiveBtn", js)
         self.assertIn("conv-pinned-list", js)
+        self.assertIn("conv-pinned-header", js)
+        self.assertIn("Pinned to top", js)
         self.assertIn("applyOptimisticOverrides(rowsForRender)", js)
         self.assertIn("scrollConversationRowIntoView(convId, data.pinned ? 'start' : 'nearest')", js)
         self.assertIn(".conv-item .conv-pin-btn", css)
