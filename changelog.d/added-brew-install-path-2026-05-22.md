@@ -1,0 +1,1 @@
+- Added a Homebrew install path alongside the curl one-liner. `brew tap amirfish1/ccc && brew install ccc` installs CCC into the Cellar, puts `ccc` on `PATH`, and pins a brew-managed Python so the formula keeps working when the system `python3` drifts. Foreground with `ccc`, background with `brew services start ccc`, or use CCC's own launchd agent via `ccc --install-service`.
