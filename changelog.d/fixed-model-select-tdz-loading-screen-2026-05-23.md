@@ -1,0 +1,1 @@
+- Fixed the dashboard loading screen getting stuck on "Loading conversations..." due to TDZ (Temporal Dead Zone) ReferenceErrors when trying to access the newly added model selection dropdown ($nsmModelSelect) and the _defaultModelsByEngine mapping before their initialization statements.

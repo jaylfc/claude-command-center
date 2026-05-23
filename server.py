@@ -2271,6 +2271,7 @@ def find_all_conversations(
                 "mtime": row_mtime,
                 "size": stat.st_size,
                 "first_message": first_message[:200] if first_message else None,
+                "ai_title": (tail_meta.get("ai_title") or None),
                 # Both keys: `branch`/`git_branch` is the JSONL's literal
                 # gitBranch (what the row defaults to when no inference);
                 # `effective_branch`/`effective_kind` carry the tool-call
@@ -3892,8 +3893,8 @@ SESSION_OVERRIDES_FILE = COMMAND_CENTER_STATE_DIR / "session-overrides.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 7
-_CONV_META_COMPAT_SCHEMA_VERSIONS = {7}
+_CONV_META_SCHEMA_VERSION = 8
+_CONV_META_COMPAT_SCHEMA_VERSIONS = {8}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -4092,6 +4093,7 @@ _META_MARKERS = (
     '"type":"agent-name"',
     '"type":"last-prompt"',
     '"type":"queued_command"',
+    '"type":"ai-title"',
 )
 
 # Markers for session signals — only lines with these need full JSON parse
@@ -4126,6 +4128,7 @@ def _extract_tail_meta(path):
         "last_meaningful_ts": 0,
         "custom_title": None,
         "agent_name": None,
+        "ai_title": None,
         "last_prompt": None,
         # Session signals — positions track ordering so stage can regress
         "has_edit": False,
@@ -4210,6 +4213,10 @@ def _extract_tail_meta(path):
                     meta["custom_title"] = ev.get("customTitle") or meta["custom_title"]
                 elif t == "agent-name":
                     meta["agent_name"] = ev.get("agentName") or meta["agent_name"]
+                elif t == "ai-title":
+                    # Claude Code rewrites ai-title throughout a session as the
+                    # conversation evolves; the latest non-empty value wins.
+                    meta["ai_title"] = ev.get("aiTitle") or meta["ai_title"]
                 elif t == "last-prompt":
                     meta["last_prompt"] = meta["last_prompt"] or ev.get("lastPrompt")
                 elif t == "attachment":
@@ -8079,6 +8086,7 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             override
             or tail_meta.get("custom_title")
             or tail_meta.get("agent_name")
+            or tail_meta.get("ai_title")
             or _sibling_feature_title(first_message)
             or None
         )
@@ -8149,6 +8157,7 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             "branch": git_branch or "",
             "first_message": (first_message or "")[:200],
             "display_name": display_name,
+            "ai_title": (tail_meta.get("ai_title") or None),
             "name_overridden": name_overridden,
             "last_prompt": (tail_meta.get("last_prompt") or "")[:200],
             "size": stat.st_size,
@@ -9461,6 +9470,23 @@ def _parse_conversation_event(ev, line_num):
         content = msg.get("content", "")
         text = _extract_text_from_content(content)
         if _is_transcript_control_text(text):
+            # Slash-command invocations look like
+            #   <command-message>dev</command-message>\n<command-name>/dev</command-name>
+            # Without surfacing them the transcript pane looks like the agent
+            # just started running tools out of nowhere — the user has no
+            # record of what they typed. Show the command name as a
+            # synthetic user_text turn so the pane mirrors what the user did.
+            head = (text or "").lstrip()
+            if head.startswith("<command-name>") or head.startswith("<command-message>"):
+                m = re.search(r"<command-name>([^<]+)</command-name>", head)
+                cmd_name = m.group(1).strip() if m else ""
+                if not cmd_name:
+                    m2 = re.search(r"<command-message>([^<]+)</command-message>", head)
+                    if m2:
+                        raw = m2.group(1).strip()
+                        cmd_name = raw if raw.startswith("/") else ("/" + raw)
+                if cmd_name:
+                    return {"line": line_num, "ts": ts, "type": "user_text", "text": cmd_name, "images": []}
             return None
         images = _extract_images_from_content(content)
         if text or images:
@@ -21452,77 +21478,7 @@ def _term_kill_running(state):
     return True
 
 
-_TTS_LOCK = threading.Lock()
-_TTS_PROC = None
-_TTS_MAX_CHARS = 12000
 
-
-def _tts_cleanup_locked():
-    global _TTS_PROC
-    if _TTS_PROC is not None and _TTS_PROC.poll() is not None:
-        _TTS_PROC = None
-
-
-def _tts_stop_locked():
-    global _TTS_PROC
-    _tts_cleanup_locked()
-    proc = _TTS_PROC
-    if proc is None:
-        return False
-    try:
-        proc.terminate()
-        try:
-            proc.wait(timeout=0.6)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    except (ProcessLookupError, OSError):
-        pass
-    _TTS_PROC = None
-    return True
-
-
-def _tts_stop():
-    with _TTS_LOCK:
-        stopped = _tts_stop_locked()
-    return {"ok": True, "stopped": stopped}
-
-
-def _tts_status():
-    with _TTS_LOCK:
-        _tts_cleanup_locked()
-        proc = _TTS_PROC
-        return {"ok": True, "speaking": proc is not None, "pid": proc.pid if proc is not None else None}
-
-
-def _tts_say(text):
-    global _TTS_PROC
-    say_bin = shutil.which("say")
-    if not say_bin:
-        return {"ok": False, "error": "macOS say command is unavailable", "code": "say_unavailable"}
-    text = str(text or "").strip()
-    if not text:
-        return {"ok": False, "error": "missing text", "code": "missing_text"}
-    if len(text) > _TTS_MAX_CHARS:
-        text = text[:_TTS_MAX_CHARS].rstrip() + "..."
-    with _TTS_LOCK:
-        _tts_stop_locked()
-        try:
-            proc = subprocess.Popen(
-                [say_bin],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            if proc.stdin:
-                proc.stdin.write(text)
-                proc.stdin.close()
-            _TTS_PROC = proc
-            pid = proc.pid
-        except (OSError, ValueError) as e:
-            _TTS_PROC = None
-            return {"ok": False, "error": f"failed to start say: {e}", "code": "spawn_failed"}
-    return {"ok": True, "pid": pid, "chars": len(text)}
 
 
 # ---------------------------------------------------------------------------
@@ -22614,23 +22570,43 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "error": "Morning view is disabled. Set CCC_ENABLE_MORNING=1 to enable."
             }, 404)
             return
-        if path == "/api/tts/say":
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length) if length > 0 else b""
+
+        if path == "/api/ingest/gemini":
             try:
-                payload = json.loads(body) if body else {}
-            except json.JSONDecodeError:
-                payload = {}
-            result = _tts_say(payload.get("text", ""))
-            status = 200 if result.get("ok") else (501 if result.get("code") == "say_unavailable" else 400)
-            self.send_json(result, status)
-            return
-        if path == "/api/tts/stop":
-            self.send_json(_tts_stop())
-            return
-        if path == "/api/tts/status":
-            self.send_json(_tts_status())
-            return
+                import uuid
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_len)
+                data = json.loads(body)
+                messages = data.get("messages", [])
+                
+                session_id = str(uuid.uuid4())
+                brain_dir = Path.home() / ".gemini" / "antigravity" / "brain" / session_id
+                logs_dir = brain_dir / ".system_generated" / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                
+                transcript_path = logs_dir / "transcript.jsonl"
+                
+                with open(transcript_path, "w", encoding="utf-8") as f:
+                    for i, msg in enumerate(messages):
+                        role = msg.get("role", "USER_INPUT")
+                        source = "USER_EXPLICIT" if role == "USER_INPUT" else "MODEL"
+                        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        row = {
+                            "step_index": i,
+                            "source": source,
+                            "type": role,
+                            "status": "DONE",
+                            "created_at": now,
+                            "content": msg.get("content", "")
+                        }
+                        f.write(json.dumps(row) + "\n")
+                
+                self.send_json({"ok": True, "session_id": session_id})
+                return
+            except Exception as e:
+                self.send_json({"error": str(e)}, 400)
+                return
+
         if path == "/api/bust-issue-state":
             # External signal that GitHub issue state may have changed (e.g. a
             # Claude Code PostToolUse hook fired after `gh issue close/reopen`).

@@ -2216,20 +2216,9 @@
     return pane && pane.dataset ? pane.dataset.paneId : '';
   }
 
-  function clearTtsStatusTimer() {
-    if (_ttsStatusTimer) {
-      clearTimeout(_ttsStatusTimer);
-      _ttsStatusTimer = null;
-    }
-  }
-
   function setTtsButtonsState(active, failed, paneId) {
     _ttsActive = !!active;
     _ttsActivePaneId = active ? (paneId || _ttsActivePaneId || activePaneId()) : null;
-    if (!active) {
-      clearTtsStatusTimer();
-      _ttsStatusFailures = 0;
-    }
     ttsButtons().forEach(btn => {
       const pressed = !!active && ttsButtonPaneId(btn) === _ttsActivePaneId;
       btn.classList.toggle('speaking', pressed);
@@ -2243,26 +2232,112 @@
     }
   }
 
-  function scheduleTtsStatusPoll(delay) {
-    clearTtsStatusTimer();
-    _ttsStatusTimer = setTimeout(pollTtsStatus, delay || 700);
+  let _ttsUtterance = null;
+  let _ttsTextMapping = [];
+
+  function clearTtsHighlight() {
+    if (window.CSS && CSS.highlights && CSS.highlights.has('tts-highlight')) {
+      CSS.highlights.delete('tts-highlight');
+    }
   }
 
-  function normalizeTtsText(text) {
-    return String(text || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n[ \t]+/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .replace(/[ \t]{2,}/g, ' ')
-      .trim();
+  function highlightTtsWord(charIndex, charLength) {
+    if (!window.CSS || !CSS.highlights) return;
+    const range = new Range();
+    let startFound = false;
+    let endFound = false;
+    
+    for (const m of _ttsTextMapping) {
+      if (!startFound && charIndex >= m.start && charIndex < m.end) {
+        const offset = charIndex - m.start;
+        try {
+          range.setStart(m.node, m.nodeOffsetStart + offset);
+          startFound = true;
+        } catch(e) {}
+      }
+      const charEndIndex = charIndex + charLength;
+      if (startFound && !endFound && charEndIndex > m.start && charEndIndex <= m.end) {
+        const offset = charEndIndex - m.start;
+        try {
+          range.setEnd(m.node, m.nodeOffsetStart + offset);
+          endFound = true;
+        } catch(e) {}
+        break;
+      }
+    }
+    
+    if (startFound) {
+      if (!endFound) {
+        try {
+          range.setEnd(range.startContainer, range.startContainer.nodeValue.length);
+        } catch(e) {}
+      }
+      try {
+        const highlight = new Highlight(range);
+        CSS.highlights.set("tts-highlight", highlight);
+      } catch(e) {}
+    }
   }
 
-  function clippedTtsText(text) {
-    const clean = normalizeTtsText(text);
-    return clean.length > TTS_TEXT_MAX_CHARS
-      ? clean.slice(0, TTS_TEXT_MAX_CHARS).trim() + '...'
-      : clean;
+  function buildTtsDataFromElements(elements) {
+    let text = "";
+    const mapping = [];
+    
+    for (const el of elements) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+        acceptNode: function(node) {
+          const parent = node.parentElement;
+          if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE')) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }, false);
+      
+      let node;
+      while ((node = walker.nextNode())) {
+        const nodeText = node.nodeValue;
+        mapping.push({ node, start: text.length, end: text.length + nodeText.length, nodeOffsetStart: 0 });
+        text += nodeText;
+      }
+      text += " "; 
+    }
+    
+    const clipped = text.length > TTS_TEXT_MAX_CHARS ? text.slice(0, TTS_TEXT_MAX_CHARS) : text;
+    return { text: clipped, mapping };
+  }
+
+  function buildTtsDataFromRange(range) {
+    let text = "";
+    const mapping = [];
+    
+    const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(node) {
+        if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT;
+        const parent = node.parentElement;
+        if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    }, false);
+    
+    let node;
+    while ((node = walker.nextNode())) {
+      let nodeText = node.nodeValue;
+      let startIndex = 0;
+      let endIndex = nodeText.length;
+      
+      if (node === range.startContainer) {
+        startIndex = range.startOffset;
+      }
+      if (node === range.endContainer) {
+        endIndex = range.endOffset;
+      }
+      
+      const chunk = nodeText.substring(startIndex, endIndex);
+      if (chunk) {
+        mapping.push({ node, start: text.length, end: text.length + chunk.length, nodeOffsetStart: startIndex });
+        text += chunk;
+      }
+    }
+    return { text, mapping };
   }
 
   function elementForSelectionNode(node) {
@@ -2270,24 +2345,26 @@
     return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
   }
 
-  function selectedConversationTextForTts(paneId) {
+  function selectedConversationTtsData(paneId) {
     const sel = window.getSelection && window.getSelection();
-    if (!sel || sel.isCollapsed || !sel.rangeCount) return '';
-    const text = clippedTtsText(sel.toString());
-    if (!text) return '';
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
     const pane = document.querySelector(`.conv-pane[data-pane-id="${paneId || activePaneId()}"]`);
-    if (!pane) return '';
+    if (!pane) return null;
     const anchorEl = elementForSelectionNode(sel.anchorNode);
     const focusEl = elementForSelectionNode(sel.focusNode);
     const rangeEl = elementForSelectionNode(sel.getRangeAt(0).commonAncestorContainer);
     const inPane = anchorEl && focusEl && pane.contains(anchorEl) && pane.contains(focusEl);
     const inComposer = [anchorEl, focusEl, rangeEl].some(el => el && el.closest && el.closest('.conv-input-bar'));
-    return inPane && !inComposer ? text : '';
+    
+    if (inPane && !inComposer) {
+      return buildTtsDataFromRange(sel.getRangeAt(0));
+    }
+    return null;
   }
 
-  function lastMessageTextForTts(paneId) {
+  function lastMessageTtsData(paneId) {
     const view = getConvViewForPane(paneId || activePaneId()) || getConvView();
-    if (!view) return '';
+    if (!view) return null;
     const candidates = Array.from(view.querySelectorAll(
       '.stream-bubble, .event.assistant:not(.tool-only), .event.user_text:not(.pending), .assistant-text'
     ));
@@ -2295,57 +2372,36 @@
       const el = candidates[i];
       if (!el || el.closest('.conv-sticky-header')) continue;
       if (el.classList.contains('assistant-text') && el.closest('.event')) continue;
-      let text = '';
+      let nodesToExtract = [];
       if (el.classList.contains('stream-bubble')) {
         const blocks = el.querySelector('.stream-bubble-blocks');
-        text = blocks ? (blocks.innerText || blocks.textContent || '') : '';
+        if (blocks) nodesToExtract = [blocks];
       } else if (el.classList.contains('assistant')) {
-        text = Array.from(el.querySelectorAll('.assistant-text'))
-          .map(node => node.innerText || node.textContent || '')
-          .join('\n\n');
+        nodesToExtract = Array.from(el.querySelectorAll('.assistant-text'));
       } else if (el.classList.contains('user_text')) {
         const msg = el.querySelector('.user-msg');
-        text = (msg && msg.getAttribute('data-raw-text')) || (msg && (msg.innerText || msg.textContent)) || '';
+        if (msg) nodesToExtract = [msg];
       } else if (el.classList.contains('assistant-text')) {
-        text = el.innerText || el.textContent || '';
+        nodesToExtract = [el];
       }
-      text = clippedTtsText(text);
-      if (text) return text;
-    }
-    return '';
-  }
-
-  async function pollTtsStatus() {
-    _ttsStatusTimer = null;
-    if (!_ttsActive) return;
-    try {
-      const data = await ccPostJson('/api/tts/status', {});
-      _ttsStatusFailures = 0;
-      if (!data.speaking) {
-        setTtsButtonsState(false, false);
-        return;
-      }
-    } catch (_) {
-      _ttsStatusFailures += 1;
-      if (_ttsStatusFailures >= 5) {
-        setTtsButtonsState(false, false);
-        return;
+      
+      if (nodesToExtract.length > 0) {
+        const data = buildTtsDataFromElements(nodesToExtract);
+        if (data && data.text.trim()) return data;
       }
     }
-    if (_ttsActive) scheduleTtsStatusPoll(700);
+    return null;
   }
 
   async function stopTextToSpeech() {
-    clearTtsStatusTimer();
-    setTtsButtonsBusy(true);
-    try {
-      await ccPostJson('/api/tts/stop', {});
-    } catch (_) {
-      // Stopping speech is best-effort; clear the local state either way.
-    } finally {
-      setTtsButtonsBusy(false);
-      setTtsButtonsState(false, false);
+    clearTtsHighlight();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
     }
+    _ttsUtterance = null;
+    _ttsTextMapping = [];
+    setTtsButtonsBusy(false);
+    setTtsButtonsState(false, false);
   }
 
   async function readLastMessageAloud(paneId) {
@@ -2353,30 +2409,53 @@
       await stopTextToSpeech();
       return;
     }
+    if (!window.speechSynthesis) {
+      showOpToast('Your browser does not support text-to-speech.', 'error');
+      return;
+    }
+
     paneId = paneId || activePaneId();
-    const text = selectedConversationTextForTts(paneId) || lastMessageTextForTts(paneId);
-    if (!text) {
+    const data = selectedConversationTtsData(paneId) || lastMessageTtsData(paneId);
+    
+    if (!data || !data.text.trim()) {
       setTtsButtonsState(false, true);
       showOpToast('No message to read yet.', 'error');
       return;
     }
+    
     setActivePaneById(paneId);
     setTtsButtonsBusy(true);
-    try {
-      const data = await ccPostJson('/api/tts/say', {
-        text,
-        conversation_id: currentConversation || '',
-      });
-      if (!data.ok) throw new Error(data.error || 'text-to-speech failed');
-      _ttsStatusFailures = 0;
+    
+    _ttsTextMapping = data.mapping;
+    _ttsUtterance = new SpeechSynthesisUtterance(data.text);
+    
+    _ttsUtterance.onstart = () => {
       setTtsButtonsState(true, false, paneId);
-      scheduleTtsStatusPoll(700);
-    } catch (err) {
-      setTtsButtonsState(false, true);
-      showOpToast('Text-to-speech failed: ' + (err && err.message || 'unknown'), 'error');
-    } finally {
       setTtsButtonsBusy(false);
-    }
+    };
+    
+    _ttsUtterance.onend = () => {
+      stopTextToSpeech();
+    };
+    
+    _ttsUtterance.onerror = (e) => {
+      console.error("TTS Error:", e);
+      stopTextToSpeech();
+      if (e.error !== 'canceled' && e.error !== 'interrupted') {
+        showOpToast('Text-to-speech failed.', 'error');
+        setTtsButtonsState(false, true);
+      }
+    };
+    
+    _ttsUtterance.onboundary = (e) => {
+      if (e.name === 'word') {
+        highlightTtsWord(e.charIndex, e.charLength);
+      }
+    };
+    
+    // Ensure any existing speech is stopped
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(_ttsUtterance);
   }
 
   function formatInjectFailure(data, status) {
@@ -3651,7 +3730,7 @@
   }
   function setPopoutTitle(row) {
     if (!CONV_POPOUT_MODE) return;
-    const title = (row && (row.display_name || firstSentenceOf(row.first_message || '', 70)))
+    const title = (row && (row.display_name || row.ai_title || firstSentenceOf(row.first_message || '', 70)))
       || CONV_POPOUT_TARGET.slice(0, 8)
       || 'Conversation';
     document.title = title + ' - Claude Command Center';
@@ -5827,7 +5906,7 @@
           ? c.display_name
           : (isBacklog
               ? (c.display_name || rawFirst || '(untitled)')
-              : (rawFirst || c.display_name || '(untitled)'));
+              : (c.ai_title || rawFirst || c.display_name || '(untitled)'));
         if (c.backlog_type === 'github' || c.issue_number || c.linked_issue) {
           rawTitle = stripGhIssueProjectTag(rawTitle);
         }
@@ -7015,14 +7094,20 @@
       const isBacklogRow = c.source === 'backlog';
       const isGithubPrRow = c.source === 'github_pr';
       const cleanFirst = c.first_message ? cleanIssuePrompt(c.first_message) : '';
-      let rawTitle = c.display_name || (cleanFirst ? firstSentenceOf(cleanFirst, 60) : '(untitled)');
+      // Title priority: user rename (display_name) > Claude Code's ai_title >
+      // raw first user prompt > "(untitled)". The ai_title slot rescues
+      // sessions opened with a slash command — those have no first_message
+      // CCC can show because the slash bookkeeping and meta body are filtered.
+      let rawTitle = c.display_name
+        || c.ai_title
+        || (cleanFirst ? firstSentenceOf(cleanFirst, 60) : '(untitled)');
       if (c.backlog_type === 'github' || c.issue_number || c.linked_issue) {
         rawTitle = stripGhIssueProjectTag(rawTitle);
       }
       const title = rawTitle.replace(/-/g, ' ');
       let titleClass = '';
       if (c.name_overridden) titleClass = 'user-renamed';
-      else if (!c.display_name && !c.first_message) titleClass = 'untitled';
+      else if (!c.display_name && !c.ai_title && !c.first_message) titleClass = 'untitled';
       // Prefer the last assistant "outcome" (summary) over the original ask —
       // mirrors the kanban card behavior so list view shows what the session did.
       let askHtml = '';
@@ -7315,7 +7400,7 @@
       const pinBtn = '<button class="conv-pin-btn' + (c.pinned ? ' is-unpin' : '') + '" data-role="pin" title="' + pinTitle + '" aria-label="' + pinTitle + '"><span class="conv-pin-glyph">&#128204;</span></button>';
       if (isBacklogRow) {
         const _issueAttr = escapeAttr(c.issue_number || '');
-        const _titleAttr = escapeAttr(c.display_name || c.first_message || '');
+        const _titleAttr = escapeAttr(c.display_name || c.ai_title || c.first_message || '');
         // Issue rows carry their concrete repo so the spawn handler can target
         // the right folder without relying on server state.
         const _spawnCwdAttr = escapeAttr(c.spawn_cwd || c.folder_path || '');
@@ -16116,6 +16201,7 @@
           session_id: c.session_id || c.id,
           first_message: c.first_message || '',
           display_name: c.display_name || '',
+          ai_title: c.ai_title || null,
           name_overridden: !!c.name_overridden,
           last_assistant_text: '',
           modified: c.modified || c.mtime || 0,
@@ -16170,6 +16256,7 @@
         // #1 rename overrides + #9 archived set come from server-side
         // global state files (session-names.json / archived-conversations.json).
         display_name: c.display_name || '',
+        ai_title: c.ai_title || null,
         name_overridden: !!c.name_overridden,
         last_assistant_text: '',
         modified: c.mtime,
@@ -16713,6 +16800,15 @@
   const $kptSearch = document.getElementById('kptSearch');
   const $kptRefreshBtn = document.getElementById('kptRefreshBtn');
   const $kptRecentBtn = document.getElementById('kptRecentBtn');
+  let _defaultModelsByEngine = { claude: 'opus' };
+  const $nsm = document.getElementById('newSessionModal');
+  const $nsmBody = document.getElementById('nsmBody');
+  const $nsmSubmit = document.getElementById('nsmSubmit');
+  const $nsmCancel = document.getElementById('nsmCancel');
+  const $nsmBackdrop = document.getElementById('nsmBackdrop');
+  const $nsmEngineSelect = document.getElementById('nsmEngineSelect');
+  const $nsmModelSelect = document.getElementById('nsmModelSelect');
+  const $nsmGallery = document.getElementById('nsmGallery');
   // Spawn-engine state. Source of truth = localStorage. Three DOM nodes
   // mirror it: the inline bottom-bar selector (new-session mode only),
   // the Kanban toolbar selector, and the new-session modal selector.
@@ -16769,6 +16865,33 @@
           : spawnEngineLabel(engine) + ' sessions do not support CCC-managed worktrees.';
       }
     });
+
+    if (typeof $nsmModelSelect !== 'undefined' && $nsmModelSelect) {
+      const options = MODEL_OPTIONS_BY_ENGINE[engine] || [];
+      const defaultModel = _defaultModelsByEngine[engine] || '';
+      
+      $nsmModelSelect.innerHTML = '';
+      if (options.length === 0 && !defaultModel) {
+        $nsmModelSelect.style.display = 'none';
+      } else {
+        $nsmModelSelect.style.display = '';
+        const allModels = [...options];
+        if (defaultModel && !allModels.some(o => o.id === defaultModel)) {
+          allModels.unshift({ id: defaultModel, label: defaultModel + ' (default)' });
+        }
+        allModels.forEach(opt => {
+          const el = document.createElement('option');
+          el.value = opt.id;
+          el.textContent = opt.label || opt.id;
+          $nsmModelSelect.appendChild(el);
+        });
+        if (defaultModel) {
+          $nsmModelSelect.value = defaultModel;
+        } else if (allModels.length > 0) {
+          $nsmModelSelect.value = allModels[0].id;
+        }
+      }
+    }
   }
   function setSpawnEngine(v) {
     if (v !== 'claude' && v !== 'codex' && v !== 'gemini' && v !== 'antigravity') return;
@@ -16796,11 +16919,15 @@
   // option greyed out instead of getting a 503 mid-spawn. Polled on
   // window focus too — handles "I just installed it; refresh the UI"
   // without a hard reload.
+
   async function refreshEngineAvailability() {
     async function probe(engine, endpoint, label) {
       try {
         const r = await fetch(endpoint);
         const d = await r.json();
+        if (d.model) {
+          _defaultModelsByEngine[engine] = d.model;
+        }
         const reason = d.available ? '' : (d.reason || (label + ' CLI not found'));
         const selectors = [$convInputEngineSelect, $kptToolbarEngineSelect,
           (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)];
@@ -16819,6 +16946,7 @@
       probe('gemini', '/api/sessions/spawn-gemini/availability', 'Gemini'),
       probe('antigravity', '/api/sessions/spawn-antigravity/availability', 'Antigravity'),
     ]);
+    syncSpawnEngineDependentUi();
   }
   async function refreshCodexAvailability() {
     try {
@@ -17107,13 +17235,7 @@
   // sentence at submit time. Subject was redundant — users almost never typed
   // something different from the body's lead, and the ✨ Titles button + the
   // post-spawn rename flow cover the "I want a cleaner title" case.
-  const $nsm = document.getElementById('newSessionModal');
-  const $nsmBody = document.getElementById('nsmBody');
-  const $nsmSubmit = document.getElementById('nsmSubmit');
-  const $nsmCancel = document.getElementById('nsmCancel');
-  const $nsmBackdrop = document.getElementById('nsmBackdrop');
-  const $nsmEngineSelect = document.getElementById('nsmEngineSelect');
-  const $nsmGallery = document.getElementById('nsmGallery');
+
 
   // Lazy-loaded template cache. Loaded on first modal open and reused after
   // — keep it in module scope so reopening the modal doesn't refetch. If the

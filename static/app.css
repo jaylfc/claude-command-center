@@ -7130,3 +7130,9 @@ body.status-pos-right .conv-sticky-header .csh-col-ask {
   cursor: not-allowed;
   pointer-events: none;
 }
+
+/* TTS Word Highlighting */
+::highlight(tts-highlight) {
+  color: #eab308;
+  background-color: transparent;
+}
