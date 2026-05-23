@@ -1,0 +1,1 @@
+Cut `/api/sessions` warm latency in half (~2.7s → ~1.2s) by caching `_git_branch_for_cwd` per `.git/HEAD` mtime and building the Antigravity CLI-log meta map once per scan instead of re-parsing every log for every row.

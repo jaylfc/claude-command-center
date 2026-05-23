@@ -16,6 +16,7 @@ __version__ = "4.3.0"
 import ast
 import base64
 import fcntl
+import gzip
 import html
 import hashlib
 import http.server
@@ -8795,12 +8796,79 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
     return claude_path, _parse_conversation_event
 
 
-def parse_conversation(conversation_id, after_line=0, repo_path=None):
-    """Parse a conversation JSONL file into structured events."""
+# Per-conversation parse cache. Keyed on (conv_id, after_line, jsonl_mtime).
+# Conversations are append-only files — once the JSONL's mtime is unchanged,
+# the parsed result for a given after_line offset is bit-identical. The cache
+# turns the click→render path on already-opened convs from ~170 ms (full
+# parse of a ~750 KB JSONL) into a hash-table lookup. Bounded so a long
+# session of clicking around different convs doesn't grow unbounded.
+_CONV_PARSE_CACHE = {}
+_CONV_PARSE_CACHE_LOCK = threading.Lock()
+_CONV_PARSE_CACHE_MAX = 96
+
+
+_CONV_PATH_CACHE = {}
+_CONV_PATH_CACHE_LOCK = threading.Lock()
+
+
+def _conv_parse_jsonl_mtime(conversation_id, repo_path=None):
+    """Return the mtime of the JSONL backing this conversation, or 0 if we
+    can't resolve it. The resolver itself walks ~/.claude/projects/ to find
+    the slug — measured at ~125 ms per call on a populated home dir — so
+    we cache (sid → path) and only re-stat the file on each call. The stat
+    is the freshness signal; the cached path stays valid as long as the
+    file exists, and we invalidate on miss.
+    """
+    try:
+        with _CONV_PATH_CACHE_LOCK:
+            path = _CONV_PATH_CACHE.get(conversation_id)
+        if path is not None:
+            p = Path(path)
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                # File moved/deleted — drop the stale entry and re-resolve.
+                with _CONV_PATH_CACHE_LOCK:
+                    _CONV_PATH_CACHE.pop(conversation_id, None)
+                path = None
+        if _is_gemini_session(conversation_id):
+            resolved = _resolve_gemini_chat_path(conversation_id)
+        elif _is_antigravity_session(conversation_id):
+            resolved = _antigravity_transcript_path(conversation_id)
+        else:
+            resolved, _ = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
+        if resolved and Path(resolved).is_file():
+            with _CONV_PATH_CACHE_LOCK:
+                _CONV_PATH_CACHE[conversation_id] = str(resolved)
+            return Path(resolved).stat().st_mtime
+    except Exception:
+        pass
+    return 0.0
+
+
+def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=True):
+    """Parse a conversation JSONL file into structured events.
+
+    `use_cache=True` (default) checks the in-memory parse cache keyed on the
+    JSONL's mtime — see _CONV_PARSE_CACHE. Set False for callers that need a
+    guaranteed re-parse.
+    """
+    if use_cache:
+        mtime = _conv_parse_jsonl_mtime(conversation_id, repo_path=repo_path)
+        if mtime > 0:
+            key = (conversation_id, int(after_line), mtime)
+            with _CONV_PARSE_CACHE_LOCK:
+                hit = _CONV_PARSE_CACHE.get(key)
+            if hit is not None:
+                return hit
     if _is_gemini_session(conversation_id):
-        return _parse_gemini_conversation(conversation_id, after_line=after_line)
+        result = _parse_gemini_conversation(conversation_id, after_line=after_line)
+        _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
+        return result
     if _is_antigravity_session(conversation_id):
-        return _parse_antigravity_conversation(conversation_id, after_line=after_line)
+        result = _parse_antigravity_conversation(conversation_id, after_line=after_line)
+        _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
+        return result
     filepath, parser = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
     events = []
     line_num = 0
@@ -8843,7 +8911,61 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None):
     except FileNotFoundError:
         pass
 
-    return {"events": events, "last_line": line_num}
+    result = {"events": events, "last_line": line_num}
+    _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
+    return result
+
+
+def _conv_parse_cache_put(conversation_id, after_line, repo_path, result):
+    """Stash a parse result under (sid, after_line, current jsonl mtime)."""
+    mtime = _conv_parse_jsonl_mtime(conversation_id, repo_path=repo_path)
+    if mtime <= 0:
+        return
+    key = (conversation_id, int(after_line), mtime)
+    with _CONV_PARSE_CACHE_LOCK:
+        if len(_CONV_PARSE_CACHE) >= _CONV_PARSE_CACHE_MAX:
+            # Drop the oldest entry — Python 3.7+ dicts preserve insertion
+            # order, so popping the first key is FIFO eviction. Fine for
+            # this use case; recency-weighting isn't worth the bookkeeping.
+            try:
+                _CONV_PARSE_CACHE.pop(next(iter(_CONV_PARSE_CACHE)))
+            except StopIteration:
+                pass
+        _CONV_PARSE_CACHE[key] = result
+
+
+# Pre-serialized response bytes for /api/conversations/<id>?after=N. The
+# parse-cache above saves the line-walk; this cache saves the json.dumps
+# (~60 ms for a 700 KB conv) AND the gzip (~15 ms) on top. A click on a
+# conversation the user already opened once becomes a sub-5 ms socket
+# write. Keys are (sid, after_line, jsonl_mtime); values are {"raw": bytes,
+# "gzip": bytes|None}. Bounded so memory doesn't blow up.
+_CONV_BYTES_CACHE = {}
+_CONV_BYTES_CACHE_LOCK = threading.Lock()
+_CONV_BYTES_CACHE_MAX = 48
+
+
+def _conv_response_bytes_get(conversation_id, after_line):
+    mtime = _conv_parse_jsonl_mtime(conversation_id)
+    if mtime <= 0:
+        return None
+    key = (conversation_id, int(after_line), mtime)
+    with _CONV_BYTES_CACHE_LOCK:
+        return _CONV_BYTES_CACHE.get(key)
+
+
+def _conv_response_bytes_put(conversation_id, after_line, raw, gz):
+    mtime = _conv_parse_jsonl_mtime(conversation_id)
+    if mtime <= 0:
+        return
+    key = (conversation_id, int(after_line), mtime)
+    with _CONV_BYTES_CACHE_LOCK:
+        if len(_CONV_BYTES_CACHE) >= _CONV_BYTES_CACHE_MAX:
+            try:
+                _CONV_BYTES_CACHE.pop(next(iter(_CONV_BYTES_CACHE)))
+            except StopIteration:
+                pass
+        _CONV_BYTES_CACHE[key] = {"raw": raw, "gzip": gz}
 
 
 # Regex for files-from-conversation extraction. Two patterns: HTTP(S)
@@ -12011,12 +12133,38 @@ def _gemini_activity_fields_from_tail(tail, live):
     return fields
 
 
+_git_branch_cache = {}  # cwd -> (head_mtime, branch)
+_git_branch_cache_lock = threading.Lock()
+
+
 def _git_branch_for_cwd(cwd):
-    if not cwd or not Path(cwd).is_dir():
+    # Hot-path on /api/sessions: every gemini/antigravity row asks for the
+    # branch of its cwd, and the gemini+antigravity scanners alone fire ~50
+    # git subprocesses per poll (~0.5s combined). Cache the answer keyed off
+    # `.git/HEAD`'s mtime so a checkout invalidates the entry the next time
+    # we look. Falls back to the bare subprocess if the HEAD file can't be
+    # stat'd (detached worktree, weird permission).
+    if not cwd:
+        return ""
+    cwd_s = str(cwd)
+    try:
+        head_path = Path(cwd_s) / ".git" / "HEAD"
+        if not head_path.exists():
+            # `.git` may be a file (worktree) — let `git rev-parse` resolve it.
+            head_mtime = 0.0
+        else:
+            head_mtime = head_path.stat().st_mtime
+    except OSError:
+        head_mtime = 0.0
+    with _git_branch_cache_lock:
+        cached = _git_branch_cache.get(cwd_s)
+        if cached and cached[0] == head_mtime and head_mtime > 0:
+            return cached[1]
+    if not Path(cwd_s).is_dir():
         return ""
     try:
         out = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "HEAD"],
+            ["git", "-C", cwd_s, "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, timeout=2,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -12024,7 +12172,11 @@ def _git_branch_for_cwd(cwd):
     if out.returncode != 0:
         return ""
     branch = (out.stdout or "").strip()
-    return "" if branch == "HEAD" else branch
+    branch = "" if branch == "HEAD" else branch
+    if head_mtime > 0:
+        with _git_branch_cache_lock:
+            _git_branch_cache[cwd_s] = (head_mtime, branch)
+    return branch
 
 
 def find_gemini_conversations(
@@ -12312,7 +12464,7 @@ def find_gemini_conversations(
             "verified": sid in verified_set,
             "pinned_repo": pinned_repo,
             "last_interacted": last_interactions.get(sid),
-            "is_live": spawn_alive,
+            "is_live": bool(spawn_alive) or (time.time() - modified) < _ANTIGRAVITY_LIVE_WINDOW_S,
             "spawn_pid": spawn_pid,
             "can_headless_resume": True,
             "can_app_resume": False,
@@ -12702,6 +12854,12 @@ _ANTIGRAVITY_APP_LS_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _ANTIGRAVITY_META_VERSION = 2
+# An Antigravity transcript writes every assistant tool call / message, so if
+# the file moved within this window we treat the session as live. Antigravity
+# has no hook system that CCC could listen to (the way Claude Code does via
+# sidecar markers), so an mtime gate is the cheapest "is the agent actually
+# doing something right now" signal we can derive without polling processes.
+_ANTIGRAVITY_LIVE_WINDOW_S = 180
 
 
 def _antigravity_read_log_tail(path, max_bytes=64000):
@@ -13506,6 +13664,25 @@ def find_antigravity_conversations(
     spawn_by_sid = _antigravity_spawn_pid_by_session_id()
     summary_titles = _load_antigravity_summary_titles()
     git_top_cache = {}
+    # Build a session_id → cli-log meta map ONCE for this scan.
+    # The old per-row `_antigravity_cli_log_meta_for_session` re-iterated every
+    # cli log file and re-parsed each one looking for the session_id — for 15
+    # missing-cwd rows × ~10 logs that was ~1.0s per /api/sessions poll. One
+    # pass collapses that to a single sweep, ~70ms.
+    cli_meta_by_sid = {}
+    try:
+        cli_log_paths = _antigravity_cli_log_paths(repo_path if repo_only else None)
+    except Exception:
+        cli_log_paths = []
+    for _log_path in cli_log_paths:
+        try:
+            _meta = _antigravity_cli_log_meta(_log_path)
+        except Exception:
+            continue
+        _msid = _meta.get("session_id") or ""
+        if not _msid or _msid in cli_meta_by_sid:
+            continue
+        cli_meta_by_sid[_msid] = {**_meta, "log_path": str(_log_path)}
     out = []
     scanned = 0
     for path in paths:
@@ -13523,7 +13700,7 @@ def find_antigravity_conversations(
         cli_meta = {}
         cwd = tail.get("cwd") or ""
         if not cwd or not tail.get("model"):
-            cli_meta = _antigravity_cli_log_meta_for_session(sid, repo_path if repo_only else None)
+            cli_meta = cli_meta_by_sid.get(sid, {})
             cwd = cwd or cli_meta.get("cwd") or ""
         pinned = repo_pins.get(sid)
         pinned_repo = False
@@ -13626,7 +13803,7 @@ def find_antigravity_conversations(
             "verified": sid in verified_set,
             "pinned_repo": pinned_repo,
             "last_interacted": last_interactions.get(sid),
-            "is_live": spawn_alive,
+            "is_live": bool(spawn_alive) or (time.time() - modified) < _ANTIGRAVITY_LIVE_WINDOW_S,
             "spawn_pid": spawn_pid,
             "can_headless_resume": bool(
                 _antigravity_cli_conversation_path(sid)
@@ -22122,8 +22299,52 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             conv_id = path.split("/")[-1]
             qs = urllib.parse.parse_qs(parsed.query)
             after_line = int(qs.get("after", ["0"])[0])
+            # Look for a fully-baked response (JSON-encoded body + matching
+            # gzip variant) in the conv-bytes cache. On a hit we skip
+            # parse_conversation, json.dumps, AND gzip — the click→render
+            # path collapses to a hashmap lookup + socket write.
+            cached_bytes = _conv_response_bytes_get(conv_id, after_line)
+            if cached_bytes is not None:
+                accept = self.headers.get("Accept-Encoding", "") or ""
+                want_gzip = "gzip" in accept.lower()
+                body = cached_bytes["gzip"] if want_gzip and cached_bytes.get("gzip") else cached_bytes["raw"]
+                enc = "gzip" if (want_gzip and cached_bytes.get("gzip") and body is cached_bytes["gzip"]) else None
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                if enc:
+                    self.send_header("Content-Encoding", enc)
+                    self.send_header("Vary", "Accept-Encoding")
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
             result = parse_conversation(conv_id, after_line)
-            self.send_json(result)
+            raw = json.dumps(result).encode()
+            gz = None
+            if len(raw) >= self._GZIP_MIN_BYTES:
+                try:
+                    gz = gzip.compress(raw, compresslevel=5)
+                except Exception:
+                    gz = None
+            _conv_response_bytes_put(conv_id, after_line, raw, gz)
+            accept = self.headers.get("Accept-Encoding", "") or ""
+            want_gzip = "gzip" in accept.lower()
+            body = gz if (want_gzip and gz) else raw
+            enc = "gzip" if (want_gzip and gz) else None
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if enc:
+                self.send_header("Content-Encoding", enc)
+                self.send_header("Vary", "Accept-Encoding")
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
         elif path == "/api/pkood/tail":
             qs = urllib.parse.parse_qs(parsed.query)
             agent_id = qs.get("id", [""])[0]
@@ -22304,9 +22525,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     ct = "text/css"
                 elif rel.endswith(".html"):
                     ct = "text/html; charset=utf-8"
+                body, enc = self._maybe_gzip(body, ct)
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header("Cache-Control", "no-store, must-revalidate")
+                self.send_header("Content-Length", str(len(body)))
+                if enc:
+                    self.send_header("Content-Encoding", enc)
+                    self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
                 self.wfile.write(body)
         elif path.startswith("/static/"):
@@ -22360,9 +22586,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_json({"error": str(e)}, 500)
                     return
                 ct = static_ct_map[ext]
+                body, enc = self._maybe_gzip(body, ct)
                 self.send_response(200)
                 self.send_header("Content-Type", ct)
                 self.send_header("Cache-Control", "no-store, must-revalidate")
+                self.send_header("Content-Length", str(len(body)))
+                if enc:
+                    self.send_header("Content-Encoding", enc)
+                    self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
                 self.wfile.write(body)
         elif path == "/sw.js":
@@ -25150,25 +25381,80 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass  # Client disconnected
 
+    # Allowlist of content types worth compressing. JSON/JS/HTML/CSS shrink
+    # ~5-10x; binaries (PNG/JPG/etc) are already compressed and gzipping
+    # them just burns CPU. SSE/event-stream is deliberately absent —
+    # streaming through a gzip encoder buffers until flush and breaks the
+    # frame cadence EventSource depends on.
+    _GZIPPABLE_TYPES = frozenset({
+        "application/json",
+        "application/javascript",
+        "application/manifest+json",
+        "image/svg+xml",
+        "text/css",
+        "text/html",
+        "text/plain",
+    })
+    # Below ~1 KB the compressed overhead (header + dictionary) is often
+    # bigger than what compression saves — and the latency tax of running
+    # the encoder still applies. Skip them.
+    _GZIP_MIN_BYTES = 1024
+
+    def _maybe_gzip(self, body, content_type):
+        """Compress `body` if the client opted in via Accept-Encoding and
+        the content type is on the allowlist. Returns (body, encoding) where
+        encoding is "gzip" or None. Callers must add the Content-Encoding
+        header themselves when encoding is non-None.
+        """
+        if not body or len(body) < self._GZIP_MIN_BYTES:
+            return body, None
+        base_ct = (content_type or "").split(";", 1)[0].strip().lower()
+        if base_ct not in self._GZIPPABLE_TYPES:
+            return body, None
+        accept = self.headers.get("Accept-Encoding", "") or ""
+        if "gzip" not in accept.lower():
+            return body, None
+        try:
+            # compresslevel=5: ~95 % of level 9's compression at ~30 % of the
+            # CPU cost. Sweet spot for "compress on every request, no
+            # response cache".
+            return gzip.compress(body, compresslevel=5), "gzip"
+        except Exception:
+            return body, None
+
     def send_html(self, content):
         # There is no server-wide repo. Keep the attribute for older JS paths,
         # but make it explicitly empty so callers must use row/filter context.
         content = content.replace('<body>', '<body data-repo="">', 1)
+        body = content.encode()
+        ct = "text/html; charset=utf-8"
+        body, enc = self._maybe_gzip(body, ct)
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", ct)
         # Never cache the single-page app. The server re-reads index.html on every
         # request; this header stops browsers from serving a stale JS snapshot
         # after edits (main cause of "I clicked the button and nothing happened").
         self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Content-Length", str(len(body)))
+        if enc:
+            self.send_header("Content-Encoding", enc)
+            self.send_header("Vary", "Accept-Encoding")
         self.end_headers()
-        self.wfile.write(content.encode())
+        self.wfile.write(body)
 
     def send_json(self, data, status=200):
+        body = json.dumps(data).encode()
+        ct = "application/json"
+        body, enc = self._maybe_gzip(body, ct)
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", ct)
+        self.send_header("Content-Length", str(len(body)))
+        if enc:
+            self.send_header("Content-Encoding", enc)
+            self.send_header("Vary", "Accept-Encoding")
         self.end_headers()
         try:
-            self.wfile.write(json.dumps(data).encode())
+            self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             # Client (browser) disconnected mid-response — typically a hard
             # reload or tab close cancelling an in-flight /api/sessions.
