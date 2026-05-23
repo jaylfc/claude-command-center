@@ -17,13 +17,16 @@ Install with curl:
 curl -fsSL https://raw.githubusercontent.com/amirfish1/claude-command-center/main/scripts/install.sh | CCC_FROM=readme bash
 ```
 
-Or with Homebrew:
+With Homebrew:
 
 ```bash
 brew tap amirfish1/ccc
 brew install ccc
 ccc
 ```
+
+Or download the macOS DMG and drag `CCC.app` to Applications:
+[github.com/amirfish1/claude-command-center/releases/latest](https://github.com/amirfish1/claude-command-center/releases/latest)
 
 Try the read-only demo first: [ccc.amirfish.ai/demo](https://ccc.amirfish.ai/demo/) (or [amirfish1.github.io/claude-command-center/demo](https://amirfish1.github.io/claude-command-center/demo/)) - full kanban with seeded fake data, no install required.
 
@@ -95,6 +98,8 @@ brew install ccc
 ccc                              # foreground
 brew services start ccc          # or run as a brew-managed background service
 ```
+
+**DMG** — drag `CCC.app` to Applications, double-click to launch. Under the hood this runs the same `install.sh` (clones into `~/.ccc/claude-command-center` and asks whether to install the launchd service). First launch shows the macOS "unidentified developer" prompt — right-click `CCC.app` → **Open** → **Open**. Only required once. Download from the [latest release](https://github.com/amirfish1/claude-command-center/releases/latest).
 
 If you'd rather clone first and run the script directly, pass the channel as a flag instead: `./scripts/install.sh --from=readme`.
 
