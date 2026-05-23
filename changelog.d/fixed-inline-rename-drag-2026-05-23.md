@@ -1,0 +1,1 @@
+- Fixed inline conversation renaming so dragging inside the title editor selects text instead of dragging the row.

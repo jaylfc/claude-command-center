@@ -4787,6 +4787,11 @@
     const $list = document.getElementById('convList');
     return !!($list && $list.querySelector('.conv-title-input'));
   }
+  function dragStartsFromTextEditor(target) {
+    return !!(target && target.closest && target.closest(
+      'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), .conv-title-input, .kanban-rename-input'
+    ));
+  }
   function filterGhIssues(convs) {
     if (getViewGhPref() !== 'hide') return convs;
     return (convs || []).filter(c => !(
@@ -6373,6 +6378,10 @@
       if (selectedCardIds.has(card.dataset.id)) card.classList.add('selected');
       // Drag-and-drop between columns
       card.addEventListener('dragstart', (ev) => {
+        if (dragStartsFromTextEditor(ev.target)) {
+          ev.preventDefault();
+          return;
+        }
         // If this card is part of a multi-select, include all selected IDs
         const ids = selectedCardIds.has(card.dataset.id)
           ? Array.from(selectedCardIds)
@@ -6499,6 +6508,8 @@
         input.rows = 2;
         input.style.cssText = 'width:100%;font-size:14px;font-weight:600;padding:6px 8px;border-radius:4px;border:1px solid var(--accent);background:var(--bg);color:var(--text);font-family:inherit;outline:none;resize:vertical;min-height:40px;line-height:1.4;white-space:pre-wrap;word-wrap:break-word;';
         titleEl.replaceWith(input);
+        const previousDraggable = card.getAttribute('draggable');
+        card.draggable = false;
         // Auto-size to content
         input.style.height = 'auto';
         input.style.height = Math.max(40, input.scrollHeight) + 'px';
@@ -6510,6 +6521,8 @@
         let done = false;
         async function commit(save) {
           if (done) return; done = true;
+          if (previousDraggable === null) card.removeAttribute('draggable');
+          else card.setAttribute('draggable', previousDraggable);
           if (save) {
             const newName = input.value.trim();
             // Only call rename API if the name actually changed
@@ -9013,6 +9026,10 @@
 
   function attachDragHandlers(el) {
     el.addEventListener('dragstart', (ev) => {
+      if (dragStartsFromTextEditor(ev.target)) {
+        ev.preventDefault();
+        return;
+      }
       dragSourceId = el.dataset.id;
       el.classList.add('dragging');
       startExternalConversationDrag(el.dataset.id, el.dataset.repoPath || '');
@@ -9307,6 +9324,8 @@
     input.value = currentText.startsWith('(') && currentText.endsWith(')') ? '' : currentText;
     input.placeholder = 'Session name…';
     titleEl.replaceWith(input);
+    const previousDraggable = item.getAttribute('draggable');
+    item.draggable = false;
     // hide edit button while editing
     const editBtn = item.querySelector('.conv-edit-btn');
     if (editBtn) editBtn.style.display = 'none';
@@ -9319,6 +9338,8 @@
       if (finished) return;
       finished = true;
       _renameInProgress = false;  // clear before our own re-render below
+      if (previousDraggable === null) item.removeAttribute('draggable');
+      else item.setAttribute('draggable', previousDraggable);
       if (save) {
         const newName = input.value.trim();
         try {
