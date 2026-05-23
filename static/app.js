@@ -2393,6 +2393,9 @@
     return null;
   }
 
+  let _ttsRate = 1.0;
+  let _ttsLastCharIndex = 0;
+
   async function stopTextToSpeech() {
     clearTtsHighlight();
     if (window.speechSynthesis) {
@@ -2400,61 +2403,102 @@
     }
     _ttsUtterance = null;
     _ttsTextMapping = [];
+    _ttsRate = 1.0;
+    _ttsLastCharIndex = 0;
     setTtsButtonsBusy(false);
     setTtsButtonsState(false, false);
   }
 
   async function readLastMessageAloud(paneId) {
-    if (_ttsActive) {
-      await stopTextToSpeech();
-      return;
-    }
     if (!window.speechSynthesis) {
       showOpToast('Your browser does not support text-to-speech.', 'error');
       return;
     }
 
-    paneId = paneId || activePaneId();
-    const data = selectedConversationTtsData(paneId) || lastMessageTtsData(paneId);
-    
-    if (!data || !data.text.trim()) {
-      setTtsButtonsState(false, true);
-      showOpToast('No message to read yet.', 'error');
-      return;
+    let textToSpeak = null;
+    let mappingToUse = null;
+
+    if (_ttsActive) {
+      if (_ttsRate === 1.0) {
+        _ttsRate = 1.5;
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        
+        textToSpeak = _ttsUtterance.text.substring(_ttsLastCharIndex);
+        mappingToUse = _ttsTextMapping.filter(m => m.end > _ttsLastCharIndex).map(m => {
+          let newStart = m.start - _ttsLastCharIndex;
+          let newNodeOffset = m.nodeOffsetStart;
+          if (newStart < 0) {
+            newNodeOffset += Math.abs(newStart);
+            newStart = 0;
+          }
+          return {
+            node: m.node,
+            start: newStart,
+            end: m.end - _ttsLastCharIndex,
+            nodeOffsetStart: newNodeOffset
+          };
+        });
+      } else {
+        await stopTextToSpeech();
+        return;
+      }
+    } else {
+      _ttsRate = 1.0;
+      _ttsLastCharIndex = 0;
+      paneId = paneId || activePaneId();
+      const data = selectedConversationTtsData(paneId) || lastMessageTtsData(paneId);
+      
+      if (!data || !data.text.trim()) {
+        setTtsButtonsState(false, true);
+        showOpToast('No message to read yet.', 'error');
+        return;
+      }
+      textToSpeak = data.text;
+      mappingToUse = data.mapping;
     }
     
+    paneId = paneId || activePaneId();
     setActivePaneById(paneId);
     setTtsButtonsBusy(true);
     
-    _ttsTextMapping = data.mapping;
-    _ttsUtterance = new SpeechSynthesisUtterance(data.text);
+    _ttsTextMapping = mappingToUse;
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    _ttsUtterance = utterance;
+    _ttsUtterance.rate = _ttsRate;
     
     _ttsUtterance.onstart = () => {
+      if (_ttsUtterance !== utterance) return;
       setTtsButtonsState(true, false, paneId);
       setTtsButtonsBusy(false);
+      ttsButtons().forEach(btn => {
+        if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
+          btn.title = _ttsRate === 1.0 ? 'Reading at 1.0x (Click for 1.5x)' : 'Reading at 1.5x (Click to Stop)';
+        }
+      });
     };
     
     _ttsUtterance.onend = () => {
-      stopTextToSpeech();
+      if (_ttsUtterance === utterance) stopTextToSpeech();
     };
     
     _ttsUtterance.onerror = (e) => {
+      if (_ttsUtterance !== utterance) return;
       console.error("TTS Error:", e);
-      stopTextToSpeech();
       if (e.error !== 'canceled' && e.error !== 'interrupted') {
+        stopTextToSpeech();
         showOpToast('Text-to-speech failed.', 'error');
         setTtsButtonsState(false, true);
       }
     };
     
     _ttsUtterance.onboundary = (e) => {
+      if (_ttsUtterance !== utterance) return;
       if (e.name === 'word') {
+        _ttsLastCharIndex = e.charIndex;
         highlightTtsWord(e.charIndex, e.charLength);
       }
     };
     
-    // Ensure any existing speech is stopped
-    window.speechSynthesis.cancel();
     window.speechSynthesis.speak(_ttsUtterance);
   }
 
@@ -7098,13 +7142,35 @@
       // raw first user prompt > "(untitled)". The ai_title slot rescues
       // sessions opened with a slash command — those have no first_message
       // CCC can show because the slash bookkeeping and meta body are filtered.
-      let rawTitle = c.display_name
-        || c.ai_title
-        || (cleanFirst ? firstSentenceOf(cleanFirst, 60) : '(untitled)');
+      // Prefix glyphs let the user tell at-a-glance which slot won:
+      //   ✏️  = user-chosen (rename), ✨ = Claude's ai-title, none = raw first
+      //   message, italic "(untitled)" = nothing on file.
+      let titleSource = '';
+      let rawTitle;
+      if (c.name_overridden && c.display_name) {
+        rawTitle = c.display_name;
+        titleSource = 'user';
+      } else if (c.ai_title) {
+        rawTitle = c.ai_title;
+        titleSource = 'ai';
+      } else if (c.display_name) {
+        // Non-rename server-side display_name (e.g. /api/sessions chains in
+        // custom_title / agent_name before falling through). No glyph —
+        // these aren't "user chose this" the way a rename is.
+        rawTitle = c.display_name;
+      } else if (cleanFirst) {
+        rawTitle = firstSentenceOf(cleanFirst, 60);
+      } else {
+        rawTitle = '(untitled)';
+      }
       if (c.backlog_type === 'github' || c.issue_number || c.linked_issue) {
         rawTitle = stripGhIssueProjectTag(rawTitle);
       }
-      const title = rawTitle.replace(/-/g, ' ');
+      let title = rawTitle.replace(/-/g, ' ');
+      // ✨ = AI-generated (Claude/Codex/Antigravity). User renames get NO
+      // glyph; the .user-renamed CSS class gives them a quiet dotted underline
+      // instead so the row doesn't shout.
+      if (titleSource === 'ai') title = '✨ ' + title;
       let titleClass = '';
       if (c.name_overridden) titleClass = 'user-renamed';
       else if (!c.display_name && !c.ai_title && !c.first_message) titleClass = 'untitled';
@@ -7790,7 +7856,7 @@
           +   '<button type="button" class="conv-ingroupchat-archive-btn"'
           +     ' data-role="ingroupchat-archive"'
           +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
-          +     ' title="Archive this group chat">📦</button>'
+          +     ' title="Archive this group chat">&#128229;</button>'
           + '</div>'
           + chatWaitingHint
           + (partListHtml ? '<div class="conv-ingroupchat-participants">' + partListHtml + '</div>' : '')
@@ -17661,6 +17727,9 @@
     try {
       const endpoint = spawnEndpointForEngine(engine);
       const body = { prompt, name: effectiveSubject, repo_path: repoPath };
+      if (typeof $nsmModelSelect !== 'undefined' && $nsmModelSelect && $nsmModelSelect.value) {
+        body.model = $nsmModelSelect.value;
+      }
       if (spawnSupportsWorktree(engine)) body.worktree = useWorktree;
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},

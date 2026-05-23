@@ -4841,7 +4841,7 @@ def _append_custom_title(path, session_id, name):
     _conv_meta_cache.pop(str(path), None)
 
 
-def rename_session(session_id, name):
+def rename_session(session_id, name, source="user"):
     """Rename a session, writing through to the .jsonl when safe.
 
     Strategy:
@@ -4887,13 +4887,16 @@ def rename_session(session_id, name):
             except OSError as e2:
                 result["error"] = f"both paths failed: {e2}"
                 return result
-        # Also record in side-car as a "user set this from the command center" marker.
-        # Display priority still comes from the jsonl (authoritative), but the
-        # side-car's presence is used to render the teal "I renamed this" color.
-        try:
-            _save_session_name_override(session_id, name)
-        except OSError:
-            pass  # non-fatal
+        # Side-car is the "user explicitly chose this name from the command
+        # center" marker. Only write it for source="user" so that auto-titlers
+        # (summarize_session_title etc.) stay out of name_overridden territory
+        # — otherwise every auto-summary lights up the ✏️ glyph as if the
+        # human had typed it.
+        if source == "user":
+            try:
+                _save_session_name_override(session_id, name)
+            except OSError:
+                pass  # non-fatal
         result["ok"] = True
         result["method"] = "jsonl"
         return result
@@ -5140,7 +5143,9 @@ def summarize_session_title(session_id):
 
     # Cap length defensively
     title = title[:120]
-    rename_result = rename_session(session_id, title)
+    # source="auto": writes the JSONL custom-title (so the title sticks) but
+    # skips the sidecar — keeps name_overridden False / ✏️ off the row.
+    rename_result = rename_session(session_id, title, source="auto")
     result["ok"] = bool(rename_result.get("ok"))
     result["title"] = title
     result["rename_method"] = rename_result.get("method")
@@ -10582,6 +10587,12 @@ def find_codex_conversations(
         title = _strip_ccc_session_state_instruction(
             (row.get("title") or "").strip()
         ).strip()
+        # Codex sometimes stores the verbatim first user message as the
+        # "title" when the prompt is too short to summarize. Only treat the
+        # title as AI-generated when it actually differs from first_message
+        # — otherwise the ✨ glyph would show on rows where Codex did no
+        # summarization.
+        codex_ai_title = title if (title and title != first_message) else None
         display_name = (
             name_overrides.get(sid)
             or (row.get("agent_nickname") or "").strip()
@@ -10621,6 +10632,7 @@ def find_codex_conversations(
             "git_branch": branch,
             "first_message": first_message[:200],
             "display_name": display_name,
+            "ai_title": codex_ai_title,
             "name_overridden": bool(name_overrides.get(sid)),
             "last_prompt": (tail.get("last_prompt") or "")[:200],
             "size": st.st_size,
@@ -11382,7 +11394,92 @@ ANTIGRAVITY_CLI_BRAIN = ANTIGRAVITY_CLI_HOME / "brain"
 ANTIGRAVITY_CLI_CONVERSATIONS = ANTIGRAVITY_CLI_HOME / "conversations"
 ANTIGRAVITY_MAIN_LOG = Path.home() / "Library" / "Logs" / "Antigravity" / "main.log"
 ANTIGRAVITY_APP_LS_SERVICE = "exa.language_server_pb.LanguageServerService"
+# AgyHub stores conversation summaries (incl. the AI-generated title) here
+# as a stream of length-prefixed protobuf messages. Each top-level record is
+# `{ string uuid; SummaryDetail detail; }` and SummaryDetail begins with
+# `string title;` — see _load_antigravity_summary_titles below.
+ANTIGRAVITY_SUMMARIES_PROTO = ANTIGRAVITY_HOME / "agyhub_summaries_proto.pb"
 GEMINI_CONTEXT_LIMIT = 1_000_000
+
+
+_antigravity_summary_cache = {"mtime": 0, "titles": {}}
+
+
+def _antigravity_read_varint(buf, pos):
+    val = 0
+    shift = 0
+    while pos < len(buf):
+        b = buf[pos]
+        pos += 1
+        val |= (b & 0x7f) << shift
+        if not (b & 0x80):
+            return val, pos
+        shift += 7
+        if shift >= 64:
+            break
+    return val, pos
+
+
+def _load_antigravity_summary_titles():
+    """Return {session_id: ai-generated title} from agyhub_summaries_proto.pb.
+
+    Antigravity (Gemini's desktop coding agent) writes a per-session title
+    into a protobuf summaries file. The schema isn't public, but the wire
+    format is stable enough to walk by hand:
+
+      record         := 0x0A <varint-len> <record-bytes>
+      record-bytes   := 0x0A <uuid-len> <uuid> 0x12 <varint-len> <submsg>
+      submsg         := 0x0A <title-len> <title-utf8> [other fields...]
+
+    Cached by file mtime so the cost is a single parse per change.
+    """
+    try:
+        mtime = ANTIGRAVITY_SUMMARIES_PROTO.stat().st_mtime
+    except OSError:
+        return {}
+    if _antigravity_summary_cache["mtime"] == mtime:
+        return _antigravity_summary_cache["titles"]
+    try:
+        data = ANTIGRAVITY_SUMMARIES_PROTO.read_bytes()
+    except OSError:
+        return _antigravity_summary_cache["titles"]
+    titles = {}
+    pos = 0
+    while pos < len(data):
+        # Top-level record opens with field 1, wire-type 2 (length-delimited).
+        if data[pos] != 0x0A:
+            pos += 1
+            continue
+        pos += 1
+        rec_len, pos = _antigravity_read_varint(data, pos)
+        record = data[pos:pos + rec_len]
+        pos += rec_len
+        rp = 0
+        sid = None
+        submsg = None
+        while rp < len(record):
+            tag = record[rp]
+            rp += 1
+            if tag == 0x0A:  # field 1: UUID string
+                ulen, rp = _antigravity_read_varint(record, rp)
+                sid = record[rp:rp + ulen].decode("utf-8", "replace")
+                rp += ulen
+            elif tag == 0x12:  # field 2: SummaryDetail submessage
+                slen, rp = _antigravity_read_varint(record, rp)
+                submsg = record[rp:rp + slen]
+                rp += slen
+            else:
+                # Skip unknown wire types defensively; we only need fields 1 & 2.
+                break
+        if not sid or not submsg or submsg[0] != 0x0A:
+            continue
+        tlen, tp = _antigravity_read_varint(submsg, 1)
+        title = submsg[tp:tp + tlen].decode("utf-8", "replace").strip()
+        if title:
+            titles[sid] = title
+    _antigravity_summary_cache["mtime"] = mtime
+    _antigravity_summary_cache["titles"] = titles
+    return titles
 
 
 def _resolve_gemini_bin():
@@ -12101,6 +12198,7 @@ def find_gemini_conversations(
         })
     seen_ids = {c.get("id") for c in out}
     antigravity_spawn_by_sid = _antigravity_spawn_pid_by_session_id()
+    antigravity_summary_titles = _load_antigravity_summary_titles()
     for log_path in _antigravity_cli_log_paths(repo_path if repo_only else None):
         if limit and scanned >= int(limit):
             break
@@ -12156,8 +12254,10 @@ def find_gemini_conversations(
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
         first_message = (spawn_info.get("prompt") or "").strip()
+        ai_title = antigravity_summary_titles.get(sid)
         display_name = (
             name_overrides.get(sid)
+            or ai_title
             or (first_message[:80] if first_message else None)
             or _antigravity_log_display_name(log_path)
         )
@@ -12172,6 +12272,7 @@ def find_gemini_conversations(
             "git_branch": branch,
             "first_message": first_message[:200],
             "display_name": display_name,
+            "ai_title": ai_title or None,
             "name_overridden": bool(name_overrides.get(sid)),
             "last_prompt": first_message[:200],
             "size": st.st_size,
@@ -12792,17 +12893,28 @@ def _antigravity_cli_log_meta(path):
 def _antigravity_model_from_text(text):
     if not isinstance(text, str) or not text:
         return ""
+
+    def _normalize(candidate):
+        # Antigravity logs sometimes carry its internal placeholder IDs
+        # (MODEL_PLACEHOLDER_M16, _M47, _M50, …) instead of a human-readable
+        # name. Those IDs leak into the row's model chip and read as gibberish
+        # to the user. Drop them so the chip stays blank — better empty than
+        # noise — and the renderer falls back to the engine label.
+        if candidate.startswith("MODEL_PLACEHOLDER_"):
+            return ""
+        return candidate
+
     model = ""
     for match in _ANTIGRAVITY_MODEL_SELECTION_RE.finditer(text):
-        candidate = " ".join((match.group(1) or "").split())
+        candidate = _normalize(" ".join((match.group(1) or "").split()))
         if candidate:
             model = candidate
     for match in _ANTIGRAVITY_MODEL_LABEL_RE.finditer(text):
-        candidate = " ".join((match.group(1) or "").split())
+        candidate = _normalize(" ".join((match.group(1) or "").split()))
         if candidate:
             model = candidate
     for match in _ANTIGRAVITY_PRINT_MODEL_RE.finditer(text):
-        candidate = " ".join((match.group(1) or "").split())
+        candidate = _normalize(" ".join((match.group(1) or "").split()))
         if candidate:
             model = candidate
     return model
@@ -13392,6 +13504,7 @@ def find_antigravity_conversations(
     cutoff = _session_scan_cutoff_ts(include_old)
     max_rows = _session_scan_file_limit(include_old)
     spawn_by_sid = _antigravity_spawn_pid_by_session_id()
+    summary_titles = _load_antigravity_summary_titles()
     git_top_cache = {}
     out = []
     scanned = 0
@@ -13436,8 +13549,10 @@ def find_antigravity_conversations(
         if not include_old and max_rows > 0 and len(out) >= max_rows:
             continue
         first_message = (tail.get("first_message") or "").strip()
+        ai_title = summary_titles.get(sid)
         display_name = (
             name_overrides.get(sid)
+            or ai_title
             or (first_message[:80] if first_message else None)
             or ((spawn_info.get("prompt") or "").strip()[:80] if spawn_info.get("prompt") else None)
             or "Antigravity session"
@@ -13470,6 +13585,7 @@ def find_antigravity_conversations(
             "git_branch": branch,
             "first_message": first_message[:200],
             "display_name": display_name,
+            "ai_title": ai_title or None,
             "name_overridden": bool(name_overrides.get(sid)),
             "last_prompt": (tail.get("last_prompt") or "")[:200],
             "size": st.st_size,
@@ -14027,7 +14143,7 @@ def resume_session_gemini(session_id, text):
     return {"ok": True, "pid": proc.pid, "log": str(log_path), "resumed": True, "via": "gemini-resume"}
 
 
-def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=False):
+def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
     """Spawn a headless Gemini CLI run and return tracking info."""
     prompt = _strip_ccc_session_state_instruction(prompt)
     resolved = _resolve_gemini_bin()
@@ -14038,6 +14154,8 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
     session_name = _slugify(name or prompt) or "unnamed"
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     log_filename = f"spawn-gemini-{session_name}-{timestamp}.log"
+    if model:
+        _set_session_model(log_filename[:-4], model, False)
     log_dir = repo_log_dir(ctx["repo_path"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
@@ -14046,9 +14164,9 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
         "--approval-mode", os.environ.get("CCC_GEMINI_APPROVAL_MODE", "yolo"),
         "--output-format", "stream-json",
     ]
-    model = os.environ.get("CCC_GEMINI_MODEL")
-    if model:
-        cmd.extend(["--model", model])
+    model_to_use = model or os.environ.get("CCC_GEMINI_MODEL")
+    if model_to_use:
+        cmd.extend(["--model", model_to_use])
     if worktree:
         cmd.extend(["--worktree", session_name])
     cmd.extend(["-p", prompt])
@@ -14091,7 +14209,7 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
     return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
 
 
-def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None):
+def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model=None):
     """Spawn a headless AGY print-mode run and return tracking info."""
     prompt = _strip_ccc_session_state_instruction(prompt or "")
     if not prompt:
@@ -14104,6 +14222,8 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None):
     session_name = _slugify(name or prompt) or "antigravity"
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     log_filename = f"spawn-antigravity-{session_name}-{timestamp}.log"
+    if model:
+        _set_session_model(log_filename[:-4], model, False)
     log_dir = repo_log_dir(ctx["repo_path"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
@@ -14392,7 +14512,7 @@ def launch_antigravity_terminal(prompt="", name=None, cwd=None, repo_path=None, 
     }
 
 
-def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
+def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
     """Spawn a headless Claude Code session and return tracking info.
 
     The spawned subprocess requires an explicit cwd or repo_path.
@@ -14413,6 +14533,8 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
         session_name = "unnamed"
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     log_filename = f"spawn-{session_name}-{timestamp}.log"
+    if model:
+        _set_session_model(log_filename[:-4], model, False)
     log_dir = repo_log_dir(repo_for_logs)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
@@ -14429,7 +14551,7 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
         claude_bin["bin"], "-p", "--verbose",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
-        "--model", "opus",
+        "--model", model or "opus",
         "--dangerously-skip-permissions",
         "--name", session_name,
     ]
@@ -14518,7 +14640,7 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False):
     return resp
 
 
-def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None):
+def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, model=None):
     """Spawn a headless Codex CLI run and return tracking info.
 
     Mirrors `spawn_session` but invokes the Codex CLI's `exec`
@@ -14550,17 +14672,19 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None):
         session_name = "unnamed"
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     log_filename = f"spawn-codex-{session_name}-{timestamp}.log"
+    model_to_use = model or os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
+    if model_to_use:
+        _set_session_model(log_filename[:-4], model_to_use, False)
     log_dir = repo_log_dir(ctx["repo_path"])
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
-    model = os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
 
     cmd = [
         bin_path, "exec",
         "--json",
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
-        "--model", model,
+        "--model", model_to_use,
         "--cd", spawn_cwd,
     ]
     for image_path in image_paths:
@@ -23319,6 +23443,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             else:
                                 cwd_resolved = candidate
             worktree_flag = bool(payload.get("worktree"))
+            model = payload.get("model")
             if not prompt:
                 self.send_json({"ok": False, "error": "missing prompt"}, 400)
             elif cwd_error:
@@ -23331,6 +23456,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         cwd=str(cwd_resolved) if cwd_resolved else None,
                         repo_path=payload.get("repo_path"),
                         worktree=worktree_flag,
+                        model=model,
                     )
                     if result.get("code") == "claude_unavailable":
                         self.send_json(result, 503)
@@ -23375,6 +23501,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                                 cwd_error = f"path is outside $HOME ({home}): {candidate}"
                             else:
                                 cwd_resolved = candidate
+            model = payload.get("model")
             if not prompt:
                 self.send_json({"ok": False, "error": "missing prompt"}, 400)
             elif cwd_error:
@@ -23386,6 +23513,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         name=name,
                         cwd=str(cwd_resolved) if cwd_resolved else None,
                         repo_path=payload.get("repo_path"),
+                        model=model,
                     )
                     # Resolver-side failures (binary not found, CCC_CODEX_BIN
                     # misconfigured) carry a stable `"code": "codex_unavailable"`
@@ -23490,6 +23618,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                                 cwd_error = f"path is outside $HOME ({home}): {candidate}"
                             else:
                                 cwd_resolved = candidate
+            model = payload.get("model")
             if not prompt:
                 self.send_json({"ok": False, "error": "missing prompt"}, 400)
             elif cwd_error:
@@ -23501,6 +23630,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         name=name,
                         cwd=str(cwd_resolved) if cwd_resolved else None,
                         repo_path=payload.get("repo_path"),
+                        model=model,
                     )
                     if result.get("code") == "antigravity_unavailable":
                         self.send_json(result, 503)

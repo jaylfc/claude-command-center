@@ -2580,20 +2580,24 @@
   }
   @container sidebar (max-width: 500px) {
     .conv-folder-chip {
-      max-width: 104px;
+      max-width: 73px;
     }
   }
   .conv-item .conv-title.untitled {
     font-weight: 500; color: var(--text-muted); font-style: italic;
   }
-  /* Teal marker: "I renamed this from the command center" */
-  /* Renamed sessions used to render their title in cyan, but the colour
-     change made the list noisier without adding scannable signal — you
-     usually know which sessions you renamed because you renamed them.
-     Inheriting the default `--text` keeps every row visually equal, and
-     the rename state is still recoverable through the rename button /
-     hover affordance. */
+  /* User-rename marker: a muted leading chevron. Pairs with the ✨ glyph
+     that the renderer prepends to AI-titled rows — user-curated names
+     get a quiet "›" instead so you can scan at a glance which titles you
+     personally set vs which Claude/Codex/Antigravity invented. Earlier
+     attempts used teal, pencil emoji, and a dotted underline; all were
+     either too loud or got clipped by the row's `overflow: hidden`. */
   .conv-item .conv-title.user-renamed { color: inherit; }
+  .conv-item .conv-title.user-renamed::before {
+    content: "› ";
+    color: var(--text-muted);
+    font-weight: 500;
+  }
   .conv-item .conv-edit-btn {
     opacity: 0; font-size: 13px; cursor: pointer;
     background: none; border: none; color: var(--text-muted);
@@ -4378,7 +4382,7 @@
        ragged-right edge. Long folder names ellipsize; the full name is
        still recoverable via the title-attribute tooltip the renderer
        emits on every chip. */
-    width: 130px; max-width: 130px;
+    width: 90px; max-width: 90px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -5924,17 +5928,20 @@
 #convList .conv-ingroupchat-archive-btn,
 #convList .conv-ingroupchat-rename-btn,
 #convList .conv-ingroupchat-clear-btn {
-  background: transparent; border: none; cursor: pointer;
-  font-size: 12px; padding: 2px 4px; opacity: 0;
+  background: none; border: none; cursor: pointer;
+  font-size: 13px; padding: 2px 4px; opacity: 0;
   color: var(--text-muted); flex-shrink: 0;
-  transition: opacity 0.1s ease-in;
+  border-radius: 3px;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
 }
 #convList .conv-ingroupchat-row:hover .conv-ingroupchat-archive-btn,
 #convList .conv-ingroupchat-row:hover .conv-ingroupchat-rename-btn,
-#convList .conv-ingroupchat-row:hover .conv-ingroupchat-clear-btn { opacity: 0.85; }
-#convList .conv-ingroupchat-archive-btn:hover,
+#convList .conv-ingroupchat-row:hover .conv-ingroupchat-clear-btn { opacity: 0.7; }
 #convList .conv-ingroupchat-rename-btn:hover,
 #convList .conv-ingroupchat-clear-btn:hover { opacity: 1; }
+#convList .conv-ingroupchat-archive-btn:hover {
+  opacity: 1; color: var(--orange); background: rgba(255,166,87,0.12);
+}
 
 /* "+" affordance on the section header — create an empty chat. */
 #convList .conv-ingroupchat-new-btn {
