@@ -4666,7 +4666,14 @@
   }
   function filterGhIssues(convs) {
     if (getViewGhPref() !== 'hide') return convs;
-    return (convs || []).filter(c => !(c.source === 'github' || c.backlog_type === 'github' || c.source === 'github_pr' || c.issue_number || c.linked_issue));
+    return (convs || []).filter(c => !(
+      c.source === 'github' ||
+      c.backlog_type === 'github' ||
+      c.source === 'github_pr' ||
+      c.issue_number ||
+      c.linked_issue ||
+      (c.id && c.id.startsWith('backlog-issue-'))
+    ));
   }
 
   function renderKanbanSidebar(convs) {
@@ -5699,7 +5706,7 @@
   function renderKanbanBoard(convs, targetEl, isSplit) {
     convs = filterGhIssues(convs);
     if (!targetEl) targetEl = $kanbanBoard;
-    const defaultColumns = [
+    let defaultColumns = [
       { key: 'backlog',         label: 'GH Issues',       defaultExpanded: true,
         hint: 'Open GitHub issues and TODO.md / PARKING_LOT items with no session yet.' },
       { key: 'needs-attention', label: 'Needs attention', defaultExpanded: true,
@@ -5719,6 +5726,9 @@
       { key: 'archived',        label: 'Archived',        defaultExpanded: false,
         hint: 'Dismissed / not planned — kept for context, not actionable.' },
     ];
+    if (getViewGhPref() === 'hide') {
+      defaultColumns = defaultColumns.filter(c => c.key !== 'backlog');
+    }
     // Apply user-defined column order from localStorage.
     let savedOrder = [];
     try { savedOrder = JSON.parse(localStorage.getItem('ccc-column-order') || '[]'); } catch (_) {}
@@ -7943,11 +7953,12 @@
         : '';
       const _ghRefresh = '<span class="conv-ghissues-refresh' + (ghIssuesRefreshing ? ' is-spinning' : '') + '" data-role="ghissues-refresh" role="button" tabindex="0" title="Refresh GitHub issues" aria-label="Refresh GitHub issues">&#8635;</span>';
       const _ghTools = '<span class="conv-ghissues-tools">' + _ghRefresh + _ghGroupingToggle + '</span>';
+      const sectionTitle = getViewGhPref() === 'hide' ? 'Backlog' : 'GH Issues';
       _ghIssuesHtml =
         '<div class="conv-ghissues-section' + (_ghCollapsed ? ' collapsed' : '') + '" data-role="ghissues-section">'
         + '<button type="button" class="conv-ghissues-header" data-role="ghissues-toggle" aria-expanded="' + (!_ghCollapsed) + '">'
         +   '<span class="conv-ghissues-arrow">' + _ghArrow + '</span>'
-        +   '<span class="conv-ghissues-label">GH Issues</span>'
+        +   '<span class="conv-ghissues-label">' + sectionTitle + '</span>'
         +   _ghTools
         +   '<span class="conv-ghissues-count">' + _ghIssueConvs.length + '</span>'
         + '</button>'
@@ -19581,8 +19592,7 @@
       document.body.classList.remove('hide-gh-issues');
     }
     if (typeof conversationsData !== 'undefined') {
-      if (typeof renderKanbanSidebar === 'function') renderKanbanSidebar(conversationsData);
-      if (typeof renderConversationList === 'function') renderConversationList(conversationsData);
+      if (typeof renderSidebar === 'function') renderSidebar(conversationsData);
     }
   }
   function refreshAppearanceChecks() {
