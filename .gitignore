@@ -30,6 +30,9 @@ venv/
 /dist/
 /build/
 
+# macOS DMG installer artifacts (built by scripts/build-dmg.sh, shipped via GitHub release assets)
+/ccc-v*.dmg
+
 # Local logs or state that might end up in-tree.
 # Whole `.claude/` dir is per-machine — settings, session logs, pasted
 # images, locks, agent worktree scratch — none of it belongs in git.

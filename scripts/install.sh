@@ -22,7 +22,7 @@ PORT="${PORT:-8090}"
 DASHBOARD_URL="http://localhost:${PORT}"
 SOURCE_FILE="$HOME/.claude/command-center/install-source"
 
-VALID_CHANNELS="readme landing-hero hn ph devto yt gh-trending unknown"
+VALID_CHANNELS="readme landing-hero hn ph devto yt gh-trending dmg unknown"
 
 err() {
   printf 'install: %s\n' "$*" >&2
