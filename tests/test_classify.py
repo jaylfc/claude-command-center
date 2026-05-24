@@ -1062,6 +1062,46 @@ class TestShellCommandPreview(unittest.TestCase):
         self.assertIn("inspect the current state", label)
         self.assertNotIn("import json", label)
 
+    def test_inline_shell_comment_gets_readable_activity_label(self):
+        cmd = (
+            'CCC_URL="http://127.0.0.1:8090" '
+            "# Check if there's a rename endpoint by looking at the API\n"
+            'curl -s "$CCC_URL/api/conversations?repo_path=/tmp/repo" | '
+            "python3 -c \"print('x')\""
+        )
+
+        label = self.server._shell_command_activity_label(cmd)
+
+        self.assertEqual(
+            label,
+            "Shell command: Check if there's a rename endpoint by looking at the API",
+        )
+        self.assertNotIn("curl -s", label)
+        self.assertNotIn("python3 -c", label)
+
+    def test_inline_shell_comment_ignores_hash_inside_quotes(self):
+        cmd = "python3 -c \"print('# not a shell comment')\""
+
+        label = self.server._shell_command_activity_label(cmd)
+
+        self.assertNotIn("Shell command:", label)
+        self.assertIn("python3 -c", label)
+
+    def test_collapsed_inline_shell_comment_trims_following_command(self):
+        cmd = (
+            'CCC_URL="http://127.0.0.1:8090" '
+            "# Check if there's a rename endpoint by looking at the API "
+            'curl -s "$CCC_URL/api/conversations?repo_path=/tmp/repo" | '
+            "python3 -c \"print('x')\""
+        )
+
+        label = self.server._shell_command_activity_label(cmd)
+
+        self.assertEqual(
+            label,
+            "Shell command: Check if there's a rename endpoint by looking at the API",
+        )
+
     def test_bash_tool_parse_keeps_readable_label_and_raw_command(self):
         cmd = (
             "python3 << 'EOF'\n"

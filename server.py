@@ -9169,6 +9169,85 @@ def _redacted_shell_command_text(command, max_len=8000):
     return text
 
 
+def _iter_shell_comment_texts(command):
+    text = _redacted_shell_command_text(command, max_len=12000)
+    if "#" not in text:
+        return
+
+    quote = ""
+    escaped = False
+    line_start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\" and quote == '"':
+                escaped = True
+            elif ch == quote:
+                quote = ""
+            if ch in "\r\n":
+                line_start = i + 1
+            i += 1
+            continue
+
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch in "\r\n":
+            line_start = i + 1
+            i += 1
+            continue
+        if ch == "#" and (i == line_start or text[i - 1].isspace()):
+            prefix = text[line_start:i].strip()
+            if not prefix and i + 1 < len(text) and text[i + 1] == "!":
+                i += 1
+                continue
+            end = i + 1
+            while end < len(text) and text[end] not in "\r\n":
+                end += 1
+            yield text[i + 1:end]
+            i = end
+            continue
+        i += 1
+
+
+def _clean_shell_inline_comment_note(note, max_len=180):
+    text = _PROMPT_SECRET_RE.sub("[redacted]", re.sub(r"\s+", " ", note or "").strip())
+    text = text.strip(" -#")
+    if not text or not re.search(r"[A-Za-z]", text):
+        return ""
+    if re.match(r"(?i)^(?:shellcheck|noqa|pylint|eslint|prettier|type:\s)", text):
+        return ""
+
+    text = re.split(r"\s+(?:&&|\|\||;|\|)\s+", text, maxsplit=1)[0].strip()
+    command_tail = re.search(
+        r"\s+(?:curl|python[0-9.]*|node|npm|pnpm|yarn|bun|deno|git|gh|rg|grep|"
+        r"sed|awk|jq|cat|cd|uv|pytest|make)\s+(?:-|/|\$|['\"]|[A-Za-z0-9_.-]+)",
+        text,
+    )
+    if command_tail and command_tail.start() >= 16:
+        text = text[:command_tail.start()].rstrip(" .:-")
+
+    return _prompt_fragment(text, max_len)
+
+
+def _shell_inline_comment_summary(command, max_len=240):
+    """Return a human note from an inline shell comment, if one is present."""
+    if not isinstance(command, str) or "#" not in command:
+        return ""
+    for comment in _iter_shell_comment_texts(command):
+        note = _clean_shell_inline_comment_note(comment)
+        if note:
+            return _prompt_fragment("Shell command: " + note, max_len)
+    return ""
+
+
 def _extract_shell_heredoc(command):
     """Return {head, body, tag} for a simple shell heredoc command."""
     if not isinstance(command, str) or "<<" not in command:
@@ -9328,6 +9407,9 @@ def _shell_heredoc_summary(command, max_len=240):
 def _shell_command_activity_label(command, max_len=1000):
     """Return a concise label for command activity surfaces."""
     semantic = _shell_heredoc_summary(command, max_len=max_len)
+    if semantic:
+        return semantic
+    semantic = _shell_inline_comment_summary(command, max_len=max_len)
     if semantic:
         return semantic
     return _shell_command_preview(command, max_len=max_len)
