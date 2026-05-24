@@ -596,6 +596,51 @@
   .tool-call.tool-command .tool-detail {
     color: var(--text);
   }
+  .tool-call.tool-command.has-command-disclosure .tool-detail {
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .tool-command-disclosure {
+    flex: 1 0 100%;
+    margin: 4px 0 2px 20px;
+    min-width: 0;
+    color: var(--text-muted);
+  }
+  .tool-command-disclosure summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-muted);
+    user-select: none;
+  }
+  .tool-command-disclosure summary:hover { color: var(--text); }
+  .tool-command-kind {
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 10px;
+    line-height: 16px;
+    background: var(--surface-2);
+  }
+  .tool-command-disclosure pre {
+    margin: 6px 0 0;
+    padding: 8px 10px;
+    max-height: 360px;
+    overflow: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
   .tool-call.tool-file .tool-detail {
     color: var(--text);
   }

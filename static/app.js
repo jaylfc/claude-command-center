@@ -13057,6 +13057,26 @@
     return { display: full, full, className: '' };
   }
 
+  function renderToolCommandDisclosure(block, detail) {
+    const command = String((block && block.command) || '').trim();
+    if (!command) return '';
+    const visible = String((detail && detail.full) || '').trim();
+    const commandFlat = command.replace(/\s+/g, ' ').trim();
+    const visibleFlat = visible.replace(/\s+/g, ' ').trim();
+    if (commandFlat === visibleFlat && command.length <= 160 && command.indexOf('\n') === -1) {
+      return '';
+    }
+    const kind = String((block && block.command_kind) || '').trim();
+    const label = /script/i.test(kind) ? 'View script' : 'View command';
+    const kindHtml = kind
+      ? '<span class="tool-command-kind">' + escapeHtml(kind) + '</span>'
+      : '';
+    return '<details class="tool-command-disclosure">'
+      + '<summary><span>' + escapeHtml(label) + '</span>' + kindHtml + '</summary>'
+      + '<pre>' + escapeHtml(command) + '</pre>'
+      + '</details>';
+  }
+
   function summarizeToolCall(div) {
     const tc = div.querySelector('.tool-call');
     if (!tc) return 'Ran 1 command';
@@ -13606,13 +13626,16 @@
                 return '<div class="ask-user-block">' + headerHtml + questionHtml + optsHtml + '</div>';
               }).join('');
             }
-            html += '<div class="tool-call' + toolClass + detail.className + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '">'
+            const commandDisclosure = renderToolCommandDisclosure(b, detail);
+            const commandClass = commandDisclosure ? ' has-command-disclosure' : '';
+            html += '<div class="tool-call' + toolClass + detail.className + commandClass + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '">'
               + '<span class="arrow">-></span> '
               + sourceHtml
               + '<span class="tool-name" data-tool-name="' + escapeAttr(b.name || '') + '">' + escapeHtml(displayName) + '</span>'
               + (askBody
                   ? askBody
                   : (detail.display ? ' <span class="tool-detail" title="' + escapeAttr(detail.full) + '">' + escapeHtml(detail.display) + '</span>' : ''))
+              + commandDisclosure
               + '</div>';
           } else if (b.kind === 'text') {
             html += '<div class="assistant-text">' + renderMarkdown(b.text) + '</div>';

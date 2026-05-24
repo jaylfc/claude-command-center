@@ -8451,7 +8451,7 @@ def _add_sidecar_fields(entry):
         tool = inflight.get("tool")
         file_ref = inflight.get("file")
         entry["sidecar_tool"] = tool
-        entry["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
+        entry["sidecar_file"] = _shell_command_activity_label(file_ref) if tool == "Bash" else file_ref
         entry["sidecar_ts"] = inflight.get("started_at", 0)
         entry["sidecar_in_flight"] = True
         if inflight.get("tool") == "AskUserQuestion":
@@ -8473,7 +8473,7 @@ def _add_sidecar_fields(entry):
         tool = sc.get("tool") if sc else None
         file_ref = sc.get("file") if sc else None
         entry["sidecar_tool"] = tool
-        entry["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
+        entry["sidecar_file"] = _shell_command_activity_label(file_ref) if tool == "Bash" else file_ref
         entry["sidecar_ts"] = sc.get("timestamp", 0) if sc else 0
         entry["sidecar_in_flight"] = False
         if sc and sc.get("tool") == "AskUserQuestion":
@@ -9156,6 +9156,183 @@ def _shell_command_preview(command, max_len=1000):
     return _prompt_fragment(cleaned, max_len)
 
 
+def _redacted_shell_command_text(command, max_len=8000):
+    """Preserve a shell command's formatting while redacting obvious secrets."""
+    if not isinstance(command, str):
+        return ""
+    text = command.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+    text = _PROMPT_SECRET_RE.sub("[redacted]", text)
+    if len(text) > max_len:
+        return text[: max_len - 3].rstrip() + "..."
+    return text
+
+
+def _extract_shell_heredoc(command):
+    """Return {head, body, tag} for a simple shell heredoc command."""
+    if not isinstance(command, str) or "<<" not in command:
+        return None
+    text = _redacted_shell_command_text(command, max_len=12000)
+    m = re.search(
+        r"<<-?\s*(?P<quote>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)",
+        text,
+    )
+    if not m:
+        return None
+
+    head = text[:m.start()].strip()
+    rest = text[m.end():]
+    if rest.startswith("\n"):
+        rest = rest[1:]
+    elif rest.startswith("\r\n"):
+        rest = rest[2:]
+    else:
+        # The live sidecar stores older commands as whitespace-collapsed
+        # previews. Treat whatever follows the marker as the body so we can
+        # still derive a useful label.
+        rest = rest.strip()
+
+    tag = m.group("tag")
+    closing = re.search(r"(?m)^[ \t]*" + re.escape(tag) + r"[ \t]*$", rest)
+    body = rest[:closing.start()] if closing else rest
+    body = re.sub(r"\s+" + re.escape(tag) + r"\s*$", "", body).strip()
+    if not body:
+        return None
+    return {"head": head, "body": body, "tag": tag}
+
+
+def _shell_script_label(head):
+    preview = _shell_command_preview(head, max_len=160)
+    try:
+        words = shlex.split(preview)
+    except ValueError:
+        words = preview.split()
+    exe = os.path.basename(words[0]) if words else ""
+    low = exe.lower()
+    if low.startswith("python"):
+        return "Python script"
+    if low == "node":
+        return "Node script"
+    if low in ("bun", "deno"):
+        return low.capitalize() + " script"
+    if low in ("bash", "sh", "zsh"):
+        return "Shell script"
+    if low == "ruby":
+        return "Ruby script"
+    if low == "perl":
+        return "Perl script"
+    if low == "php":
+        return "PHP script"
+    if low == "osascript":
+        return "AppleScript"
+    return "Inline script"
+
+
+def _clean_script_note(note, max_len=120):
+    note = _PROMPT_SECRET_RE.sub("[redacted]", re.sub(r"\s+", " ", note or "").strip())
+    if not note:
+        return ""
+    note = re.split(
+        r"\s+(?:[A-Za-z_][A-Za-z0-9_]*\s*=|for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\b|"
+        r"if\s+|while\s+|with\s+|def\s+|class\s+|print\s*\()",
+        note,
+        maxsplit=1,
+    )[0].strip(" -#")
+    return _prompt_fragment(note, max_len)
+
+
+def _script_comment_notes(body):
+    notes = []
+    for line in str(body or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and not stripped.startswith("#!"):
+            note = _clean_script_note(stripped.lstrip("# "))
+            if note:
+                notes.append(note)
+    if notes:
+        return notes
+    for m in re.finditer(r"(?:^|\s)#\s*([^#\n]+)", str(body or "")):
+        note = _clean_script_note(m.group(1))
+        if note:
+            notes.append(note)
+    return notes
+
+
+def _script_print_notes(body):
+    notes = []
+    for m in re.finditer(r"\bprint\s*\(\s*f?(['\"])([^'\"]{1,160})\1", str(body or "")):
+        note = _clean_script_note(m.group(2), max_len=100)
+        if note:
+            notes.append(note)
+    return notes
+
+
+def _script_path_basenames(body):
+    out = []
+    for m in re.finditer(r"['\"](/[^'\"\n]+)['\"]", str(body or "")):
+        base = os.path.basename(m.group(1).rstrip("/"))
+        if base and base not in out:
+            out.append(base)
+    return out
+
+
+def _script_action_phrases(body):
+    text = str(body or "")
+    low = text.lower()
+    actions = []
+    if re.search(r"\bshutil\.copy(?:2|file)?\b|\bcopyfile\s*\(", text):
+        actions.append("backs up a file" if re.search(r"\.bak|backup|preedit", low) else "copies a file")
+    if re.search(r"\bjson\.loads?\b", text):
+        actions.append("reads JSON")
+    if re.search(r"\bjson\.dumps?\b", text):
+        actions.append("writes JSON")
+    if re.search(r"\bsubprocess\.run\b|\bos\.system\b", text):
+        actions.append("runs a subprocess")
+    deduped = []
+    for action in actions:
+        if action not in deduped:
+            deduped.append(action)
+    return deduped
+
+
+def _shell_heredoc_summary(command, max_len=240):
+    here = _extract_shell_heredoc(command)
+    if not here:
+        return ""
+    label = _shell_script_label(here.get("head", ""))
+    body = here.get("body", "")
+    actions = _script_action_phrases(body)
+    comments = _script_comment_notes(body)
+    prints = _script_print_notes(body)
+    basenames = _script_path_basenames(body)
+
+    parts = []
+    parts.extend(actions[:2])
+    if comments:
+        parts.append(comments[0])
+    elif prints:
+        parts.append(prints[0])
+    elif basenames:
+        parts.append("uses " + ", ".join(basenames[:2]))
+
+    detail = "; ".join(p for p in parts if p)
+    if basenames and detail and not any(base in detail for base in basenames[:1]):
+        detail += " (" + basenames[0] + ")"
+    if not detail:
+        line_count = len([ln for ln in body.splitlines() if ln.strip()])
+        detail = f"{line_count} line" + ("" if line_count == 1 else "s")
+    return _prompt_fragment(label + ": " + detail, max_len)
+
+
+def _shell_command_activity_label(command, max_len=1000):
+    """Return a concise label for command activity surfaces."""
+    semantic = _shell_heredoc_summary(command, max_len=max_len)
+    if semantic:
+        return semantic
+    return _shell_command_preview(command, max_len=max_len)
+
+
 def _ask_user_question_payload(tool_input, max_options=3):
     """Return a compact summary of Claude Code's AskUserQuestion input."""
     if not isinstance(tool_input, dict):
@@ -9701,9 +9878,23 @@ def _parse_conversation_event(ev, line_num):
             if btype == "tool_use":
                 inp = block.get("input", {})
                 name = block.get("name", "?")
-                detail_max = 1200 if name == "Bash" else 240
-                detail = _tool_use_detail(name, inp, max_len=detail_max)
+                raw_command = inp.get("command", "") if isinstance(inp, dict) and name == "Bash" else ""
+                if raw_command:
+                    detail = _shell_command_activity_label(raw_command, max_len=1200)
+                else:
+                    detail_max = 1200 if name == "Bash" else 240
+                    detail = _tool_use_detail(name, inp, max_len=detail_max)
                 tool_block = {"kind": "tool_use", "name": name, "detail": detail}
+                if raw_command:
+                    command_text = _redacted_shell_command_text(raw_command, max_len=12000)
+                    if command_text and (
+                        "\n" in command_text
+                        or len(command_text) > 160
+                        or re.sub(r"\s+", " ", command_text).strip() != detail
+                    ):
+                        tool_block["command"] = command_text
+                        here = _extract_shell_heredoc(raw_command)
+                        tool_block["command_kind"] = _shell_script_label(here.get("head", "")) if here else "Shell command"
                 if name == "AskUserQuestion":
                     ask = _ask_user_question_structured(inp)
                     if ask:
@@ -10063,7 +10254,7 @@ def _codex_args(raw):
 def _codex_tool_detail(name, args):
     lname = _codex_tool_name(name)
     if lname == "exec_command":
-        return _shell_command_preview(args.get("cmd") or args.get("command") or "")
+        return _shell_command_activity_label(args.get("cmd") or args.get("command") or "")
     if lname == "write_stdin":
         return args.get("chars") or args.get("session_id") or ""
     for key in ("path", "file_path", "filename", "query", "pattern", "prompt", "message"):
@@ -10919,12 +11110,24 @@ def _parse_codex_event(ev, line_num, token_usage=None):
         detail = _codex_tool_detail(name, args)
         if isinstance(detail, str) and len(detail) > 200:
             detail = detail[:200] + "..."
+        block = {"kind": "tool_use", "name": _codex_tool_name(name), "detail": detail or ""}
+        command_text = _codex_tool_command(name, args)
+        if command_text:
+            redacted_command = _redacted_shell_command_text(command_text, max_len=12000)
+            if redacted_command and (
+                "\n" in redacted_command
+                or len(redacted_command) > 160
+                or re.sub(r"\s+", " ", redacted_command).strip() != (detail or "")
+            ):
+                block["command"] = redacted_command
+                here = _extract_shell_heredoc(command_text)
+                block["command_kind"] = _shell_script_label(here.get("head", "")) if here else "Shell command"
         return {
             "line": line_num,
             "ts": ts,
             "type": "assistant",
             "message_id": f"codex-tool-{line_num}",
-            "blocks": [{"kind": "tool_use", "name": _codex_tool_name(name), "detail": detail or ""}],
+            "blocks": [block],
         }
     if ptype == "function_call_output":
         output = payload.get("output") or ""
@@ -13327,7 +13530,7 @@ def _antigravity_tool_detail(call):
     args = _antigravity_tool_args(call)
     cmd = _antigravity_tool_command(call)
     if cmd:
-        return _shell_command_preview(cmd, max_len=1200)
+        return _shell_command_activity_label(cmd, max_len=1200)
     for key in (
         "TargetFile", "AbsolutePath", "DirectoryPath", "SearchPath", "File",
         "Path", "Query", "Prompt", "Message", "Description", "Instruction",
@@ -13890,11 +14093,23 @@ def _parse_antigravity_event(ev, line_num, usage_map=None):
             detail = _antigravity_tool_detail(call)
             if isinstance(detail, str) and len(detail) > 1200:
                 detail = detail[:1200] + "..."
-            blocks.append({
+            block = {
                 "kind": "tool_use",
                 "name": _antigravity_tool_name(call),
                 "detail": detail or "",
-            })
+            }
+            command_text = _antigravity_tool_command(call)
+            if command_text:
+                redacted_command = _redacted_shell_command_text(command_text, max_len=12000)
+                if redacted_command and (
+                    "\n" in redacted_command
+                    or len(redacted_command) > 160
+                    or re.sub(r"\s+", " ", redacted_command).strip() != (detail or "")
+                ):
+                    block["command"] = redacted_command
+                    here = _extract_shell_heredoc(command_text)
+                    block["command_kind"] = _shell_script_label(here.get("head", "")) if here else "Shell command"
+            blocks.append(block)
         if blocks:
             out = {
                 "line": line_num,
@@ -22236,7 +22451,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     tool = inflight.get("tool")
                     file_ref = inflight.get("file")
                     status["sidecar_tool"] = tool
-                    status["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
+                    status["sidecar_file"] = _shell_command_activity_label(file_ref) if tool == "Bash" else file_ref
                     status["sidecar_status"] = "active"
                     status["sidecar_ts"] = inflight.get("started_at", 0)
                     status["sidecar_in_flight"] = True
@@ -22251,7 +22466,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     tool = sc.get("tool")
                     file_ref = sc.get("file")
                     status["sidecar_tool"] = tool
-                    status["sidecar_file"] = _shell_command_preview(file_ref) if tool == "Bash" else file_ref
+                    status["sidecar_file"] = _shell_command_activity_label(file_ref) if tool == "Bash" else file_ref
                     status["sidecar_status"] = sc.get("status")
                     status["sidecar_ts"] = sc.get("timestamp", 0)
                     status["sidecar_in_flight"] = False
@@ -22274,7 +22489,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     if active_child:
                         status["status"] = "busy"
                         status["sidecar_tool"] = "Bash"
-                        status["sidecar_file"] = _shell_command_preview(active_child.get("command") or "")
+                        status["sidecar_file"] = _shell_command_activity_label(active_child.get("command") or "")
                         status["sidecar_status"] = "active"
                         status["sidecar_ts"] = time.time()
                         status["sidecar_in_flight"] = True

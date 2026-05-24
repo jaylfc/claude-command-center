@@ -1044,6 +1044,59 @@ class TestShellCommandPreview(unittest.TestCase):
         self.assertNotIn("sk-ant-test-XXXXXXXXXXXXXXXX", self.server._shell_command_preview(cmd))
         self.assertIn("[redacted]", self.server._shell_command_preview(cmd))
 
+    def test_inline_python_script_gets_readable_activity_label(self):
+        cmd = (
+            "/tmp/venv/bin/python3 << 'EOF'\n"
+            "import json, shutil\n"
+            "src = '/tmp/demo/draft_info.json'\n"
+            "shutil.copy2(src, src + '.bak')\n"
+            "# inspect the current state after the edit\n"
+            "print('Current segments:')\n"
+            "EOF"
+        )
+
+        label = self.server._shell_command_activity_label(cmd)
+
+        self.assertIn("Python script", label)
+        self.assertIn("backs up a file", label)
+        self.assertIn("inspect the current state", label)
+        self.assertNotIn("import json", label)
+
+    def test_bash_tool_parse_keeps_readable_label_and_raw_command(self):
+        cmd = (
+            "python3 << 'EOF'\n"
+            "token = 'sk-ant-test-XXXXXXXXXXXXXXXX'\n"
+            "# inspect transcript segments\n"
+            "print(token)\n"
+            "EOF"
+        )
+        ev = {
+            "type": "assistant",
+            "timestamp": "2026-05-23T12:00:00.000Z",
+            "message": {
+                "id": "msg-test",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu-test",
+                        "name": "Bash",
+                        "input": {"command": cmd},
+                    }
+                ],
+            },
+        }
+
+        parsed = self.server._parse_conversation_event(ev, 1)
+        block = parsed["blocks"][0]
+
+        self.assertEqual(block["kind"], "tool_use")
+        self.assertIn("Python script", block["detail"])
+        self.assertIn("inspect transcript segments", block["detail"])
+        self.assertIn("\n", block["command"])
+        self.assertIn("[redacted]", block["command"])
+        self.assertNotIn("sk-ant-test-XXXXXXXXXXXXXXXX", block["command"])
+
 
 class TestAddSidecarFields(unittest.TestCase):
     """_add_sidecar_fields() merges PreToolUse/PostToolUse hook output into
