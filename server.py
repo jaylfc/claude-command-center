@@ -1687,6 +1687,27 @@ def _spawn_repo_context(cwd=None, repo_path=None):
     return {"repo_path": resolved, "cwd": str(p)}
 
 
+_ORCHESTRATION_SPAWN_ENGINES = ("claude", "codex", "antigravity")
+_ORCHESTRATION_SPAWN_ENGINE_ALIASES = {
+    "claude": "claude",
+    "claude-code": "claude",
+    "claude_code": "claude",
+    "codex": "codex",
+    "openai-codex": "codex",
+    "openai_codex": "codex",
+    "antigravity": "antigravity",
+    "agy": "antigravity",
+    "gemini": "antigravity",
+}
+
+
+def _normalize_orchestration_spawn_engine(value):
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "claude"
+    return _ORCHESTRATION_SPAWN_ENGINE_ALIASES.get(raw)
+
+
 # Archive view delegates all per-session JSONL inspection to the
 # canonical _extract_tail_meta() (defined later in the file), which is
 # already mtime-cached and is the same source of truth /api/sessions
@@ -24263,6 +24284,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 payload = {}
             prompt = (payload.get("prompt") or "").strip()
             name = (payload.get("name") or "").strip() or None
+            engine_raw = payload.get("engine")
+            engine = _normalize_orchestration_spawn_engine(engine_raw)
             cwd_raw = payload.get("cwd")
             cwd_input = cwd_raw.strip() if isinstance(cwd_raw, str) else ""
             cwd_resolved = None
@@ -24297,19 +24320,48 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             model = payload.get("model")
             if not prompt:
                 self.send_json({"ok": False, "error": "missing prompt"}, 400)
+            elif engine is None:
+                self.send_json({
+                    "ok": False,
+                    "error": f"unsupported engine: {engine_raw}",
+                    "supported_engines": list(_ORCHESTRATION_SPAWN_ENGINES),
+                }, 400)
             elif cwd_error:
                 self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
             else:
                 try:
-                    result = spawn_session(
-                        prompt,
-                        name=name,
-                        cwd=str(cwd_resolved) if cwd_resolved else None,
-                        repo_path=payload.get("repo_path"),
-                        worktree=worktree_flag,
-                        model=model,
-                    )
-                    if result.get("code") == "claude_unavailable":
+                    spawn_cwd = str(cwd_resolved) if cwd_resolved else None
+                    if engine == "codex":
+                        result = spawn_session_codex(
+                            prompt,
+                            name=name,
+                            cwd=spawn_cwd,
+                            repo_path=payload.get("repo_path"),
+                            model=model,
+                        )
+                    elif engine == "antigravity":
+                        result = spawn_session_antigravity(
+                            prompt,
+                            name=name,
+                            cwd=spawn_cwd,
+                            repo_path=payload.get("repo_path"),
+                            model=model,
+                        )
+                    else:
+                        result = spawn_session(
+                            prompt,
+                            name=name,
+                            cwd=spawn_cwd,
+                            repo_path=payload.get("repo_path"),
+                            worktree=worktree_flag,
+                            model=model,
+                        )
+                    result.setdefault("engine", engine)
+                    if result.get("code") in (
+                        "claude_unavailable",
+                        "codex_unavailable",
+                        "antigravity_unavailable",
+                    ):
                         self.send_json(result, 503)
                     else:
                         self.send_json(result)

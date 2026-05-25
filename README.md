@@ -222,6 +222,10 @@ plain HTTP. On startup the server copies the skill to
 `~/.claude/command-center/port.txt` so the skill can discover the running
 instance without hardcoding a port.
 
+Spawn calls may pass `engine: "claude" | "codex" | "antigravity"` to
+`/api/sessions/spawn`; omitted means Claude Code for backwards compatibility.
+Legacy `engine: "gemini"` maps to Antigravity.
+
 Once installed, a Claude session can run e.g.:
 
 ```bash

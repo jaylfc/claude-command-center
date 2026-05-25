@@ -1127,6 +1127,45 @@ class TestRepoContextHelpers(unittest.TestCase):
             httpd.server_close()
             thread.join(timeout=5)
 
+    def test_unified_spawn_endpoint_accepts_engine(self):
+        httpd = self.server.http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            self.server.CommandCenterHandler,
+        )
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            with mock.patch.object(
+                self.server,
+                "spawn_session_codex",
+                return_value={"ok": True, "pid": 123, "name": "demo", "log": "/tmp/demo.log"},
+            ) as spawn_codex:
+                req = urllib.request.Request(
+                    base + "/api/sessions/spawn",
+                    data=json.dumps({
+                        "prompt": "do the thing",
+                        "engine": "Codex",
+                        "model": "gpt-test",
+                    }).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as res:
+                    body = json.loads(res.read().decode("utf-8"))
+            self.assertEqual(body["engine"], "codex")
+            spawn_codex.assert_called_once_with(
+                "do the thing",
+                name=None,
+                cwd=None,
+                repo_path=None,
+                model="gpt-test",
+            )
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
+
     def test_resolve_codex_bin_prefers_env_override(self):
         """`_resolve_codex_bin` must honour CCC_CODEX_BIN when it points
         at an executable file. Verifies the precedence head — env var
@@ -1307,6 +1346,16 @@ class TestRepoContextHelpers(unittest.TestCase):
         import inspect
         sig = inspect.signature(server.spawn_session_gemini)
         self.assertEqual(list(sig.parameters), ["prompt", "name", "cwd", "repo_path", "worktree", "model"])
+
+    def test_orchestration_spawn_engine_normalization(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertEqual(server._normalize_orchestration_spawn_engine(None), "claude")
+        self.assertEqual(server._normalize_orchestration_spawn_engine("Claude"), "claude")
+        self.assertEqual(server._normalize_orchestration_spawn_engine("Codex"), "codex")
+        self.assertEqual(server._normalize_orchestration_spawn_engine("antigravity"), "antigravity")
+        self.assertEqual(server._normalize_orchestration_spawn_engine("gemini"), "antigravity")
 
     def test_record_spawn_to_registry_persists_engine(self):
         """The on-disk spawn registry must round-trip an `engine` field
