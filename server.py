@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "4.3.0"
+__version__ = "4.3.1"
 
 import ast
 import base64
@@ -3915,6 +3915,8 @@ SPAWNED_PIDS_FILE = COMMAND_CENTER_STATE_DIR / "spawned-pids.json"
 # Read by resume_session_{headless,codex,gemini,antigravity} so a queued
 # change actually lands on the next ask.
 SESSION_OVERRIDES_FILE = COMMAND_CENTER_STATE_DIR / "session-overrides.json"
+PENDING_INPUTS_FILE = COMMAND_CENTER_STATE_DIR / "pending-inputs.json"
+
 
 # {path: {mtime, custom_title, last_prompt, agent_name, ...}}
 # Persistent across restarts via _CONV_META_CACHE_FILE — without it, every
@@ -8893,15 +8895,21 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
             with _CONV_PARSE_CACHE_LOCK:
                 hit = _CONV_PARSE_CACHE.get(key)
             if hit is not None:
-                return hit
+                events_copy = list(hit.get("events") or [])
+                events_copy.extend(_get_queued_events_for_session(conversation_id))
+                return {"events": events_copy, "last_line": hit.get("last_line", 0)}
     if _is_gemini_session(conversation_id):
         result = _parse_gemini_conversation(conversation_id, after_line=after_line)
         _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
-        return result
+        events_copy = list(result.get("events") or [])
+        events_copy.extend(_get_queued_events_for_session(conversation_id))
+        return {"events": events_copy, "last_line": result.get("last_line", 0)}
     if _is_antigravity_session(conversation_id):
         result = _parse_antigravity_conversation(conversation_id, after_line=after_line)
         _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
-        return result
+        events_copy = list(result.get("events") or [])
+        events_copy.extend(_get_queued_events_for_session(conversation_id))
+        return {"events": events_copy, "last_line": result.get("last_line", 0)}
     filepath, parser = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
     events = []
     line_num = 0
@@ -8946,7 +8954,10 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
 
     result = {"events": events, "last_line": line_num}
     _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
-    return result
+    events_copy = list(events)
+    events_copy.extend(_get_queued_events_for_session(conversation_id))
+    return {"events": events_copy, "last_line": line_num}
+
 
 
 def _conv_parse_cache_put(conversation_id, after_line, repo_path, result):
@@ -11262,6 +11273,77 @@ _pending_resume_queue: dict = {}   # session_id → [text, ...]
 _pending_resume_lock = threading.Lock()
 _pending_terminal_input_queue: dict = {}   # session_id → [text, ...]
 _pending_terminal_input_lock = threading.Lock()
+_pending_inputs_lock = threading.Lock()
+
+
+def _load_pending_inputs():
+    """Load pending queues from PENDING_INPUTS_FILE into memory."""
+    global _pending_resume_queue, _pending_terminal_input_queue
+    try:
+        with open(PENDING_INPUTS_FILE) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    with _pending_resume_lock:
+        rq = data.get("resume_queue")
+        if isinstance(rq, dict):
+            _pending_resume_queue.update({k: list(v) for k, v in rq.items() if isinstance(v, list)})
+    with _pending_terminal_input_lock:
+        tq = data.get("terminal_queue")
+        if isinstance(tq, dict):
+            _pending_terminal_input_queue.update({k: list(v) for k, v in tq.items() if isinstance(v, list)})
+
+
+def _save_pending_inputs():
+    """Save pending queues from memory to PENDING_INPUTS_FILE."""
+    with _pending_inputs_lock:
+        with _pending_resume_lock:
+            rq = dict(_pending_resume_queue)
+        with _pending_terminal_input_lock:
+            tq = dict(_pending_terminal_input_queue)
+        payload = {"resume_queue": rq, "terminal_queue": tq}
+        try:
+            PENDING_INPUTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = PENDING_INPUTS_FILE.with_suffix(".json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+            tmp.replace(PENDING_INPUTS_FILE)
+        except OSError as e:
+            print(f"  [pending-inputs] save failed: {e}")
+
+
+def _get_queued_events_for_session(session_id):
+    """Get synthetic events for any queued messages of this session."""
+    events = []
+    if not session_id:
+        return events
+    with _pending_resume_lock:
+        resume_queue = list(_pending_resume_queue.get(session_id, []))
+    with _pending_terminal_input_lock:
+        term_queue = list(_pending_terminal_input_queue.get(session_id, []))
+    ts = time.time()
+    for text in resume_queue:
+        events.append({
+            "line": None,
+            "ts": ts,
+            "type": "user_text",
+            "text": text,
+            "images": [],
+            "pending": True
+        })
+    for text in term_queue:
+        events.append({
+            "line": None,
+            "ts": ts,
+            "type": "user_text",
+            "text": text,
+            "images": [],
+            "pending": True
+        })
+    return events
+
 _BUSY_SESSION_STATUSES = {"busy", "running"}
 
 
@@ -11321,7 +11403,9 @@ def _queue_terminal_input(session_id, text, status=None):
         queue = _pending_terminal_input_queue.setdefault(session_id, [])
         queue.append(text)
         queued_count = len(queue)
+    _save_pending_inputs()
     payload = {
+
         "ok": True,
         "queued": True,
         "via": "terminal-queued",
@@ -11524,6 +11608,7 @@ def _inject_bg_agent_via_pty_socket(worker, text):
 
 def _start_resume_queue_watcher() -> None:
     """Drain queued prompts once Codex/Gemini or live terminal sessions go idle."""
+    _load_pending_inputs()
     def _watcher():
         while True:
             time.sleep(5)
@@ -11541,10 +11626,12 @@ def _start_resume_queue_watcher() -> None:
                     queue = _pending_resume_queue.get(sid, [])
                     if not queue:
                         _pending_resume_queue.pop(sid, None)
+                        _save_pending_inputs()
                         continue
                     text = queue.pop(0)
                     if not queue:
                         _pending_resume_queue.pop(sid, None)
+                _save_pending_inputs()
                 try:
                     if _is_codex_session(sid):
                         resume_session_codex(sid, text)
@@ -11572,14 +11659,17 @@ def _start_resume_queue_watcher() -> None:
                         queue = _pending_terminal_input_queue.get(sid, [])
                         if not queue:
                             _pending_terminal_input_queue.pop(sid, None)
+                            _save_pending_inputs()
                             continue
                         text = queue.pop(0)
                         if not queue:
                             _pending_terminal_input_queue.pop(sid, None)
+                    _save_pending_inputs()
                     _inject_text_into_session(sid, text, _from_terminal_queue=True)
                 except Exception:
                     pass
     threading.Thread(target=_watcher, daemon=True, name="resume-queue-watcher").start()
+
 
 
 def resume_session_codex(session_id, text):
@@ -11597,7 +11687,9 @@ def resume_session_codex(session_id, text):
                 if _poll_spawn_entry(s) is None:
                     with _pending_resume_lock:
                         _pending_resume_queue.setdefault(session_id, []).append(text)
+                    _save_pending_inputs()
                     return {
+
                         "ok": True,
                         "queued": True,
                         "pid": s.get("pid"),
@@ -14678,7 +14770,9 @@ def resume_session_gemini(session_id, text):
                 if _poll_spawn_entry(s) is None:
                     with _pending_resume_lock:
                         _pending_resume_queue.setdefault(session_id, []).append(text)
+                    _save_pending_inputs()
                     return {
+
                         "ok": True,
                         "queued": True,
                         "pid": s.get("pid"),
@@ -14990,7 +15084,9 @@ def resume_session_antigravity(session_id, text):
                 if _poll_spawn_entry(s) is None:
                     with _pending_resume_lock:
                         _pending_resume_queue.setdefault(session_id, []).append(text)
+                    _save_pending_inputs()
                     return {
+
                         "ok": True,
                         "queued": True,
                         "pid": s.get("pid"),
@@ -19725,8 +19821,11 @@ def parse_conversation_by_sid(session_id, after_line=0):
                             events.append(parsed)
             except OSError:
                 break
-            return {"events": events, "last_line": line_num}
+            events_copy = list(events)
+            events_copy.extend(_get_queued_events_for_session(session_id))
+            return {"events": events_copy, "last_line": line_num}
     return {"events": [], "last_line": 0}
+
 
 
 # Patterns for the session-timeline endpoint. Bash command prefixes that

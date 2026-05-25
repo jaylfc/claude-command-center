@@ -744,17 +744,18 @@
     const isPkood = currentSession && currentSession.source === 'pkood';
     const isCodex = currentSession && currentSession.source === 'codex';
     const isGemini = currentSession && currentSession.source === 'gemini';
+    const isAntigravity = currentSession && currentSession.source === 'antigravity';
     const repos = (typeof repoListState !== 'undefined' && repoListState.repos) || [];
-    const currentCwd = (currentSession && currentSession.cwd) || '';
+    const activeRepo = (currentSession && (currentSession.repoPath || currentSession.cwd)) || '';
     let html = '';
     html += '<div class="com-section-label">Move to repo</div>';
-    if (!sid || isPkood || isCodex || isGemini) {
-      html += '<div class="com-item com-current">No movable session selected</div>';
+    if (!sid) {
+      html += '<div class="com-item com-current">No session selected</div>';
     } else if (!repos.length) {
       html += '<div class="com-item com-current">No known repos. Add one in the Repo picker.</div>';
     } else {
       for (const r of repos) {
-        const isCurrent = r.path === currentCwd;
+        const isCurrent = r.path === activeRepo;
         const cls = 'com-item' + (isCurrent ? ' com-current' : '');
         const label = escapeHtml(r.label || r.path);
         const path = escapeHtml(r.path);
@@ -771,25 +772,44 @@
         const target = btn.dataset.target;
         const sidNow = currentSession && currentSession.id;
         if (!sidNow || !target) return;
-        if (!confirm('Move session to ' + target + '?\n\nThe JSONL file gets relocated; resume will then run in the new repo.')) return;
+        
+        const isNonClaude = isPkood || isCodex || isGemini || isAntigravity;
+        const confirmMsg = isNonClaude
+          ? 'Pin session to ' + target + '?\n\nThe session will visually display under the new repo.'
+          : 'Move session to ' + target + '?\n\nThe JSONL file gets relocated; resume will then run in the new repo.';
+          
+        if (!confirm(confirmMsg)) return;
         btn.disabled = true;
-        btn.textContent = 'Moving…';
+        btn.textContent = isNonClaude ? 'Pinning…' : 'Moving…';
         try {
-          const res = await fetch('/api/sessions/' + encodeURIComponent(sidNow) + '/move', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ repo_path: target }),
-          });
-          const data = await res.json();
-          if (data.ok) {
-            _closeConvOverflow();
-            // Refresh the conversation list so the moved session shows
-            // in its new home (and disappears from the current view if
-            // we're not pointed at the target).
-            if (typeof refreshConversationList === 'function') refreshConversationList();
-            else if (typeof loadConversationList === 'function') loadConversationList();
+          if (isNonClaude) {
+            const res = await fetch('/api/repo/pin', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ session_id: sidNow, path: target }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+              _closeConvOverflow();
+              if (typeof refreshConversationList === 'function') refreshConversationList();
+              else if (typeof loadConversationList === 'function') loadConversationList();
+            } else {
+              btn.textContent = 'Failed: ' + (data.error || 'unknown');
+            }
           } else {
-            btn.textContent = 'Failed: ' + (data.error || 'unknown');
+            const res = await fetch('/api/sessions/' + encodeURIComponent(sidNow) + '/move', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ repo_path: target }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+              _closeConvOverflow();
+              if (typeof refreshConversationList === 'function') refreshConversationList();
+              else if (typeof loadConversationList === 'function') loadConversationList();
+            } else {
+              btn.textContent = 'Failed: ' + (data.error || 'unknown');
+            }
           }
         } catch (err) {
           btn.textContent = 'Failed: ' + err.message;
@@ -808,6 +828,13 @@
         $convOverflowMenu.classList.add('open');
         $convOverflowMenu.setAttribute('aria-hidden', 'false');
         $convOverflowBtn.setAttribute('aria-expanded', 'true');
+        
+        // Escape the status-rail overflow-y container using fixed coords
+        const rect = $convOverflowBtn.getBoundingClientRect();
+        $convOverflowMenu.style.position = 'fixed';
+        $convOverflowMenu.style.top = (rect.bottom + 4) + 'px';
+        $convOverflowMenu.style.right = (window.innerWidth - rect.right) + 'px';
+        $convOverflowMenu.style.maxHeight = `calc(100vh - ${rect.bottom + 10}px)`;
       }
     });
     document.addEventListener('click', (e) => {
@@ -12003,7 +12030,8 @@
     const wasAtBottom = isConversationAtBottom($view);
     for (const ev of events) {
       const div = document.createElement('div');
-      div.className = 'event ' + ev.type;
+      div.className = 'event ' + ev.type + (ev.pending ? ' pending' : '');
+
       // Use the event's own JSONL timestamp (when it was actually written)
       // rather than render time; fall back to render time only when the
       // event has no ts (synthetic / very old logs).
@@ -12202,6 +12230,16 @@
           if (p.element && p.element.parentNode) p.element.parentNode.removeChild(p.element);
           _pendingSends.splice(pIdx, 1);
         }
+        const pendingDivs = $view.querySelectorAll('.event.user_text.pending');
+        for (const pDiv of pendingDivs) {
+          const userMsgDiv = pDiv.querySelector('.user-msg');
+          if (userMsgDiv) {
+            const rawText = userMsgDiv.getAttribute('data-raw-text') || userMsgDiv.textContent;
+            if (_normSend(rawText) === normed) {
+              if (pDiv.parentNode) pDiv.parentNode.removeChild(pDiv);
+            }
+          }
+        }
         const imagesHtml = renderImageDescriptors(ev.images);
         const cleanedText = cleanIssuePrompt(ev.text || '');
         const notification = parseTaskNotificationBlock(cleanedText);
@@ -12215,10 +12253,11 @@
           ? '<div class="user-msg" data-raw-text="' + escapeAttr(cleanedText) + '">' + linkifyPastedImages(escapeHtml(cleanedText)) + '</div>'
           : '';
         div.innerHTML = '<span class="label">User</span>'
-          + '<span class="line-num">L' + ev.line + '</span>'
+          + (ev.line != null ? '<span class="line-num">L' + ev.line + '</span>' : '')
           + tsSpan(ev.ts)
           + textHtml
           + imagesHtml;
+
       } else if (ev.type === 'assistant') {
         let html = '<span class="line-num">L' + ev.line + '</span>' + tsSpan(ev.ts);
         let hasNonTool = false;

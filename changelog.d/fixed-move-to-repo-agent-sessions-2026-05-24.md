@@ -1,0 +1,1 @@
+Enable the "Move to repo" overflow menu action for agent sessions (antigravity, gemini, pkood, codex) by resolving the target repo to a visual repo pin via the `/api/repo/pin` endpoint instead of requiring a physical JSONL move on disk.

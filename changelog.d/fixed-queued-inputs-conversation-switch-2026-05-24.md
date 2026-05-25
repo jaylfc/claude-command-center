@@ -1,0 +1,1 @@
+- Fixed queued inputs disappearing from the conversation pane when switching between conversations. Pending messages in Codex, Gemini, Antigravity, or terminal queues are now persisted to disk (`pending-inputs.json`) and rendered with a "sending..." status upon switching back.

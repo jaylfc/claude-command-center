@@ -2851,5 +2851,69 @@ class TestHealthcheck(unittest.TestCase):
         self.assertGreater(len(result["checks"]), 0)
 
 
+class TestPendingInputs(unittest.TestCase):
+    def setUp(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        self.server = importlib.import_module("server")
+        self.tmp_dir = tempfile.mkdtemp(prefix="ccc-pending-inputs-")
+        self.server.PENDING_INPUTS_FILE = pathlib.Path(self.tmp_dir) / "pending-inputs.json"
+        
+        # Clear locks/queues
+        with self.server._pending_resume_lock:
+            self.server._pending_resume_queue.clear()
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue.clear()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        with self.server._pending_resume_lock:
+            self.server._pending_resume_queue.clear()
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue.clear()
+
+    def test_save_and_load_pending_inputs(self):
+        sid = "test-session-id"
+        with self.server._pending_resume_lock:
+            self.server._pending_resume_queue[sid] = ["hello resume"]
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue[sid] = ["hello term"]
+
+        # Save to disk
+        self.server._save_pending_inputs()
+        self.assertTrue(self.server.PENDING_INPUTS_FILE.is_file())
+
+        # Clear memory queues
+        with self.server._pending_resume_lock:
+            self.server._pending_resume_queue.clear()
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue.clear()
+
+        # Load from disk
+        self.server._load_pending_inputs()
+
+        # Verify loaded correctly
+        with self.server._pending_resume_lock:
+            self.assertEqual(self.server._pending_resume_queue.get(sid), ["hello resume"])
+        with self.server._pending_terminal_input_lock:
+            self.assertEqual(self.server._pending_terminal_input_queue.get(sid), ["hello term"])
+
+    def test_get_queued_events_for_session(self):
+        sid = "test-session-id"
+        with self.server._pending_resume_lock:
+            self.server._pending_resume_queue[sid] = ["r1", "r2"]
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue[sid] = ["t1"]
+
+        events = self.server._get_queued_events_for_session(sid)
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0]["text"], "r1")
+        self.assertTrue(events[0]["pending"])
+        self.assertEqual(events[1]["text"], "r2")
+        self.assertEqual(events[2]["text"], "t1")
+        self.assertTrue(events[2]["pending"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
