@@ -1247,13 +1247,17 @@
 
   function isCommandActivityTool(tool) {
     const name = toolDisplayName(String(tool || ''));
-    return name === 'Bash' || name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command';
+    return name === 'Bash'
+      || name === 'exec_command'
+      || name === 'shell_command'
+      || name === 'run_shell_command'
+      || name === 'run_command';
   }
 
   function liveActivityToolLabel(tool) {
     const name = String(tool || '');
     if (name === 'Bash') return 'Bash command';
-    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command') return 'Shell command';
+    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command' || name === 'run_command') return 'Shell command';
     if (name === 'Read') return 'Reading file';
     if (name === 'Edit' || name === 'MultiEdit') return 'Editing file';
     if (name === 'Write') return 'Writing file';
@@ -1267,7 +1271,7 @@
   function liveActivityCompactToolLabel(tool) {
     const name = String(tool || '');
     if (name === 'Bash') return 'Bash';
-    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command') return 'Shell';
+    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command' || name === 'run_command') return 'Shell';
     return liveActivityToolLabel(tool);
   }
 
@@ -13132,6 +13136,11 @@
       const loc = codeRead.start ? ':' + codeRead.start + (codeRead.end && codeRead.end !== codeRead.start ? '-' + codeRead.end : '') : '';
       return 'Viewed ' + _pathBase(codeRead.path) + loc;
     }
+    if (isCommandActivityTool(displayName)) {
+      const compact = compactShellCommandLabel(detail);
+      const verb = tc.classList.contains('tool-call-ok') ? 'Completed ' : 'Ran ';
+      return compact ? verb + compact : verb + 'shell command';
+    }
     if (source) {
       return detail
         ? 'Used ' + source + ': ' + displayName + ' ' + trunc(detail, 40)
@@ -13192,6 +13201,39 @@
     }
     if (cur) words.push(cur);
     return words;
+  }
+
+  function compactShellCommandLabel(command) {
+    let raw = String(command || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return '';
+    raw = raw.replace(/^Shell command:\s*/i, '').trim();
+    const words = splitShellWords(raw);
+    if (!words.length) return raw.length > 40 ? raw.slice(0, 39) + '…' : raw;
+    const cmd = _pathBase(words[0]);
+    const sub = words[1] && !words[1].startsWith('-') ? words[1] : '';
+    if (cmd === 'git' && sub) return 'git ' + sub;
+    if (cmd === 'gh' && sub) return 'gh ' + sub;
+    if (cmd === 'npx' && sub) {
+      const third = words[2] && !words[2].startsWith('-') ? words[2] : '';
+      return third ? 'npx ' + sub + ' ' + third : 'npx ' + sub;
+    }
+    if ((cmd === 'npm' || cmd === 'pnpm' || cmd === 'yarn') && sub) return cmd + ' ' + sub;
+    if ((cmd === 'python' || cmd === 'python3') && sub) return sub === '-m' && words[2] ? cmd + ' -m ' + words[2] : cmd + ' ' + sub;
+    if (cmd) return cmd;
+    return raw.length > 40 ? raw.slice(0, 39) + '…' : raw;
+  }
+
+  function joinCompactList(items, maxItems) {
+    const unique = Array.from(new Set((items || []).filter(Boolean)));
+    const max = Math.max(1, Number(maxItems) || 3);
+    const visible = unique.slice(0, max);
+    const extra = unique.length - visible.length;
+    if (!visible.length) return '';
+    let text = '';
+    if (visible.length === 1) text = visible[0];
+    else if (visible.length === 2) text = visible[0] + ' and ' + visible[1];
+    else text = visible.slice(0, -1).join(', ') + ', and ' + visible[visible.length - 1];
+    return extra > 0 ? text + ' and ' + extra + ' more' : text;
   }
 
   function _codeLangForPath(path) {
@@ -13310,7 +13352,13 @@
         }
       }
       if (commands.length) {
-        parts.push(commands.length === 1 ? 'ran shell command' : 'ran ' + commands.length + ' shell commands');
+        const commandList = joinCompactList(commands.map(tc => compactShellCommandLabel(toolCallDetailText(tc))), 3);
+        if (commandList) {
+          const allSucceeded = commands.every(tc => tc.classList.contains('tool-call-ok'));
+          parts.push((allSucceeded ? 'completed ' : 'ran ') + commandList);
+        } else {
+          parts.push(commands.length === 1 ? 'ran shell command' : 'ran ' + commands.length + ' shell commands');
+        }
       }
       const sourcedTools = calls.filter(tc =>
         !isEditToolName(toolCallName(tc))
@@ -13329,7 +13377,8 @@
       const accounted = edits.length + commands.length + sourcedTools.length;
       const other = Math.max(0, calls.length - accounted);
       if (other) parts.push('ran ' + other + ' other tool' + (other === 1 ? '' : 's'));
-      label.textContent = parts.length ? parts.join('; ') : 'Ran ' + count + ' commands';
+      const text = parts.length ? parts.join('; ') : 'Ran ' + count + ' commands';
+      label.textContent = text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
     } else {
       label.textContent = 'Ran ' + count + ' commands';
     }
@@ -13342,6 +13391,17 @@
     return /has been (?:updated|created) successfully/i.test(t)
       || /file state is current/i.test(t)
       || /no need to Read it back/i.test(t);
+  }
+
+  function isSuccessfulCommandToolResult(toolCall, text) {
+    if (!isCommandActivityTool(toolCallName(toolCall))) return false;
+    const t = String(text || '');
+    if (/exit code:\s*[1-9]\d*/i.test(t) || /Process exited with code\s+[1-9]\d*/i.test(t)) return false;
+    if (/Tool is running as a background task/i.test(t)) return false;
+    return /The command completed successfully/i.test(t)
+      || /finished,\s*exit code:\s*0/i.test(t)
+      || /Process exited with code\s+0/i.test(t)
+      || !!t.trim();
   }
 
   function stampCurrentToolGroup(ts) {
@@ -13739,9 +13799,12 @@
             // CSS ::before never renders. Plain outputs bake the prefix into
             // their <pre>; structured code previews rely on the group stamp.
             const _toolTs = eventStamp(ev.ts) || nowStamp();
+            const commandSucceeded = !ev.is_error && isSuccessfulCommandToolResult(last, text);
+            if (commandSucceeded) last.classList.add('tool-call-ok');
             if (!ev.is_error && isRoutineSuccessfulToolResult(last, text)) {
               last.classList.add('tool-call-ok');
               stampCurrentToolGroup(_toolTs);
+              updateToolGroupLabel(_currentToolGroup);
               continue;
             }
             const codePreview = ev.is_error ? null : renderToolCodePreview(last, text);
@@ -13767,6 +13830,7 @@
             // node needs the attribute set, not just the parent group.
             stampCurrentToolGroup(_toolTs);
             last.appendChild(out);
+            if (commandSucceeded) updateToolGroupLabel(_currentToolGroup);
           }
         }
         continue;
