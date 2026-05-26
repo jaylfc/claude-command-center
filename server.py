@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "4.3.2.5"
+__version__ = "4.4.0"
 
 import ast
 import base64
@@ -15967,8 +15967,12 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
     return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
 
 
-def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model=None):
-    """Spawn a headless AGY print-mode run and return tracking info."""
+def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
+    """Spawn a headless AGY print-mode run and return tracking info.
+
+    If `worktree=True`, create a fresh git worktree off the launch cwd on a
+    `feat/<slug>` branch (same shape as the Claude path) and run AGY there.
+    """
     prompt = _strip_ccc_session_state_instruction(prompt or "")
     if not prompt:
         return {"ok": False, "error": "missing prompt"}
@@ -15995,6 +15999,17 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model
                 "via": "antigravity-spawn",
             }
         model_to_use = settings_result.get("model") or model_to_use
+
+    worktree_path = None
+    worktree_branch = None
+    if worktree:
+        try:
+            worktree_path, worktree_branch = _create_worktree_for_spawn(
+                spawn_cwd, session_name,
+            )
+            spawn_cwd = worktree_path
+        except RuntimeError as e:
+            return {"ok": False, "error": f"worktree creation failed: {e}"}
 
     cmd = _antigravity_command_words(resolved)
     user_args = cmd[1:]
@@ -16034,6 +16049,8 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model
     cmd.extend(["-p", prompt])
 
     log_fh = open(log_path, "w")
+    if worktree_path:
+        _run_worktree_init_hook(worktree_path, ctx["repo_path"], session_name, log_fh)
     try:
         proc = subprocess.Popen(
             cmd,
@@ -16089,7 +16106,7 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model
         engine="antigravity",
         model=model_to_use,
     )
-    return {
+    resp = {
         "ok": True,
         "pid": proc.pid,
         "name": session_name,
@@ -16097,6 +16114,10 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model
         "via": "antigravity-spawn",
         "model": model_to_use,
     }
+    if worktree_path:
+        resp["worktree_path"] = worktree_path
+        resp["worktree_branch"] = worktree_branch
+    return resp
 
 
 def _resume_session_antigravity_app(session_id, text):
@@ -16512,7 +16533,7 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, m
     return resp
 
 
-def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, model=None):
+def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
     """Spawn a headless Codex CLI run and return tracking info.
 
     Mirrors `spawn_session` but invokes the Codex CLI's `exec`
@@ -16525,6 +16546,9 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, model=None)
 
     The spawned subprocess requires an explicit cwd or repo_path. Codex `--cd`
     is set so the agent's workspace root matches that concrete directory.
+
+    If `worktree=True`, create a fresh git worktree off the launch cwd on a
+    `feat/<slug>` branch (same shape as the Claude path) and run codex there.
 
     Returns the same shape as spawn_session:
       {ok: True,  pid, name, log}                       — success
@@ -16551,6 +16575,17 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, model=None)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_filename
 
+    worktree_path = None
+    worktree_branch = None
+    if worktree:
+        try:
+            worktree_path, worktree_branch = _create_worktree_for_spawn(
+                spawn_cwd, session_name,
+            )
+            spawn_cwd = worktree_path
+        except RuntimeError as e:
+            return {"ok": False, "error": f"worktree creation failed: {e}"}
+
     cmd = [
         bin_path, "exec",
         "--json",
@@ -16564,6 +16599,8 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, model=None)
     cmd.extend(["--", prompt])
 
     log_fh = open(log_path, "w")
+    if worktree_path:
+        _run_worktree_init_hook(worktree_path, ctx["repo_path"], session_name, log_fh)
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
@@ -16597,7 +16634,11 @@ def spawn_session_codex(prompt, name=None, cwd=None, repo_path=None, model=None)
         engine="codex",
     )
 
-    return {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
+    resp = {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
+    if worktree_path:
+        resp["worktree_path"] = worktree_path
+        resp["worktree_branch"] = worktree_branch
+    return resp
 
 
 _COLOR_PALETTE = [
@@ -26077,6 +26118,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             name=name,
                             cwd=spawn_cwd,
                             repo_path=payload.get("repo_path"),
+                            worktree=worktree_flag,
                             model=model,
                         )
                     elif engine == "antigravity":
@@ -26085,6 +26127,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             name=name,
                             cwd=spawn_cwd,
                             repo_path=payload.get("repo_path"),
+                            worktree=worktree_flag,
                             model=model,
                         )
                     else:
@@ -26156,6 +26199,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         name=name,
                         cwd=str(cwd_resolved) if cwd_resolved else None,
                         repo_path=payload.get("repo_path"),
+                        worktree=bool(payload.get("worktree")),
                         model=model,
                     )
                     # Resolver-side failures (binary not found, CCC_CODEX_BIN
@@ -26273,6 +26317,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         name=name,
                         cwd=str(cwd_resolved) if cwd_resolved else None,
                         repo_path=payload.get("repo_path"),
+                        worktree=bool(payload.get("worktree")),
                         model=model,
                     )
                     if result.get("code") == "antigravity_unavailable":
