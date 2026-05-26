@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "4.3.1"
+__version__ = "4.3.2"
 
 import ast
 import base64
@@ -1223,7 +1223,7 @@ def _detect_session_engine(session_id):
     return "claude"
 
 
-def _native_pick_folder(prompt_text="Pick a repo folder for Claude Command Center"):
+def _native_pick_folder(prompt_text="Pick a repo folder for Command Center"):
     """Open the OS-native folder chooser and return the selected absolute path.
 
     Returns a dict:
@@ -3412,7 +3412,7 @@ def _push_screenshot_to_branch(local_path, commit_subject):
     # Configure local user/email for the commit so this works on a fresh
     # box without ~/.gitconfig user.email set. Safe scope: --local only
     # touches this scratch dir's .git/config, never global config.
-    _git(["config", "--local", "user.name", "Claude Command Center"], wt)
+    _git(["config", "--local", "user.name", "Command Center"], wt)
     _git(["config", "--local", "user.email", "ccc-bug-report@localhost"], wt)
 
     # Copy the screenshot in under its basename and stage it explicitly —
@@ -16948,6 +16948,10 @@ def _group_chat_read(path):
     if not (real_path.startswith(group_chats_dir + os.sep) or real_path == group_chats_dir):
         return None, "forbidden"
     try:
+        _group_chat_update_header_if_changed(real_path)
+    except Exception:
+        pass
+    try:
         stat_result = os.stat(real_path)
         with open(real_path, "r", encoding="utf-8") as fh:
             content = fh.read()
@@ -17029,6 +17033,11 @@ def _coordinate_sessions(payload):
     mode = (payload.get("mode") or "topic").strip()
     sessions_meta = payload.get("sessions_meta") or []
     include_human = bool(payload.get("include_human", True))
+    lane = (payload.get("lane") or "").strip() or None
+    keywords = payload.get("keywords") or []
+    if not isinstance(keywords, list):
+        keywords = []
+    keywords = [str(k).strip() for k in keywords if str(k).strip()]
 
     if not topic:
         return {"ok": False, "error": "missing topic"}
@@ -17104,6 +17113,8 @@ def _coordinate_sessions(payload):
                 "started_at": time.time(),
                 "archived": False,
                 "closed_at": None,
+                "lane": lane,
+                "keywords": keywords,
             }, fh)
     except OSError:
         pass  # sidecar failure is non-fatal
@@ -17123,8 +17134,104 @@ def _coordinate_sessions(payload):
             f"created empty chat with topic `{topic}`",
         )
 
+    _group_chat_update_header_if_changed(chat_path, force_write=True)
     chat_path_tilde = "~/.claude/group-chats/" + f"{slug}-{ts}.md"
     return {"ok": True, "chat_path": chat_path_tilde, "results": results}
+
+
+def _group_chat_update_header_if_changed(chat_path, force_write=False):
+    """Read the chat markdown file, compute the current wake status of all
+    agent participants, and update the markdown header if it differs from
+    what's on disk.
+    """
+    try:
+        real_path = os.path.realpath(os.path.expanduser(chat_path))
+    except Exception:
+        return
+    try:
+        with open(real_path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return
+
+    sidecar_path = real_path[:-3] + ".json" if real_path.endswith(".md") else real_path + ".json"
+    try:
+        with open(sidecar_path, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except Exception:
+        return
+
+    session_ids = meta.get("session_ids") or []
+    name_map = meta.get("name_map") or {}
+
+    # Build the wake status block
+    wake_status_lines = ["**Wake-status:**"]
+    for sid in session_ids:
+        label = name_map.get(sid) or sid
+        pmeta = _group_chat_participant_meta(sid)
+        if pmeta.get("is_live"):
+            status_str = "online"
+        else:
+            last_activity = pmeta.get("last_activity")
+            if last_activity and last_activity > 0:
+                last_active_date = datetime.fromtimestamp(last_activity).strftime("%Y-%m-%d")
+                status_str = f"offline (last active {last_active_date})"
+            else:
+                status_str = "offline"
+        wake_status_lines.append(f"- `{label}` ({sid[:8]}): {status_str}")
+
+    if not session_ids:
+        wake_status_lines.append("- (no participants)")
+
+    wake_status_block = "\n".join(wake_status_lines)
+
+    boundary_idx = content.find("\n---")
+    if boundary_idx == -1:
+        boundary_idx = content.find("\n## ")
+
+    if boundary_idx != -1:
+        header_part = content[:boundary_idx]
+        rest_part = content[boundary_idx:]
+    else:
+        header_part = content
+        rest_part = ""
+
+    if "**Wake-status:**" in header_part:
+        # Find where it starts
+        start_idx = header_part.find("**Wake-status:**")
+        # Replace from start_idx to the end of header_part
+        header_part = header_part[:start_idx].rstrip() + "\n" + wake_status_block
+    else:
+        # Append it after **Participants:** line
+        parts = header_part.split("\n")
+        inserted = False
+        for i, line in enumerate(parts):
+            if line.startswith("**Participants:**"):
+                parts.insert(i + 1, wake_status_block)
+                inserted = True
+                break
+        if not inserted:
+            parts.append(wake_status_block)
+        header_part = "\n".join(parts)
+
+    new_content = header_part.rstrip() + "\n" + rest_part.lstrip()
+
+    if force_write or new_content != content:
+        try:
+            with open(real_path, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+        except OSError:
+            return
+
+        # Update the cached mtime to prevent a self-nudge loop
+        try:
+            new_mtime = os.stat(real_path).st_mtime
+            with _coord_lock:
+                entry = _active_coordinations.get(real_path)
+                if entry is not None:
+                    entry["mtime"] = new_mtime
+        except Exception:
+            pass
 
 
 def _group_chat_nudge(path):
@@ -17365,6 +17472,10 @@ def _coordination_watcher() -> None:
 
         for path in paths:
             try:
+                _group_chat_update_header_if_changed(path)
+            except Exception:
+                pass
+            try:
                 mtime = os.stat(path).st_mtime
             except OSError:
                 # File deleted — drop it. Can't write closed_at because the .md
@@ -17603,6 +17714,11 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
             continue
         if md_path in active_paths:
             status = "active"
+            try:
+                _group_chat_update_header_if_changed(md_path)
+                stat = os.stat(md_path)
+            except Exception:
+                pass
         elif is_archived:
             status = "archived"
         else:
@@ -17646,6 +17762,8 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
             "last_author_hash": waiting["last_author_hash"],
             "last_author_is_human": waiting["last_author_is_human"],
             "waiting_on_hashes": waiting["waiting_on_hashes"],
+            "lane": meta.get("lane"),
+            "keywords": meta.get("keywords") or [],
         })
     out.sort(key=lambda c: c["last_mtime"], reverse=True)
     return out
@@ -20192,7 +20310,7 @@ def _morning_spawn_prompt(goal_name, intent_markdown, strategy_text):
     # Full context for a never-seen-before strategy session.
     return (
         f"You're picking up a new focused work session on the goal \"{goal_name}\" "
-        f"(from my Morning view in Claude Command Center).\n\n"
+        f"(from my Morning view in Command Center).\n\n"
         f"## Goal intent\n\n{intent_markdown}\n\n"
         f"## Current strategy\n\n{strategy_text}\n\n"
         f"This is a fresh session for this strategy. Please help me move forward "
@@ -20205,7 +20323,7 @@ def _morning_task_spawn_prompt(goal_name, intent_markdown, task_text, status):
     status_line = f"## Current status (my note)\n\n{status}\n\n" if status else ""
     return (
         f"You're picking up a focused work session on a task I committed to today "
-        f"(from my Morning view in Claude Command Center).\n\n"
+        f"(from my Morning view in Command Center).\n\n"
         f"## Goal\n\n{goal_name}\n\n"
         f"## Goal intent\n\n{intent_markdown}\n\n"
         f"## Task\n\n{task_text}\n\n"
@@ -25479,7 +25597,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     gh_out = subprocess.run(
                         ["gh", "issue", "close", issue_num,
                          "--reason", "not planned",
-                         "--comment", "Archived via Claude Command Center (not planned)"],
+                         "--comment", "Archived via Command Center (not planned)"],
                         capture_output=True, text=True, timeout=10,
                         cwd=ctx["repo_path"],
                     )
@@ -27071,7 +27189,7 @@ def get_app_config():
         return _app_config_cache
     import shutil
     config = {
-        "app_name": "Claude Command Center",
+        "app_name": "Command Center for Claude, Codex, and Anti-Gravity",
         "title_strip": TITLE_STRIP_PREFIXES,
         "repo": "",
         "vercel_enabled": bool(_VERCEL_PROJECT_ENV),
@@ -27869,7 +27987,7 @@ def main():
         sys.exit(0)
     signal.signal(signal.SIGTERM, _on_sigterm)
     display_host = "localhost" if bind_host in ("127.0.0.1", "::1") else bind_host
-    print(f"Claude Command Center running at http://{display_host}:{PORT}")
+    print(f"Command Center running at http://{display_host}:{PORT}")
     print(f"  State dir:     {COMMAND_CENTER_STATE_DIR}")
     print(f"  Projects dir:  {PROJECTS_ROOT}")
     print(f"  Press Ctrl+C to stop")

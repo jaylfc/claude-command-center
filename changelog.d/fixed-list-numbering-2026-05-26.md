@@ -1,0 +1,1 @@
+- Fix list numbering restarting at 1 for split or arbitrary starting numbered lists in the conversation view.

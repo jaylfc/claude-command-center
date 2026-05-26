@@ -335,6 +335,71 @@
   footer a { color: var(--fg-mute); text-decoration: none; }
   footer a:hover { color: var(--fg); }
   .star-line { margin-top: 28px; padding-top: 28px; border-top: 1px dashed var(--line); color: var(--fg-mute); font-size: 13px; }
+
+  /* === Scroll-reveal animations === */
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(40px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0)    scale(1); }
+  }
+  @keyframes wipe-in {
+    0%   { clip-path: inset(0 100% 0 0); transform: translateX(-20px); opacity: 0; }
+    100% { clip-path: inset(0 0 0 0);    transform: translateX(0);     opacity: 1; }
+  }
+  @keyframes boot-up {
+    0%   { opacity: 0; filter: brightness(8) blur(20px) contrast(2);
+           transform: scaleY(0.005) scaleX(0);
+           box-shadow: 0 0 0 rgba(245, 166, 35, 0); }
+    18%  { opacity: 1; filter: brightness(3.5) blur(10px) contrast(1.5);
+           transform: scaleY(0.01) scaleX(1);
+           box-shadow: 0 0 100px rgba(245, 166, 35, 0.5); }
+    60%  { filter: brightness(1.4) blur(2px) contrast(1.1);
+           transform: scaleY(1)    scaleX(1.02); }
+    100% { opacity: 1; filter: brightness(1) blur(0) contrast(1);
+           transform: scaleY(1)    scaleX(1);
+           box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4); }
+  }
+
+  .fade-target { opacity: 0; transform: translateY(40px) scale(0.98); }
+  .fade-target.is-visible {
+    animation: fade-up 1.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .boot-target { opacity: 0; transform: scaleY(0.005) scaleX(0); filter: brightness(8) blur(20px); }
+  .boot-target.is-visible {
+    animation: boot-up 2.0s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  .wipe-target { opacity: 0; }
+  .wipe-target.is-visible {
+    animation: wipe-in 1.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    animation-delay: 0.4s;
+  }
+
+  /* Stagger children inside grids when the grid is visible */
+  .stagger-grid > * { opacity: 0; transform: translateY(40px) scale(0.98); }
+  .stagger-grid.is-visible > * {
+    animation: fade-up 1.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+  .stagger-grid.is-visible > *:nth-child(1) { animation-delay: 0.10s; }
+  .stagger-grid.is-visible > *:nth-child(2) { animation-delay: 0.25s; }
+  .stagger-grid.is-visible > *:nth-child(3) { animation-delay: 0.40s; }
+  .stagger-grid.is-visible > *:nth-child(4) { animation-delay: 0.55s; }
+
+  /* Hero internal stagger (fires on load, not on observer) */
+  .hero .fade-target { animation-delay: 0s; }
+  .hero .fade-target.is-visible:nth-of-type(1) { animation-delay: 0.05s; }
+  .hero .fade-target.is-visible:nth-of-type(2) { animation-delay: 0.15s; }
+  .hero .fade-target.is-visible:nth-of-type(3) { animation-delay: 0.25s; }
+  .hero .fade-target.is-visible:nth-of-type(4) { animation-delay: 0.35s; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .fade-target, .boot-target, .wipe-target, .stagger-grid > * {
+      opacity: 1 !important;
+      transform: none !important;
+      filter: none !important;
+      animation: none !important;
+    }
+  }
 </style>
 </head>
 <body>
@@ -360,18 +425,18 @@
 <main>
   <section class="hero" style="border-top: 0;">
     <div class="wrap hero-inner">
-      <div class="eyebrow">
+      <div class="eyebrow fade-target">
         <span class="badge">v4</span>
         <span>Antigravity now a first-class engine</span>
       </div>
-      <h1 class="hero-title">
+      <h1 class="hero-title fade-target">
         One inbox for every <span class="orange">Claude</span>, <span class="orange">Codex</span>, and <span class="orange">Antigravity</span> session on your Mac.
       </h1>
-      <p class="lede">
+      <p class="lede fade-target">
         Pin strategy sessions on top. Fan out sub-sessions for execution. Stay above the noise across 30+ agent sessions. Local, open source, MIT.
       </p>
 
-      <div class="cta-row">
+      <div class="cta-row fade-target">
         <a class="btn btn-primary" href="#install">
           Install with one line <span class="arrow">&rarr;</span>
         </a>
@@ -379,16 +444,16 @@
         <a class="btn btn-soft" href="https://github.com/amirfish1/claude-command-center" rel="noopener">★ GitHub</a>
       </div>
 
-      <div class="quick-install" id="quickInstall">
+      <div class="quick-install fade-target" id="quickInstall">
         <code id="quickCmd">curl -fsSL https://raw.githubusercontent.com/amirfish1/claude-command-center/main/install.sh | bash</code>
         <button class="copy" type="button" data-target="quickCmd">copy</button>
       </div>
 
-      <div class="install-meta">
+      <div class="install-meta fade-target">
         macOS <span class="sep">·</span> Python 3 stdlib <span class="sep">·</span> No telemetry by default <span class="sep">·</span> MIT
       </div>
 
-      <div class="demo" aria-label="CCC v4 dashboard demo">
+      <div class="demo boot-target" aria-label="CCC v4 dashboard demo">
         <div class="demo-bar">
           <div class="lights">
             <span class="light red"></span>
@@ -406,7 +471,7 @@
           </div>
         </div>
       </div>
-      <div class="demo-link">
+      <div class="demo-link fade-target">
         Or skip install, <a href="/demo">tour the read-only demo with seeded data &rarr;</a>
       </div>
     </div>
@@ -414,13 +479,13 @@
 
   <section id="whats-new">
     <div class="wrap">
-      <div class="section-eyebrow">New in v4 · Shipped May 21, 2026</div>
-      <h2>Three things that ship with <span class="orange">v4</span>.</h2>
-      <p class="section-lede">
+      <div class="section-eyebrow fade-target">New in v4 · Shipped May 21, 2026</div>
+      <h2 class="fade-target">Three things that ship with <span class="orange">v4</span>.</h2>
+      <p class="section-lede fade-target">
         The biggest is Antigravity. Google's new coding agent is now a first-class engine alongside Claude Code and Codex, including the app-only sessions other tools cannot drive.
       </p>
 
-      <div class="news-grid">
+      <div class="news-grid stagger-grid">
         <div class="news-card headline">
           <span class="pill">★ Headline</span>
           <h3>Antigravity engine</h3>
@@ -445,13 +510,13 @@
 
   <section id="features">
     <div class="wrap">
-      <div class="section-eyebrow">What it does</div>
-      <h2>Three things every other orchestrator <span class="orange">misses</span>.</h2>
-      <p class="section-lede">
+      <div class="section-eyebrow fade-target">What it does</div>
+      <h2 class="fade-target">Three things every other orchestrator <span class="orange">misses</span>.</h2>
+      <p class="section-lede fade-target">
         Most tools want to own execution. You launch agents through them, and the moment you open a terminal and resume something by hand, the dashboard goes blind. CCC works the other way.
       </p>
 
-      <div class="features">
+      <div class="features stagger-grid">
         <article class="feature">
           <div class="num">01</div>
           <h3>Sees every session, not just the ones it spawned.</h3>
@@ -492,13 +557,13 @@ agy --conversation &lt;sid&gt;</pre>
 
   <section id="use-cases">
     <div class="wrap">
-      <div class="section-eyebrow">Who it's for</div>
-      <h2>If you've felt this, CCC is for you.</h2>
-      <p class="section-lede">
+      <div class="section-eyebrow fade-target">Who it's for</div>
+      <h2 class="fade-target">If you've felt this, CCC is for you.</h2>
+      <p class="section-lede fade-target">
         The audience is anyone who tried to run more than 10 agent sessions and felt the bottleneck stop being the model and start being them.
       </p>
 
-      <div class="use-cases">
+      <div class="use-cases stagger-grid">
         <div class="use-case">
           <div class="who">Solo product builder</div>
           <h3>Shipping two products in parallel</h3>
@@ -525,13 +590,13 @@ agy --conversation &lt;sid&gt;</pre>
 
   <section id="compare">
     <div class="wrap">
-      <div class="section-eyebrow">Honest comparison</div>
-      <h2>How CCC differs from the <span class="orange">other tools</span>.</h2>
-      <p class="section-lede">
+      <div class="section-eyebrow fade-target">Honest comparison</div>
+      <h2 class="fade-target">How CCC differs from the <span class="orange">other tools</span>.</h2>
+      <p class="section-lede fade-target">
         Tools in this category make different bets. Here is where each one wins and where each one loses. We listed where CCC loses too.
       </p>
 
-      <div class="compare-wrap">
+      <div class="compare-wrap fade-target">
         <table class="compare">
           <thead>
             <tr>
@@ -614,13 +679,13 @@ agy --conversation &lt;sid&gt;</pre>
 
   <section id="install">
     <div class="wrap">
-      <div class="section-eyebrow">Get it</div>
-      <h2>Install in 60 seconds.</h2>
-      <p class="section-lede">
+      <div class="section-eyebrow fade-target">Get it</div>
+      <h2 class="fade-target">Install in 60 seconds.</h2>
+      <p class="section-lede fade-target">
         macOS, Python 3, Claude Code (and optionally Codex CLI, Antigravity CLI for those engines).
       </p>
 
-      <div class="install-grid">
+      <div class="install-grid stagger-grid">
         <div class="install-block">
           <h3># one-line install</h3>
 <pre><span class="comment"># downloads, installs, opens the dashboard</span>
@@ -648,10 +713,10 @@ brew install ccc</pre>
 
   <section id="why">
     <div class="wrap">
-      <div class="section-eyebrow">Why this exists</div>
-      <h2>Most orchestrators want to <span class="orange">own you</span>.</h2>
+      <div class="section-eyebrow fade-target">Why this exists</div>
+      <h2 class="fade-target">Most orchestrators want to <span class="orange">own you</span>.</h2>
       <div class="why">
-        <div class="why-text">
+        <div class="why-text fade-target">
           <p>
             Other tools want to own execution. You launch agents through their dashboard, and in return you get a card on a kanban. <strong>That's fine until you open a terminal.</strong>
           </p>
@@ -662,7 +727,7 @@ brew install ccc</pre>
             <strong>CCC goes the other way.</strong> Each engine's on-disk state is the source of truth. If Claude Code, Codex, or Antigravity is running anywhere on your machine, it shows up here. Close the dashboard. Sessions keep running. Reopen tomorrow. Everything still there.
           </p>
         </div>
-        <ul class="why-list">
+        <ul class="why-list fade-target">
           <li><strong>Architecture</strong>One Python file (stdlib HTTP server). One HTML file (vanilla JS, no build). Read the whole product in an afternoon.</li>
           <li><strong>State</strong>Human-readable JSON sidecars under <code>~/.claude/command-center/</code>. Rewriteable by hand.</li>
           <li><strong>Workers</strong>Zero. Every API request rescans Claude's session directories and returns a flat list. No background jobs to babysit.</li>
@@ -676,9 +741,9 @@ brew install ccc</pre>
 
 <section class="cta-banner">
   <div class="wrap-narrow">
-    <h2>Stop staring at the spinner.</h2>
-    <p>If you've ever forgotten which Claude tab was waiting on you, you already know why this exists. Two-line install. Local. Open source.</p>
-    <div class="cta-row">
+    <h2 class="fade-target">Stop staring at the spinner.</h2>
+    <p class="fade-target">If you've ever forgotten which Claude tab was waiting on you, you already know why this exists. Two-line install. Local. Open source.</p>
+    <div class="cta-row fade-target">
       <a class="btn btn-primary" href="#install">Install <span class="arrow">&rarr;</span></a>
       <a class="btn btn-soft" href="https://github.com/amirfish1/claude-command-center" rel="noopener">★ Star on GitHub</a>
     </div>
@@ -726,6 +791,29 @@ brew install ccc</pre>
         sel.addRange(range);
       }
     });
+  });
+
+  // Scroll-reveal: add .is-visible when an element enters the viewport.
+  // Fires once per element, then unobserves.
+  document.addEventListener('DOMContentLoaded', () => {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const targets = document.querySelectorAll('.fade-target, .boot-target, .wipe-target, .stagger-grid');
+
+    if (reduceMotion) {
+      targets.forEach(el => el.classList.add('is-visible'));
+      return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('is-visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+
+    targets.forEach(el => observer.observe(el));
   });
 </script>
 </body>

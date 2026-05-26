@@ -1,0 +1,1 @@
+- Group chat files now automatically receive a `**Wake-status:**` header block tracking the live state (awake/sleeping) of all participants.

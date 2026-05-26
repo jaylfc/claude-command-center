@@ -210,7 +210,7 @@
 
   // App config from server — populated before anything else renders.
   let APP_CONFIG = {
-    app_name: 'Claude Command Center',
+    app_name: 'Command Center for Claude, Codex, and Anti-Gravity',
     title_strip: [],
     repo: '',
     vercel_enabled: false,
@@ -255,7 +255,7 @@
   // Legacy client-side trailer that older CCC builds appended to spawn
   // prompts. Kept so the UI can scrub existing transcripts; current Claude
   // spawns receive the reminder as a hidden backend system prompt instead.
-  const SESSION_STATE_INSTRUCTION = "\n\nBefore your final reply, end with a block formatted EXACTLY like this (the Claude Command Center dashboard parses it):\n<session-state>\nDID: <one sentence — what you actually changed/learned>\nINSIGHT: <one sentence — the main finding, root cause, or surprise>\nNEXT_STEP_USER: <one sentence — the exact next thing the user should do>\n</session-state>";
+  const SESSION_STATE_INSTRUCTION = "\n\nBefore your final reply, end with a block formatted EXACTLY like this (the Command Center dashboard parses it):\n<session-state>\nDID: <one sentence — what you actually changed/learned>\nINSIGHT: <one sentence — the main finding, root cause, or surprise>\nNEXT_STEP_USER: <one sentence — the exact next thing the user should do>\n</session-state>";
 
   // When a prompt starts with the sibling-orchestrator preamble ("You are
   // a sibling Claude Code session…"), the boilerplate that follows (your
@@ -2249,7 +2249,7 @@
   let _ttsStatusFailures = 0;
 
   function ttsButtons() {
-    return Array.from(document.querySelectorAll('.conv-input-bar .tts-btn'));
+    return Array.from(document.querySelectorAll('.conv-input-bar .tts-btn, .gc-reader .tts-btn'));
   }
 
   function setTtsButtonsBusy(busy) {
@@ -2399,7 +2399,7 @@
     const focusEl = elementForSelectionNode(sel.focusNode);
     const rangeEl = elementForSelectionNode(sel.getRangeAt(0).commonAncestorContainer);
     const inPane = anchorEl && focusEl && pane.contains(anchorEl) && pane.contains(focusEl);
-    const inComposer = [anchorEl, focusEl, rangeEl].some(el => el && el.closest && el.closest('.conv-input-bar'));
+    const inComposer = [anchorEl, focusEl, rangeEl].some(el => el && el.closest && el.closest('.conv-input-bar, .gc-reader-input-row'));
     
     if (inPane && !inComposer) {
       return buildTtsDataFromRange(sel.getRangeAt(0));
@@ -3036,7 +3036,9 @@
       }
       // Numbered list: consecutive `N. text` lines.
       if (/^\s*\d+\.\s+/.test(line)) {
-        let html = '<ol>';
+        const startMatch = line.match(/^\s*(\d+)\.\s+/);
+        const startVal = startMatch ? parseInt(startMatch[1], 10) : 1;
+        let html = startVal !== 1 ? '<ol start="' + startVal + '">' : '<ol>';
         while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
           const item = lines[i].replace(/^\s*\d+\.\s+/, '');
           html += '<li>' + renderInline(item) + '</li>';
@@ -3384,6 +3386,7 @@
   const $convSearch = document.getElementById('convSearch');
   const $convSearchClear = document.getElementById('convSearchClear');
   const $kanbanBoard = document.getElementById('kanbanBoard');
+  const $flowBoard = document.getElementById('flowBoard');
   const $convKanbanToggle = document.getElementById('convKanbanToggle');
 
   // ── One-shot localStorage migration ──
@@ -3426,8 +3429,31 @@
     } catch (_) { /* localStorage may be disabled — fail silently */ }
   })();
 
-  let kanbanView = false;
-  try { kanbanView = localStorage.getItem('ccc-kanban-view') === 'true'; } catch (_) {}
+  function normalizeSidebarViewMode(value) {
+    if (value === 'board' || value === 'flow' || value === 'list') return value;
+    if (value === 'kanban') return 'board';
+    return 'list';
+  }
+  function readSidebarViewMode() {
+    try {
+      const saved = localStorage.getItem('ccc-session-view');
+      if (saved) return normalizeSidebarViewMode(saved);
+      return localStorage.getItem('ccc-kanban-view') === 'true' ? 'board' : 'list';
+    } catch (_) {
+      return 'list';
+    }
+  }
+  let sidebarViewMode = readSidebarViewMode();
+  let kanbanView = sidebarViewMode === 'board';
+  function isFlowView() { return sidebarViewMode === 'flow'; }
+  function setSidebarViewMode(mode) {
+    sidebarViewMode = normalizeSidebarViewMode(mode);
+    kanbanView = sidebarViewMode === 'board';
+    try {
+      localStorage.setItem('ccc-session-view', sidebarViewMode);
+      localStorage.setItem('ccc-kanban-view', kanbanView ? 'true' : 'false');
+    } catch (_) {}
+  }
   let kanbanCollapsed = {}; // column_key -> bool, tracks user collapse state
   try { kanbanCollapsed = JSON.parse(localStorage.getItem('ccc-kanban-collapsed') || '{}'); } catch (_) {}
   let kanbanShowAll = {};   // column_key -> bool, tracks "show all" state for large columns
@@ -3721,6 +3747,11 @@
         el.classList.toggle('active', el.dataset.id === convId);
       });
     }
+    if ($flowBoard) {
+      $flowBoard.querySelectorAll('.flow-node-session').forEach(el => {
+        el.classList.toggle('active', el.dataset.id === convId);
+      });
+    }
   }
   function setActivePaneById(paneId, activeConvId) {
     const idx = paneIndexByPaneId(paneId);
@@ -3822,7 +3853,7 @@
     const title = (row && (row.display_name || row.ai_title || firstSentenceOf(row.first_message || '', 70)))
       || CONV_POPOUT_TARGET.slice(0, 8)
       || 'Conversation';
-    document.title = title + ' - Claude Command Center';
+    document.title = title + ' - Command Center for Claude, Codex, and Anti-Gravity';
   }
   function renderPopoutMissingConversation() {
     if (_popoutMissingShown || currentConversation) return;
@@ -4863,6 +4894,7 @@
     convs = filterGhIssues(convs);
     const $kanbanBoard = document.getElementById('kanbanBoard');
     const $convList = document.getElementById('convList');
+    const $flow = document.getElementById('flowBoard');
     if (!$kanbanBoard) return;
 
     const scrolls = {};
@@ -4881,6 +4913,7 @@
     });
 
     if ($convList) $convList.style.display = 'none';
+    if ($flow) $flow.style.display = 'none';
     $kanbanBoard.style.display = '';
     renderKanbanBoard(convs || [], $kanbanBoard, false);
     if ($kanbanBoardSplit) renderKanbanBoard(convs || [], $kanbanBoardSplit, true);
@@ -4903,15 +4936,454 @@
     });
   }
 
+  let flowNodePositions = {};
+  try { flowNodePositions = JSON.parse(localStorage.getItem('ccc-flow-node-positions') || '{}'); } catch (_) {}
+  let flowNodeParents = {};
+  try { flowNodeParents = JSON.parse(localStorage.getItem('ccc-flow-node-parents') || '{}'); } catch (_) {}
+  let flowCustomObjects = [];
+  try {
+    const savedObjects = JSON.parse(localStorage.getItem('ccc-flow-custom-objects') || '[]');
+    if (Array.isArray(savedObjects)) flowCustomObjects = savedObjects;
+  } catch (_) {}
+
+  function persistFlowNodePositions() {
+    try { localStorage.setItem('ccc-flow-node-positions', JSON.stringify(flowNodePositions)); } catch (_) {}
+  }
+
+  function persistFlowNodeParents() {
+    try { localStorage.setItem('ccc-flow-node-parents', JSON.stringify(flowNodeParents)); } catch (_) {}
+  }
+
+  function persistFlowCustomObjects() {
+    try { localStorage.setItem('ccc-flow-custom-objects', JSON.stringify(flowCustomObjects)); } catch (_) {}
+  }
+
+  function flowNodeKey(kind, value) {
+    return kind + ':' + String(value || 'unknown');
+  }
+
+  function flowRowTitle(c) {
+    const isBacklog = c && c.source === 'backlog';
+    const rawFirst = (!isBacklog && c && c.first_message)
+      ? firstSentenceOf(cleanIssuePrompt(c.first_message), 90)
+      : '';
+    let rawTitle = c && c.name_overridden
+      ? c.display_name
+      : (c && (c.ai_title || rawFirst || c.display_name)) || '(untitled)';
+    if (c && (c.backlog_type === 'github' || c.issue_number || c.linked_issue)) {
+      rawTitle = stripGhIssueProjectTag(rawTitle);
+    }
+    return stripTitle(String(rawTitle || '(untitled)')).replace(/-/g, ' ').trim() || '(untitled)';
+  }
+
+  function flowRepoLabel(path, rows) {
+    const first = (rows || []).find(Boolean) || {};
+    return first.folder_label_chip || first.folder_label || selectedRepoLabel()
+      || (path === '__repo__' ? '' : _pathLeaf(path)) || 'Repo';
+  }
+
+  function flowSessionStatus(c) {
+    const col = classifyKanbanColumn(c);
+    if (c.needs_approval || c.question_waiting || col === 'waiting') {
+      return { key: 'waiting', label: 'waiting' };
+    }
+    if (c.is_live) return { key: 'live', label: 'live' };
+    if (col === 'review') return { key: 'review', label: 'review' };
+    if (col === 'testing') return { key: 'testing', label: 'testing' };
+    if (col === 'needs-attention') return { key: 'attention', label: 'attention' };
+    if (col === 'icebox') return { key: 'icebox', label: 'icebox' };
+    return { key: 'idle', label: 'idle' };
+  }
+
+  function flowIsVisibleSession(c) {
+    if (!c) return false;
+    if (c.source === 'backlog' || c.source === 'github_pr') return false;
+    if (c.archived || c.verified) return false;
+    const col = classifyKanbanColumn(c);
+    return col !== 'archived' && col !== 'verified' && col !== 'backlog';
+  }
+
+  function flowRowTime(c) {
+    return Number((c && (c.modified || c.mtime || c.last_interacted)) || 0);
+  }
+
+  function flowObjectTime(obj) {
+    return Number((obj && (obj.updated_at || obj.created_at)) || 0);
+  }
+
+  function flowWouldCreateCycle(childId, parentId, parentMap) {
+    if (!childId || !parentId || childId === parentId) return true;
+    const seen = new Set([childId]);
+    let cur = parentId;
+    while (cur) {
+      if (seen.has(cur)) return true;
+      seen.add(cur);
+      cur = parentMap[cur] || '';
+    }
+    return false;
+  }
+
+  function flowParentMapFor(records) {
+    const ids = new Set(records.map(r => r.id));
+    const parentMap = {};
+    for (const rec of records) {
+      const saved = flowNodeParents[rec.id];
+      const candidate = saved && ids.has(saved) ? saved : rec.defaultParent;
+      if (candidate && ids.has(candidate) && candidate !== rec.id) parentMap[rec.id] = candidate;
+    }
+    for (const rec of records) {
+      const parent = parentMap[rec.id];
+      if (parent && flowWouldCreateCycle(rec.id, parent, parentMap)) {
+        const fallback = rec.defaultParent;
+        if (fallback && ids.has(fallback) && fallback !== rec.id && !flowWouldCreateCycle(rec.id, fallback, parentMap)) {
+          parentMap[rec.id] = fallback;
+        } else {
+          delete parentMap[rec.id];
+        }
+      }
+    }
+    return parentMap;
+  }
+
+  function createFlowCustomObject() {
+    let title = '';
+    try { title = (window.prompt('Object name', 'New object') || '').trim(); } catch (_) {}
+    if (!title) return;
+    const now = Date.now();
+    const id = 'obj-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+    const obj = { id, title, created_at: now, updated_at: now };
+    flowCustomObjects.unshift(obj);
+    const nodeId = flowNodeKey('object', id);
+    const existingObjects = document.querySelectorAll('#flowBoard .flow-node-object').length;
+    flowNodePositions[nodeId] = {
+      x: 28 + (existingObjects % 2) * 292,
+      y: 24 + Math.floor(existingObjects / 2) * 116,
+    };
+    persistFlowCustomObjects();
+    persistFlowNodePositions();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function renameFlowCustomObject(id) {
+    const obj = flowCustomObjects.find(o => o && o.id === id);
+    if (!obj) return;
+    let title = '';
+    try { title = (window.prompt('Object name', obj.title || '') || '').trim(); } catch (_) {}
+    if (!title || title === obj.title) return;
+    obj.title = title;
+    obj.updated_at = Date.now();
+    persistFlowCustomObjects();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function deleteFlowCustomObject(id) {
+    const obj = flowCustomObjects.find(o => o && o.id === id);
+    if (!obj) return;
+    let ok = false;
+    try { ok = window.confirm('Delete "' + (obj.title || 'object') + '"?'); } catch (_) {}
+    if (!ok) return;
+    const nodeId = flowNodeKey('object', id);
+    flowCustomObjects = flowCustomObjects.filter(o => o && o.id !== id);
+    delete flowNodePositions[nodeId];
+    delete flowNodeParents[nodeId];
+    for (const [child, parent] of Object.entries(flowNodeParents)) {
+      if (parent === nodeId) delete flowNodeParents[child];
+    }
+    persistFlowCustomObjects();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function renderFlowSidebar(convs) {
+    const $flow = document.getElementById('flowBoard');
+    const $kanbanBoard = document.getElementById('kanbanBoard');
+    const $convList = document.getElementById('convList');
+    if (!$flow) return;
+    if ($convList) $convList.style.display = 'none';
+    if ($kanbanBoard) $kanbanBoard.style.display = 'none';
+    $flow.style.display = '';
+
+    const rows = (convs || []).filter(flowIsVisibleSession).sort((a, b) => flowRowTime(b) - flowRowTime(a));
+    const customObjects = (flowCustomObjects || [])
+      .filter(obj => obj && obj.id)
+      .slice()
+      .sort((a, b) => flowObjectTime(b) - flowObjectTime(a));
+    if (!rows.length && !customObjects.length) {
+      $flow.innerHTML = '<div class="flow-toolbar"><button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button></div><div class="flow-empty-state">No in-progress sessions.</div>';
+      wireFlowBoard($flow);
+      return;
+    }
+
+    const groupsByRepo = new Map();
+    for (const row of rows) {
+      const repoPath = rowRepoPath(row) || row.folder_path || selectedRepoPath() || '__repo__';
+      if (!groupsByRepo.has(repoPath)) groupsByRepo.set(repoPath, []);
+      groupsByRepo.get(repoPath).push(row);
+    }
+    const groups = Array.from(groupsByRepo.entries()).map(([path, items]) => ({
+      path,
+      label: flowRepoLabel(path, items),
+      items: items.slice().sort((a, b) => flowRowTime(b) - flowRowTime(a)),
+      newest: items.reduce((best, row) => Math.max(best, flowRowTime(row)), 0),
+    })).sort((a, b) => (b.newest - a.newest) || a.label.localeCompare(b.label));
+
+    const records = [];
+    let canvasWidth = 760;
+    let canvasHeight = 360;
+    let yCursor = 24;
+
+    customObjects.forEach((obj, idx) => {
+      const nodeId = flowNodeKey('object', obj.id);
+      const defaultPos = {
+        x: 28 + (idx % 2) * 292,
+        y: yCursor + Math.floor(idx / 2) * 116,
+      };
+      records.push({
+        id: nodeId,
+        kind: 'object',
+        objectId: obj.id,
+        defaultParent: '',
+        x: defaultPos.x,
+        y: defaultPos.y,
+        title: obj.title || 'Object',
+        kicker: 'Object',
+        meta: obj.updated_at ? ('updated ' + relativeTime(Math.floor(obj.updated_at / 1000))) : '',
+        className: 'flow-node-object',
+      });
+    });
+    if (customObjects.length) {
+      yCursor += Math.ceil(customObjects.length / 2) * 116 + 28;
+    }
+
+    for (const group of groups) {
+      const repoId = flowNodeKey('repo', group.path);
+      const repoDefault = { x: 28, y: yCursor };
+      records.push({
+        id: repoId,
+        kind: 'repo',
+        defaultParent: '',
+        x: repoDefault.x,
+        y: repoDefault.y,
+        title: group.label,
+        kicker: 'Repo',
+        meta: group.items.length + ' in progress',
+        className: 'flow-node-repo',
+      });
+
+      group.items.forEach((row, idx) => {
+        const sessionId = row.session_id || row.id;
+        const nodeId = flowNodeKey('session', sessionId);
+        const defaultPos = {
+          x: 28 + (idx % 2) * 292,
+          y: yCursor + 110 + Math.floor(idx / 2) * 116,
+        };
+        const status = flowSessionStatus(row);
+        const branch = row.effective_branch || row.branch || row.git_branch || '';
+        const rel = row.modified ? relativeTime(row.modified) : '';
+        const meta = [status.label, branch, rel].filter(Boolean).join(' · ');
+        const worktree = (row.worktree_label || row.session_cwd_is_worktree || row.effective_kind === 'worktree')
+          ? ' is-worktree'
+          : '';
+        records.push({
+          id: nodeId,
+          kind: 'session',
+          rowId: row.id,
+          sessionId,
+          defaultParent: repoId,
+          x: defaultPos.x,
+          y: defaultPos.y,
+          title: flowRowTitle(row),
+          kicker: row.source || row.engine || 'session',
+          meta,
+          className: 'flow-node-session is-' + status.key + worktree + (currentConversation === row.id ? ' active' : ''),
+        });
+      });
+      const rowsTall = Math.ceil(group.items.length / 2);
+      yCursor += 132 + Math.max(1, rowsTall) * 116;
+    }
+
+    const parentMap = flowParentMapFor(records);
+    const nodeHtml = records.map(rec => {
+      const savedPos = flowNodePositions[rec.id];
+      const pos = savedPos || { x: rec.x, y: rec.y };
+      canvasWidth = Math.max(canvasWidth, pos.x + 300);
+      canvasHeight = Math.max(canvasHeight, pos.y + 140);
+      const parent = parentMap[rec.id] || '';
+      const dataParent = parent ? ' data-flow-parent="' + escapeAttr(parent) + '"' : '';
+      const dataRow = rec.rowId ? ' data-id="' + escapeAttr(rec.rowId) + '"' : '';
+      const dataSession = rec.sessionId ? ' data-session-id="' + escapeAttr(rec.sessionId) + '"' : '';
+      const dataObject = rec.objectId ? ' data-object-id="' + escapeAttr(rec.objectId) + '"' : '';
+      const deleteBtn = rec.kind === 'object'
+        ? '<button type="button" class="flow-node-delete" data-flow-action="delete-object" title="Delete object" aria-label="Delete object">&times;</button>'
+        : '';
+      return '<div class="flow-node ' + escapeAttr(rec.className) + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
+        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject
+        + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;">'
+        + deleteBtn
+        + '<div class="flow-node-kicker">' + escapeHtml(rec.kicker) + '</div>'
+        + '<div class="flow-node-title">' + escapeHtml(rec.title) + '</div>'
+        + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>'
+        + '</div>';
+    });
+    canvasHeight = Math.max(canvasHeight, yCursor + 40);
+    $flow.innerHTML = '<div class="flow-toolbar"><button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button></div>'
+      + '<div class="flow-canvas" style="min-width:' + Math.ceil(canvasWidth) + 'px;min-height:' + Math.ceil(canvasHeight) + 'px;">'
+      + '<svg class="flow-links" aria-hidden="true"></svg>'
+      + nodeHtml.join('')
+      + '</div>';
+    wireFlowBoard($flow);
+    requestAnimationFrame(() => redrawFlowLinks($flow));
+  }
+
+  function redrawFlowLinks(targetEl) {
+    const canvas = targetEl && targetEl.querySelector('.flow-canvas');
+    const svg = canvas && canvas.querySelector('.flow-links');
+    if (!canvas || !svg) return;
+    const nodeById = new Map();
+    canvas.querySelectorAll('.flow-node').forEach(node => {
+      nodeById.set(node.dataset.flowNodeId, node);
+    });
+    const paths = [];
+    canvas.querySelectorAll('.flow-node[data-flow-parent]').forEach(node => {
+      const parent = nodeById.get(node.dataset.flowParent);
+      if (!parent) return;
+      const sx = parent.offsetLeft + parent.offsetWidth / 2;
+      const sy = parent.offsetTop + parent.offsetHeight;
+      const ex = node.offsetLeft + node.offsetWidth / 2;
+      const ey = node.offsetTop;
+      const mid = Math.max(32, (ey - sy) / 2);
+      const d = 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + mid) + ', ' + ex + ' ' + (ey - mid) + ', ' + ex + ' ' + ey;
+      paths.push('<path d="' + d + '"></path>');
+    });
+    svg.setAttribute('width', canvas.scrollWidth);
+    svg.setAttribute('height', canvas.scrollHeight);
+    svg.innerHTML = paths.join('');
+  }
+
+  function wireFlowBoard(targetEl) {
+    const canvas = targetEl && targetEl.querySelector('.flow-canvas');
+    const addBtn = targetEl && targetEl.querySelector('[data-flow-action="add-object"]');
+    if (addBtn) addBtn.addEventListener('click', createFlowCustomObject);
+    if (!canvas) return;
+    canvas.querySelectorAll('.flow-node').forEach(node => {
+      if (node.dataset.flowKind === 'session') {
+        node.addEventListener('mouseenter', () => _convPrefetchSchedule(node.dataset.id));
+        node.addEventListener('mouseleave', () => _convPrefetchCancel(node.dataset.id));
+      }
+      if (node.dataset.flowKind === 'object') {
+        const deleteBtn = node.querySelector('[data-flow-action="delete-object"]');
+        if (deleteBtn) {
+          deleteBtn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            deleteFlowCustomObject(node.dataset.objectId);
+          });
+        }
+        node.addEventListener('dblclick', ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          renameFlowCustomObject(node.dataset.objectId);
+        });
+      }
+      node.addEventListener('pointerdown', ev => {
+        if (ev.button !== undefined && ev.button !== 0) return;
+        if (ev.target.closest('button,input,textarea,a')) return;
+        ev.preventDefault();
+        const startX = ev.clientX;
+        const startY = ev.clientY;
+        const startLeft = node.offsetLeft;
+        const startTop = node.offsetTop;
+        let moved = false;
+        let dropTarget = null;
+        const setDropTarget = target => {
+          if (dropTarget === target) return;
+          if (dropTarget) dropTarget.classList.remove('flow-drop-target');
+          dropTarget = target;
+          if (dropTarget) dropTarget.classList.add('flow-drop-target');
+        };
+        const findDropTarget = (x, y) => {
+          const parentMap = {};
+          canvas.querySelectorAll('.flow-node[data-flow-parent]').forEach(el => {
+            parentMap[el.dataset.flowNodeId] = el.dataset.flowParent;
+          });
+          const els = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
+          for (const el of els) {
+            const target = el && el.closest ? el.closest('.flow-node') : null;
+            if (!target || target === node || !canvas.contains(target)) continue;
+            const targetId = target.dataset.flowNodeId;
+            const childId = node.dataset.flowNodeId;
+            if (!targetId || !childId) continue;
+            parentMap[childId] = targetId;
+            if (flowWouldCreateCycle(childId, targetId, parentMap)) continue;
+            return target;
+          }
+          return null;
+        };
+        node.classList.add('dragging');
+        try { node.setPointerCapture(ev.pointerId); } catch (_) {}
+        const onMove = moveEv => {
+          const dx = moveEv.clientX - startX;
+          const dy = moveEv.clientY - startY;
+          if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
+          const maxLeft = Math.max(8, canvas.scrollWidth - node.offsetWidth - 12);
+          const maxTop = Math.max(8, canvas.scrollHeight - node.offsetHeight - 12);
+          const nextLeft = Math.max(12, Math.min(maxLeft, startLeft + dx));
+          const nextTop = Math.max(12, Math.min(maxTop, startTop + dy));
+          node.style.left = Math.round(nextLeft) + 'px';
+          node.style.top = Math.round(nextTop) + 'px';
+          setDropTarget(findDropTarget(moveEv.clientX, moveEv.clientY));
+          redrawFlowLinks(targetEl);
+        };
+        const onUp = upEv => {
+          node.removeEventListener('pointermove', onMove);
+          node.removeEventListener('pointerup', onUp);
+          node.removeEventListener('pointercancel', onUp);
+          node.classList.remove('dragging');
+          const finalDropTarget = dropTarget;
+          setDropTarget(null);
+          try { node.releasePointerCapture(upEv.pointerId); } catch (_) {}
+          if (moved) {
+            flowNodePositions[node.dataset.flowNodeId] = {
+              x: Math.round(node.offsetLeft),
+              y: Math.round(node.offsetTop),
+            };
+            if (finalDropTarget && finalDropTarget.dataset.flowNodeId) {
+              flowNodeParents[node.dataset.flowNodeId] = finalDropTarget.dataset.flowNodeId;
+              node.dataset.flowParent = finalDropTarget.dataset.flowNodeId;
+              persistFlowNodeParents();
+            }
+            persistFlowNodePositions();
+            redrawFlowLinks(targetEl);
+            return;
+          }
+          if (node.dataset.flowKind === 'session' && node.dataset.id) {
+            targetEl.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
+            node.classList.add('active');
+            selectConversation(node.dataset.id);
+          }
+        };
+        node.addEventListener('pointermove', onMove);
+        node.addEventListener('pointerup', onUp);
+        node.addEventListener('pointercancel', onUp);
+      });
+    });
+  }
+
   function renderSidebar(convs) {
     if (_renameInProgress) return;
     const $kanbanBoard = document.getElementById('kanbanBoard');
+    const $flow = document.getElementById('flowBoard');
     const $convList = document.getElementById('convList');
     if (kanbanView) {
       renderKanbanSidebar(convs);
       return;
     }
+    if (isFlowView()) {
+      renderFlowSidebar(convs);
+      return;
+    }
     if ($kanbanBoard) $kanbanBoard.style.display = 'none';
+    if ($flow) $flow.style.display = 'none';
     if ($convList) $convList.style.display = '';
     const $search = document.getElementById('convSearch');
     try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
@@ -5305,11 +5777,73 @@
   // is mounted; the cleanup re-shows them.
   let _gcReaderHiddenInputBar = false;
 
+  function stopGroupChatReader(opts = {}) {
+    if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
+    _gcReaderPath = null;
+    _gcLastMtime = null;
+    _gcPollFailCount = 0;
+    if (_gcReaderHiddenInputBar) {
+      const inputBar = document.getElementById('convInputBar');
+      const inputCtx = document.getElementById('convInputContext');
+      if (inputBar) inputBar.style.display = '';
+      if (inputCtx) inputCtx.style.display = '';
+      _gcReaderHiddenInputBar = false;
+    }
+    if (opts && opts.rerenderSidebar && typeof renderSidebar === 'function'
+        && typeof filterConversations === 'function'
+        && typeof $convSearch !== 'undefined' && $convSearch) {
+      renderSidebar(filterConversations($convSearch.value));
+    }
+  }
+
+  function renderGroupChatMarkdown(content) {
+    const text = String(content || '');
+    const matches = Array.from(text.matchAll(/^##\s+(.+?—\s+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b).*)$/gm));
+    if (!matches.length) {
+      return '<div class="assistant-text gc-chat-doc">' + renderMarkdown(text) + '</div>';
+    }
+
+    let html = '';
+    const preamble = text.slice(0, matches[0].index).trim();
+    if (preamble) {
+      html += '<div class="gc-chat-preamble">' + renderMarkdown(preamble) + '</div>';
+    }
+
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i];
+      const heading = (match[1] || '').trim();
+      const nextIndex = i + 1 < matches.length ? matches[i + 1].index : text.length;
+      const rawBody = text.slice(match.index + match[0].length, nextIndex);
+      const body = rawBody
+        .replace(/^\s*---\s*$/gm, '')
+        .trim();
+      const parts = heading.split(/\s+—\s+/);
+      const when = parts.length > 1 ? parts.shift() : '';
+      const speaker = parts.length ? parts.join(' — ') : heading;
+      html += '<article class="gc-message">'
+        + '<div class="gc-message-meta">'
+          + '<span class="gc-message-speaker">' + escapeHtml(speaker) + '</span>'
+          + (when ? '<span class="gc-message-time">' + escapeHtml(when) + '</span>' : '')
+        + '</div>'
+        + '<div class="gc-message-body assistant-text">'
+          + (body ? renderMarkdown(body) : '<em class="gc-message-empty">(no text)</em>')
+        + '</div>'
+      + '</article>';
+    }
+    return html;
+  }
+
   function openGroupChatReader(chatPath, topic, mode, includeHuman) {
     _gcReaderPath = chatPath;
     _gcLastMtime = null;
     _gcPollFailCount = 0;
     _gcLastNudgeTime = 0;
+    currentConversation = null;
+    if (typeof ffcUpdateSidebar === 'function') ffcUpdateSidebar(null);
+    if (typeof syncActivePaneChrome === 'function') syncActivePaneChrome(null);
+    if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
+      renderSidebar(filterConversations($convSearch.value));
+    }
 
     const view = document.getElementById('conversationsView');
     if (!view) return;
@@ -5325,6 +5859,13 @@
       + (includeHuman
         ? '<div class="gc-reader-input-row" id="gcInputRow">'
             + '<textarea id="gcHumanInput" rows="1" placeholder="Add to chat…" autocomplete="off" spellcheck="false"></textarea>'
+            + '<button class="tts-btn gc-tts-btn" id="gcTtsBtn" type="button" title="Read last message" aria-label="Read last message" aria-pressed="false">'
+              + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                + '<path d="M11 5 6 9H3v6h3l5 4V5Z"></path>'
+                + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path>'
+                + '<path d="M18.5 5.5a9 9 0 0 1 0 13"></path>'
+              + '</svg>'
+            + '</button>'
             + '<button id="gcSendBtn" class="gc-send-btn" type="button" title="Send (Enter)" aria-label="Send to group chat">'
               + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
                 + '<path d="M12 19 L12 5 M6 11 L12 5 L18 11"></path>'
@@ -5345,7 +5886,15 @@
     if (includeHuman) {
       const gcSendBtn = document.getElementById('gcSendBtn');
       const gcHumanInput = document.getElementById('gcHumanInput');
+      const gcTtsBtn = document.getElementById('gcTtsBtn');
       if (gcSendBtn) gcSendBtn.addEventListener('click', () => sendHumanGcPost());
+      if (gcTtsBtn) {
+        gcTtsBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
+        gcTtsBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          readLastMessageAloud(activePaneId());
+        });
+      }
       if (gcHumanInput) {
         // Mirror the convo input: Enter sends, Shift+Enter inserts a
         // newline. Same convention as Claude Desktop / Slack / Omnara.
@@ -5498,12 +6047,12 @@
       _gcPollFailCount = 0;
       const errBanner = body.querySelector('.gc-poll-error');
       if (errBanner) errBanner.remove();
-      if (!data.ok) { body.innerHTML = renderMarkdown(data.error || 'File not found.'); return; }
+      if (!data.ok) { body.innerHTML = '<div class="assistant-text gc-chat-doc">' + renderMarkdown(data.error || 'File not found.') + '</div>'; return; }
       if (data.mtime !== _gcLastMtime) {
         const isFirstLoad = _gcLastMtime === null;
         _gcLastMtime = data.mtime;
         const atBottom = body.scrollHeight - body.scrollTop <= body.clientHeight + 40;
-        body.innerHTML = renderMarkdown(_gcExpandHashIds(data.content));
+        body.innerHTML = renderGroupChatMarkdown(_gcExpandHashIds(data.content));
         if (atBottom) body.scrollTop = body.scrollHeight;
         // Nudge all participants when content changes (but not on first load, and debounced to 15s).
         if (!isFirstLoad) {
@@ -5543,20 +6092,10 @@
   }
 
   function closeGroupChatReader() {
-    if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
-    _gcReaderPath = null;
-    _gcLastMtime = null;
-    _gcPollFailCount = 0;
     // Restore the standard input bar (mirror what the selectConversation
     // teardown does). Caller is expected to either selectConversation
     // afterwards or live with an empty conversations view.
-    if (_gcReaderHiddenInputBar) {
-      const inputBar = document.getElementById('convInputBar');
-      const inputCtx = document.getElementById('convInputContext');
-      if (inputBar) inputBar.style.display = '';
-      if (inputCtx) inputCtx.style.display = '';
-      _gcReaderHiddenInputBar = false;
-    }
+    stopGroupChatReader();
     if (typeof currentConversation === 'string' && currentConversation) {
       try { selectConversation(currentConversation); } catch (_) {}
     }
@@ -7929,8 +8468,9 @@
             }
           }
         }
+        const isActiveChat = _gcReaderPath && (_gcReaderPath === chat.path || _gcReaderPath === chat.path_tilde);
         const _chatHtml = '<div class="conv-ingroupchat-chat' + (isClosed ? ' conv-ingroupchat-chat-closed' : '') + '">'
-          + '<div class="conv-ingroupchat-row' + (isClosed ? ' conv-ingroupchat-row-closed' : '') + '"'
+          + '<div class="conv-ingroupchat-row' + (isClosed ? ' conv-ingroupchat-row-closed' : '') + (isActiveChat ? ' active' : '') + '"'
           +   ' data-role="ingroupchat-row"'
           +   ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
           +   ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
@@ -9373,7 +9913,15 @@
     document.body.classList.remove('mobile-show-main');
   }
   function updateKanbanToggle() {
-    if ($convKanbanToggle) $convKanbanToggle.classList.toggle('active', kanbanView);
+    if ($convKanbanToggle) {
+      const labels = { list: 'List', board: 'Board', flow: 'Flow' };
+      const next = sidebarViewMode === 'list' ? 'board' : (sidebarViewMode === 'board' ? 'flow' : 'list');
+      $convKanbanToggle.classList.toggle('active', sidebarViewMode !== 'list');
+      $convKanbanToggle.classList.toggle('is-flow', sidebarViewMode === 'flow');
+      $convKanbanToggle.innerHTML = '<span aria-hidden="true">&#9783;</span><span class="sh-action-label">' + labels[sidebarViewMode] + '</span>';
+      $convKanbanToggle.title = 'Switch to ' + labels[next] + ' view';
+      $convKanbanToggle.setAttribute('aria-label', 'Switch to ' + labels[next] + ' view');
+    }
     // The split-pane kanban layout was retired in favour of swapping the
     // sidebar's list↔kanban-board view inline (so .main stays visible in
     // both modes). Always passing `false` here also clears any leftover
@@ -9381,15 +9929,16 @@
     activateSplitMode(false);
   }
   updateKanbanToggle();
-  // Apply initial state if kanban was persisted on
-  if (kanbanView) {
-    $convList.style.display = 'none';
-    $kanbanBoard.style.display = '';
+  // Apply initial state if a non-list view was persisted on.
+  if (kanbanView || isFlowView()) {
+    if ($convList) $convList.style.display = 'none';
+    if ($kanbanBoard) $kanbanBoard.style.display = kanbanView ? '' : 'none';
+    if ($flowBoard) $flowBoard.style.display = isFlowView() ? '' : 'none';
   }
   if ($convKanbanToggle) {
     $convKanbanToggle.addEventListener('click', () => {
-      kanbanView = !kanbanView;
-      localStorage.setItem('ccc-kanban-view', kanbanView ? 'true' : 'false');
+      const next = sidebarViewMode === 'list' ? 'board' : (sidebarViewMode === 'board' ? 'flow' : 'list');
+      setSidebarViewMode(next);
       updateKanbanToggle();
       renderSidebar(filterConversations($convSearch.value));
     });
@@ -9415,8 +9964,7 @@
   const $kptListViewBtn = document.getElementById('kptListViewBtn');
   if ($kptListViewBtn) {
     $kptListViewBtn.addEventListener('click', () => {
-      kanbanView = false;
-      localStorage.setItem('ccc-kanban-view', 'false');
+      setSidebarViewMode('list');
       updateKanbanToggle();
       renderSidebar(filterConversations($convSearch.value));
     });
@@ -10479,19 +11027,7 @@
     // rendered INTO #conversationsView so the surrounding pane structure
     // is intact — selectConversation will repopulate the view normally.
     if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
-      try {
-        if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
-        _gcReaderPath = null;
-        _gcLastMtime = null;
-        _gcPollFailCount = 0;
-        if (_gcReaderHiddenInputBar) {
-          const inputBar = document.getElementById('convInputBar');
-          const inputCtx = document.getElementById('convInputContext');
-          if (inputBar) inputBar.style.display = '';
-          if (inputCtx) inputCtx.style.display = '';
-          _gcReaderHiddenInputBar = false;
-        }
-      } catch (_) {}
+      try { stopGroupChatReader({ rerenderSidebar: true }); } catch (_) {}
     }
     mobileShowForCurrentMode();
     currentConversation = id;
@@ -12073,6 +12609,19 @@
     // ids like `convInputContext`; scope to pane chrome, not message content.
     return document.querySelector('#convSplit > .conv-pane[data-pane-id="p1"] > .conv-input-context[data-role="input-context"]');
   }
+  function syncInputContextVisibility(slot) {
+    slot = slot || getInputContextSlot();
+    if (!slot) return;
+    const wsSlot = slot.querySelector('[data-workspace]');
+    const uSlot = slot.querySelector('[data-usage]');
+    const hasRenderedContext = !!(
+      (wsSlot && wsSlot.innerHTML.trim())
+      || (uSlot && uSlot.innerHTML.trim())
+    );
+    const shouldShow = slot.classList.contains('is-new-session') || hasRenderedContext;
+    slot.classList.toggle('visible', shouldShow);
+    if (!shouldShow) slot.classList.remove('hide-cotenants');
+  }
   let _inputContextFitRaf = 0;
   function _fitInputContextStrip() {
     _inputContextFitRaf = 0;
@@ -12100,7 +12649,13 @@
     const slot = getInputContextSlot();
     const wsSlot = slot && slot.querySelector('[data-workspace]');
     if (wsSlot) wsSlot.innerHTML = '';
-    if (slot) slot.classList.remove('visible');
+    if (slot) {
+      if (slot.classList.contains('is-new-session')) syncInputContextVisibility(slot);
+      else {
+        slot.classList.remove('visible');
+        slot.classList.remove('hide-cotenants');
+      }
+    }
     if (!sid) return;
     try {
       const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/workspace');
@@ -12121,8 +12676,7 @@
     const w = _workspaceData;
     if (!w.cwd) {
       wsSlot.innerHTML = '';
-      // Don't hide the whole strip — usage pill might still want to show.
-      slot.classList.toggle('visible', !!_usageData);
+      syncInputContextVisibility(slot);
       return;
     }
     // Show ONE pill per session: where Claude's edits are actually
@@ -12202,7 +12756,7 @@
     // single entry point. Per-session repetition was just noise.
 
     wsSlot.innerHTML = parts.join(' ');
-    slot.classList.add('visible');
+    syncInputContextVisibility(slot);
     scheduleInputContextFit();
   }
 
@@ -12576,6 +13130,7 @@
     const slot = getInputContextSlot();
     const uSlot = slot && slot.querySelector('[data-usage]');
     if (uSlot) uSlot.innerHTML = '';
+    syncInputContextVisibility(slot);
     if (!sid) return;
     try {
       // cache-buster: usage rollups land sporadically in the JSONL, so the
@@ -12712,6 +13267,7 @@
     if (!latest && !peak) {
       if (!modelPill) {
         uSlot.innerHTML = '';
+        syncInputContextVisibility(slot);
         scheduleInputContextFit();
         return;
       }
@@ -12720,7 +13276,7 @@
       uSlot.innerHTML = '<span class="wp-usage-pill wp-usage-missing" title="' + escapeHtml(title) + '">'
         + 'ctx unavailable'
         + '</span>' + modelPill;
-      slot.classList.add('visible');
+      syncInputContextVisibility(slot);
       scheduleInputContextFit();
       return;
     }
@@ -12780,7 +13336,7 @@
       + 'ctx ' + _formatTokens(latest) + ' / ' + _formatTokens(limit)
       + ' <span class="wp-usage-pct">(' + pct + '%)</span>'
       + '</span>' + peakNote + costPill + antigravityTotalsPill + modelPill;
-    slot.classList.add('visible');
+    syncInputContextVisibility(slot);
     scheduleInputContextFit();
     const pill = uSlot.querySelector('.wp-usage-clickable');
     if (pill && canToggleContextLimit) {
@@ -16567,6 +17123,9 @@
       if (kanbanView) {
         conversationsData = [];
         renderKanbanSidebar([]);
+      } else if (isFlowView()) {
+        conversationsData = [];
+        renderFlowSidebar([]);
       } else {
         $list.innerHTML = html;
       }
@@ -16820,11 +17379,18 @@
     // search and on the 10s poll; if the board is open, refresh its cards
     // instead of snapping the user back to the row list.
     const $kanban = document.getElementById('kanbanBoard');
+    const $flow = document.getElementById('flowBoard');
     if (kanbanView) {
       if ($list) $list.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       renderKanbanSidebar(filterConversations(''));
+    } else if (isFlowView()) {
+      if ($list) $list.style.display = 'none';
+      if ($kanban) $kanban.style.display = 'none';
+      renderFlowSidebar(filterConversations(''));
     } else {
       if ($kanban) $kanban.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       $list.style.display = '';
       renderConversationList(conversationsData);
     }
@@ -16844,14 +17410,24 @@
     updateRepoPickerVisibility();
     const $list = document.getElementById('convList');
     const $kanban = document.getElementById('kanbanBoard');
+    const $flow = document.getElementById('flowBoard');
     if (kanbanView) {
       if ($list) $list.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       if ($kanban) {
         $kanban.style.display = '';
         $kanban.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading board&hellip;</div>';
       }
+    } else if (isFlowView()) {
+      if ($list) $list.style.display = 'none';
+      if ($kanban) $kanban.style.display = 'none';
+      if ($flow) {
+        $flow.style.display = '';
+        $flow.innerHTML = '<div class="flow-empty-state">Loading flow&hellip;</div>';
+      }
     } else if ($list) {
       if ($kanban) $kanban.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       $list.style.display = '';
       $list.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading archive…</div>';
     }
@@ -16885,14 +17461,24 @@
       // during the wait — the actual fetch fires after sessions land.
       const $list = document.getElementById('convList');
       const $kanban = document.getElementById('kanbanBoard');
+      const $flow = document.getElementById('flowBoard');
       if (kanbanView) {
         if ($list) $list.style.display = 'none';
+        if ($flow) $flow.style.display = 'none';
         if ($kanban) {
           $kanban.style.display = '';
           $kanban.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading board&hellip;</div>';
         }
+      } else if (isFlowView()) {
+        if ($list) $list.style.display = 'none';
+        if ($kanban) $kanban.style.display = 'none';
+        if ($flow) {
+          $flow.style.display = '';
+          $flow.innerHTML = '<div class="flow-empty-state">Loading flow&hellip;</div>';
+        }
       } else if ($list) {
         if ($kanban) $kanban.style.display = 'none';
+        if ($flow) $flow.style.display = 'none';
         $list.style.display = '';
         $list.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading archive&hellip;</div>';
       }
@@ -18002,7 +18588,7 @@
       $overlay.classList.remove('fade-out', 'gone');
       if ($label) {
         $label.innerHTML =
-          '<strong>Updating Claude Command Center&hellip;</strong>' +
+          '<strong>Updating Command Center&hellip;</strong>' +
           '<div class="ccc-loading-detail">Pulling latest from GitHub and restarting the server.</div>';
       }
     }
@@ -18172,8 +18758,8 @@
     }
     if ($restartServerBtn) {
       $restartServerBtn.title = clean
-        ? 'Restart the Claude Command Center server on :' + clean
-        : 'Restart the Claude Command Center server';
+        ? 'Restart the Command Center server on :' + clean
+        : 'Restart the Command Center server';
     }
   }
 
@@ -18586,6 +19172,23 @@
     editor.style.top = top + 'px';
   }
 
+  function annOpenNewSessionWithContext(ann, closeFn, errEl) {
+    if (!ann) return;
+    const text = annContextForClipboard(ann);
+    if (!text) return;
+    try {
+      if (typeof closeFn === 'function') closeFn();
+      if (typeof enterNewSessionMode !== 'function') throw new Error('new session mode is unavailable');
+      enterNewSessionMode(text);
+      showOpToast('Annotation loaded into new session', 'success');
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = 'Open new session failed: ' + ((err && err.message) || 'unknown');
+        errEl.hidden = false;
+      }
+    }
+  }
+
   function annShowEditor() {
     if (!annotationState || !annotationState.overlay) return;
     if (annotationState.editor) annotationState.editor.remove();
@@ -18599,6 +19202,7 @@
       '<div class="ann-editor-error" hidden></div>' +
       '<div class="ann-editor-actions">' +
         '<button type="button" class="ann-btn" data-ann-cancel>Cancel</button>' +
+        '<button type="button" class="ann-btn" data-ann-open-session hidden>Open new session</button>' +
         '<button type="button" class="ann-btn ann-primary" data-ann-save>Save</button>' +
       '</div>';
     annotationState.overlay.appendChild(editor);
@@ -18607,6 +19211,8 @@
     const noteEl = editor.querySelector('.ann-editor-note');
     const errEl = editor.querySelector('.ann-editor-error');
     const saveBtn = editor.querySelector('[data-ann-save]');
+    const cancelBtn = editor.querySelector('[data-ann-cancel]');
+    const openSessionBtn = editor.querySelector('[data-ann-open-session]');
     let savedAnnotation = null;
     const copySaved = async () => {
       if (!savedAnnotation) return;
@@ -18647,6 +19253,8 @@
         if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
         savedAnnotation = data.annotation;
         noteEl.disabled = true;
+        if (cancelBtn) cancelBtn.hidden = true;
+        if (openSessionBtn) openSessionBtn.hidden = false;
         saveBtn.disabled = false;
         saveBtn.textContent = 'Copy';
         showOpToast('Annotation saved', 'success');
@@ -18661,7 +19269,10 @@
         }
       }
     };
-    editor.querySelector('[data-ann-cancel]').addEventListener('click', annStop);
+    if (cancelBtn) cancelBtn.addEventListener('click', annStop);
+    if (openSessionBtn) {
+      openSessionBtn.addEventListener('click', () => annOpenNewSessionWithContext(savedAnnotation, annStop, errEl));
+    }
     saveBtn.addEventListener('click', save);
     noteEl.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save();
@@ -18767,7 +19378,8 @@
         '<textarea class="ann-editor-note" rows="4" placeholder="Write a note for Claude…"></textarea>' +
         '<div class="ann-editor-error" hidden></div>' +
         '<div class="ann-editor-actions">' +
-          '<button type="button" class="ann-btn" data-ann-screen-close>Cancel</button>' +
+          '<button type="button" class="ann-btn" data-ann-screen-close data-ann-screen-cancel>Cancel</button>' +
+          '<button type="button" class="ann-btn" data-ann-screen-open-session hidden>Open new session</button>' +
           '<button type="button" class="ann-btn ann-primary" data-ann-screen-save>Save</button>' +
         '</div>' +
       '</div>';
@@ -18777,6 +19389,8 @@
     const noteEl = modal.querySelector('.ann-editor-note');
     const errEl = modal.querySelector('.ann-editor-error');
     const saveBtn = modal.querySelector('[data-ann-screen-save]');
+    const cancelBtn = modal.querySelector('[data-ann-screen-cancel]');
+    const openSessionBtn = modal.querySelector('[data-ann-screen-open-session]');
     const close = annCloseScreenModal;
     modal.querySelectorAll('[data-ann-screen-close]').forEach(btn => btn.addEventListener('click', close));
     let savedAnnotation = null;
@@ -18825,6 +19439,8 @@
         if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
         savedAnnotation = data.annotation;
         noteEl.disabled = true;
+        if (cancelBtn) cancelBtn.hidden = true;
+        if (openSessionBtn) openSessionBtn.hidden = false;
         saveBtn.disabled = false;
         saveBtn.textContent = 'Copy';
         showOpToast('Screen annotation saved', 'success');
@@ -18835,6 +19451,9 @@
         saveBtn.textContent = 'Save';
       }
     };
+    if (openSessionBtn) {
+      openSessionBtn.addEventListener('click', () => annOpenNewSessionWithContext(savedAnnotation, close, errEl));
+    }
     saveBtn.addEventListener('click', save);
     noteEl.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save();
@@ -19770,8 +20389,12 @@
   }
 
   function enterNewSessionMode() {
+    const initialPrompt = typeof arguments[0] === 'string' ? arguments[0] : null;
     const paneId = activePaneId();
     rememberComposerDraftForPane(paneId);
+    if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
+      try { stopGroupChatReader({ rerenderSidebar: true }); } catch (_) {}
+    }
     if (typeof stopConvStream === 'function') stopConvStream();
     if (typeof stopSpawnStream === 'function') stopSpawnStream();
     if (typeof stopPkoodTailPoller === 'function') stopPkoodTailPoller();
@@ -19788,6 +20411,7 @@
     if ($convList) $convList.querySelectorAll('.conv-item.active').forEach(el => el.classList.remove('active'));
     if ($kanbanBoard) $kanbanBoard.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
     if ($kanbanBoardSplit) $kanbanBoardSplit.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
+    if ($flowBoard) $flowBoard.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
     populateSpawnCwdPicker();
     ensureSpawnCwdOptionsLoaded(paneId);
     const spawnCwd = getSpawnCwd();
@@ -19823,9 +20447,15 @@
     setTimeout(() => {
       const input = composerInputForPane(paneId) || $convInput;
       if (input) {
-        restoreInputDraft(input, '__new__');
+        if (initialPrompt !== null) {
+          input.value = initialPrompt;
+          setInputDraftForKey(inputDraftKeyForConversation('__new__'), initialPrompt);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          moveInputCaretToEnd(input);
+        } else {
+          restoreInputDraft(input, '__new__');
+        }
         input.focus();
-        moveInputCaretToEnd(input);
       }
     }, 30);
   }

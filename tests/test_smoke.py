@@ -169,6 +169,9 @@ class TestServerImports(unittest.TestCase):
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         self.assertIn("ann-note-shot", app_js)
         self.assertIn("/api/local-image?path=", app_js)
+        self.assertIn("data-ann-open-session", app_js)
+        self.assertIn("function annOpenNewSessionWithContext", app_js)
+        self.assertIn("enterNewSessionMode(text)", app_js)
 
 
 class TestPrStateResolution(unittest.TestCase):
@@ -2452,6 +2455,25 @@ class TestRepoContextHelpers(unittest.TestCase):
         result = server._group_chat_post("/etc/passwd", "hacked")
         self.assertFalse(result["ok"])
         self.assertIn("forbidden", result.get("error", ""))
+
+    def test_group_chat_reader_restores_composer_for_new_session(self):
+        """New session must clear group-chat reader chrome before showing composer."""
+        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
+        self.assertIn("function stopGroupChatReader", js)
+        self.assertIn("stopGroupChatReader({ rerenderSidebar: true });", js)
+        self.assertIn("function enterNewSessionMode()", js)
+        self.assertIn("currentConversation = '__new__';", js)
+
+    def test_group_chat_reader_has_tts_and_conversation_typography(self):
+        """Group-chat reader should expose TTS and reuse assistant markdown styling."""
+        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
+        css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text()
+        self.assertIn("function renderGroupChatMarkdown", js)
+        self.assertIn("gc-message-body assistant-text", js)
+        self.assertIn('id="gcTtsBtn"', js)
+        self.assertIn(".conv-input-bar .tts-btn, .gc-reader .tts-btn", js)
+        self.assertIn(".conversations-view .gc-message-body.assistant-text", css)
+        self.assertIn(".gc-reader-input-row .tts-btn", css)
 
 
 class TestModelPicker(unittest.TestCase):

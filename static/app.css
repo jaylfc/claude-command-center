@@ -3285,10 +3285,88 @@
     transition: background 0.15s, color 0.15s;
   }
   .conv-kanban-toggle.active { color: var(--accent); border-color: rgba(88,166,255,0.4); }
+  .conv-kanban-toggle.is-flow { color: var(--cyan); border-color: rgba(57,210,192,0.45); }
 
   .kanban-board {
     display: flex; gap: 12px; padding: 8px;
     flex: 1; min-height: 0; overflow-x: auto;
+  }
+
+  .flow-board {
+    flex: 1; min-height: 0; overflow: auto;
+    padding: 0; background: var(--bg);
+  }
+  .flow-empty-state {
+    margin: 12px; padding: 18px 12px; text-align: center;
+    color: var(--text-muted); font-size: 12px;
+    border: 1px dashed var(--border); border-radius: 6px;
+    background: var(--surface);
+  }
+  .flow-canvas {
+    position: relative; box-sizing: border-box;
+    background:
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
+    background-size: 32px 32px;
+    background-position: -1px -1px;
+  }
+  .flow-links {
+    position: absolute; inset: 0; overflow: visible;
+    pointer-events: none; z-index: 0;
+  }
+  .flow-links path {
+    fill: none; stroke: rgba(88,166,255,0.38);
+    stroke-width: 1.6; stroke-linecap: round;
+  }
+  .flow-node {
+    position: absolute; z-index: 1; width: 260px;
+    min-height: 72px; box-sizing: border-box;
+    border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    border-radius: 6px; background: var(--surface);
+    padding: 10px 12px; cursor: grab; user-select: none; touch-action: none;
+    box-shadow: 0 8px 18px rgba(0,0,0,0.16);
+  }
+  .flow-node:hover { border-color: var(--text-muted); }
+  .flow-node.dragging {
+    cursor: grabbing; opacity: 0.92; z-index: 3;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+  }
+  .flow-node.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(88,166,255,0.22), 0 8px 18px rgba(0,0,0,0.16);
+  }
+  .flow-node-repo {
+    width: 240px; border-left-color: var(--purple);
+    background: linear-gradient(rgba(188,140,255,0.10), rgba(188,140,255,0.10)), var(--surface);
+  }
+  .flow-node-session.is-live { border-left-color: var(--green); }
+  .flow-node-session.is-waiting { border-left-color: #f2cc60; }
+  .flow-node-session.is-review { border-left-color: var(--cyan); }
+  .flow-node-session.is-testing { border-left-color: var(--orange); }
+  .flow-node-session.is-attention { border-left-color: var(--red); }
+  .flow-node-session.is-icebox { border-left-color: var(--purple); }
+  .flow-node-session.is-worktree::after {
+    content: 'worktree'; position: absolute; right: 10px; top: 8px;
+    font-size: 10px; font-weight: 700; color: var(--orange);
+    background: rgba(210,153,34,0.14); border: 1px solid rgba(210,153,34,0.32);
+    border-radius: 4px; padding: 1px 5px;
+  }
+  .flow-node-kicker {
+    color: var(--text-muted); font-size: 10px; font-weight: 700;
+    line-height: 1.2; text-transform: uppercase; letter-spacing: 0;
+    margin-bottom: 5px; padding-right: 66px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .flow-node-repo .flow-node-kicker { padding-right: 0; }
+  .flow-node-title {
+    color: var(--text); font-size: 13px; font-weight: 600;
+    line-height: 1.3; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .flow-node-meta {
+    margin-top: 6px; color: var(--text-muted); font-size: 11px;
+    line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .kanban-column {
     min-width: 260px; flex: 1;
@@ -6021,8 +6099,48 @@
 .gc-reader-header .gc-mode-badge { font-size:11px; padding:2px 6px; border-radius:10px; background:var(--surface-2); color:var(--text-muted); flex-shrink:0; }
 .gc-reader-header .gc-close { background:var(--surface-2); border:1px solid var(--border); color:var(--text); cursor:pointer; font-size:12px; font-weight:500; padding:3px 10px; border-radius:4px; flex-shrink:0; }
 .gc-reader-header .gc-close:hover { background:var(--border); }
-.gc-reader-body { flex:1; overflow-y:auto; padding:14px; font-size:13px; line-height:1.55; color:var(--text); }
+.gc-reader-body { flex:1; overflow-y:auto; padding:14px 20px 16px; font-size:16px; line-height:1.6; color:var(--text); }
 .gc-reader-body .gc-poll-error { color:var(--red); font-size:12px; padding:6px 0; }
+.gc-chat-preamble {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.gc-chat-preamble .md-h { margin-top: 0; font-size: 16px; color: var(--text); }
+.gc-chat-preamble ul { margin: 6px 0 0 18px; }
+.gc-message {
+  margin: 0 0 18px;
+  padding: 0;
+}
+.gc-message-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.gc-message-speaker {
+  color: var(--accent);
+  font-weight: 700;
+}
+.gc-message-time {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.72;
+}
+.conversations-view .gc-message-body.assistant-text {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  font-weight: 400;
+}
+.gc-message-empty { color: var(--text-muted); }
 /* Group-chat reader input — matches the convo `.conv-input-bar` shape:
    single rounded card, soft focus-within ring, no inner-input border,
    round arrow send button. Textarea autosizes from 1 row up to ~10. */
@@ -6059,8 +6177,7 @@
 .gc-reader-input-row input::placeholder {
   color: var(--text-muted); opacity: 0.6; font-weight: 400;
 }
-.gc-reader-input-row .gc-send-btn,
-.gc-reader-input-row button {
+.gc-reader-input-row .gc-send-btn {
   width: 32px; height: 32px; flex-shrink: 0;
   border-radius: 999px; border: 1px solid transparent;
   background: var(--accent); color: #fff; cursor: pointer;
@@ -6069,8 +6186,38 @@
   transition: opacity 0.15s, transform 0.05s;
   font-size: 0;
 }
-.gc-reader-input-row button:hover { opacity: 0.9; }
-.gc-reader-input-row button:active { transform: translateY(1px); }
+.gc-reader-input-row .gc-send-btn:hover { opacity: 0.9; }
+.gc-reader-input-row .gc-send-btn:active { transform: translateY(1px); }
+.gc-reader-input-row .tts-btn {
+  width: 32px; height: 32px; flex-shrink: 0;
+  border-radius: 999px; border: 1px solid var(--border); cursor: pointer;
+  background: transparent; color: var(--text-muted);
+  line-height: 1; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+}
+.gc-reader-input-row .tts-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.gc-reader-input-row .tts-btn:active { transform: translateY(1px); }
+.gc-reader-input-row .tts-btn.speaking {
+  color: #fff;
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,0.28),
+    0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+  transform: translateY(1px);
+}
+.gc-reader-input-row .tts-btn.failed {
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 55%, transparent);
+}
+.gc-reader-input-row .tts-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 .gc-reader-input-row button svg { display: block; }
 
 /* In Group Chat section — sessions currently in an active coordination */
@@ -6108,6 +6255,12 @@
   display: flex; align-items: center; gap: 8px;
   padding: 5px 14px; cursor: pointer; font-size: 12px;
   color: var(--text);
+  border-left: 3px solid transparent;
+  border-radius: 6px;
+}
+#convList .conv-ingroupchat-row.active {
+  background: var(--surface-2);
+  border-left-color: var(--purple);
 }
 #convList .conv-ingroupchat-row:hover { background: var(--row-hover, rgba(255,255,255,0.04)); }
 #convList .conv-ingroupchat-row-icon { font-size: 12px; flex-shrink: 0; opacity: 0.85; }
@@ -6429,8 +6582,14 @@
 .assistant-text strong { font-weight: 700; color: var(--text); }
 .assistant-text ol,
 .assistant-text ul {
-  padding-left: 22px;
+  padding-left: 26px;
   margin: 8px 0;
+}
+.assistant-text ol {
+  list-style-type: decimal;
+}
+.assistant-text ul {
+  list-style-type: disc;
 }
 .assistant-text ol li,
 .assistant-text ul li { margin: 6px 0; }
@@ -6723,24 +6882,144 @@ body.status-pos-right.status-rail-collapsed .conv-pane > .status-rail-restore {
   text-overflow: ellipsis;
 }
 
-/* #7 — Sidebar header on a single row. The sidebar-header is already
-   `display: flex` but with three children that wrap on narrow widths
-   (title + alerts + action-buttons), it currently stacks to ~84px.
-   Force a single row, let the title shrink + ellipsis if needed. */
+/* #7 — Compact sidebar header. The action buttons remain in the title bar,
+   but their visible labels collapse to icons and the brand text is clamped
+   to two non-wrapping lines. This keeps the app chrome under control even
+   when the update pill or all header controls are visible. */
 .sidebar-header {
   flex-wrap: nowrap !important;
   min-height: 0;
+  padding: 8px 10px;
+  gap: 8px;
+  letter-spacing: 0;
 }
-.sidebar-header > a:first-child {
-  flex: 0 1 auto;
+.sidebar-header-brand {
+  flex: 1 1 0;
   min-width: 0;
+  gap: 1px;
+}
+.sidebar-header-brand .sh-title-row {
+  width: 100%;
+  gap: 6px;
+}
+.sidebar-header-brand .sh-app-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+}
+.sidebar-header-brand .sh-title-link,
+.sidebar-header-brand .sh-meta-row {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sidebar-header-brand .sh-title-link {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  color: inherit;
+  background: none;
+  text-shadow: none;
+}
+.sidebar-header-brand .sh-title-main,
+.sidebar-header-brand .sh-title-sub {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.sidebar-header-brand .sh-title-main {
+  font-size: 17px;
+  font-weight: 750;
+  line-height: 1.05;
+  color: transparent;
+  background-image: linear-gradient(90deg, #f0f6fc 0%, #58a6ff 42%, #bc8cff 74%, #3fb950 100%);
+  text-shadow: 0 0 18px rgba(88,166,255,0.22);
+}
+.sidebar-header-brand .sh-title-sub {
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.15;
+  color: transparent;
+  background-image: linear-gradient(90deg, #8b949e 0%, #58a6ff 44%, #d299ff 100%);
+  text-shadow: 0 0 12px rgba(188,140,255,0.18);
+}
+.sidebar-header-brand .sh-version {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+.sidebar-header-brand .sh-meta-row {
+  display: block;
+  width: 100%;
+}
+.sidebar-header-brand .sh-repo-link {
+  display: none;
+}
 .sidebar-header-actions {
   flex-wrap: nowrap !important;
   flex-shrink: 0;
+  gap: 4px;
+}
+.sidebar-header-actions .sh-btn,
+.sidebar-header-actions .bug-link {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.sidebar-header-actions .sh-btn::after,
+.sidebar-header-actions .bug-link::after {
+  content: attr(aria-label);
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  z-index: 10030;
+  max-width: 240px;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 8px 22px rgba(0,0,0,0.35);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-2px);
+  transition: opacity 0.08s ease 0.35s, transform 0.08s ease 0.35s;
+}
+.sidebar-header-actions .sh-btn:hover::after,
+.sidebar-header-actions .sh-btn:focus-visible::after,
+.sidebar-header-actions .bug-link:hover::after,
+.sidebar-header-actions .bug-link:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+.sidebar-header-actions .sh-action-label {
+  display: none;
+}
+.sidebar-header-actions .sh-refresh-wrap {
+  height: 30px;
+}
+.sidebar-header-actions .sh-refresh-wrap .sh-refresh-btn {
+  width: 30px;
+  min-width: 30px;
+}
+.sidebar-header-actions .sh-refresh-wrap .sh-refresh-caret {
+  width: 22px;
+  min-width: 22px;
 }
 
 /* #5 — Session ID styling in the rail. Renders as
