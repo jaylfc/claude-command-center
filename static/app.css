@@ -3381,12 +3381,22 @@
     cursor: grabbing; opacity: 0.92; z-index: 3;
     box-shadow: 0 12px 28px rgba(0,0,0,0.28);
   }
+  .flow-node.selected {
+    outline: 2px solid rgba(88,166,255,0.72);
+    outline-offset: 3px;
+  }
   .flow-node.flow-drop-target {
     outline: 2px dashed var(--green); outline-offset: 3px;
   }
   .flow-node.active {
     border-color: var(--accent);
     box-shadow: 0 0 0 2px rgba(88,166,255,0.22), 0 8px 18px rgba(0,0,0,0.16);
+  }
+  .flow-selection-box {
+    position: absolute; z-index: 4; pointer-events: none;
+    border: 1px solid rgba(88,166,255,0.72);
+    background: rgba(88,166,255,0.14);
+    border-radius: 3px;
   }
   .flow-node-repo {
     width: 240px; border-left-color: var(--purple);
@@ -3428,6 +3438,21 @@
     border-color: rgba(139,148,158,0.48);
   }
   .flow-node-object .flow-node-collapse { right: 60px; }
+  .flow-node-archive {
+    position: absolute; right: 8px; top: 7px;
+    width: 22px; height: 22px; border-radius: 4px;
+    border: 1px solid rgba(139,148,158,0.24);
+    background: rgba(139,148,158,0.08);
+    color: var(--text-muted); cursor: pointer; line-height: 1;
+    font-size: 12px; opacity: 0;
+  }
+  .flow-node:hover .flow-node-archive,
+  .flow-node .flow-node-archive:focus-visible { opacity: 0.85; }
+  .flow-node-archive:hover {
+    opacity: 1; color: var(--orange);
+    border-color: rgba(255,166,87,0.42);
+    background: rgba(255,166,87,0.12);
+  }
   .flow-node-delete {
     position: absolute; right: 8px; top: 7px;
     width: 20px; height: 20px; border-radius: 4px;
@@ -3440,14 +3465,23 @@
     color: var(--red); border-color: rgba(248,81,73,0.35);
     background: rgba(248,81,73,0.10);
   }
+  .flow-node-session.is-working,
   .flow-node-session.is-live { border-left-color: var(--green); }
   .flow-node-session.is-waiting { border-left-color: #f2cc60; }
   .flow-node-session.is-review { border-left-color: var(--cyan); }
   .flow-node-session.is-testing { border-left-color: var(--orange); }
   .flow-node-session.is-attention { border-left-color: var(--red); }
   .flow-node-session.is-icebox { border-left-color: var(--purple); }
+  .flow-node-session.is-verified { border-left-color: var(--green); }
+  .flow-node-session.is-pushed,
+  .flow-node-session.is-committed { border-left-color: var(--cyan); }
+  .flow-node-session.is-uncommitted { border-left-color: var(--orange); }
+  .flow-node-session.is-failed { border-left-color: var(--red); }
+  .flow-node-session.is-read-only,
+  .flow-node-session.is-no-edits,
+  .flow-node-session.is-idle { border-left-color: var(--accent); }
   .flow-node-session.is-worktree::after {
-    content: 'worktree'; position: absolute; right: 10px; top: 8px;
+    content: 'worktree'; position: absolute; right: 34px; top: 8px;
     font-size: 10px; font-weight: 700; color: var(--orange);
     background: rgba(210,153,34,0.14); border: 1px solid rgba(210,153,34,0.32);
     border-radius: 4px; padding: 1px 5px;

@@ -5199,6 +5199,48 @@
     }
   } catch (_) {}
   let flowDraftFocusId = '';
+  let flowSelectedNodes = {};
+
+  function flowSelectedNodeIds() {
+    return Object.keys(flowSelectedNodes || {}).filter(id => flowSelectedNodes[id]);
+  }
+
+  function flowSelectedNodeCount() {
+    return flowSelectedNodeIds().length;
+  }
+
+  function updateFlowSelectionClasses(targetEl) {
+    const root = targetEl || document.getElementById('flowBoard');
+    if (!root) return;
+    root.querySelectorAll('.flow-node').forEach(node => {
+      node.classList.toggle('selected', !!flowSelectedNodes[node.dataset.flowNodeId]);
+    });
+  }
+
+  function setFlowSelectedNodes(nodeIds, targetEl) {
+    flowSelectedNodes = {};
+    (nodeIds || []).forEach(nodeId => {
+      if (nodeId) flowSelectedNodes[nodeId] = true;
+    });
+    updateFlowSelectionClasses(targetEl);
+  }
+
+  function clearFlowSelectedNodes(targetEl) {
+    flowSelectedNodes = {};
+    updateFlowSelectionClasses(targetEl);
+  }
+
+  function pruneFlowSelectedNodes(records) {
+    const ids = new Set((records || []).map(rec => rec.id));
+    let changed = false;
+    Object.keys(flowSelectedNodes || {}).forEach(nodeId => {
+      if (!ids.has(nodeId)) {
+        delete flowSelectedNodes[nodeId];
+        changed = true;
+      }
+    });
+    return changed;
+  }
 
   function persistFlowNodePositions() {
     try { localStorage.setItem('ccc-flow-node-positions', JSON.stringify(flowNodePositions)); } catch (_) {}
@@ -5453,12 +5495,28 @@
     return true;
   }
 
-  function flowHasCollapsedAncestor(nodeId) {
+  function flowParentForCollapse(nodeId, defaultParent) {
+    return flowNodeParents[nodeId] || defaultParent || '';
+  }
+
+  function flowHasCollapsedAncestor(nodeId, defaultParent) {
     if (!nodeId) return false;
     const seen = new Set([nodeId]);
-    let cur = flowNodeParents[nodeId] || '';
+    let cur = flowParentForCollapse(nodeId, defaultParent);
     while (cur && !seen.has(cur)) {
       if (isFlowNodeCollapsed(cur)) return true;
+      seen.add(cur);
+      cur = flowNodeParents[cur] || '';
+    }
+    return false;
+  }
+
+  function flowHasAncestorNode(nodeId, ancestorId, defaultParent) {
+    if (!nodeId || !ancestorId) return false;
+    const seen = new Set([nodeId]);
+    let cur = flowParentForCollapse(nodeId, defaultParent);
+    while (cur && !seen.has(cur)) {
+      if (cur === ancestorId) return true;
       seen.add(cur);
       cur = flowNodeParents[cur] || '';
     }
@@ -5532,25 +5590,67 @@
       || (path === '__repo__' ? '' : _pathLeaf(path)) || 'Repo';
   }
 
+  function flowSessionSignal(c) {
+    if (!c) return { key: '', label: '' };
+    const isCodexRow = c.source === 'codex' || c.engine === 'codex';
+    const isGeminiRow = c.source === 'gemini' || c.engine === 'gemini';
+    const isAntigravityRow = c.source === 'antigravity' || c.engine === 'antigravity';
+    const activityAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
+    const activityTs = c.sidecar_ts || c.last_interacted || c.modified || 0;
+    const rowActivityAge = activityTs ? Math.max(0, Math.floor(Date.now() / 1000 - activityTs)) : 9999;
+    const midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow || isAntigravityRow) && c.last_event_type === 'user');
+    const isQuestionWaiting = c.is_live && (c.question_waiting || (c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion'));
+    if (isQuestionWaiting) return { key: 'waiting', label: 'QUESTION' };
+    if (c.needs_approval) return { key: 'waiting', label: 'needs approval' };
+    const codexOpenTurn = isCodexRow && !c.sidecar_status
+      && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
+    const geminiOpenTurn = isGeminiRow && !c.sidecar_status
+      && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
+    const antigravityOpenTurn = isAntigravityRow && !c.sidecar_status
+      && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
+    const isActiveSidecar = c.is_live && c.sidecar_status === 'active';
+    const isWip = !!c.gh_in_progress || !!c.pending_spawn || (c.is_live && !!c.pending_tool)
+      || codexOpenTurn || geminiOpenTurn || antigravityOpenTurn
+      || (isActiveSidecar && (activityAge < 300 || midTurn || !c.sidecar_ts));
+    if (isWip) return { key: 'working', label: 'WIP' };
+    if (c.source === 'pkood') {
+      const ps = (c.pkood_status || '').toUpperCase();
+      if (ps === 'RUNNING') return { key: 'working', label: 'running' };
+      if (ps === 'BLOCKED') return { key: 'waiting', label: 'blocked' };
+      if (c.pkood_is_stuck) return { key: 'attention', label: 'stuck' };
+    }
+    if (c.spawn_failed) return { key: 'failed', label: 'failed' };
+    if ((c.effective_kind === 'worktree' || c.session_cwd_is_worktree) && c.worktree_dirty) return { key: 'uncommitted', label: 'uncommitted' };
+    if (c.tail_pr_number) return { key: 'review', label: 'PR #' + c.tail_pr_number };
+    if (c.has_push) return { key: 'pushed', label: 'pushed' };
+    if (c.has_commit) return { key: 'committed', label: 'committed' };
+    if (hasReadOnlyWork(c)) return { key: 'read-only', label: 'read-only' };
+    if (hasNoEdits(c)) return { key: 'no-edits', label: 'no edits' };
+    return { key: '', label: '' };
+  }
+
   function flowSessionStatus(c) {
     const col = classifyKanbanColumn(c);
+    const signal = flowSessionSignal(c);
     if (c.needs_approval || c.question_waiting || col === 'waiting') {
-      return { key: 'waiting', label: 'waiting' };
+      return { key: 'waiting', label: signal.label || 'waiting' };
     }
-    if (c.is_live) return { key: 'live', label: 'live' };
-    if (col === 'review') return { key: 'review', label: 'review' };
+    if (signal.label) return signal;
+    if (col === 'working') return { key: 'working', label: '' };
+    if (col === 'review') return { key: 'review', label: '' };
     if (col === 'testing') return { key: 'testing', label: 'testing' };
-    if (col === 'needs-attention') return { key: 'attention', label: 'attention' };
+    if (col === 'needs-attention') return { key: 'attention', label: 'needs attention' };
     if (col === 'icebox') return { key: 'icebox', label: 'icebox' };
-    return { key: 'idle', label: 'idle' };
+    if (col === 'verified') return { key: 'verified', label: 'verified' };
+    return { key: 'working', label: '' };
   }
 
   function flowIsVisibleSession(c) {
     if (!c) return false;
     if (c.source === 'backlog' || c.source === 'github_pr') return false;
-    if (c.archived || c.verified) return false;
+    if (c.archived) return false;
     const col = classifyKanbanColumn(c);
-    return col !== 'archived' && col !== 'verified' && col !== 'backlog';
+    return col !== 'archived' && col !== 'backlog';
   }
 
   function flowTimestampSec(value) {
@@ -5561,7 +5661,7 @@
 
   function flowLastUpdatedLabel(value) {
     const ts = flowTimestampSec(value);
-    return ts ? ('Last updated ' + relativeTime(ts)) : '';
+    return ts ? relativeTime(ts) : '';
   }
 
   function flowRowTime(c) {
@@ -5599,6 +5699,36 @@
     const board = document.getElementById('flowBoard');
     if (!board || !nodeId) return null;
     return Array.from(board.querySelectorAll('.flow-node')).find(el => el.dataset.flowNodeId === nodeId) || null;
+  }
+
+  function flowPointerWorldPoint(ev, world) {
+    const rect = world.getBoundingClientRect();
+    const zoom = flowZoom || 1;
+    return {
+      x: (ev.clientX - rect.left) / zoom,
+      y: (ev.clientY - rect.top) / zoom,
+    };
+  }
+
+  function flowRectFromPoints(a, b) {
+    const left = Math.min(a.x, b.x);
+    const top = Math.min(a.y, b.y);
+    const right = Math.max(a.x, b.x);
+    const bottom = Math.max(a.y, b.y);
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
+  }
+
+  function flowNodeRect(node) {
+    return {
+      left: node.offsetLeft,
+      top: node.offsetTop,
+      right: node.offsetLeft + node.offsetWidth,
+      bottom: node.offsetTop + node.offsetHeight,
+    };
+  }
+
+  function flowRectsIntersect(a, b) {
+    return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
   }
 
   function flowRepoPathForNode(node) {
@@ -5677,6 +5807,16 @@
     persistFlowNodePositions();
     persistFlowNodeParents();
     renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  async function archiveFlowSession(rowId) {
+    if (!rowId) return;
+    try {
+      await moveCardToColumn(rowId, 'archived');
+    } catch (err) {
+      showOpToast('Archive failed: ' + ((err && err.message) || 'unknown'), 'error');
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+    }
   }
 
   function sessionSubjectFromPrompt(text) {
@@ -5944,15 +6084,15 @@
       const repoDefault = { x: 28, y: yCursor };
       flowCollapsedDefaultsChanged = ensureFlowDefaultRepoCollapsed(repoId) || flowCollapsedDefaultsChanged;
       const repoCollapsed = isFlowNodeCollapsed(repoId);
-      const visibleDrafts = repoCollapsed
-        ? []
-        : group.drafts.filter(draft => !flowHasCollapsedAncestor(flowNodeKey('draft-session', draft.id)));
-      const visibleItems = repoCollapsed
-        ? []
-        : group.items.filter(row => {
-          const sessionId = row.session_id || row.id;
-          return !flowHasCollapsedAncestor(flowNodeKey('session', sessionId));
-        });
+      const visibleDrafts = group.drafts.filter(draft => {
+        const nodeId = flowNodeKey('draft-session', draft.id);
+        return !flowHasCollapsedAncestor(nodeId, draft.parent_node_id || repoId);
+      });
+      const visibleItems = group.items.filter(row => {
+        const sessionId = row.session_id || row.id;
+        const nodeId = flowNodeKey('session', sessionId);
+        return !flowHasCollapsedAncestor(nodeId, repoId);
+      });
       const repoMeta = [
         group.items.length ? (group.items.length + ' in progress') : '',
         group.drafts.length ? (group.drafts.length + ' draft' + (group.drafts.length === 1 ? '' : 's')) : '',
@@ -6020,13 +6160,22 @@
           className: 'flow-node-session is-' + status.key + worktree + (currentConversation === row.id ? ' active' : ''),
         });
       });
-      const rowsTall = Math.ceil(visibleItems.length / 2);
-      const visibleChildCount = visibleItems.length + visibleDrafts.length;
+      const repoLayoutDrafts = visibleDrafts.filter(draft => {
+        const nodeId = flowNodeKey('draft-session', draft.id);
+        return flowHasAncestorNode(nodeId, repoId, draft.parent_node_id || repoId);
+      });
+      const repoLayoutItems = visibleItems.filter(row => {
+        const sessionId = row.session_id || row.id;
+        return flowHasAncestorNode(flowNodeKey('session', sessionId), repoId, repoId);
+      });
+      const rowsTall = Math.ceil(repoLayoutItems.length / 2);
+      const visibleChildCount = repoLayoutItems.length + repoLayoutDrafts.length;
       yCursor += visibleChildCount
-        ? 132 + Math.max(1, rowsTall) * 116 + Math.max(0, visibleDrafts.length - 1) * 92
+        ? 132 + Math.max(1, rowsTall) * 116 + Math.max(0, repoLayoutDrafts.length - 1) * 92
         : 108;
     }
     if (flowCollapsedDefaultsChanged) persistFlowCollapsedNodes();
+    pruneFlowSelectedNodes(records);
 
     const parentMap = flowParentMapFor(records);
     const nodeHtml = records.map(rec => {
@@ -6053,6 +6202,9 @@
       const collapseBtn = (rec.kind === 'repo' || rec.kind === 'object')
         ? '<button type="button" class="flow-node-collapse" data-flow-action="toggle-collapse" title="' + (collapsed ? 'Expand' : 'Collapse') + '" aria-label="' + (collapsed ? 'Expand' : 'Collapse') + '" aria-pressed="' + (collapsed ? 'true' : 'false') + '">' + (collapsed ? '&#9656;' : '&#9662;') + '</button>'
         : '';
+      const archiveBtn = rec.kind === 'session'
+        ? '<button type="button" class="flow-node-archive" data-flow-action="archive-session" title="Archive session" aria-label="Archive session">&#128229;</button>'
+        : '';
       const bodyHtml = rec.kind === 'draft-session'
         ? '<input type="text" class="flow-draft-input" data-draft-id="' + escapeAttr(rec.draftId) + '"'
           + ' value="' + escapeAttr(rec.title || '') + '" placeholder="Name or task this session..." autocomplete="off">'
@@ -6060,12 +6212,14 @@
           + '<button type="button" class="flow-draft-play" data-flow-action="play-draft-session" title="Start session" aria-label="Start session">&#9654;</button>'
         : '<div class="flow-node-title">' + escapeHtml(rec.title) + '</div>'
           + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>';
-      return '<div class="flow-node ' + escapeAttr(rec.className) + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
+      const selectedClass = flowSelectedNodes[rec.id] ? ' selected' : '';
+      return '<div class="flow-node ' + escapeAttr(rec.className) + selectedClass + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
         + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath
         + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;">'
         + deleteBtn
         + addBtn
         + collapseBtn
+        + archiveBtn
         + '<div class="flow-node-kicker">' + escapeHtml(rec.kicker) + '</div>'
         + bodyHtml
         + '</div>';
@@ -6136,6 +6290,61 @@
     svg.innerHTML = paths.join('');
   }
 
+  function startFlowRangeSelection(ev, targetEl, canvas, world) {
+    if (!targetEl || !canvas || !world) return;
+    if (ev.button !== undefined && ev.button !== 0) return;
+    if (ev.target.closest('.flow-node,button,input,textarea,a')) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    beginSidebarDrag();
+
+    const start = flowPointerWorldPoint(ev, world);
+    const box = document.createElement('div');
+    box.className = 'flow-selection-box';
+    world.appendChild(box);
+    let moved = false;
+
+    const updateBox = point => {
+      const rect = flowRectFromPoints(start, point);
+      box.style.left = Math.round(rect.left) + 'px';
+      box.style.top = Math.round(rect.top) + 'px';
+      box.style.width = Math.round(rect.width) + 'px';
+      box.style.height = Math.round(rect.height) + 'px';
+      const selected = [];
+      world.querySelectorAll('.flow-node').forEach(node => {
+        if (flowRectsIntersect(flowNodeRect(node), rect)) selected.push(node.dataset.flowNodeId);
+      });
+      setFlowSelectedNodes(selected, targetEl);
+    };
+
+    const cleanup = () => {
+      world.removeEventListener('pointermove', onMove);
+      world.removeEventListener('pointerup', onUp);
+      world.removeEventListener('pointercancel', onUp);
+      if (box.parentNode) box.parentNode.removeChild(box);
+      try { world.releasePointerCapture(ev.pointerId); } catch (_) {}
+      endSidebarDrag();
+    };
+
+    const onMove = moveEv => {
+      if (Math.abs(moveEv.clientX - ev.clientX) > 3 || Math.abs(moveEv.clientY - ev.clientY) > 3) moved = true;
+      updateBox(flowPointerWorldPoint(moveEv, world));
+    };
+    const onUp = upEv => {
+      if (moved) {
+        updateBox(flowPointerWorldPoint(upEv, world));
+      } else {
+        clearFlowSelectedNodes(targetEl);
+      }
+      cleanup();
+    };
+
+    try { world.setPointerCapture(ev.pointerId); } catch (_) {}
+    world.addEventListener('pointermove', onMove);
+    world.addEventListener('pointerup', onUp);
+    world.addEventListener('pointercancel', onUp);
+  }
+
   function wireFlowBoard(targetEl) {
     const canvas = targetEl && targetEl.querySelector('.flow-canvas');
     const world = canvas && (canvas.querySelector('.flow-world') || canvas);
@@ -6192,6 +6401,7 @@
       });
     }
     if (!canvas || !world) return;
+    world.addEventListener('pointerdown', ev => startFlowRangeSelection(ev, targetEl, canvas, world));
     world.querySelectorAll('.flow-node').forEach(node => {
       const collapseBtn = node.querySelector('[data-flow-action="toggle-collapse"]');
       if (collapseBtn) {
@@ -6201,6 +6411,14 @@
         });
       }
       if (node.dataset.flowKind === 'session') {
+        const archiveBtn = node.querySelector('[data-flow-action="archive-session"]');
+        if (archiveBtn) {
+          archiveBtn.addEventListener('click', ev => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            archiveFlowSession(node.dataset.id);
+          });
+        }
         node.addEventListener('mouseenter', () => _convPrefetchSchedule(node.dataset.id));
         node.addEventListener('mouseleave', () => _convPrefetchCancel(node.dataset.id));
       }
@@ -6257,8 +6475,30 @@
         beginSidebarDrag();
         const startX = ev.clientX;
         const startY = ev.clientY;
-        const startLeft = node.offsetLeft;
-        const startTop = node.offsetTop;
+        const nodeId = node.dataset.flowNodeId;
+        const nodeWasSelected = !!flowSelectedNodes[nodeId];
+        if (!nodeWasSelected && flowSelectedNodeCount()) clearFlowSelectedNodes(targetEl);
+        const selectedIds = nodeWasSelected ? new Set(flowSelectedNodeIds()) : new Set([nodeId]);
+        const dragNodes = nodeWasSelected && selectedIds.size > 1
+          ? Array.from(world.querySelectorAll('.flow-node')).filter(el => selectedIds.has(el.dataset.flowNodeId))
+          : [node];
+        if (dragNodes.indexOf(node) === -1) dragNodes.push(node);
+        const dragItems = dragNodes.map(el => ({
+          el,
+          id: el.dataset.flowNodeId,
+          left: el.offsetLeft,
+          top: el.offsetTop,
+          width: el.offsetWidth,
+          height: el.offsetHeight,
+        })).filter(item => item.id);
+        const dragIds = new Set(dragItems.map(item => item.id));
+        const isGroupDrag = dragItems.length > 1;
+        const groupBounds = dragItems.reduce((acc, item) => ({
+          left: Math.min(acc.left, item.left),
+          top: Math.min(acc.top, item.top),
+          right: Math.max(acc.right, item.left + item.width),
+          bottom: Math.max(acc.bottom, item.top + item.height),
+        }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
         let moved = false;
         let dropTarget = null;
         const setDropTarget = target => {
@@ -6275,7 +6515,7 @@
           const els = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
           for (const el of els) {
             const target = el && el.closest ? el.closest('.flow-node') : null;
-            if (!target || target === node || !canvas.contains(target)) continue;
+            if (!target || dragIds.has(target.dataset.flowNodeId) || !canvas.contains(target)) continue;
             const targetId = target.dataset.flowNodeId;
             const childId = node.dataset.flowNodeId;
             if (!targetId || !childId) continue;
@@ -6285,38 +6525,51 @@
           }
           return null;
         };
-        node.classList.add('dragging');
+        dragItems.forEach(item => item.el.classList.add('dragging'));
         try { node.setPointerCapture(ev.pointerId); } catch (_) {}
         const onMove = moveEv => {
           const zoom = flowZoom || 1;
-          const dx = (moveEv.clientX - startX) / zoom;
-          const dy = (moveEv.clientY - startY) / zoom;
+          let dx = (moveEv.clientX - startX) / zoom;
+          let dy = (moveEv.clientY - startY) / zoom;
           if (Math.abs(moveEv.clientX - startX) > 2 || Math.abs(moveEv.clientY - startY) > 2) moved = true;
           const base = flowEffectiveBaseSize(targetEl, canvas);
-          const maxLeft = Math.max(8, base.width - node.offsetWidth - 12);
-          const maxTop = Math.max(8, base.height - node.offsetHeight - 12);
-          const nextLeft = Math.max(12, Math.min(maxLeft, startLeft + dx));
-          const nextTop = Math.max(12, Math.min(maxTop, startTop + dy));
-          node.style.left = Math.round(nextLeft) + 'px';
-          node.style.top = Math.round(nextTop) + 'px';
-          setDropTarget(findDropTarget(moveEv.clientX, moveEv.clientY));
+          if (isGroupDrag) {
+            dx = Math.max(12 - groupBounds.left, Math.min(base.width - groupBounds.right - 12, dx));
+            dy = Math.max(12 - groupBounds.top, Math.min(base.height - groupBounds.bottom - 12, dy));
+            dragItems.forEach(item => {
+              item.el.style.left = Math.round(item.left + dx) + 'px';
+              item.el.style.top = Math.round(item.top + dy) + 'px';
+            });
+            setDropTarget(null);
+          } else {
+            const item = dragItems[0];
+            const maxLeft = Math.max(8, base.width - item.width - 12);
+            const maxTop = Math.max(8, base.height - item.height - 12);
+            const nextLeft = Math.max(12, Math.min(maxLeft, item.left + dx));
+            const nextTop = Math.max(12, Math.min(maxTop, item.top + dy));
+            item.el.style.left = Math.round(nextLeft) + 'px';
+            item.el.style.top = Math.round(nextTop) + 'px';
+            setDropTarget(findDropTarget(moveEv.clientX, moveEv.clientY));
+          }
           redrawFlowLinks(targetEl);
         };
         const onUp = upEv => {
           node.removeEventListener('pointermove', onMove);
           node.removeEventListener('pointerup', onUp);
           node.removeEventListener('pointercancel', onUp);
-          node.classList.remove('dragging');
+          dragItems.forEach(item => item.el.classList.remove('dragging'));
           const finalDropTarget = dropTarget;
           setDropTarget(null);
           try { node.releasePointerCapture(upEv.pointerId); } catch (_) {}
           endSidebarDrag();
           if (moved) {
-            flowNodePositions[node.dataset.flowNodeId] = {
-              x: Math.round(node.offsetLeft),
-              y: Math.round(node.offsetTop),
-            };
-            if (finalDropTarget && finalDropTarget.dataset.flowNodeId) {
+            dragItems.forEach(item => {
+              flowNodePositions[item.id] = {
+                x: Math.round(item.el.offsetLeft),
+                y: Math.round(item.el.offsetTop),
+              };
+            });
+            if (!isGroupDrag && finalDropTarget && finalDropTarget.dataset.flowNodeId) {
               flowNodeParents[node.dataset.flowNodeId] = finalDropTarget.dataset.flowNodeId;
               node.dataset.flowParent = finalDropTarget.dataset.flowNodeId;
               persistFlowNodeParents();
