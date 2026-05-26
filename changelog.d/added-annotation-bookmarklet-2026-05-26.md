@@ -1,0 +1,1 @@
+Add a stand-alone annotation bookmarklet at `static/bookmarklet.js` that injects a DOM picker overlay into any page (e.g. a BYM dev server at `localhost:3001`), captures element selector + nearby text + HTML excerpt, and copies a Claude-ready annotation block to the clipboard.
