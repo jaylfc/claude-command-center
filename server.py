@@ -4604,6 +4604,14 @@ _CCC_SESSION_STATE_INSTRUCTION_TRAILER_RE = re.compile(
     r"\n*Before your final reply\b.*?</session-state>\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_CCC_SHELL_SEARCH_SYSTEM_PROMPT = (
+    "When searching local files from Bash, prefer `rg` over recursive grep. "
+    "Do not run `grep -r` or `grep -R` across broad directories; it can block "
+    "on FIFOs such as `.claude/logs/*.stdin`. If `rg` is unavailable, search "
+    "only regular files with `find ... -type f -print0 | xargs -0 grep ...`. "
+    "Exclude `.claude`, `.git`, `node_modules`, `.venv`, `.next`, `dist`, and "
+    "`build` unless the user explicitly asks to search them."
+)
 _CCC_SESSION_STATE_SYSTEM_PROMPT = (
     "End your final reply with a compact CCC session-state block:\n"
     "<session-state>\n"
@@ -4615,8 +4623,11 @@ _CCC_SESSION_STATE_SYSTEM_PROMPT = (
 
 
 def _claude_session_state_args():
-    """CLI args that keep CCC's final-state reminder out of user text."""
-    return ["--append-system-prompt", _CCC_SESSION_STATE_SYSTEM_PROMPT]
+    """CLI args that keep CCC's hidden reminders out of user text."""
+    return [
+        "--append-system-prompt",
+        _CCC_SHELL_SEARCH_SYSTEM_PROMPT + "\n\n" + _CCC_SESSION_STATE_SYSTEM_PROMPT,
+    ]
 
 
 def _parse_session_state(text):

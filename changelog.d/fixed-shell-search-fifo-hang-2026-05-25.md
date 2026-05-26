@@ -1,0 +1,1 @@
+- Discourage CCC-spawned Claude sessions from running broad recursive grep commands that can hang on command-center FIFO logs.

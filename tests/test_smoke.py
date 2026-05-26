@@ -73,6 +73,18 @@ class TestServerImports(unittest.TestCase):
             self.assertIn("error", r)
             popen.assert_not_called()
 
+    def test_claude_append_prompt_discourages_blocking_recursive_grep(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+
+        args = server._claude_session_state_args()
+
+        self.assertEqual(args[0], "--append-system-prompt")
+        self.assertIn("Do not run `grep -r`", args[1])
+        self.assertIn(".claude/logs/*.stdin", args[1])
+        self.assertIn("<session-state>", args[1])
+
     def test_morning_disabled_when_plugin_absent(self):
         """If morning.py isn't importable, MORNING_ENABLED must be False
         no matter what CCC_ENABLE_MORNING says."""
