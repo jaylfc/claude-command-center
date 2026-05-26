@@ -4967,7 +4967,7 @@
     const rawFirst = (!isBacklog && c && c.first_message)
       ? firstSentenceOf(cleanIssuePrompt(c.first_message), 90)
       : '';
-    let rawTitle = c && c.name_overridden
+    let rawTitle = c && (c.name_overridden || c.spawn_named) && c.display_name
       ? c.display_name
       : (c && (c.ai_title || rawFirst || c.display_name)) || '(untitled)';
     if (c && (c.backlog_type === 'github' || c.issue_number || c.linked_issue)) {
@@ -6536,7 +6536,8 @@
             lastOrg = o;
           }
         }
-        // Prefer first_message for the title unless the user explicitly renamed it.
+        // Prefer first_message for the title unless the user explicitly renamed it
+        // or CCC launched Claude with a stable --name.
         // Auto-generated display_names (from claude /rename) tend to be awkwardly truncated.
         // For backlog cards, `first_message` is the issue body (which often
         // starts with a markdown heading like "## Feature request"), so using
@@ -6545,7 +6546,7 @@
         const rawFirst = (!isBacklog && c.first_message)
           ? firstSentenceOf(cleanIssuePrompt(c.first_message), 90)
           : '';
-        let rawTitle = c.name_overridden
+        let rawTitle = (c.name_overridden || c.spawn_named) && c.display_name
           ? c.display_name
           : (isBacklog
               ? (c.display_name || rawFirst || '(untitled)')
@@ -7768,8 +7769,9 @@
       const isBacklogRow = c.source === 'backlog';
       const isGithubPrRow = c.source === 'github_pr';
       const cleanFirst = c.first_message ? cleanIssuePrompt(c.first_message) : '';
-      // Title priority: user rename (display_name) > Claude Code's ai_title >
-      // raw first user prompt > "(untitled)". The ai_title slot rescues
+      // Title priority: user rename or CCC spawn name (display_name) >
+      // Claude Code's ai_title > raw first user prompt > "(untitled)".
+      // The ai_title slot rescues
       // sessions opened with a slash command — those have no first_message
       // CCC can show because the slash bookkeeping and meta body are filtered.
       // Prefix glyphs let the user tell at-a-glance which slot won:
@@ -7777,9 +7779,9 @@
       //   message, italic "(untitled)" = nothing on file.
       let titleSource = '';
       let rawTitle;
-      if (c.name_overridden && c.display_name) {
+      if ((c.name_overridden || c.spawn_named) && c.display_name) {
         rawTitle = c.display_name;
-        titleSource = 'user';
+        titleSource = c.name_overridden ? 'user' : 'spawn';
       } else if (c.ai_title) {
         rawTitle = c.ai_title;
         titleSource = 'ai';

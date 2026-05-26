@@ -2010,6 +2010,13 @@ def _spawn_registry_entry_for_session(session_id, engine=None):
     return None
 
 
+def _tail_meta_spawn_named(tail_meta):
+    """True when Claude's transcript still reflects its launch --name."""
+    custom_title = str((tail_meta or {}).get("custom_title") or "").strip()
+    agent_name = str((tail_meta or {}).get("agent_name") or "").strip()
+    return bool(custom_title and agent_name and custom_title == agent_name)
+
+
 def _live_registry_conversation_row(
     session_id,
     meta,
@@ -2049,7 +2056,14 @@ def _live_registry_conversation_row(
     spawn_prompt = _strip_ccc_session_state_instruction(
         spawn_entry.get("command_summary") or ""
     ).strip()
-    display_name = overrides.get(sid) or (meta or {}).get("name") or f"Live session {sid[:8]}"
+    spawn_name = str(spawn_entry.get("name") or "").strip()
+    display_name = (
+        overrides.get(sid)
+        or (meta or {}).get("name")
+        or spawn_name
+        or f"Live session {sid[:8]}"
+    )
+    spawn_named = bool(spawn_name and display_name == spawn_name and not overrides.get(sid))
     mtime = (
         _registry_epoch_seconds((meta or {}).get("updatedAt"))
         or _registry_epoch_seconds((meta or {}).get("startedAt"))
@@ -2083,6 +2097,7 @@ def _live_registry_conversation_row(
         "effective_branch": branch,
         "effective_kind": "worktree" if cwd_is_worktree else None,
         "display_name": display_name,
+        "spawn_named": spawn_named,
         "name_overridden": bool(overrides.get(sid)),
         "archived": sid in (archived_set or set()),
         "verified": False,
@@ -2364,7 +2379,12 @@ def find_all_conversations(
                 except OSError:
                     pass
 
-            display_name = name_overrides.get(session_id) or None
+            spawn_named = _tail_meta_spawn_named(tail_meta)
+            display_name = (
+                name_overrides.get(session_id)
+                or (tail_meta.get("custom_title") if spawn_named else None)
+                or None
+            )
             has_edit = bool(tail_meta.get("has_edit"))
             has_commit = bool(tail_meta.get("has_commit"))
             has_push = bool(tail_meta.get("has_push"))
@@ -2450,7 +2470,8 @@ def find_all_conversations(
                 "effective_branch": effective_branch,
                 "effective_kind": effective_kind,
                 "display_name": display_name,
-                "name_overridden": bool(display_name),
+                "spawn_named": spawn_named,
+                "name_overridden": bool(name_overrides.get(session_id)),
                 "archived": session_id in archived_set,
                 "pinned": session_id in pinned_rank,
                 "pin_rank": pinned_rank.get(session_id),
@@ -8632,6 +8653,7 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             or _sibling_feature_title(first_message)
             or None
         )
+        spawn_named = _tail_meta_spawn_named(tail_meta)
         # name_overridden means "user touched the name from the command center"
         # (used for teal visual marker). Decoupled from display value.
         name_overridden = bool(override)
@@ -8700,6 +8722,7 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             "first_message": (first_message or "")[:200],
             "display_name": display_name,
             "ai_title": (tail_meta.get("ai_title") or None),
+            "spawn_named": spawn_named,
             "name_overridden": name_overridden,
             "last_prompt": (tail_meta.get("last_prompt") or "")[:200],
             "size": stat.st_size,

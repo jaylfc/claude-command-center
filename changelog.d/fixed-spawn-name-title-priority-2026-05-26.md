@@ -1,0 +1,1 @@
+- CCC-spawned Claude sessions now keep their launch name as the card title instead of falling back to the original prompt.
