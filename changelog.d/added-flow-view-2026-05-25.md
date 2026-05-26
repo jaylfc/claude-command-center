@@ -1,1 +1,1 @@
-- Added a Flow view for in-progress sessions that lays repo nodes and session nodes onto a draggable, connected canvas.
+- Added a Flow view for in-progress sessions with recency-sorted repo/session nodes, persistent positions, persistent parent links, and custom objects.
