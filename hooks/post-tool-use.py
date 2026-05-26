@@ -117,11 +117,18 @@ def ask_user_question_payload(tool_input):
     header = prompt_fragment(q.get("header"), 80)
     question = prompt_fragment(q.get("question"), 160)
     options = []
+    option_details = []
     for opt in q.get("options") or []:
-        label = opt.get("label") if isinstance(opt, dict) else opt
+        if isinstance(opt, dict):
+            label = opt.get("label")
+            description = prompt_fragment(opt.get("description"), 240)
+        else:
+            label = opt
+            description = ""
         label = prompt_fragment(label, 80)
         if label:
             options.append(label)
+            option_details.append({"label": label, "description": description})
     parts = []
     if header:
         parts.append(header + ":")
@@ -133,7 +140,13 @@ def ask_user_question_payload(tool_input):
     summary = prompt_fragment(" ".join(parts), 240)
     if not summary:
         return {}
-    return {"header": header, "question": question, "options": options, "summary": summary}
+    return {
+        "header": header,
+        "question": question,
+        "options": options,
+        "option_details": option_details,
+        "summary": summary,
+    }
 
 
 def main():

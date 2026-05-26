@@ -586,7 +586,7 @@
   let sessionSourceByConv = {}; // {convId: 'interactive'|'pkood'|'task'}
   let sessionSpawnPidByConv = {}; // {convId: pid of claude we spawned (stdin inject)}
   // Currently-focused session and its live-process state (per-pane, shimmed via window.currentSession)
-  let liveStatus = { live: false, pid: null, tty: null, terminalApp: null, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
+  let liveStatus = { live: false, pid: null, tty: null, terminalApp: null, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false, questionWaiting: false, questionText: '', questionHeader: '', questionPreamble: '', questionOptions: [], questionOptionDetails: [] };
   let liveStatusTimer = null;
   // Separate 1s tick that just re-renders the live-tool strip + inline
   // indicator from the cached liveStatus. The 5s poller refreshes the
@@ -1100,7 +1100,7 @@
 
   async function refreshLiveStatus() {
     if (!currentSession.id) {
-      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
+      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, questionWaiting: false, questionText: '', questionHeader: '', questionPreamble: '', questionOptions: [], questionOptionDetails: [] };
       updateJumpButton();
       updateInputBar();
       return;
@@ -1127,7 +1127,9 @@
         questionWaiting: !!data.question_waiting,
         questionText: data.question_text || '',
         questionHeader: data.question_header || '',
+        questionPreamble: data.question_preamble || '',
         questionOptions: Array.isArray(data.question_options) ? data.question_options : [],
+        questionOptionDetails: Array.isArray(data.question_option_details) ? data.question_option_details : [],
       };
       // Mirror the freshly-fetched sidecar fields back into the cached
       // sidebar row so the left list catches up to the right pane on
@@ -1150,14 +1152,16 @@
           row.question_waiting = !!data.question_waiting;
           row.question_text = data.question_text || '';
           row.question_header = data.question_header || '';
+          row.question_preamble = data.question_preamble || '';
           row.question_options = Array.isArray(data.question_options) ? data.question_options : [];
+          row.question_option_details = Array.isArray(data.question_option_details) ? data.question_option_details : [];
           if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
             renderSidebar(filterConversations($convSearch.value));
           }
         }
       }
     } catch (err) {
-      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
+      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, sidecarTool: null, sidecarFile: null, sidecarStatus: null, sidecarTs: 0, sidecarInFlight: false, questionWaiting: false, questionText: '', questionHeader: '', questionPreamble: '', questionOptions: [], questionOptionDetails: [] };
     }
     updateJumpButton();
     updateInputBar();
@@ -1325,7 +1329,10 @@
   }
 
   function liveQuestionOptionParts() {
-    const opts = Array.isArray(liveStatus.questionOptions) ? liveStatus.questionOptions : [];
+    const richOpts = Array.isArray(liveStatus.questionOptionDetails) ? liveStatus.questionOptionDetails : [];
+    const opts = richOpts.length
+      ? richOpts
+      : (Array.isArray(liveStatus.questionOptions) ? liveStatus.questionOptions : []);
     return opts.map(function (opt) {
       if (opt && typeof opt === 'object') {
         return {
@@ -1341,6 +1348,7 @@
 
   function liveQuestionDetailHtml(fallbackDetail) {
     const header = cleanLiveActivityDetail(liveStatus.questionHeader || '');
+    const preamble = cleanLiveActivityDetail(liveStatus.questionPreamble || '');
     let question = cleanLiveActivityDetail(liveStatus.questionText || fallbackDetail || '');
     const options = liveQuestionOptionParts();
     if (header && question.toLowerCase().startsWith(header.toLowerCase() + ':')) {
@@ -1349,7 +1357,10 @@
     if (!liveStatus.questionText && options.length) {
       question = question.replace(/\bOptions:\s*.*$/i, '').trim();
     }
-    if (!header && !question && !options.length) return '';
+    if (!preamble && !header && !question && !options.length) return '';
+    const preambleHtml = preamble
+      ? '<div class="cl-question-preamble">' + escapeHtml(preamble) + '</div>'
+      : '';
     const headerHtml = header
       ? '<div class="cl-question-header">' + escapeHtml(header) + '</div>'
       : '';
@@ -1364,7 +1375,7 @@
             + '</li>';
         }).join('') + '</ul>'
       : '';
-    return '<div class="cl-question-detail">' + headerHtml + questionHtml + optionsHtml + '</div>';
+    return '<div class="cl-question-detail">' + preambleHtml + headerHtml + questionHtml + optionsHtml + '</div>';
   }
 
   function updateLiveStripOffset($view, strip) {
@@ -1546,7 +1557,7 @@
       // Pkood sessions don't need live status polling or resume button
       if (liveStatusTimer) { clearInterval(liveStatusTimer); liveStatusTimer = null; }
       if (liveStatusRenderTicker) { clearInterval(liveStatusRenderTicker); liveStatusRenderTicker = null; }
-      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, questionWaiting: false, questionText: '', questionHeader: '', questionOptions: [] };
+      liveStatus = { live: false, pid: null, tty: null, terminalApp: null, questionWaiting: false, questionText: '', questionHeader: '', questionPreamble: '', questionOptions: [], questionOptionDetails: [] };
       updateResumeButton();
       updateAnnounceButton();
       updateJumpButton();
@@ -4249,7 +4260,7 @@
       spawn_pid: pid, pending_spawn: true,
       has_edit: false, has_commit: false, has_push: false,
       sidecar_status: 'active', sidecar_has_writes: false,
-      question_waiting: false, question_text: '', question_header: '', question_options: [],
+      question_waiting: false, question_text: '', question_header: '', question_preamble: '', question_options: [], question_option_details: [],
       modified: Date.now() / 1000, size: 0, branch: '',
       last_event_type: null, pending_tool: null, pending_file: null,
       name_overridden: false,
@@ -17268,7 +17279,9 @@
         question_waiting: false,
         question_text: '',
         question_header: '',
+        question_preamble: '',
         question_options: [],
+        question_option_details: [],
         // Folder chip — same fields the conversation rows use.
         folder_path: repoPath,
         folder_label: repoLabel,
@@ -18231,7 +18244,9 @@
           question_waiting: !!c.question_waiting,
           question_text: c.question_text || '',
           question_header: c.question_header || '',
+          question_preamble: c.question_preamble || '',
           question_options: Array.isArray(c.question_options) ? c.question_options : [],
+          question_option_details: Array.isArray(c.question_option_details) ? c.question_option_details : [],
           can_headless_resume: c.can_headless_resume === true,
           can_app_resume: c.can_app_resume === true,
           session_cwd: c.session_cwd || c.folder_path,
@@ -18296,7 +18311,9 @@
         question_waiting: !!c.question_waiting,
         question_text: c.question_text || '',
         question_header: c.question_header || '',
+        question_preamble: c.question_preamble || '',
         question_options: Array.isArray(c.question_options) ? c.question_options : [],
+        question_option_details: Array.isArray(c.question_option_details) ? c.question_option_details : [],
         source: c.source || 'interactive',
         can_headless_resume: c.can_headless_resume === true,
         can_app_resume: c.can_app_resume === true,

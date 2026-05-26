@@ -212,10 +212,17 @@ class TestServerImports(unittest.TestCase):
         app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
         self.assertIn("function liveQuestionDetailHtml", app_js)
         self.assertIn("liveStatus.questionText", app_js)
+        self.assertIn("questionPreamble", app_js)
+        self.assertIn("question_preamble", app_js)
+        self.assertIn("questionOptionDetails", app_js)
+        self.assertIn("question_option_details", app_js)
         self.assertIn("liveQuestionOptionParts", app_js)
         self.assertIn("cl-question-options", app_js)
         self.assertIn(".conv-live-tool-inline .cl-question-detail", app_css)
+        self.assertIn(".conv-live-tool-inline .cl-question-preamble", app_css)
         self.assertIn(".conv-live-tool-inline .cl-question-options", app_css)
+        self.assertIn("flex-direction: column", app_css)
+        self.assertIn("cl-question-option-desc", app_css)
 
 
 class TestPrStateResolution(unittest.TestCase):
@@ -963,8 +970,8 @@ class TestRepoContextHelpers(unittest.TestCase):
                             "header": "Key flow",
                             "question": "How automated do you want this?",
                             "options": [
-                                {"label": "Full auto"},
-                                {"label": "Half auto"},
+                                {"label": "Full auto", "description": "Run everything without checking back."},
+                                {"label": "Half auto", "description": "Ask before the risky bits."},
                                 {"label": "Skip Whisper"},
                             ],
                         }]
@@ -980,6 +987,8 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIn("How automated do you want this?", detail)
         self.assertIn("Full auto", detail)
         self.assertIn("Half auto", detail)
+        rich = parsed["blocks"][0]["question"]["questions"][0]["options"]
+        self.assertEqual(rich[0]["description"], "Run everything without checking back.")
 
     def test_bash_tool_detail_strips_shell_wrapper(self):
         ev = {
@@ -1014,6 +1023,17 @@ class TestRepoContextHelpers(unittest.TestCase):
         project_dir = pathlib.Path(self.tmp_home, ".claude", "projects", "-demo-repo")
         project_dir.mkdir(parents=True)
         jsonl = project_dir / f"{sid}.jsonl"
+        preamble_event = {
+            "type": "assistant",
+            "timestamp": "2026-05-15T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "Locked in. Back to the key flow question.",
+                }],
+            },
+        }
         ask_event = {
             "type": "assistant",
             "timestamp": "2026-05-15T00:00:00Z",
@@ -1028,17 +1048,23 @@ class TestRepoContextHelpers(unittest.TestCase):
                         "questions": [{
                             "header": "Key flow",
                             "question": "How automated do you want this?",
-                            "options": [{"label": "Half auto"}],
+                            "options": [{"label": "Half auto", "description": "Ask before destructive steps."}],
                         }]
                     },
                 }],
             },
         }
-        jsonl.write_text(json.dumps(ask_event) + "\n", encoding="utf-8")
+        jsonl.write_text(
+            json.dumps(preamble_event) + "\n" + json.dumps(ask_event) + "\n",
+            encoding="utf-8",
+        )
 
         pending = self.server._pending_ask_user_question_for_session(sid)
         self.assertIsNotNone(pending)
         self.assertEqual(pending["question"], "How automated do you want this?")
+        self.assertEqual(pending["preamble"], "Locked in. Back to the key flow question.")
+        self.assertEqual(pending["options"], ["Half auto"])
+        self.assertEqual(pending["option_details"][0]["description"], "Ask before destructive steps.")
 
         answer_event = {
             "type": "user",
@@ -1059,6 +1085,52 @@ class TestRepoContextHelpers(unittest.TestCase):
     def test_inflight_ask_user_question_marks_row_waiting(self):
         sid = "00000000-0000-4000-8000-000000000100"
         self.server.SIDECAR_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        project_dir = pathlib.Path(self.tmp_home, ".claude", "projects", "-demo-repo")
+        project_dir.mkdir(parents=True)
+        jsonl = project_dir / f"{sid}.jsonl"
+        jsonl.write_text(json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-05-15T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "Locked in. Back to the key flow question.",
+                }],
+            },
+        }) + "\n" + json.dumps({
+            "type": "assistant",
+            "timestamp": "2026-05-15T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu-question",
+                    "name": "AskUserQuestion",
+                    "input": {
+                        "questions": [{
+                            "header": "Key flow",
+                            "question": "How automated do you want this?",
+                            "options": [{
+                                "label": "Half auto",
+                                "description": "Ask before destructive steps.",
+                            }],
+                        }]
+                    },
+                }],
+            },
+        }) + "\n" + json.dumps({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu-question",
+                    "is_error": True,
+                    "content": "<tool_use_error>validation failed</tool_use_error>",
+                }],
+            },
+        }) + "\n", encoding="utf-8")
         marker = {
             "session_id": sid,
             "tool": "AskUserQuestion",
@@ -1079,6 +1151,8 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(entry["sidecar_tool"], "AskUserQuestion")
         self.assertTrue(entry["question_waiting"])
         self.assertEqual(entry["question_text"], "How automated do you want this?")
+        self.assertEqual(entry["question_preamble"], "Locked in. Back to the key flow question.")
+        self.assertEqual(entry["question_option_details"][0]["description"], "Ask before destructive steps.")
 
     def test_spawn_session_preflights_missing_claude_cli(self):
         with mock.patch.object(
