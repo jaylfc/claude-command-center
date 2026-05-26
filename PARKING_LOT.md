@@ -4,42 +4,6 @@ Ideas, fixes, and improvements deferred for later thought. Each entry has full c
 
 ---
 
-## Context usage pill can lag after high-context turns
-**Parked:** 2026-05-26
-**Context:** A 1M Claude session that had recently been compacted/pruned
-showed the bottom-bar usage pill as `ctx 9k / 1.00M (1%)` even though the
-current turn was using roughly 763k tokens and should have read closer to
-three quarters of the 1M context window.
-
-**Details:**
-- The affected UI element is `.wp-usage-pill.wp-usage-clickable` in the input
-  context strip.
-- The stale value appears to come from the most recent compact/prune
-  post-token baseline rather than the latest assistant turn's full context
-  usage.
-- A later server-side extraction for the same transcript can report the
-  expected high value, which points at a frontend refresh/race issue rather
-  than the core `extract_session_usage` math always being wrong.
-- Likely code paths to inspect:
-  - `static/app.js` `fetchSessionUsage()` / `renderSessionUsageIntoStrip()`
-  - event-stream and polling refreshes that call `fetchSessionUsage(sid)`
-  - `server.py` `extract_session_usage()` compact-boundary handling
-
-**Possible fix direction:**
-- Guard `fetchSessionUsage()` with a monotonically increasing request id so an
-  older in-flight fetch cannot overwrite a newer usage result for the same
-  session.
-- Verify that a final assistant event carrying `message.usage` always triggers
-  a fresh usage fetch, including when the response arrives through SSE rather
-  than the fallback poll.
-- Add a smoke-level fixture for compact baseline followed by a high-token
-  assistant usage block, and a small JS assertion/string check if the frontend
-  race guard is added.
-
-**Status:** Parked
-
----
-
 ## Multi-agent shared-clone git hygiene rule rewrite
 **Parked:** 2026-04-29
 **Context:** On 2026-04-27 a sibling Claude session silently destroyed ~28 lines of my uncommitted deploy-swap edits in `static/index.html`. Both rules in the existing `~/.claude/CLAUDE.md` "Multi-agent git hygiene" section were followed by the sibling, yet the work was still lost. The current rules are insufficient and need a rewrite — but the right rewrite isn't obvious yet, so this needs more thought before landing.
