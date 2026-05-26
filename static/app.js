@@ -3499,15 +3499,15 @@
   })();
 
   function normalizeSidebarViewMode(value) {
-    if (value === 'board' || value === 'flow' || value === 'list') return value;
-    if (value === 'kanban') return 'board';
+    if (value === 'flow' || value === 'list') return value;
+    if (value === 'board' || value === 'kanban') return 'flow';
     return 'list';
   }
   function readSidebarViewMode() {
     try {
       const saved = localStorage.getItem('ccc-session-view');
       if (saved) return normalizeSidebarViewMode(saved);
-      return localStorage.getItem('ccc-kanban-view') === 'true' ? 'board' : 'list';
+      return localStorage.getItem('ccc-kanban-view') === 'true' ? 'flow' : 'list';
     } catch (_) {
       return 'list';
     }
@@ -4073,6 +4073,30 @@
   // Pending spawn placeholders (optimistic UI) — keyed by pid.
   const pendingSpawns = new Map();
 
+  function carryFlowPendingSpawnNode(placeholder, realCard) {
+    if (!placeholder || !realCard) return;
+    try {
+      const placeholderSessionId = placeholder.session_id || placeholder.id;
+      const realSessionId = realCard.session_id || realCard.id;
+      if (!placeholderSessionId || !realSessionId) return;
+      const placeholderNodeId = flowNodeKey('session', placeholderSessionId);
+      const realNodeId = flowNodeKey('session', realSessionId);
+      const savedParent = flowNodeParents[placeholderNodeId] || placeholder.flow_parent_node_id || '';
+      const savedPos = flowNodePositions[placeholderNodeId] || placeholder.flow_node_position || null;
+      if (savedParent) flowNodeParents[realNodeId] = savedParent;
+      if (savedPos && Number.isFinite(Number(savedPos.x)) && Number.isFinite(Number(savedPos.y))) {
+        flowNodePositions[realNodeId] = {
+          x: Math.round(Number(savedPos.x)),
+          y: Math.round(Number(savedPos.y)),
+        };
+      }
+      delete flowNodeParents[placeholderNodeId];
+      delete flowNodePositions[placeholderNodeId];
+      persistFlowNodeParents();
+      persistFlowNodePositions();
+    } catch (_) {}
+  }
+
   function renderPendingSpawnConversation(card, paneId) {
     const $view = getConvViewForPane(paneId || activePaneId()) || $conversationsView;
     if (!$view || !card) return;
@@ -4159,6 +4183,7 @@
       if (!realCard) continue;
       const placeholderId = placeholder.id || ('spawning-' + pid);
       const defaultPlaceholderId = 'spawning-' + pid;
+      carryFlowPendingSpawnNode(placeholder, realCard);
       if (currentConversation === placeholderId || currentConversation === defaultPlaceholderId) {
         selectionSwap = { realCard, placeholderId };
       }
@@ -4354,6 +4379,7 @@
           const placeholderCol = columnOverrides[placeholderId] || columnOverrides[defaultPlaceholderId];
           const realCard = fresh.find(c => String(c.spawn_pid) === String(pid));
           if (realCard && realCard.session_id) {
+            carryFlowPendingSpawnNode(placeholder, realCard);
             _firstSeenSessions.set(realCard.session_id, Date.now());
             if (placeholderCol && !realCard.verified && !realCard.archived) {
               _stickyInitialCol.set(realCard.session_id, {
@@ -5051,6 +5077,8 @@
   try { flowNodePositions = JSON.parse(localStorage.getItem('ccc-flow-node-positions') || '{}'); } catch (_) {}
   let flowNodeParents = {};
   try { flowNodeParents = JSON.parse(localStorage.getItem('ccc-flow-node-parents') || '{}'); } catch (_) {}
+  let flowCollapsedNodes = {};
+  try { flowCollapsedNodes = JSON.parse(localStorage.getItem('ccc-flow-collapsed-nodes') || '{}'); } catch (_) {}
   let flowCustomObjects = [];
   try {
     const savedObjects = JSON.parse(localStorage.getItem('ccc-flow-custom-objects') || '[]');
@@ -5082,6 +5110,10 @@
     try { localStorage.setItem('ccc-flow-node-parents', JSON.stringify(flowNodeParents)); } catch (_) {}
   }
 
+  function persistFlowCollapsedNodes() {
+    try { localStorage.setItem('ccc-flow-collapsed-nodes', JSON.stringify(flowCollapsedNodes)); } catch (_) {}
+  }
+
   function persistFlowCustomObjects() {
     try { localStorage.setItem('ccc-flow-custom-objects', JSON.stringify(flowCustomObjects)); } catch (_) {}
   }
@@ -5110,11 +5142,39 @@
       : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9V3h6"/><path d="M21 15v6h-6"/><path d="M9 3 3 9"/><path d="m15 21 6-6"/></svg>';
   }
 
+  function flowRecencyValue() {
+    try {
+      if (recencyFilter === '1d' || recencyFilter === '7d') return recencyFilter;
+      if (recencyFilter === '10h') return '1d';
+    } catch (_) {}
+    try {
+      const raw = localStorage.getItem('ccc-show-recent') || '';
+      if (raw === '1' || raw === '10h') return '1d';
+      if (raw === '1d' || raw === '7d') return raw;
+    } catch (_) {}
+    return '';
+  }
+
+  function flowRecencyButtonHtml(value, label, current) {
+    const active = current === value;
+    return '<button type="button" class="flow-toolbar-btn' + (active ? ' active' : '') + '" data-flow-recency="' + escapeAttr(value) + '" aria-pressed="' + (active ? 'true' : 'false') + '">' + label + '</button>';
+  }
+
   function flowToolbarHtml() {
     const expandedLabel = flowExpanded ? 'Collapse flow view' : 'Expand flow view';
+    const recency = flowRecencyValue();
     return '<div class="flow-toolbar">'
       + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
       + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
+      + '<div class="flow-toolbar-group" role="group" aria-label="Flow recency">'
+      + flowRecencyButtonHtml('', 'All', recency)
+      + flowRecencyButtonHtml('1d', '1d', recency)
+      + flowRecencyButtonHtml('7d', '7d', recency)
+      + '</div>'
+      + '<div class="flow-toolbar-group" role="group" aria-label="Flow collapse controls">'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="collapse-all">Collapse all</button>'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="expand-all">Expand all</button>'
+      + '</div>'
       + '<div class="flow-toolbar-spacer"></div>'
       + '<div class="flow-zoom-controls" role="group" aria-label="Flow zoom">'
       + '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>'
@@ -5137,12 +5197,40 @@
       expandBtn.setAttribute('aria-pressed', flowExpanded ? 'true' : 'false');
       expandBtn.innerHTML = flowExpandIconHtml();
     }
+    const recency = flowRecencyValue();
+    targetEl.querySelectorAll('[data-flow-recency]').forEach(btn => {
+      const active = (btn.getAttribute('data-flow-recency') || '') === recency;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
   }
 
   function flowCanvasBaseSize(canvas) {
     return {
       width: Number(canvas && canvas.dataset.flowBaseWidth) || 760,
       height: Number(canvas && canvas.dataset.flowBaseHeight) || 360,
+    };
+  }
+
+  function flowMinimumBaseSize(targetEl) {
+    if (!targetEl) return { width: 0, height: 0 };
+    const toolbar = targetEl.querySelector('.flow-toolbar');
+    const toolbarHeight = toolbar ? toolbar.offsetHeight : 46;
+    const rawWidth = targetEl.clientWidth || window.innerWidth || 0;
+    const rawHeight = Math.max(0, (targetEl.clientHeight || window.innerHeight || 0) - toolbarHeight);
+    const zoom = flowZoom || 1;
+    return {
+      width: Math.ceil(rawWidth / zoom),
+      height: Math.ceil(rawHeight / zoom),
+    };
+  }
+
+  function flowEffectiveBaseSize(targetEl, canvas) {
+    const base = flowCanvasBaseSize(canvas);
+    const min = flowMinimumBaseSize(targetEl);
+    return {
+      width: Math.max(base.width, min.width),
+      height: Math.max(base.height, min.height),
     };
   }
 
@@ -5157,7 +5245,7 @@
       clientY = boardRect.top + toolbarHeight + Math.max(0, targetEl.clientHeight - toolbarHeight) / 2;
     }
     const canvasRect = canvas.getBoundingClientRect();
-    const base = flowCanvasBaseSize(canvas);
+    const base = flowEffectiveBaseSize(targetEl, canvas);
     return {
       clientX,
       clientY,
@@ -5175,7 +5263,7 @@
       ? flowZoomOrigin(targetEl, canvas, oldZoom || 1, opts || {})
       : null;
     if (canvas) {
-      const base = flowCanvasBaseSize(canvas);
+      const base = flowEffectiveBaseSize(targetEl, canvas);
       const scaledWidth = Math.ceil(base.width * flowZoom);
       const scaledHeight = Math.ceil(base.height * flowZoom);
       canvas.style.width = scaledWidth + 'px';
@@ -5209,6 +5297,7 @@
     const board = document.getElementById('flowBoard');
     if (board) {
       board.classList.toggle('is-expanded', flowExpanded && isFlowView());
+      applyFlowZoom(board, { preserve: false });
       updateFlowToolbarState(board);
       requestAnimationFrame(() => redrawFlowLinks(board));
     }
@@ -5245,6 +5334,84 @@
 
   function flowNodeKey(kind, value) {
     return kind + ':' + String(value || 'unknown');
+  }
+
+  function isFlowNodeCollapsed(nodeId) {
+    return !!(nodeId && flowCollapsedNodes[nodeId] === true);
+  }
+
+  function setFlowNodeCollapsed(nodeId, collapsed) {
+    if (!nodeId) return false;
+    const next = !!collapsed;
+    if (flowCollapsedNodes[nodeId] === next) return false;
+    flowCollapsedNodes[nodeId] = next;
+    return true;
+  }
+
+  function ensureFlowDefaultRepoCollapsed(nodeId) {
+    if (!nodeId) return false;
+    if (Object.prototype.hasOwnProperty.call(flowCollapsedNodes, nodeId)) return false;
+    flowCollapsedNodes[nodeId] = true;
+    return true;
+  }
+
+  function flowHasCollapsedAncestor(nodeId) {
+    if (!nodeId) return false;
+    const seen = new Set([nodeId]);
+    let cur = flowNodeParents[nodeId] || '';
+    while (cur && !seen.has(cur)) {
+      if (isFlowNodeCollapsed(cur)) return true;
+      seen.add(cur);
+      cur = flowNodeParents[cur] || '';
+    }
+    return false;
+  }
+
+  function expandFlowNodeAndAncestors(nodeId) {
+    if (!nodeId) return false;
+    let changed = false;
+    const seen = new Set();
+    let cur = nodeId;
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      changed = setFlowNodeCollapsed(cur, false) || changed;
+      cur = flowNodeParents[cur] || '';
+    }
+    return changed;
+  }
+
+  function toggleFlowNodeCollapsed(nodeId) {
+    if (!nodeId) return;
+    setFlowNodeCollapsed(nodeId, !isFlowNodeCollapsed(nodeId));
+    persistFlowCollapsedNodes();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function flowKnownCollapsibleNodeIds(targetEl) {
+    const ids = new Set();
+    if (targetEl) {
+      targetEl.querySelectorAll('.flow-node[data-flow-kind="repo"], .flow-node[data-flow-kind="object"]').forEach(node => {
+        if (node.dataset.flowNodeId) ids.add(node.dataset.flowNodeId);
+      });
+    }
+    (flowCustomObjects || []).forEach(obj => {
+      if (obj && obj.id) ids.add(flowNodeKey('object', obj.id));
+    });
+    Object.keys(flowCollapsedNodes || {}).forEach(nodeId => {
+      if (nodeId.startsWith('repo:') || nodeId.startsWith('object:')) ids.add(nodeId);
+    });
+    return ids;
+  }
+
+  function setFlowAllNodesCollapsed(collapsed, targetEl) {
+    const ids = flowKnownCollapsibleNodeIds(targetEl || document.getElementById('flowBoard'));
+    let changed = false;
+    ids.forEach(nodeId => {
+      changed = setFlowNodeCollapsed(nodeId, collapsed) || changed;
+    });
+    if (!changed && ids.size === 0) return;
+    persistFlowCollapsedNodes();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
   }
 
   function flowRowTitle(c) {
@@ -5288,16 +5455,27 @@
     return col !== 'archived' && col !== 'verified' && col !== 'backlog';
   }
 
+  function flowTimestampSec(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n > 20000000000 ? Math.floor(n / 1000) : n;
+  }
+
+  function flowLastUpdatedLabel(value) {
+    const ts = flowTimestampSec(value);
+    return ts ? ('Last updated ' + relativeTime(ts)) : '';
+  }
+
   function flowRowTime(c) {
-    return Number((c && (c.modified || c.mtime || c.last_interacted)) || 0);
+    return flowTimestampSec(c && (c.modified || c.mtime || c.last_interacted));
   }
 
   function flowObjectTime(obj) {
-    return Number((obj && (obj.updated_at || obj.created_at)) || 0);
+    return flowTimestampSec(obj && (obj.updated_at || obj.created_at));
   }
 
   function flowDraftTime(draft) {
-    return Number((draft && (draft.updated_at || draft.created_at)) || 0);
+    return flowTimestampSec(draft && (draft.updated_at || draft.created_at));
   }
 
   function flowDraftPrompt(draft) {
@@ -5370,6 +5548,7 @@
     flowDraftSessions.unshift(draft);
     flowNodePositions[nodeId] = pos;
     flowNodeParents[nodeId] = parentId;
+    if (expandFlowNodeAndAncestors(parentId)) persistFlowCollapsedNodes();
     flowDraftFocusId = id;
     persistFlowDraftSessions();
     persistFlowNodePositions();
@@ -5451,6 +5630,8 @@
       cwd: repoPath,
       session_cwd: repoPath,
       session_cwd_exists: true,
+      flow_parent_node_id: savedParent,
+      flow_node_position: savedPos ? { x: savedPos.x, y: savedPos.y } : null,
     });
 
     try {
@@ -5587,6 +5768,7 @@
     const rows = (convs || []).filter(flowIsVisibleSession).sort((a, b) => flowRowTime(b) - flowRowTime(a));
     const customObjects = (flowCustomObjects || [])
       .filter(obj => obj && obj.id)
+      .filter(obj => !flowHasCollapsedAncestor(flowNodeKey('object', obj.id)))
       .slice()
       .sort((a, b) => flowObjectTime(b) - flowObjectTime(a));
     const draftSessions = (flowDraftSessions || [])
@@ -5632,6 +5814,7 @@
     let canvasWidth = 760;
     let canvasHeight = 360;
     let yCursor = 24;
+    let flowCollapsedDefaultsChanged = false;
 
     customObjects.forEach((obj, idx) => {
       const nodeId = flowNodeKey('object', obj.id);
@@ -5648,7 +5831,9 @@
         y: defaultPos.y,
         title: obj.title || 'Object',
         kicker: 'Object',
-        meta: obj.updated_at ? ('updated ' + relativeTime(Math.floor(obj.updated_at / 1000))) : '',
+        meta: isFlowNodeCollapsed(nodeId)
+          ? 'collapsed'
+          : flowLastUpdatedLabel(obj.updated_at || obj.created_at),
         className: 'flow-node-object',
       });
     });
@@ -5659,9 +5844,22 @@
     for (const group of groups) {
       const repoId = flowNodeKey('repo', group.path);
       const repoDefault = { x: 28, y: yCursor };
+      flowCollapsedDefaultsChanged = ensureFlowDefaultRepoCollapsed(repoId) || flowCollapsedDefaultsChanged;
+      const repoCollapsed = isFlowNodeCollapsed(repoId);
+      const visibleDrafts = repoCollapsed
+        ? []
+        : group.drafts.filter(draft => !flowHasCollapsedAncestor(flowNodeKey('draft-session', draft.id)));
+      const visibleItems = repoCollapsed
+        ? []
+        : group.items.filter(row => {
+          const sessionId = row.session_id || row.id;
+          return !flowHasCollapsedAncestor(flowNodeKey('session', sessionId));
+        });
       const repoMeta = [
         group.items.length ? (group.items.length + ' in progress') : '',
         group.drafts.length ? (group.drafts.length + ' draft' + (group.drafts.length === 1 ? '' : 's')) : '',
+        repoCollapsed ? 'collapsed' : '',
+        flowLastUpdatedLabel(group.newest),
       ].filter(Boolean).join(' · ') || '0 in progress';
       records.push({
         id: repoId,
@@ -5676,7 +5874,7 @@
         className: 'flow-node-repo',
       });
 
-      group.drafts.forEach((draft, idx) => {
+      visibleDrafts.forEach((draft, idx) => {
         const nodeId = flowNodeKey('draft-session', draft.id);
         const defaultPos = {
           x: 320,
@@ -5691,12 +5889,12 @@
           y: defaultPos.y,
           title: flowDraftPrompt(draft),
           kicker: 'Draft session',
-          meta: 'saved locally',
+          meta: ['saved locally', flowLastUpdatedLabel(draft.updated_at || draft.created_at)].filter(Boolean).join(' · '),
           className: 'flow-node-session flow-node-draft is-draft',
         });
       });
 
-      group.items.forEach((row, idx) => {
+      visibleItems.forEach((row, idx) => {
         const sessionId = row.session_id || row.id;
         const nodeId = flowNodeKey('session', sessionId);
         const defaultPos = {
@@ -5705,7 +5903,7 @@
         };
         const status = flowSessionStatus(row);
         const branch = row.effective_branch || row.branch || row.git_branch || '';
-        const rel = row.modified ? relativeTime(row.modified) : '';
+        const rel = flowLastUpdatedLabel(row.last_interacted || row.modified || row.mtime);
         const meta = [status.label, branch, rel].filter(Boolean).join(' · ');
         const worktree = (row.worktree_label || row.session_cwd_is_worktree || row.effective_kind === 'worktree')
           ? ' is-worktree'
@@ -5724,9 +5922,13 @@
           className: 'flow-node-session is-' + status.key + worktree + (currentConversation === row.id ? ' active' : ''),
         });
       });
-      const rowsTall = Math.ceil(group.items.length / 2);
-      yCursor += 132 + Math.max(1, rowsTall) * 116 + Math.max(0, group.drafts.length - 1) * 92;
+      const rowsTall = Math.ceil(visibleItems.length / 2);
+      const visibleChildCount = visibleItems.length + visibleDrafts.length;
+      yCursor += visibleChildCount
+        ? 132 + Math.max(1, rowsTall) * 116 + Math.max(0, visibleDrafts.length - 1) * 92
+        : 108;
     }
+    if (flowCollapsedDefaultsChanged) persistFlowCollapsedNodes();
 
     const parentMap = flowParentMapFor(records);
     const nodeHtml = records.map(rec => {
@@ -5749,6 +5951,10 @@
       const addBtn = (rec.kind === 'repo' || rec.kind === 'object')
         ? '<button type="button" class="flow-node-add-session" data-flow-action="add-draft-session" title="New session draft connected here" aria-label="New session draft connected here">+</button>'
         : '';
+      const collapsed = isFlowNodeCollapsed(rec.id);
+      const collapseBtn = (rec.kind === 'repo' || rec.kind === 'object')
+        ? '<button type="button" class="flow-node-collapse" data-flow-action="toggle-collapse" title="' + (collapsed ? 'Expand' : 'Collapse') + '" aria-label="' + (collapsed ? 'Expand' : 'Collapse') + '" aria-pressed="' + (collapsed ? 'true' : 'false') + '">' + (collapsed ? '&#9656;' : '&#9662;') + '</button>'
+        : '';
       const bodyHtml = rec.kind === 'draft-session'
         ? '<input type="text" class="flow-draft-input" data-draft-id="' + escapeAttr(rec.draftId) + '"'
           + ' value="' + escapeAttr(rec.title || '') + '" placeholder="Name or task this session..." autocomplete="off">'
@@ -5761,13 +5967,15 @@
         + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;">'
         + deleteBtn
         + addBtn
+        + collapseBtn
         + '<div class="flow-node-kicker">' + escapeHtml(rec.kicker) + '</div>'
         + bodyHtml
         + '</div>';
     });
     canvasHeight = Math.max(canvasHeight, yCursor + 40);
-    const baseWidth = Math.ceil(canvasWidth);
-    const baseHeight = Math.ceil(canvasHeight);
+    const minBase = flowMinimumBaseSize($flow);
+    const baseWidth = Math.ceil(Math.max(canvasWidth, minBase.width));
+    const baseHeight = Math.ceil(Math.max(canvasHeight, minBase.height));
     const scaledWidth = Math.ceil(baseWidth * flowZoom);
     const scaledHeight = Math.ceil(baseHeight * flowZoom);
     $flow.innerHTML = flowToolbarHtml()
@@ -5824,7 +6032,7 @@
       }
       paths.push('<path d="' + d + '"></path>');
     });
-    const base = flowCanvasBaseSize(canvas);
+    const base = flowEffectiveBaseSize(targetEl, canvas);
     svg.setAttribute('width', base.width);
     svg.setAttribute('height', base.height);
     svg.innerHTML = paths.join('');
@@ -5839,10 +6047,22 @@
     const zoomInBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-in"]');
     const zoomResetBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-reset"]');
     const expandBtn = targetEl && targetEl.querySelector('[data-flow-action="toggle-expand"]');
+    const collapseAllBtn = targetEl && targetEl.querySelector('[data-flow-action="collapse-all"]');
+    const expandAllBtn = targetEl && targetEl.querySelector('[data-flow-action="expand-all"]');
     if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => setFlowZoom(flowZoom / 1.15, targetEl));
     if (zoomInBtn) zoomInBtn.addEventListener('click', () => setFlowZoom(flowZoom * 1.15, targetEl));
     if (zoomResetBtn) zoomResetBtn.addEventListener('click', () => setFlowZoom(1, targetEl));
     if (expandBtn) expandBtn.addEventListener('click', () => setFlowExpanded(!flowExpanded));
+    if (collapseAllBtn) collapseAllBtn.addEventListener('click', () => setFlowAllNodesCollapsed(true, targetEl));
+    if (expandAllBtn) expandAllBtn.addEventListener('click', () => setFlowAllNodesCollapsed(false, targetEl));
+    if (targetEl) {
+      targetEl.querySelectorAll('[data-flow-recency]').forEach(btn => {
+        btn.addEventListener('click', ev => {
+          ev.preventDefault();
+          setRecencyFilter(btn.getAttribute('data-flow-recency') || '');
+        });
+      });
+    }
     if (targetEl && !targetEl.dataset.flowBoardWired) {
       targetEl.dataset.flowBoardWired = '1';
       targetEl.addEventListener('wheel', handleFlowWheel, { passive: false });
@@ -5850,6 +6070,13 @@
       targetEl.addEventListener('gesturechange', handleFlowGestureChange, { passive: false });
       document.addEventListener('keydown', ev => {
         if (ev.key === 'Escape' && flowExpanded) setFlowExpanded(false);
+      });
+      window.addEventListener('resize', () => {
+        if (!isFlowView()) return;
+        const board = document.getElementById('flowBoard');
+        if (!board) return;
+        applyFlowZoom(board, { preserve: false });
+        redrawFlowLinks(board);
       });
     }
     if (targetEl) {
@@ -5868,6 +6095,13 @@
     }
     if (!canvas || !world) return;
     world.querySelectorAll('.flow-node').forEach(node => {
+      const collapseBtn = node.querySelector('[data-flow-action="toggle-collapse"]');
+      if (collapseBtn) {
+        collapseBtn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          toggleFlowNodeCollapsed(node.dataset.flowNodeId);
+        });
+      }
       if (node.dataset.flowKind === 'session') {
         node.addEventListener('mouseenter', () => _convPrefetchSchedule(node.dataset.id));
         node.addEventListener('mouseleave', () => _convPrefetchCancel(node.dataset.id));
@@ -5880,9 +6114,11 @@
           input.addEventListener('keydown', ev => {
             if (ev.key === 'Enter') {
               ev.preventDefault();
+              ev.stopPropagation();
               saveFlowDraftInput(node.dataset.draftId, input.value);
               input.blur();
             } else if (ev.key === 'Escape') {
+              ev.stopPropagation();
               input.blur();
             }
           });
@@ -5958,7 +6194,7 @@
           const dx = (moveEv.clientX - startX) / zoom;
           const dy = (moveEv.clientY - startY) / zoom;
           if (Math.abs(moveEv.clientX - startX) > 2 || Math.abs(moveEv.clientY - startY) > 2) moved = true;
-          const base = flowCanvasBaseSize(canvas);
+          const base = flowEffectiveBaseSize(targetEl, canvas);
           const maxLeft = Math.max(8, base.width - node.offsetWidth - 12);
           const maxTop = Math.max(8, base.height - node.offsetHeight - 12);
           const nextLeft = Math.max(12, Math.min(maxLeft, startLeft + dx));
@@ -10391,25 +10627,37 @@
   let convSortMode = 'recent';  // always latest-first
   // Alphabetical override — when on, sorts by title and ignores convSortMode.
   let convAlphaSort = localStorage.getItem('ccc-conv-alpha-sort') === '1';
-  // Recency filter: '' (off) | '10h' | '7d'.
-  // Backwards-compat: old '1' value (binary toggle) maps to '10h'.
+  function normalizeRecencyFilter(value) {
+    if (value === '1' || value === '10h') return '1d';
+    if (value === '1d' || value === '7d') return value;
+    return '';
+  }
+  // Recency filter: '' (all) | '1d' | '7d'.
+  // Backwards-compat: old '1' and '10h' values map to '1d'.
   let recencyFilter = (function () {
     const raw = localStorage.getItem('ccc-show-recent') || '';
-    if (raw === '1') return '10h';
-    if (raw === '10h' || raw === '7d') return raw;
-    return '';
+    return normalizeRecencyFilter(raw);
   })();
   // Helpers — derived from recencyFilter so the rest of the code can stay
   // boolean-ish where it doesn't care about the actual window.
-  const RECENCY_WINDOWS = { '10h': 10 * 3600, '7d': 7 * 24 * 3600 };
+  const RECENCY_WINDOWS = { '1d': 24 * 3600, '7d': 7 * 24 * 3600 };
   function recencyCutoffSec() {
     const w = RECENCY_WINDOWS[recencyFilter];
     return w ? (Date.now() / 1000 - w) : 0;
   }
   let showRecentOnly = !!recencyFilter;  // legacy alias used by other branches
-  const RECENT_HOURS = 10;  // legacy const, no longer the source of truth
   const $convSortBtn = document.getElementById('convSortBtn');
   const $convAlphaSortBtn = document.getElementById('convAlphaSortBtn');
+
+  function setRecencyFilter(value, opts) {
+    recencyFilter = normalizeRecencyFilter(value);
+    showRecentOnly = !!recencyFilter;
+    try { localStorage.setItem('ccc-show-recent', recencyFilter || '0'); } catch (_) {}
+    updateRecentBtn();
+    if (!(opts && opts.skipRender)) {
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+    }
+  }
 
   function _convTitleForSort(c) {
     const raw = c.display_name
@@ -10539,7 +10787,7 @@
     });
   }
 
-  // ── Kanban toggle ──
+  // ── Session view toggle ──
   function activateSplitMode(active) {
     if (active) {
       document.body.classList.add('kanban-split');
@@ -10554,8 +10802,8 @@
   }
   function updateKanbanToggle() {
     if ($convKanbanToggle) {
-      const labels = { list: 'List', board: 'Board', flow: 'Flow' };
-      const next = sidebarViewMode === 'list' ? 'board' : (sidebarViewMode === 'board' ? 'flow' : 'list');
+      const labels = { list: 'List', flow: 'Flow' };
+      const next = sidebarViewMode === 'list' ? 'flow' : 'list';
       $convKanbanToggle.classList.toggle('active', sidebarViewMode !== 'list');
       $convKanbanToggle.classList.toggle('is-flow', sidebarViewMode === 'flow');
       $convKanbanToggle.innerHTML = '<span aria-hidden="true">&#9783;</span><span class="sh-action-label">' + labels[sidebarViewMode] + '</span>';
@@ -10577,7 +10825,7 @@
   }
   if ($convKanbanToggle) {
     $convKanbanToggle.addEventListener('click', () => {
-      const next = sidebarViewMode === 'list' ? 'board' : (sidebarViewMode === 'board' ? 'flow' : 'list');
+      const next = sidebarViewMode === 'list' ? 'flow' : 'list';
       setSidebarViewMode(next);
       updateKanbanToggle();
       renderSidebar(filterConversations($convSearch.value));
@@ -18777,26 +19025,22 @@
       renderSidebar(filterConversations($kptSearch.value));
     });
   }
-  // Recency cycle: Off → Last 10h → Last 7d → Off.
+  // Recency cycle: All → Last 1d → Last 7d → All.
   // One button, three states. Label and active-style update each cycle.
-  const RECENCY_LABELS = { '': 'Recency: off', '10h': 'Last 10h', '7d': 'Last 7d' };
-  const RECENCY_NEXT = { '': '10h', '10h': '7d', '7d': '' };
+  const RECENCY_LABELS = { '': 'All', '1d': 'Last 1d', '7d': 'Last 7d' };
+  const RECENCY_NEXT = { '': '1d', '1d': '7d', '7d': '' };
   function updateRecentBtn() {
     if (!$kptRecentBtn) return;
-    $kptRecentBtn.textContent = RECENCY_LABELS[recencyFilter];
+    $kptRecentBtn.textContent = RECENCY_LABELS[recencyFilter] || RECENCY_LABELS[''];
     $kptRecentBtn.classList.toggle('active', !!recencyFilter);
     $kptRecentBtn.title = recencyFilter
-      ? 'Showing only sessions/issues from the last ' + (recencyFilter === '10h' ? '10 hours' : '7 days') + '. Click to cycle.'
-      : 'Click to limit to last 10h, then 7d, then off.';
+      ? 'Showing only sessions/issues from the last ' + (recencyFilter === '1d' ? '1 day' : '7 days') + '. Click to cycle.'
+      : 'Showing all sessions/issues. Click to limit to last 1d, then 7d.';
   }
   updateRecentBtn();
   if ($kptRecentBtn) {
     $kptRecentBtn.addEventListener('click', () => {
-      recencyFilter = RECENCY_NEXT[recencyFilter];
-      showRecentOnly = !!recencyFilter;
-      localStorage.setItem('ccc-show-recent', recencyFilter || '0');
-      updateRecentBtn();
-      renderSidebar(filterConversations($convSearch.value));
+      setRecencyFilter(RECENCY_NEXT[recencyFilter] || '');
     });
   }
   // Refresh
