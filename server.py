@@ -1980,6 +1980,146 @@ def _is_generated_helper_session(first_message):
     )
 
 
+def _registry_epoch_seconds(value):
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if ts > 10_000_000_000:
+        ts = ts / 1000.0
+    return ts if ts > 0 else 0.0
+
+
+def _spawn_registry_entry_for_session(session_id, engine=None):
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    try:
+        entries = _load_spawn_registry()
+    except Exception:
+        return None
+    for entry in entries:
+        if entry.get("session_id") != sid and entry.get("resumed_sid") != sid:
+            continue
+        if engine and entry.get("engine") != engine:
+            continue
+        return entry
+    return None
+
+
+def _live_registry_conversation_row(
+    session_id,
+    meta,
+    *,
+    folder_path=None,
+    folder_label=None,
+    name_overrides=None,
+    archived_set=None,
+    pinned_rank=None,
+    repo_pins=None,
+    resolve_worktree_dirty=True,
+):
+    """Build a row for a live Claude session whose JSONL does not exist yet."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    cwd = str((meta or {}).get("cwd") or "").strip()
+    natural_folder_path = folder_path or (_find_git_root(cwd) if cwd else "") or cwd
+    natural_folder_label = folder_label or (
+        _resolve_dir_case(natural_folder_path) if natural_folder_path else "Live session"
+    )
+    row_folder_path = natural_folder_path
+    row_folder_label = natural_folder_label
+    pinned_repo = False
+    pin_target = (repo_pins or {}).get(sid)
+    if pin_target and pin_target != row_folder_path:
+        try:
+            if Path(pin_target).is_dir():
+                row_folder_path = pin_target
+                row_folder_label = Path(pin_target).name
+                pinned_repo = True
+        except OSError:
+            pass
+
+    overrides = name_overrides or {}
+    spawn_entry = _spawn_registry_entry_for_session(sid, engine="claude") or {}
+    spawn_prompt = _strip_ccc_session_state_instruction(
+        spawn_entry.get("command_summary") or ""
+    ).strip()
+    display_name = overrides.get(sid) or (meta or {}).get("name") or f"Live session {sid[:8]}"
+    mtime = (
+        _registry_epoch_seconds((meta or {}).get("updatedAt"))
+        or _registry_epoch_seconds((meta or {}).get("startedAt"))
+        or time.time()
+    )
+    branch = _git_branch_for_cwd(cwd)
+    cwd_is_worktree = bool(cwd and (Path(cwd) / ".git").is_file())
+    row = {
+        "id": sid,
+        "session_id": sid,
+        "jsonl_path": "",
+        "slug": _encode_project_slug(row_folder_path) if row_folder_path else "live-session",
+        "folder_label": row_folder_label,
+        "folder_path": row_folder_path,
+        "pinned_repo": pinned_repo,
+        "source": "interactive",
+        "engine": "claude",
+        "timestamp": "",
+        "session_cwd": cwd,
+        "session_cwd_exists": bool(cwd and Path(cwd).is_dir()),
+        "session_cwd_is_worktree": cwd_is_worktree,
+        "mtime": mtime,
+        "modified": mtime,
+        "modified_human": time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)),
+        "size": 0,
+        "first_message": _prompt_fragment(spawn_prompt, 200) if spawn_prompt else "",
+        "last_prompt": _prompt_fragment(spawn_prompt, 200) if spawn_prompt else "",
+        "ai_title": None,
+        "branch": branch,
+        "git_branch": branch,
+        "effective_branch": branch,
+        "effective_kind": "worktree" if cwd_is_worktree else None,
+        "display_name": display_name,
+        "name_overridden": bool(overrides.get(sid)),
+        "archived": sid in (archived_set or set()),
+        "verified": False,
+        "pinned": sid in (pinned_rank or {}),
+        "pin_rank": (pinned_rank or {}).get(sid),
+        "worktree_dirty": (
+            _worktree_dirty_cached(cwd, mtime) if resolve_worktree_dirty and cwd else False
+        ),
+        "has_commit": False,
+        "has_push": False,
+        "has_edit": False,
+        "tail_pr_number": None,
+        "tail_pr_url": None,
+        "pr_state": None,
+        "is_live": True,
+        "spawn_pid": (meta or {}).get("pid"),
+        "last_assistant_text": "",
+        "last_event_type": None,
+        "pending_tool": None,
+        "pending_file": None,
+        "sidecar_status": None,
+        "sidecar_has_writes": False,
+        "sidecar_tool": None,
+        "sidecar_file": None,
+        "sidecar_ts": 0,
+        "sidecar_in_flight": False,
+        "needs_approval": False,
+        "needs_approval_message": "",
+        "question_waiting": False,
+        "question_text": "",
+        "question_header": "",
+        "question_options": [],
+    }
+    try:
+        _add_sidecar_fields(row)
+    except Exception:
+        pass
+    return row
+
+
 def find_all_conversations(
     limit_per_folder=None,
     resolve_pr_states=True,
@@ -2340,6 +2480,28 @@ def find_all_conversations(
                 **sidecar_fields,
             })
 
+    # Claude can have a live process registry entry before it has written
+    # a project JSONL. Surface those registry-only sessions so UUID search
+    # and active-session discovery do not silently miss them.
+    try:
+        for sid, meta in _load_session_registry().items():
+            if sid in seen_session_ids:
+                continue
+            row = _live_registry_conversation_row(
+                sid,
+                meta,
+                name_overrides=name_overrides,
+                archived_set=archived_set,
+                pinned_rank=pinned_rank,
+                repo_pins=repo_pins,
+                resolve_worktree_dirty=resolve_worktree_dirty,
+            )
+            if row:
+                out.append(row)
+                seen_session_ids.add(sid)
+    except Exception:
+        pass
+
     # Add Codex threads to the archive too. They live in ~/.codex/state_*.sqlite
     # instead of ~/.claude/projects, but the row shape below matches the archive
     # renderer's existing Claude session rows.
@@ -2396,7 +2558,7 @@ def find_all_conversations(
     return out
 
 
-_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 1
+_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 2
 _ARCHIVE_RESPONSE_CACHE_FILE = COMMAND_CENTER_STATE_DIR / "archive-conversations-cache.json"
 _ARCHIVE_RESPONSE_CACHE_FRESH_TTL = 30
 _ARCHIVE_RESPONSE_CACHE_LOCK = threading.Lock()
@@ -7962,7 +8124,10 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
     _this_repo = repo_path
     pinned_in_sids = {sid for sid, p in _repo_pins.items() if p == _this_repo}
     pinned_out_sids = {sid for sid, p in _repo_pins.items() if p and p != _this_repo}
-    if not project_dirs and not pinned_in_sids:
+    if live_sids is None:
+        live_sids = set(_load_session_registry().keys())
+    live_sids = set(live_sids or [])
+    if not project_dirs and not pinned_in_sids and not live_sids:
         if progress:
             progress(
                 "transcripts",
@@ -7979,9 +8144,6 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
     pinned_rank = _pinned_rank_map(pinned_list)
     verified_set = set(_load_verified_conversations())
     last_interactions = _load_last_interactions()
-    if live_sids is None and not include_old:
-        live_sids = set(_load_session_registry().keys())
-    live_sids = set(live_sids or [])
     # If the same session_id (file name) appears in multiple candidate
     # dirs (unlikely — claude-code uses one slug per process — but
     # possible if a repo path was historically encoded both ways), the
@@ -8302,6 +8464,44 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             # None when they've never clicked/typed since this feature shipped.
             "last_interacted": last_interactions.get(sid) or last_interactions.get(conv_id),
         })
+
+    # Registry-only live sessions have no JSONL yet, so the transcript scan
+    # above cannot see them. Add matching rows for the current repo so the
+    # sidebar can find them by UUID immediately after spawn.
+    try:
+        registry = _load_session_registry()
+        for sid in live_sids:
+            sid_jsonl_name = f"{sid}.jsonl"
+            if sid_jsonl_name in seen_jsonl or sid in pinned_out_sids:
+                continue
+            meta = registry.get(sid)
+            if not meta:
+                continue
+            cwd = meta.get("cwd") or ""
+            cwd_top = _git_toplevel_for_path(cwd, git_top_cache) if cwd else None
+            belongs_here = (
+                sid in pinned_in_sids
+                or cwd_top == repo_path
+                or (cwd and _path_is_within(cwd, repo_path))
+            )
+            if not belongs_here:
+                continue
+            row = _live_registry_conversation_row(
+                sid,
+                meta,
+                folder_path=repo_path,
+                folder_label=_resolve_dir_case(repo_path),
+                name_overrides=name_overrides,
+                archived_set=archived_set,
+                pinned_rank=pinned_rank,
+                repo_pins=_repo_pins,
+                resolve_worktree_dirty=True,
+            )
+            if row:
+                conversations.append(row)
+                seen_jsonl.add(sid_jsonl_name)
+    except Exception:
+        pass
 
     if progress:
         progress(
@@ -8863,6 +9063,60 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
     return claude_path, _parse_conversation_event
 
 
+def _registry_only_conversation_stub(conversation_id, after_line=0):
+    sid = str(conversation_id or "").strip()
+    if not sid:
+        return None
+    try:
+        meta = _load_session_registry().get(sid)
+    except Exception:
+        meta = None
+    if not meta:
+        return None
+
+    spawn_entry = _spawn_registry_entry_for_session(sid, engine="claude") or {}
+    prompt = _strip_ccc_session_state_instruction(
+        spawn_entry.get("command_summary") or ""
+    ).strip()
+    ts_epoch = (
+        _registry_epoch_seconds(meta.get("updatedAt"))
+        or _registry_epoch_seconds(meta.get("startedAt"))
+        or 0
+    )
+    ts = (
+        datetime.fromtimestamp(ts_epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+        if ts_epoch else ""
+    )
+
+    raw_events = []
+    if prompt:
+        raw_events.append({
+            "line": 1,
+            "ts": ts,
+            "type": "user_text",
+            "text": prompt,
+            "images": [],
+        })
+    raw_events.append({
+        "line": len(raw_events) + 1,
+        "ts": ts,
+        "type": "assistant",
+        "message_id": f"registry-only-{sid}",
+        "blocks": [{
+            "kind": "text",
+            "text": "Live Claude process is registered, but no transcript JSONL has been written yet.",
+        }],
+    })
+
+    try:
+        after = int(after_line or 0)
+    except (TypeError, ValueError):
+        after = 0
+    events = [ev for ev in raw_events if ev.get("line", 0) > after]
+    events.extend(_get_queued_events_for_session(sid))
+    return {"events": events, "last_line": len(raw_events)}
+
+
 # Per-conversation parse cache. Keyed on (conv_id, after_line, jsonl_mtime).
 # Conversations are append-only files — once the JSONL's mtime is unchanged,
 # the parsed result for a given after_line offset is bit-identical. The cache
@@ -8943,6 +9197,10 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
         events_copy.extend(_get_queued_events_for_session(conversation_id))
         return {"events": events_copy, "last_line": result.get("last_line", 0)}
     filepath, parser = _resolve_conversation_reader(conversation_id, repo_path=repo_path)
+    if parser is _parse_conversation_event and not Path(filepath).is_file():
+        stub = _registry_only_conversation_stub(conversation_id, after_line=after_line)
+        if stub is not None:
+            return stub
     events = []
     line_num = 0
     is_codex = parser is _parse_codex_event
@@ -8982,7 +9240,9 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
                 if parsed:
                     events.append(parsed)
     except FileNotFoundError:
-        pass
+        stub = _registry_only_conversation_stub(conversation_id, after_line=after_line)
+        if stub is not None:
+            return stub
 
     result = {"events": events, "last_line": line_num}
     _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
@@ -19844,7 +20104,8 @@ def parse_conversation_by_sid(session_id, after_line=0):
     depending on spawn cwd, so repo-specific lookup misses them.
     """
     if not PROJECTS_ROOT.is_dir():
-        return {"events": [], "last_line": 0}
+        stub = _registry_only_conversation_stub(session_id, after_line=after_line)
+        return stub or {"events": [], "last_line": 0}
     for pd in PROJECTS_ROOT.iterdir():
         if not pd.is_dir():
             continue
@@ -19873,7 +20134,8 @@ def parse_conversation_by_sid(session_id, after_line=0):
             events_copy = list(events)
             events_copy.extend(_get_queued_events_for_session(session_id))
             return {"events": events_copy, "last_line": line_num}
-    return {"events": [], "last_line": 0}
+    stub = _registry_only_conversation_stub(session_id, after_line=after_line)
+    return stub or {"events": [], "last_line": 0}
 
 
 
