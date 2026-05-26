@@ -15581,6 +15581,19 @@ def launch_antigravity_terminal(prompt="", name=None, cwd=None, repo_path=None, 
     }
 
 
+def _write_spawn_error_event(log_fh, code, message):
+    try:
+        log_fh.write(json.dumps({
+            "type": "system",
+            "subtype": "spawn_error",
+            "code": code,
+            "error": message,
+        }) + "\n")
+        log_fh.flush()
+    except Exception:
+        pass
+
+
 def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
     """Spawn a headless Claude Code session and return tracking info.
 
@@ -15662,12 +15675,12 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, m
             "error": f"Claude Code CLI failed to start: {e}",
             "code": "claude_unavailable",
         }
-    # Drop our local copy of the rdwr fd — Popen has dup'd it into the
-    # child as fd 0, and the child's RDWR reference is what keeps the
-    # FIFO from EOFing on a CCC restart.
+    # Keep a parent-owned writer open before dropping the local RDWR fd.
+    # If this open fails, the prompt write below fails closed instead of
+    # reporting a live session that never received its initial task.
+    stdin_fd = _open_fifo_writer(fifo_path) if fifo_path else None
     if child_stdin_fd is not None:
         _close_fd_quiet(child_stdin_fd)
-    stdin_fd = _open_fifo_writer(fifo_path) if fifo_path else None
 
     entry = {
         "pid": proc.pid,
@@ -15684,7 +15697,20 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, m
     # Note: headless `claude -p` doesn't support TUI slash commands like /rename
     # or /color — they're treated as unknown skills. Tab naming/coloring only
     # happens when the user "jumps" into the TUI (see launch_terminal_for_session).
-    _write_stream_json_user_message(entry, prompt)
+    prompt_written = _write_stream_json_user_message(entry, prompt)
+    if not prompt_written:
+        message = "Claude Code started, but CCC could not write the initial prompt to stdin."
+        _write_spawn_error_event(log_fh, "spawn_stdin_unavailable", message)
+        _retire_unresponsive_spawn_entry(entry, terminate=True)
+        return {
+            "ok": False,
+            "error": message,
+            "code": "spawn_stdin_unavailable",
+            "pid": proc.pid,
+            "name": session_name,
+            "log": str(log_path),
+            "engine": "claude",
+        }
 
     _spawned_sessions.append(entry)
     _record_spawn_to_registry(
@@ -15702,7 +15728,14 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, m
     # mis-routed sessions are debuggable from the server log.
     print(f"  [spawn] PID {proc.pid} ({session_name}) in cwd {spawn_cwd}")
 
-    resp = {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path)}
+    resp = {
+        "ok": True,
+        "pid": proc.pid,
+        "name": session_name,
+        "log": str(log_path),
+        "engine": "claude",
+        "initial_prompt_written": True,
+    }
     if worktree_path:
         resp["worktree_path"] = worktree_path
         resp["worktree_branch"] = worktree_branch
@@ -16165,9 +16198,10 @@ def resume_session_headless(session_id, text):
             "error": f"Claude Code CLI failed to start: {e}",
             "code": "claude_unavailable",
         }
+    # Keep a parent-owned writer open before dropping the local RDWR fd.
+    stdin_fd = _open_fifo_writer(fifo_path) if fifo_path else None
     if child_stdin_fd is not None:
         _close_fd_quiet(child_stdin_fd)
-    stdin_fd = _open_fifo_writer(fifo_path) if fifo_path else None
 
     entry = {
         "pid": proc.pid,
@@ -16182,6 +16216,18 @@ def resume_session_headless(session_id, text):
         "stdin_fd": stdin_fd,
     }
     ok = _write_stream_json_user_message(entry, text)
+    if not ok:
+        message = "Claude Code started, but CCC could not write the resume prompt to stdin."
+        _write_spawn_error_event(log_fh, "spawn_stdin_unavailable", message)
+        _retire_unresponsive_spawn_entry(entry, terminate=True)
+        return {
+            "ok": False,
+            "error": message,
+            "code": "spawn_stdin_unavailable",
+            "pid": proc.pid,
+            "log": str(log_path),
+            "resumed": True,
+        }
     _spawned_sessions.append(entry)
     _record_spawn_to_registry(
         pid=proc.pid,
@@ -16193,7 +16239,13 @@ def resume_session_headless(session_id, text):
         fifo=fifo_path,
         engine="claude",
     )
-    return {"ok": ok, "pid": proc.pid, "log": str(log_path), "resumed": True}
+    return {
+        "ok": True,
+        "pid": proc.pid,
+        "log": str(log_path),
+        "resumed": True,
+        "initial_prompt_written": True,
+    }
 
 
 # ---------------------------------------------------------------------------
