@@ -1204,11 +1204,47 @@
     });
   }
 
+  function liveQuestionDisplayOptions() {
+    const seen = new Set();
+    const options = liveQuestionOptionParts().map(function (opt) {
+      const label = cleanLiveActivityDetail(opt.label || '');
+      seen.add(label.toLowerCase());
+      return {
+        label,
+        description: cleanLiveActivityDetail(opt.description || ''),
+        action: 'answer',
+        answer: label,
+        utility: false,
+      };
+    }).filter(function (opt) {
+      return !!opt.label;
+    });
+    if (!seen.has('type something')) {
+      options.push({
+        label: 'Type something',
+        description: '',
+        action: 'type',
+        answer: '',
+        utility: true,
+      });
+    }
+    if (!seen.has('chat about this')) {
+      options.push({
+        label: 'Chat about this',
+        description: '',
+        action: 'answer',
+        answer: 'Chat about this',
+        utility: true,
+      });
+    }
+    return options;
+  }
+
   function liveQuestionDetailHtml(fallbackDetail) {
     const header = cleanLiveActivityDetail(liveStatus.questionHeader || '');
     const preamble = cleanLiveActivityDetail(liveStatus.questionPreamble || '');
     let question = cleanLiveActivityDetail(liveStatus.questionText || fallbackDetail || '');
-    const options = liveQuestionOptionParts();
+    const options = liveQuestionDisplayOptions();
     if (header && question.toLowerCase().startsWith(header.toLowerCase() + ':')) {
       question = question.slice(header.length + 1).trim();
     }
@@ -1227,14 +1263,65 @@
       : '';
     const optionsHtml = options.length
       ? '<ul class="cl-question-options">' + options.map(function (opt) {
-          return '<li>'
+          return '<li' + (opt.utility ? ' class="is-utility"' : '') + '>'
+            + '<button type="button" class="cl-question-option-btn' + (opt.utility ? ' is-utility' : '') + '"'
+            + ' data-live-question-action="' + escapeAttr(opt.action || 'answer') + '"'
+            + (opt.answer ? ' data-live-question-answer="' + escapeAttr(opt.answer) + '"' : '')
+            + '>'
             + '<span class="cl-question-option-label">' + escapeHtml(opt.label) + '</span>'
             + (opt.description ? '<span class="cl-question-option-desc">' + escapeHtml(opt.description) + '</span>' : '')
+            + '</button>'
             + '</li>';
         }).join('') + '</ul>'
       : '';
     return '<div class="cl-question-detail">' + preambleHtml + headerHtml + questionHtml + optionsHtml + '</div>';
   }
+
+  function focusLiveQuestionComposer(paneId) {
+    const input = composerInputForPane(paneId || activePaneId()) || $convInput;
+    if (!input) return false;
+    input.focus();
+    moveInputCaretToEnd(input);
+    return true;
+  }
+
+  async function submitLiveQuestionAnswer(answer, paneId) {
+    const text = cleanLiveActivityDetail(answer);
+    if (!text) return false;
+    const input = composerInputForPane(paneId || activePaneId()) || $convInput;
+    if (!input) return false;
+    input.value = text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await sendToTerminal(paneId || activePaneId());
+    return true;
+  }
+
+  async function handleLiveQuestionActionClick(ev) {
+    const btn = ev.target && ev.target.closest
+      ? ev.target.closest('[data-live-question-action]')
+      : null;
+    if (!btn) return;
+    ev.preventDefault();
+    const pane = btn.closest && btn.closest('.conv-pane[data-pane-id]');
+    const paneId = (pane && pane.dataset && pane.dataset.paneId) || activePaneId();
+    if (paneId) setActivePaneById(paneId);
+    const action = btn.getAttribute('data-live-question-action') || 'answer';
+    if (action === 'type') {
+      focusLiveQuestionComposer(paneId);
+      return;
+    }
+    const answer = btn.getAttribute('data-live-question-answer') || btn.textContent || '';
+    btn.disabled = true;
+    btn.classList.add('is-submitting');
+    try {
+      await submitLiveQuestionAnswer(answer, paneId);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('is-submitting');
+    }
+  }
+
+  document.addEventListener('click', handleLiveQuestionActionClick);
 
   function updateLiveStripOffset($view, strip) {
     if (!$view) return;

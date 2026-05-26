@@ -52,6 +52,7 @@ COMMAND_CENTER_STATE_DIR = Path.home() / ".claude" / "command-center"
 COMMAND_CENTER_PASTED_IMAGES_DIR = COMMAND_CENTER_STATE_DIR / "pasted-images"
 ANNOTATIONS_FILE = COMMAND_CENTER_STATE_DIR / "annotations.json"
 ANNOTATION_SCREENSHOT_DIR = COMMAND_CENTER_STATE_DIR / "annotation-screenshots"
+ANNOTATION_UX_FIXES_QUEUE_NAME = "UX-fixes-queue"
 _ANNOTATIONS_LOCK = threading.Lock()
 PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 # User-picked repos that live outside the $HOME scan (e.g. ~/dev/foo, /workspaces/bar).
@@ -3943,6 +3944,117 @@ def create_annotation(payload):
             items = items[-500:]
         _write_annotations(items)
     return {"ok": True, "annotation": annotation}
+
+
+def _normalize_annotation_queue_name(value):
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[\s_-]+", " ", text)
+    return text
+
+
+def _find_annotation_ux_queue_session(queue_name=ANNOTATION_UX_FIXES_QUEUE_NAME):
+    """Find the newest Claude session in the CCC repo with the queue name."""
+    repo_path = resolve_repo_path(str(CCC_ROOT))
+    target = _normalize_annotation_queue_name(queue_name)
+    matches = []
+    try:
+        live_sids = set(_load_session_registry().keys())
+        rows = find_conversations(repo_path, include_old=True, live_sids=live_sids)
+    except Exception:
+        rows = []
+    for row in rows:
+        sid = row.get("session_id") or row.get("id")
+        if not sid:
+            continue
+        names = [
+            row.get("display_name"),
+            row.get("ai_title"),
+        ]
+        if row.get("spawn_named"):
+            names.append(row.get("display_name"))
+        if any(_normalize_annotation_queue_name(name) == target for name in names if name):
+            matches.append(row)
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda row: (
+            1 if row.get("is_live") else 0,
+            float(row.get("last_interacted") or row.get("modified") or row.get("mtime") or 0),
+        ),
+        reverse=True,
+    )
+    return matches[0]
+
+
+def enqueue_annotation_ux_fixes_queue(text, queue_name=ANNOTATION_UX_FIXES_QUEUE_NAME):
+    """Send annotation context to the shared CCC UX-fixes queue session.
+
+    If a Claude session named ``queue_name`` already exists in this repo, the
+    text is injected into that session. Otherwise a new Claude session is
+    spawned in the CCC repo with the same text as its first prompt.
+    """
+    text = _annotation_text(text, 24000)
+    if not text:
+        return {"ok": False, "error": "missing text", "status": 400}
+    repo_path = resolve_repo_path(str(CCC_ROOT))
+    existing = _find_annotation_ux_queue_session(queue_name)
+    if existing:
+        sid = existing.get("session_id") or existing.get("id")
+        injected = _inject_text_into_session(sid, text)
+        if injected.get("ok"):
+            _record_interaction(sid)
+            return {
+                "ok": True,
+                "action": "injected",
+                "queue_name": queue_name,
+                "session_id": sid,
+                "repo_path": repo_path,
+                "inject": injected,
+            }
+        return {
+            "ok": False,
+            "action": "inject",
+            "queue_name": queue_name,
+            "session_id": sid,
+            "repo_path": repo_path,
+            "error": injected.get("error") or "inject failed",
+            "inject": injected,
+        }
+
+    spawned = spawn_session(text, name=queue_name, repo_path=repo_path)
+    if not spawned.get("ok"):
+        out = {
+            "ok": False,
+            "action": "spawn",
+            "queue_name": queue_name,
+            "repo_path": repo_path,
+            "error": spawned.get("error") or "spawn failed",
+            "spawn": spawned,
+        }
+        if spawned.get("code") == "claude_unavailable":
+            out["status"] = 503
+        return out
+
+    sid = None
+    log_path = spawned.get("log")
+    if log_path:
+        sid = _morning_resolve_session_id_from_log(log_path, max_wait_s=8.0)
+    if sid:
+        try:
+            _save_session_name_override(sid, queue_name)
+        except OSError:
+            pass
+        _record_interaction(sid)
+
+    return {
+        "ok": True,
+        "action": "spawned",
+        "queue_name": queue_name,
+        "session_id": sid,
+        "repo_path": repo_path,
+        "pid": spawned.get("pid"),
+        "spawn": spawned,
+    }
 
 
 def _schedule_restart(delay=0.5):
@@ -24817,6 +24929,24 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 payload = {}
             result = capture_annotation_screen(minimize=payload.get("minimize", True))
             self.send_json(result)
+            return
+        if path == "/api/annotations/ux-fixes-queue":
+            # Route a saved annotation into the shared CCC UX-fixes session.
+            # The prompt text is local user data, so keep it in the existing
+            # Claude session/log flow rather than writing a public repo file.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self.send_json({"ok": False, "error": "invalid JSON"}, 400)
+                return
+            if not isinstance(payload, dict):
+                self.send_json({"ok": False, "error": "expected JSON object"}, 400)
+                return
+            result = enqueue_annotation_ux_fixes_queue(payload.get("text") or "")
+            status = int(result.pop("status", 200 if result.get("ok") else 500))
+            self.send_json(result, status)
             return
         if path == "/api/bug-report":
             # Submit a bug report as a GitHub issue against the CCC repo.

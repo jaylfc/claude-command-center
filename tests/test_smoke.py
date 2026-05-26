@@ -174,6 +174,7 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("enterNewSessionMode(text)", app_js)
         self.assertIn("data-ann-ux-queue", app_js)
         self.assertIn("function annOpenUxFixesQueue", app_js)
+        self.assertIn("/api/annotations/ux-fixes-queue", app_js)
         self.assertIn("Add to UX fixes queue", app_js)
         self.assertIn("Session ID: ", app_js)
         self.assertIn("persistAnnotation", app_js)
@@ -217,11 +218,17 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("questionOptionDetails", app_js)
         self.assertIn("question_option_details", app_js)
         self.assertIn("liveQuestionOptionParts", app_js)
+        self.assertIn("liveQuestionDisplayOptions", app_js)
+        self.assertIn("handleLiveQuestionActionClick", app_js)
+        self.assertIn("data-live-question-action", app_js)
+        self.assertIn("Type something", app_js)
+        self.assertIn("Chat about this", app_js)
         self.assertIn("cl-question-options", app_js)
         self.assertIn(".conv-live-tool-inline .cl-question-detail", app_css)
         self.assertIn(".conv-live-tool-inline .cl-question-preamble", app_css)
         self.assertIn(".conv-live-tool-inline .cl-question-options", app_css)
         self.assertIn("flex-direction: column", app_css)
+        self.assertIn("cl-question-option-btn", app_css)
         self.assertIn("cl-question-option-desc", app_css)
 
 
@@ -579,6 +586,62 @@ class TestRepoContextHelpers(unittest.TestCase):
         finally:
             with self.server._pending_terminal_input_lock:
                 self.server._pending_terminal_input_queue.clear()
+
+    def test_annotation_ux_queue_injects_existing_session(self):
+        sid = "00000000-0000-4000-8000-000000000010"
+        old_root = self.server.CCC_ROOT
+        self.server.CCC_ROOT = self.repo
+        try:
+            with mock.patch.object(
+                self.server,
+                "_find_annotation_ux_queue_session",
+                return_value={"session_id": sid, "display_name": "UX-fixes-queue"},
+            ), mock.patch.object(
+                self.server,
+                "_inject_text_into_session",
+                return_value={"ok": True, "via": "spawn-fifo"},
+            ) as inject, mock.patch.object(self.server, "spawn_session") as spawn:
+                result = self.server.enqueue_annotation_ux_fixes_queue("Annotation: bad pill")
+        finally:
+            self.server.CCC_ROOT = old_root
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "injected")
+        self.assertEqual(result["session_id"], sid)
+        inject.assert_called_once_with(sid, "Annotation: bad pill")
+        spawn.assert_not_called()
+
+    def test_annotation_ux_queue_spawns_named_session_when_missing(self):
+        sid = "00000000-0000-4000-8000-000000000011"
+        log_path = pathlib.Path(self.tmp_home, "spawn.log")
+        log_path.write_text(json.dumps({"session_id": sid}) + "\n", encoding="utf-8")
+        old_root = self.server.CCC_ROOT
+        self.server.CCC_ROOT = self.repo
+        try:
+            with mock.patch.object(
+                self.server,
+                "_find_annotation_ux_queue_session",
+                return_value=None,
+            ), mock.patch.object(
+                self.server,
+                "spawn_session",
+                return_value={"ok": True, "pid": 123, "log": str(log_path)},
+            ) as spawn:
+                result = self.server.enqueue_annotation_ux_fixes_queue("Annotation: bad pill")
+        finally:
+            self.server.CCC_ROOT = old_root
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"], "spawned")
+        self.assertEqual(result["session_id"], sid)
+        self.assertEqual(
+            self.server._load_session_name_overrides().get(sid),
+            "UX-fixes-queue",
+        )
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.args[0], "Annotation: bad pill")
+        self.assertEqual(spawn.call_args.kwargs["name"], "UX-fixes-queue")
+        self.assertEqual(spawn.call_args.kwargs["repo_path"], str(self.repo))
 
     def test_codex_live_terminal_injects_via_tty(self):
         sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"

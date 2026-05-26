@@ -4739,6 +4739,40 @@
     font-size: 12px;
     line-height: 1.25;
   }
+  .conv-live-tool-strip .cl-question-option-btn,
+  .conv-live-tool-inline .cl-question-option-btn {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .conv-live-tool-strip .cl-question-option-btn:hover .cl-question-option-label,
+  .conv-live-tool-inline .cl-question-option-btn:hover .cl-question-option-label,
+  .conv-live-tool-strip .cl-question-option-btn:focus-visible .cl-question-option-label,
+  .conv-live-tool-inline .cl-question-option-btn:focus-visible .cl-question-option-label {
+    color: var(--accent);
+  }
+  .conv-live-tool-strip .cl-question-option-btn:focus-visible,
+  .conv-live-tool-inline .cl-question-option-btn:focus-visible {
+    outline: 2px solid rgba(88,166,255,0.55);
+    outline-offset: 3px;
+    border-radius: 4px;
+  }
+  .conv-live-tool-strip .cl-question-option-btn.is-submitting,
+  .conv-live-tool-inline .cl-question-option-btn.is-submitting {
+    cursor: progress;
+    opacity: 0.72;
+  }
+  .conv-live-tool-strip .cl-question-options li.is-utility,
+  .conv-live-tool-inline .cl-question-options li.is-utility {
+    border-style: dashed;
+    background: rgba(139,148,158,0.08);
+  }
   .conv-live-tool-strip .cl-question-option-label,
   .conv-live-tool-inline .cl-question-option-label {
     display: block;
