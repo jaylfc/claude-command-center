@@ -14459,7 +14459,7 @@
     const uSlot = slot && slot.querySelector('[data-usage]');
     if (!slot || !uSlot) return;
     const u = _usageData || {};
-    const latest = u.latest_input_tokens || 0;
+    const transcriptLatest = u.latest_input_tokens || 0;
     const peak = u.peak_input_tokens || 0;
     // Model pill — shown when we know the model. Strips the "claude-"
     // prefix so it reads as `opus-4-7` / `sonnet-4-6`. Adds a `1M` suffix
@@ -14476,6 +14476,9 @@
     const ovr = u.override || null;
     const displayModel = ovr ? ovr.model : (u.model || '');
     const engine = u.engine || (ovr && ovr.engine) || 'claude';
+    const liveContextTokens = Number(u.live_context_tokens || 0);
+    const liveContextLimit = Number(u.live_context_limit || 0);
+    const hasLiveContext = engine === 'claude' && liveContextTokens > 0;
     const ovrNorm = ovr ? _normalizeModelId(ovr.model) : '';
     const liveNorm = _normalizeModelId(u.model || '');
     const queued = !!ovr && (ovr.applied === 'queued' || (ovrNorm && ovrNorm !== liveNorm));
@@ -14485,7 +14488,13 @@
       // show the 1M pill.
       const ovrIsOneM = !!(ovr && ovr.context_1m);
       const serverLimitIsOneM = Number(u.context_limit || 0) >= 1000000;
-      const isOneM = engine === 'claude' && (ovrIsOneM || serverLimitIsOneM || peak > 200000 || displayModel.toLowerCase().includes('[1m]'));
+      const isOneM = engine === 'claude' && (
+        ovrIsOneM
+        || serverLimitIsOneM
+        || liveContextLimit >= 1000000
+        || Math.max(peak, liveContextTokens) > 200000
+        || displayModel.toLowerCase().includes('[1m]')
+      );
       const shortModel = displayModel.replace(/^claude-/, '').replace(/\[1m\]/i, '').trim();
       const modelTip = displayModel
         + (isOneM ? '\n(1M context window — anthropic-beta: context-1m)' : '')
@@ -14512,8 +14521,9 @@
     // 200k default is wrong; one click flips and persists.
     const canToggleContextLimit = engine === 'claude';
     const override = canToggleContextLimit ? _getCtxLimitOverride() : 0;
-    const limit = override || u.context_limit || 200000;
-    if (!latest && !peak) {
+    const limit = override || (hasLiveContext ? liveContextLimit : 0) || u.context_limit || 200000;
+    const displayTokens = transcriptLatest || (hasLiveContext ? liveContextTokens : 0);
+    if (!displayTokens && !peak) {
       if (!modelPill) {
         uSlot.innerHTML = '';
         syncInputContextVisibility(slot);
@@ -14529,18 +14539,36 @@
       scheduleInputContextFit();
       return;
     }
-    const pct = Math.round((latest / limit) * 100);
+    const livePct = Number(u.live_context_percent || 0);
+    const calcPct = Math.round((displayTokens / limit) * 100);
+    const pct = Math.max(calcPct, hasLiveContext && livePct ? livePct : 0);
     let cls = 'wp-usage-pill';
     if (canToggleContextLimit) cls += ' wp-usage-clickable';
     if (pct >= 85) cls += ' wp-usage-hot';
     else if (pct >= 60) cls += ' wp-usage-warm';
-    const peakNote = peak > latest
+    const peakNote = peak > displayTokens
       ? ' <span class="wp-usage-peak" title="Peak since the most recent compact">peak ' + _formatTokens(peak) + '</span>'
       : '';
     const overrideNote = override ? ' (override)' : '';
-    const title = 'Latest assistant turn: ' + latest.toLocaleString() + ' tokens / '
+    const sourceLabel = transcriptLatest ? 'calc' : (hasLiveContext ? '/ctx' : 'ctx');
+    const slashContextText = hasLiveContext && transcriptLatest
+      ? ' · /ctx ' + _formatTokens(liveContextTokens) + ' (' + (livePct || Math.round((liveContextTokens / limit) * 100)) + '%)'
+      : '';
+    const liveWhen = hasLiveContext && u.live_context_timestamp
+      ? '\nRecorded: ' + u.live_context_timestamp
+      : '';
+    const liveNote = hasLiveContext
+      ? '\nLatest /context output: ' + liveContextTokens.toLocaleString() + ' tokens / '
+        + (liveContextLimit || limit).toLocaleString() + ' context limit'
+        + ' (' + (livePct || Math.round((liveContextTokens / limit) * 100)) + '%)'
+      : '\nLatest /context output: none captured';
+    const title = 'Calculated estimate: '
+      + displayTokens.toLocaleString() + ' tokens / '
       + limit.toLocaleString() + ' context limit' + overrideNote
-      + ' (' + (u.model || 'model unknown') + ')'
+      + ' (' + calcPct + '%)'
+      + '\nModel: ' + (u.model || 'model unknown')
+      + liveWhen
+      + liveNote
       + (canToggleContextLimit ? '\n\nClick to toggle between 200k and 1M.' : '');
     // Cost pill — Anthropic API list-price equivalent. Subscription users
     // (Pro/Max) pay flat, but the figure is still the cleanest cross-model
@@ -14582,8 +14610,9 @@
       }
     }
     uSlot.innerHTML = '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
-      + 'ctx ' + _formatTokens(latest) + ' / ' + _formatTokens(limit)
-      + ' <span class="wp-usage-pct">(' + pct + '%)</span>'
+      + sourceLabel + ' ' + _formatTokens(displayTokens) + ' / ' + _formatTokens(limit)
+      + ' <span class="wp-usage-pct">(' + calcPct + '%)</span>'
+      + slashContextText
       + '</span>' + peakNote + costPill + antigravityTotalsPill + modelPill;
     syncInputContextVisibility(slot);
     scheduleInputContextFit();

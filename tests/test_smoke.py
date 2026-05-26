@@ -3008,6 +3008,71 @@ class TestModelPicker(unittest.TestCase):
         self.assertEqual(usage["compact_count"], 1)
         self.assertEqual(usage["context_limit"], 1_000_000)
 
+    def test_extract_session_usage_captures_slash_context_output(self):
+        """The footer can show Claude's live `/context` count separately
+        from CCC's post-compact transcript estimate."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        sid = "11111111-2222-3333-4444-999999999999"
+        boundary = {
+            "type": "system",
+            "subtype": "compact_boundary",
+            "sessionId": sid,
+            "compactMetadata": {
+                "trigger": "manual",
+                "preTokens": 773_985,
+                "postTokens": 12_673,
+            },
+        }
+        context_output = {
+            "type": "system",
+            "subtype": "local_command",
+            "sessionId": sid,
+            "timestamp": "2026-05-26T19:52:30.316Z",
+            "content": (
+                "<local-command-stdout>## Context Usage\n\n"
+                "**Model:** claude-opus-4-7  \n"
+                "**Tokens:** 47.3k / 1m (5%)\n\n"
+                "### Estimated usage by category\n"
+                "| Category | Tokens | Percentage |\n"
+                "| Messages | 21.5k | 2.2% |\n"
+                "</local-command-stdout>"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            project = root / "-tmp-project-context-output"
+            project.mkdir()
+            (project / f"{sid}.jsonl").write_text(
+                json.dumps(boundary) + "\n"
+                + json.dumps(context_output) + "\n"
+            )
+            orig_root = server.PROJECTS_ROOT
+            server.PROJECTS_ROOT = root
+            try:
+                with mock.patch.object(server, "_is_codex_session", return_value=False), \
+                     mock.patch.object(server, "_is_gemini_session", return_value=False), \
+                     mock.patch.object(server, "_load_desktop_app_metadata", return_value={}):
+                    usage = server.extract_session_usage(sid)
+            finally:
+                server.PROJECTS_ROOT = orig_root
+
+        self.assertEqual(usage["latest_input_tokens"], 12_673)
+        self.assertEqual(usage["live_context_tokens"], 47_300)
+        self.assertEqual(usage["live_context_limit"], 1_000_000)
+        self.assertEqual(usage["live_context_percent"], 5)
+        self.assertEqual(usage["live_context_source"], "/context")
+        self.assertEqual(usage["live_context_timestamp"], "2026-05-26T19:52:30.316Z")
+        self.assertEqual(usage["model"], "claude-opus-4-7")
+
+    def test_context_footer_renders_calc_and_slash_context_values(self):
+        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
+        self.assertIn("Calculated estimate:", js)
+        self.assertIn("Latest /context output:", js)
+        self.assertIn("'calc'", js)
+        self.assertIn("' · /ctx '", js)
+
     def test_parse_conversation_surfaces_compact_boundary(self):
         """The transcript pane should show feedback when `/compact` finishes."""
         for mod in ("server",):

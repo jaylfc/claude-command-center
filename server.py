@@ -22059,6 +22059,55 @@ def _diagnostic_context_tokens(diagnostics):
     return best
 
 
+_CONTEXT_AMOUNT_RE = r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM]?)"
+_CONTEXT_TOKENS_RE = re.compile(
+    r"\*{0,2}Tokens:\*{0,2}\s*"
+    + _CONTEXT_AMOUNT_RE
+    + r"\s*/\s*"
+    + _CONTEXT_AMOUNT_RE
+    + r"(?:\s*\(([0-9]+)%\))?",
+    re.IGNORECASE,
+)
+_CONTEXT_MODEL_RE = re.compile(r"\*{0,2}Model:\*{0,2}\s*([^\n<]+)", re.IGNORECASE)
+
+
+def _context_amount_to_tokens(number, suffix):
+    try:
+        value = float(str(number or "0").replace(",", ""))
+    except (TypeError, ValueError):
+        return 0
+    scale = {"k": 1_000, "m": 1_000_000}.get(str(suffix or "").lower(), 1)
+    return int(round(value * scale))
+
+
+def _local_command_context_usage(ev):
+    """Parse Claude Code `/context` output captured as a local_command event."""
+    if not isinstance(ev, dict):
+        return None
+    content = ev.get("content")
+    if not isinstance(content, str) or "Context Usage" not in content:
+        return None
+    match = _CONTEXT_TOKENS_RE.search(content)
+    if not match:
+        return None
+    tokens = _context_amount_to_tokens(match.group(1), match.group(2))
+    limit = _context_amount_to_tokens(match.group(3), match.group(4))
+    if tokens <= 0 or limit <= 0:
+        return None
+    percent = _codex_int(match.group(5))
+    if not percent:
+        percent = int(round(tokens * 100 / limit))
+    model_match = _CONTEXT_MODEL_RE.search(content)
+    model = model_match.group(1).strip() if model_match else ""
+    return {
+        "tokens": tokens,
+        "limit": limit,
+        "percent": percent,
+        "model": model,
+        "timestamp": ev.get("timestamp") or "",
+    }
+
+
 def extract_session_usage(session_id):
     """Walk a session's JSONL transcript and return token-usage stats.
 
@@ -22083,6 +22132,11 @@ def extract_session_usage(session_id):
         "model": "",
         "context_limit": 0,
         "compact_count": 0,
+        "live_context_tokens": 0,
+        "live_context_limit": 0,
+        "live_context_percent": 0,
+        "live_context_timestamp": "",
+        "live_context_source": "",
         "engine": "claude",
         "override": _get_session_override(session_id),
         "cost_usd": 0.0,
@@ -22124,6 +22178,7 @@ def extract_session_usage(session_id):
     model = desktop_meta.get("model") or ""
     diagnostic_latest = 0
     diagnostic_peak = 0
+    live_context = None
     max_observed_window = 0
     # Claude Code re-records the same Anthropic API response (same
     # `message.id`) under a fresh event uuid every time a session is
@@ -22160,7 +22215,20 @@ def extract_session_usage(session_id):
                     peak = post_tokens
                     diagnostic_latest = post_tokens
                     diagnostic_peak = post_tokens
+                    live_context = None
                     compact_count += 1
+                    continue
+                if ev.get("type") == "system" and ev.get("subtype") == "local_command":
+                    parsed_context = _local_command_context_usage(ev)
+                    if parsed_context:
+                        live_context = parsed_context
+                        max_observed_window = max(
+                            max_observed_window,
+                            parsed_context["tokens"],
+                            parsed_context["limit"],
+                        )
+                        if parsed_context.get("model"):
+                            model = parsed_context["model"]
                     continue
                 if ev.get("type") != "assistant":
                     continue
@@ -22243,6 +22311,11 @@ def extract_session_usage(session_id):
         "model": model,
         "context_limit": limit,
         "compact_count": compact_count,
+        "live_context_tokens": live_context["tokens"] if live_context else 0,
+        "live_context_limit": live_context["limit"] if live_context else 0,
+        "live_context_percent": live_context["percent"] if live_context else 0,
+        "live_context_timestamp": live_context["timestamp"] if live_context else "",
+        "live_context_source": "/context" if live_context else "",
         "engine": "claude",
         "override": override,
         "cost_usd": round(cost_total, 4),

@@ -1,0 +1,1 @@
+- Surface Claude Code's live `/context` tokens in the footer pill alongside CCC's calculated estimate, so the two numbers can be compared at a glance and 1M sessions are detected from the real limit reported by Claude.
