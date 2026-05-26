@@ -9216,7 +9216,7 @@ def _enrich_ask_payload_from_transcript(session_id, payload):
     if not session_id:
         return payload or {}
     payload = dict(payload or {})
-    if payload.get("summary") and payload.get("option_details"):
+    if payload.get("summary") and payload.get("option_details") and payload.get("preamble"):
         return payload
     transcript_payload = _pending_ask_user_question_for_session(session_id) or {}
     if not transcript_payload:

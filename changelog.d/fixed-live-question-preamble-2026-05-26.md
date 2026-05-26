@@ -1,0 +1,1 @@
+- Preserve assistant lead-in text when rendering rich live question cards.

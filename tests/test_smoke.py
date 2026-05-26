@@ -1201,6 +1201,11 @@ class TestRepoContextHelpers(unittest.TestCase):
             "question": "How automated do you want this?",
             "header": "Key flow",
             "options": ["Half auto"],
+            "option_details": [{
+                "label": "Half auto",
+                "description": "Ask before destructive steps.",
+            }],
+            "summary": "Key flow: How automated do you want this?",
             "started_at": 1778813567.0,
         }
         (self.server.SIDECAR_STATE_DIR / f"{sid}_in_flight.json").write_text(
