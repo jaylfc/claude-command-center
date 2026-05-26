@@ -20301,7 +20301,7 @@
   }
 
   function annUxFixesQueuePrompt(ann) {
-    return 'Add to UX fixes queue:\n\n' + annContextForClipboard(ann);
+    return annContextForClipboard(ann);
   }
 
   async function annOpenUxFixesQueue(ann, closeFn, errEl) {

@@ -1,0 +1,1 @@
+Drop the "Add to UX fixes queue:" preamble from annotations sent into the UX-fixes-queue session so the receiving Claude treats the note as a direct request to act on rather than something to route further.
