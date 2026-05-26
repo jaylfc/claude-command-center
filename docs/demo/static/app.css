@@ -3938,6 +3938,66 @@
     word-break: normal;
   }
   .conv-live-tool-inline .cl-age { color: var(--text-muted); font-size: 11px; margin-left: auto; flex: 0 0 auto; }
+  .conv-live-tool-strip .cl-question-detail,
+  .conv-live-tool-inline .cl-question-detail {
+    flex: 1 1 calc(100% - 16px);
+    min-width: 0;
+    margin: 2px 0 0 16px;
+    padding: 8px 10px;
+    border-left: 3px solid rgba(88,166,255,0.55);
+    border-radius: 4px;
+    background: rgba(88,166,255,0.08);
+    color: var(--text);
+  }
+  .conv-live-tool-strip .cl-question-header,
+  .conv-live-tool-inline .cl-question-header {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.25;
+    margin-bottom: 2px;
+  }
+  .conv-live-tool-strip .cl-question-text,
+  .conv-live-tool-inline .cl-question-text {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .conv-live-tool-strip .cl-question-options,
+  .conv-live-tool-inline .cl-question-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    list-style: none;
+    margin: 7px 0 0;
+    padding: 0;
+  }
+  .conv-live-tool-strip .cl-question-options li,
+  .conv-live-tool-inline .cl-question-options li {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    max-width: 100%;
+    padding: 4px 7px;
+    border: 1px solid rgba(88,166,255,0.28);
+    border-radius: 5px;
+    background: rgba(88,166,255,0.08);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.25;
+  }
+  .conv-live-tool-strip .cl-question-option-label,
+  .conv-live-tool-inline .cl-question-option-label {
+    overflow-wrap: anywhere;
+  }
+  .conv-live-tool-strip .cl-question-option-desc,
+  .conv-live-tool-inline .cl-question-option-desc {
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
   /* When the live-tool strip is present above the sticky header, push the
      header down so they don't both stick at y=0 and overlap.
      `top: 24px` deliberately *underlaps* the strip's bottom edge by a few

@@ -1324,6 +1324,49 @@
     return bits.join(': ') + (value ? ': ' + value : '');
   }
 
+  function liveQuestionOptionParts() {
+    const opts = Array.isArray(liveStatus.questionOptions) ? liveStatus.questionOptions : [];
+    return opts.map(function (opt) {
+      if (opt && typeof opt === 'object') {
+        return {
+          label: cleanLiveActivityDetail(opt.label || ''),
+          description: cleanLiveActivityDetail(opt.description || ''),
+        };
+      }
+      return { label: cleanLiveActivityDetail(opt), description: '' };
+    }).filter(function (opt) {
+      return !!opt.label;
+    });
+  }
+
+  function liveQuestionDetailHtml(fallbackDetail) {
+    const header = cleanLiveActivityDetail(liveStatus.questionHeader || '');
+    let question = cleanLiveActivityDetail(liveStatus.questionText || fallbackDetail || '');
+    const options = liveQuestionOptionParts();
+    if (header && question.toLowerCase().startsWith(header.toLowerCase() + ':')) {
+      question = question.slice(header.length + 1).trim();
+    }
+    if (!liveStatus.questionText && options.length) {
+      question = question.replace(/\bOptions:\s*.*$/i, '').trim();
+    }
+    if (!header && !question && !options.length) return '';
+    const headerHtml = header
+      ? '<div class="cl-question-header">' + escapeHtml(header) + '</div>'
+      : '';
+    const questionHtml = question
+      ? '<div class="cl-question-text">' + escapeHtml(question) + '</div>'
+      : '';
+    const optionsHtml = options.length
+      ? '<ul class="cl-question-options">' + options.map(function (opt) {
+          return '<li>'
+            + '<span class="cl-question-option-label">' + escapeHtml(opt.label) + '</span>'
+            + (opt.description ? '<span class="cl-question-option-desc">' + escapeHtml(opt.description) + '</span>' : '')
+            + '</li>';
+        }).join('') + '</ul>'
+      : '';
+    return '<div class="cl-question-detail">' + headerHtml + questionHtml + optionsHtml + '</div>';
+  }
+
   function updateLiveStripOffset($view, strip) {
     if (!$view) return;
     if (!strip) {
@@ -1382,11 +1425,15 @@
     const ageLbl = isQuestion ? 'waiting for answer' : (inFlight ? 'running ' + dur : dur + ' ago');
     const toolLabel = isQuestion ? 'Question' : liveActivityToolLabel(tool);
     const title = liveActivityTitle(isQuestion ? 'Waiting for answer' : (inFlight ? 'Currently running' : 'Last completed'), tool, file);
+    const detailHtml = isQuestion
+      ? liveQuestionDetailHtml(file)
+      : (shortFile ? ' <span class="cl-file' + liveActivityDetailClass(tool) + '">' + escapeHtml(shortFile) + '</span>' : '');
     const html =
         '<span class="cl-pulse"></span>'
       + '<span class="cl-tool">' + (inFlight && !isQuestion ? '▶ ' : '') + escapeHtml(toolLabel) + '</span>'
-      + (shortFile ? ' <span class="cl-file' + liveActivityDetailClass(tool) + '">' + escapeHtml(shortFile) + '</span>' : '')
-      + '<span class="cl-age">' + ageLbl + '</span>';
+      + (isQuestion ? '' : detailHtml)
+      + '<span class="cl-age">' + ageLbl + '</span>'
+      + (isQuestion ? detailHtml : '');
     updateLiveStripOffset($view, null);
     // Inline indicator at the bottom of the transcript. Re-append on every
     // refresh so it stays the last child even when new events have
@@ -3129,6 +3176,22 @@
     );
   }
 
+  const INLINE_CODE_PATH_RE = /^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/;
+  function _isPlaceholderPathToken(token) {
+    return String(token || '').indexOf('...') !== -1;
+  }
+  function _isInternalApiPathToken(token) {
+    const clean = normalizeMarkdownLinkTarget(token).split(/[?#]/)[0];
+    return clean === '/api' || clean.startsWith('/api/');
+  }
+  function _shouldLinkifyInlineCodePath(token) {
+    const target = normalizeMarkdownLinkTarget(token);
+    if (!INLINE_CODE_PATH_RE.test(target)) return false;
+    if (_isPlaceholderPathToken(target)) return false;
+    if (_isInternalApiPathToken(target)) return false;
+    return true;
+  }
+
   function highlightCode(code, lang) {
     const key = _CB_LANG_ALIAS[String(lang || '').toLowerCase()] || String(lang || '').toLowerCase();
     const patterns = _CB_LANG_PATTERNS[key];
@@ -3180,7 +3243,7 @@
     s = linkifyPastedImages(s);
     // Inline code `x` (also make paths inside code clickable)
     s = s.replace(/`([^`]+)`/g, (m, inner) => {
-      if (/^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/.test(inner)) {
+      if (_shouldLinkifyInlineCodePath(inner)) {
         return '<code class="md-code">' + linkifyPath(inner) + '</code>';
       }
       // Mixed inline content (e.g. `see http://… for details`) — link
@@ -3283,11 +3346,17 @@
   //   • web routes       → open in a browser tab on the project's deploy
   //                        URL (Vercel) when known, else the same origin
   // Heuristic: if it starts with `/` AND the last segment has a file
-  // extension, treat as a file. Otherwise treat as a web route. Routes
-  // like `/api/foo/bar` (no extension on the last segment) win the
-  // browser-tab path; files like `static/index.html` win the file path.
+  // extension, treat as a file. Extensionless macOS/Linux filesystem roots
+  // also win the file path so folder links open in Finder. Everything else
+  // is treated as a web route: `/api/foo/bar` opens in the browser, while
+  // `/Users/me/project/screenshots/` goes through `/api/open`.
+  function _isAbsoluteFilesystemPath(p) {
+    const clean = String(p || '').trim().replace(/^file:\/\//i, '').split(/[?#]/)[0];
+    return /^\/(?:Users|Volumes|Applications|Library|System|private|tmp|var|etc|opt|usr|bin|sbin|home)(?:\/|$)/.test(clean);
+  }
   function _isWebRoutePath(p) {
     if (!p.startsWith('/')) return false;
+    if (_isAbsoluteFilesystemPath(p)) return false;
     const last = p.split('/').pop() || '';
     // Strip query/fragment before extension check.
     const cleanLast = last.split(/[?#]/)[0];
@@ -3449,6 +3518,7 @@
   function setSidebarViewMode(mode) {
     sidebarViewMode = normalizeSidebarViewMode(mode);
     kanbanView = sidebarViewMode === 'board';
+    if (sidebarViewMode !== 'flow') setFlowExpanded(false);
     try {
       localStorage.setItem('ccc-session-view', sidebarViewMode);
       localStorage.setItem('ccc-kanban-view', kanbanView ? 'true' : 'false');
@@ -4873,6 +4943,47 @@
     const $list = document.getElementById('convList');
     return !!($list && $list.querySelector('.conv-title-input'));
   }
+  let _sidebarDragInProgress = false;
+  let _sidebarRenderPendingAfterDrag = false;
+  let _sidebarRenderAfterDragRaf = 0;
+  function isSidebarDragInProgress() {
+    return _sidebarDragInProgress || !!document.querySelector(
+      '.flow-node.dragging,.kanban-card.dragging,.kanban-column-header.dragging-header,.conv-item.dragging'
+    );
+  }
+  function beginSidebarDrag() {
+    _sidebarDragInProgress = true;
+  }
+  function flushSidebarRenderAfterDrag() {
+    _sidebarRenderAfterDragRaf = 0;
+    if (isSidebarDragInProgress()) {
+      _sidebarRenderPendingAfterDrag = true;
+      return;
+    }
+    if (!_sidebarRenderPendingAfterDrag) return;
+    _sidebarRenderPendingAfterDrag = false;
+    try {
+      const $search = document.getElementById('convSearch');
+      renderArchiveList($search ? $search.value : '');
+    } catch (_) {}
+  }
+  function endSidebarDrag() {
+    _sidebarDragInProgress = false;
+    if (!_sidebarRenderPendingAfterDrag || _sidebarRenderAfterDragRaf) return;
+    _sidebarRenderAfterDragRaf = requestAnimationFrame(flushSidebarRenderAfterDrag);
+  }
+  function deferSidebarRenderIfDragging() {
+    if (!isSidebarDragInProgress()) return false;
+    _sidebarRenderPendingAfterDrag = true;
+    return true;
+  }
+  document.addEventListener('dragstart', ev => {
+    const target = ev.target && ev.target.closest && ev.target.closest('.conv-item,.kanban-card,.kanban-column-header');
+    if (!target || dragStartsFromTextEditor(ev.target)) return;
+    beginSidebarDrag();
+  }, true);
+  document.addEventListener('dragend', endSidebarDrag, true);
+  document.addEventListener('drop', endSidebarDrag, true);
   function dragStartsFromTextEditor(target) {
     return !!(target && target.closest && target.closest(
       'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), .conv-title-input, .kanban-rename-input'
@@ -4945,6 +5056,23 @@
     const savedObjects = JSON.parse(localStorage.getItem('ccc-flow-custom-objects') || '[]');
     if (Array.isArray(savedObjects)) flowCustomObjects = savedObjects;
   } catch (_) {}
+  const FLOW_ZOOM_MIN = 0.45;
+  const FLOW_ZOOM_MAX = 2.25;
+  let flowZoom = 1;
+  try {
+    const savedZoom = Number(localStorage.getItem('ccc-flow-zoom'));
+    if (Number.isFinite(savedZoom)) flowZoom = Math.max(FLOW_ZOOM_MIN, Math.min(FLOW_ZOOM_MAX, savedZoom));
+  } catch (_) {}
+  let flowExpanded = false;
+  let flowGestureStartZoom = 1;
+  let flowDraftSessions = [];
+  try {
+    const savedDrafts = JSON.parse(localStorage.getItem('ccc-flow-draft-sessions') || '[]');
+    if (Array.isArray(savedDrafts)) {
+      flowDraftSessions = savedDrafts.filter(d => d && d.id && d.repo_path);
+    }
+  } catch (_) {}
+  let flowDraftFocusId = '';
 
   function persistFlowNodePositions() {
     try { localStorage.setItem('ccc-flow-node-positions', JSON.stringify(flowNodePositions)); } catch (_) {}
@@ -4956,6 +5084,163 @@
 
   function persistFlowCustomObjects() {
     try { localStorage.setItem('ccc-flow-custom-objects', JSON.stringify(flowCustomObjects)); } catch (_) {}
+  }
+
+  function persistFlowZoom() {
+    try { localStorage.setItem('ccc-flow-zoom', String(flowZoom)); } catch (_) {}
+  }
+
+  function persistFlowDraftSessions() {
+    try { localStorage.setItem('ccc-flow-draft-sessions', JSON.stringify(flowDraftSessions)); } catch (_) {}
+  }
+
+  function clampFlowZoom(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 1;
+    return Math.max(FLOW_ZOOM_MIN, Math.min(FLOW_ZOOM_MAX, n));
+  }
+
+  function flowZoomLabel() {
+    return Math.round(flowZoom * 100) + '%';
+  }
+
+  function flowExpandIconHtml() {
+    return flowExpanded
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v6H3"/><path d="M15 21v-6h6"/><path d="M3 9l6-6"/><path d="M21 15l-6 6"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9V3h6"/><path d="M21 15v6h-6"/><path d="M9 3 3 9"/><path d="m15 21 6-6"/></svg>';
+  }
+
+  function flowToolbarHtml() {
+    const expandedLabel = flowExpanded ? 'Collapse flow view' : 'Expand flow view';
+    return '<div class="flow-toolbar">'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
+      + '<div class="flow-toolbar-spacer"></div>'
+      + '<div class="flow-zoom-controls" role="group" aria-label="Flow zoom">'
+      + '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>'
+      + '<button type="button" class="flow-toolbar-btn flow-zoom-value" data-flow-action="zoom-reset" title="Reset zoom" aria-label="Reset zoom">' + flowZoomLabel() + '</button>'
+      + '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>'
+      + '</div>'
+      + '<button type="button" class="flow-toolbar-btn flow-icon-btn flow-expand-btn" data-flow-action="toggle-expand" title="' + expandedLabel + '" aria-label="' + expandedLabel + '" aria-pressed="' + (flowExpanded ? 'true' : 'false') + '">' + flowExpandIconHtml() + '</button>'
+      + '</div>';
+  }
+
+  function updateFlowToolbarState(targetEl) {
+    if (!targetEl) return;
+    const zoomValue = targetEl.querySelector('[data-flow-action="zoom-reset"]');
+    if (zoomValue) zoomValue.textContent = flowZoomLabel();
+    const expandBtn = targetEl.querySelector('[data-flow-action="toggle-expand"]');
+    if (expandBtn) {
+      const label = flowExpanded ? 'Collapse flow view' : 'Expand flow view';
+      expandBtn.title = label;
+      expandBtn.setAttribute('aria-label', label);
+      expandBtn.setAttribute('aria-pressed', flowExpanded ? 'true' : 'false');
+      expandBtn.innerHTML = flowExpandIconHtml();
+    }
+  }
+
+  function flowCanvasBaseSize(canvas) {
+    return {
+      width: Number(canvas && canvas.dataset.flowBaseWidth) || 760,
+      height: Number(canvas && canvas.dataset.flowBaseHeight) || 360,
+    };
+  }
+
+  function flowZoomOrigin(targetEl, canvas, oldZoom, opts) {
+    const boardRect = targetEl.getBoundingClientRect();
+    let clientX = opts && Number.isFinite(opts.clientX) ? opts.clientX : NaN;
+    let clientY = opts && Number.isFinite(opts.clientY) ? opts.clientY : NaN;
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+      const toolbar = targetEl.querySelector('.flow-toolbar');
+      const toolbarHeight = toolbar ? toolbar.offsetHeight : 0;
+      clientX = boardRect.left + targetEl.clientWidth / 2;
+      clientY = boardRect.top + toolbarHeight + Math.max(0, targetEl.clientHeight - toolbarHeight) / 2;
+    }
+    const canvasRect = canvas.getBoundingClientRect();
+    const base = flowCanvasBaseSize(canvas);
+    return {
+      clientX,
+      clientY,
+      x: Math.max(0, Math.min(base.width, (clientX - canvasRect.left) / oldZoom)),
+      y: Math.max(0, Math.min(base.height, (clientY - canvasRect.top) / oldZoom)),
+    };
+  }
+
+  function applyFlowZoom(targetEl, opts) {
+    targetEl = targetEl || document.getElementById('flowBoard');
+    if (!targetEl) return;
+    const canvas = targetEl.querySelector('.flow-canvas');
+    const oldZoom = opts && Number.isFinite(opts.oldZoom) ? opts.oldZoom : flowZoom;
+    const origin = canvas && !(opts && opts.preserve === false)
+      ? flowZoomOrigin(targetEl, canvas, oldZoom || 1, opts || {})
+      : null;
+    if (canvas) {
+      const base = flowCanvasBaseSize(canvas);
+      const scaledWidth = Math.ceil(base.width * flowZoom);
+      const scaledHeight = Math.ceil(base.height * flowZoom);
+      canvas.style.width = scaledWidth + 'px';
+      canvas.style.height = scaledHeight + 'px';
+      canvas.style.minWidth = scaledWidth + 'px';
+      canvas.style.minHeight = scaledHeight + 'px';
+      const world = canvas.querySelector('.flow-world');
+      if (world) {
+        world.style.width = base.width + 'px';
+        world.style.height = base.height + 'px';
+        world.style.transform = 'scale(' + flowZoom + ')';
+      }
+      if (origin) {
+        const boardRect = targetEl.getBoundingClientRect();
+        targetEl.scrollLeft = Math.max(0, canvas.offsetLeft + origin.x * flowZoom - (origin.clientX - boardRect.left));
+        targetEl.scrollTop = Math.max(0, canvas.offsetTop + origin.y * flowZoom - (origin.clientY - boardRect.top));
+      }
+    }
+    updateFlowToolbarState(targetEl);
+  }
+
+  function setFlowZoom(nextZoom, targetEl, opts) {
+    const oldZoom = flowZoom;
+    flowZoom = clampFlowZoom(nextZoom);
+    persistFlowZoom();
+    applyFlowZoom(targetEl, Object.assign({}, opts || {}, { oldZoom }));
+  }
+
+  function setFlowExpanded(expanded) {
+    flowExpanded = !!expanded;
+    const board = document.getElementById('flowBoard');
+    if (board) {
+      board.classList.toggle('is-expanded', flowExpanded && isFlowView());
+      updateFlowToolbarState(board);
+      requestAnimationFrame(() => redrawFlowLinks(board));
+    }
+    document.body.classList.toggle('flow-expanded', flowExpanded && isFlowView());
+  }
+
+  function handleFlowWheel(ev) {
+    if (!ev.ctrlKey) return;
+    const targetEl = ev.currentTarget;
+    if (!targetEl || targetEl.style.display === 'none') return;
+    if (ev.target && ev.target.closest && ev.target.closest('input,textarea,select')) return;
+    ev.preventDefault();
+    const delta = Number(ev.deltaY) || 0;
+    setFlowZoom(flowZoom * Math.exp(-delta * 0.01), targetEl, {
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+    });
+  }
+
+  function handleFlowGestureStart(ev) {
+    flowGestureStartZoom = flowZoom;
+    ev.preventDefault();
+  }
+
+  function handleFlowGestureChange(ev) {
+    ev.preventDefault();
+    const scale = Number(ev.scale);
+    if (!Number.isFinite(scale) || scale <= 0) return;
+    setFlowZoom(flowGestureStartZoom * scale, ev.currentTarget, {
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+    });
   }
 
   function flowNodeKey(kind, value) {
@@ -5009,6 +5294,201 @@
 
   function flowObjectTime(obj) {
     return Number((obj && (obj.updated_at || obj.created_at)) || 0);
+  }
+
+  function flowDraftTime(draft) {
+    return Number((draft && (draft.updated_at || draft.created_at)) || 0);
+  }
+
+  function flowDraftPrompt(draft) {
+    return String((draft && (draft.prompt || draft.title)) || '').trim();
+  }
+
+  function flowCurrentRepoForDraft() {
+    const selectedRow = (conversationsData || []).find(x => x && x.id === currentConversation);
+    return rowRepoPath(selectedRow) || selectedRepoPath();
+  }
+
+  function focusFlowDraftInput(id) {
+    if (!id) return;
+    requestAnimationFrame(() => {
+      const input = document.querySelector('#flowBoard .flow-draft-input[data-draft-id="' + String(id).replace(/"/g, '\\"') + '"]');
+      if (!input) return;
+      input.focus();
+      input.select();
+    });
+  }
+
+  function findFlowNodeElement(nodeId) {
+    const board = document.getElementById('flowBoard');
+    if (!board || !nodeId) return null;
+    return Array.from(board.querySelectorAll('.flow-node')).find(el => el.dataset.flowNodeId === nodeId) || null;
+  }
+
+  function flowRepoPathForNode(node) {
+    if (!node) return flowCurrentRepoForDraft();
+    if (node.dataset.repoPath) return node.dataset.repoPath;
+    let parentId = node.dataset.flowParent || flowNodeParents[node.dataset.flowNodeId] || '';
+    const seen = new Set([node.dataset.flowNodeId]);
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      const parentEl = findFlowNodeElement(parentId);
+      if (parentEl && parentEl.dataset.repoPath) return parentEl.dataset.repoPath;
+      parentId = (parentEl && parentEl.dataset.flowParent) || flowNodeParents[parentId] || '';
+    }
+    return flowCurrentRepoForDraft();
+  }
+
+  function flowDraftPositionForParent(parentNodeId, repoPath) {
+    const parentEl = findFlowNodeElement(parentNodeId || flowNodeKey('repo', repoPath));
+    const existingDrafts = flowDraftSessions.filter(d => d && d.repo_path === repoPath).length;
+    if (parentEl) {
+      return {
+        x: Math.round(parentEl.offsetLeft + 292),
+        y: Math.round(parentEl.offsetTop + existingDrafts * 92),
+      };
+    }
+    return { x: 320, y: 24 + existingDrafts * 92 };
+  }
+
+  function createFlowDraftSession(repoPath, parentNodeId) {
+    const targetRepo = repoPath || flowCurrentRepoForDraft();
+    if (!targetRepo || targetRepo === '__repo__') {
+      showOpToast('Pick a repo, or use + on a repo/object node.', 'error');
+      if ($convFolderFilter) {
+        try { $convFolderFilter.focus(); } catch (_) {}
+      }
+      return;
+    }
+    const now = Date.now();
+    const id = 'draft-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+    const repoId = flowNodeKey('repo', targetRepo);
+    const parentId = parentNodeId || repoId;
+    const draft = { id, repo_path: targetRepo, parent_node_id: parentId, title: '', created_at: now, updated_at: now };
+    const nodeId = flowNodeKey('draft-session', id);
+    const pos = flowDraftPositionForParent(parentId, targetRepo);
+    flowDraftSessions.unshift(draft);
+    flowNodePositions[nodeId] = pos;
+    flowNodeParents[nodeId] = parentId;
+    flowDraftFocusId = id;
+    persistFlowDraftSessions();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function saveFlowDraftInput(id, value) {
+    const draft = flowDraftSessions.find(d => d && d.id === id);
+    if (!draft) return;
+    draft.title = String(value || '');
+    draft.prompt = draft.title;
+    draft.updated_at = Date.now();
+    persistFlowDraftSessions();
+  }
+
+  function deleteFlowDraftSession(id) {
+    const draft = flowDraftSessions.find(d => d && d.id === id);
+    if (!draft) return;
+    const nodeId = flowNodeKey('draft-session', id);
+    flowDraftSessions = flowDraftSessions.filter(d => d && d.id !== id);
+    delete flowNodePositions[nodeId];
+    delete flowNodeParents[nodeId];
+    for (const [child, parent] of Object.entries(flowNodeParents)) {
+      if (parent === nodeId) delete flowNodeParents[child];
+    }
+    persistFlowDraftSessions();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function sessionSubjectFromPrompt(text) {
+    const body = String(text || '').trim();
+    const chunks = body.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+    const first = chunks[0] || body;
+    return first.length > 120 ? first.slice(0, 120).trim() + '...' : first;
+  }
+
+  async function playFlowDraftSession(id) {
+    const draft = flowDraftSessions.find(d => d && d.id === id);
+    if (!draft) return;
+    const prompt = flowDraftPrompt(draft);
+    if (!prompt) {
+      focusFlowDraftInput(id);
+      showOpToast('Type a session task before pressing Play.', 'error');
+      return;
+    }
+    const repoPath = draft.repo_path || flowCurrentRepoForDraft();
+    if (!repoPath || repoPath === '__repo__') {
+      showOpToast('Draft session needs a repo.', 'error');
+      return;
+    }
+
+    const engine = getSpawnEngine();
+    const subject = sessionSubjectFromPrompt(prompt);
+    const cardSource = spawnSourceForEngine(engine);
+    const tempPid = 'tmp-' + Date.now();
+    const draftNodeId = flowNodeKey('draft-session', id);
+    const pendingNodeId = flowNodeKey('session', 'spawning-' + tempPid);
+    const savedPos = flowNodePositions[draftNodeId];
+    const savedParent = flowNodeParents[draftNodeId] || draft.parent_node_id || flowNodeKey('repo', repoPath);
+    const originalDraft = Object.assign({}, draft);
+
+    flowDraftSessions = flowDraftSessions.filter(d => d && d.id !== id);
+    delete flowNodePositions[draftNodeId];
+    delete flowNodeParents[draftNodeId];
+    if (savedPos) flowNodePositions[pendingNodeId] = savedPos;
+    if (savedParent) flowNodeParents[pendingNodeId] = savedParent;
+    persistFlowDraftSessions();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+
+    insertPendingSpawnCard(tempPid, subject, cardSource, null, {
+      first_message: prompt,
+      repo_path: repoPath,
+      folder_path: repoPath,
+      spawn_cwd: repoPath,
+      cwd: repoPath,
+      session_cwd: repoPath,
+      session_cwd_exists: true,
+    });
+
+    try {
+      const endpoint = spawnEndpointForEngine(engine);
+      const body = { prompt, name: subject, cwd: repoPath, repo_path: repoPath };
+      if (spawnSupportsWorktree(engine)) body.worktree = false;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
+      if (data.ok) {
+        const placeholder = adoptPendingSpawnPid(tempPid, data.pid, data.log);
+        if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
+          selectConversation(placeholder.id);
+        }
+        if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
+        setTimeout(refreshConversationList, 600);
+        setTimeout(refreshConversationList, 1500);
+        setTimeout(refreshConversationList, 3000);
+      } else {
+        throw new Error(data.error || ('HTTP ' + res.status));
+      }
+    } catch (err) {
+      _removePendingSpawnCard(tempPid);
+      delete flowNodePositions[pendingNodeId];
+      delete flowNodeParents[pendingNodeId];
+      flowDraftSessions.unshift(originalDraft);
+      flowNodePositions[draftNodeId] = savedPos || flowDraftPositionForParent(originalDraft.parent_node_id, repoPath);
+      flowNodeParents[draftNodeId] = savedParent;
+      flowDraftFocusId = id;
+      persistFlowDraftSessions();
+      persistFlowNodePositions();
+      persistFlowNodeParents();
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+      showOpToast('Spawn failed: ' + ((err && err.message) || 'network'), 'error');
+    }
   }
 
   function flowWouldCreateCycle(childId, parentId, parentMap) {
@@ -5109,24 +5589,44 @@
       .filter(obj => obj && obj.id)
       .slice()
       .sort((a, b) => flowObjectTime(b) - flowObjectTime(a));
-    if (!rows.length && !customObjects.length) {
-      $flow.innerHTML = '<div class="flow-toolbar"><button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button></div><div class="flow-empty-state">No in-progress sessions.</div>';
+    const draftSessions = (flowDraftSessions || [])
+      .filter(draft => draft && draft.id && draft.repo_path)
+      .slice()
+      .sort((a, b) => flowDraftTime(b) - flowDraftTime(a));
+    if (!rows.length && !customObjects.length && !draftSessions.length) {
+      $flow.innerHTML = flowToolbarHtml() + '<div class="flow-empty-state">No in-progress sessions.</div>';
       wireFlowBoard($flow);
+      setFlowExpanded(flowExpanded);
       return;
     }
 
     const groupsByRepo = new Map();
+    const ensureRepoGroup = repoPath => {
+      const path = repoPath || selectedRepoPath() || '__repo__';
+      if (!groupsByRepo.has(path)) groupsByRepo.set(path, { sessions: [], drafts: [] });
+      return groupsByRepo.get(path);
+    };
     for (const row of rows) {
       const repoPath = rowRepoPath(row) || row.folder_path || selectedRepoPath() || '__repo__';
-      if (!groupsByRepo.has(repoPath)) groupsByRepo.set(repoPath, []);
-      groupsByRepo.get(repoPath).push(row);
+      ensureRepoGroup(repoPath).sessions.push(row);
     }
-    const groups = Array.from(groupsByRepo.entries()).map(([path, items]) => ({
-      path,
-      label: flowRepoLabel(path, items),
-      items: items.slice().sort((a, b) => flowRowTime(b) - flowRowTime(a)),
-      newest: items.reduce((best, row) => Math.max(best, flowRowTime(row)), 0),
-    })).sort((a, b) => (b.newest - a.newest) || a.label.localeCompare(b.label));
+    for (const draft of draftSessions) {
+      ensureRepoGroup(draft.repo_path).drafts.push(draft);
+    }
+    const groups = Array.from(groupsByRepo.entries()).map(([path, group]) => {
+      const items = (group.sessions || []).slice().sort((a, b) => flowRowTime(b) - flowRowTime(a));
+      const drafts = (group.drafts || []).slice().sort((a, b) => flowDraftTime(b) - flowDraftTime(a));
+      return {
+        path,
+        label: flowRepoLabel(path, items),
+        items,
+        drafts,
+        newest: Math.max(
+          items.reduce((best, row) => Math.max(best, flowRowTime(row)), 0),
+          drafts.reduce((best, draft) => Math.max(best, flowDraftTime(draft)), 0)
+        ),
+      };
+    }).sort((a, b) => (b.newest - a.newest) || a.label.localeCompare(b.label));
 
     const records = [];
     let canvasWidth = 760;
@@ -5159,16 +5659,41 @@
     for (const group of groups) {
       const repoId = flowNodeKey('repo', group.path);
       const repoDefault = { x: 28, y: yCursor };
+      const repoMeta = [
+        group.items.length ? (group.items.length + ' in progress') : '',
+        group.drafts.length ? (group.drafts.length + ' draft' + (group.drafts.length === 1 ? '' : 's')) : '',
+      ].filter(Boolean).join(' · ') || '0 in progress';
       records.push({
         id: repoId,
         kind: 'repo',
+        repoPath: group.path,
         defaultParent: '',
         x: repoDefault.x,
         y: repoDefault.y,
         title: group.label,
         kicker: 'Repo',
-        meta: group.items.length + ' in progress',
+        meta: repoMeta,
         className: 'flow-node-repo',
+      });
+
+      group.drafts.forEach((draft, idx) => {
+        const nodeId = flowNodeKey('draft-session', draft.id);
+        const defaultPos = {
+          x: 320,
+          y: yCursor + idx * 92,
+        };
+        records.push({
+          id: nodeId,
+          kind: 'draft-session',
+          draftId: draft.id,
+          defaultParent: draft.parent_node_id || repoId,
+          x: defaultPos.x,
+          y: defaultPos.y,
+          title: flowDraftPrompt(draft),
+          kicker: 'Draft session',
+          meta: 'saved locally',
+          className: 'flow-node-session flow-node-draft is-draft',
+        });
       });
 
       group.items.forEach((row, idx) => {
@@ -5200,7 +5725,7 @@
         });
       });
       const rowsTall = Math.ceil(group.items.length / 2);
-      yCursor += 132 + Math.max(1, rowsTall) * 116;
+      yCursor += 132 + Math.max(1, rowsTall) * 116 + Math.max(0, group.drafts.length - 1) * 92;
     }
 
     const parentMap = flowParentMapFor(records);
@@ -5214,62 +5739,168 @@
       const dataRow = rec.rowId ? ' data-id="' + escapeAttr(rec.rowId) + '"' : '';
       const dataSession = rec.sessionId ? ' data-session-id="' + escapeAttr(rec.sessionId) + '"' : '';
       const dataObject = rec.objectId ? ' data-object-id="' + escapeAttr(rec.objectId) + '"' : '';
+      const dataDraft = rec.draftId ? ' data-draft-id="' + escapeAttr(rec.draftId) + '"' : '';
+      const dataRepoPath = rec.repoPath ? ' data-repo-path="' + escapeAttr(rec.repoPath) + '"' : '';
       const deleteBtn = rec.kind === 'object'
         ? '<button type="button" class="flow-node-delete" data-flow-action="delete-object" title="Delete object" aria-label="Delete object">&times;</button>'
+        : rec.kind === 'draft-session'
+          ? '<button type="button" class="flow-node-delete" data-flow-action="delete-draft-session" title="Discard draft" aria-label="Discard draft">&times;</button>'
+          : '';
+      const addBtn = (rec.kind === 'repo' || rec.kind === 'object')
+        ? '<button type="button" class="flow-node-add-session" data-flow-action="add-draft-session" title="New session draft connected here" aria-label="New session draft connected here">+</button>'
         : '';
+      const bodyHtml = rec.kind === 'draft-session'
+        ? '<input type="text" class="flow-draft-input" data-draft-id="' + escapeAttr(rec.draftId) + '"'
+          + ' value="' + escapeAttr(rec.title || '') + '" placeholder="Name or task this session..." autocomplete="off">'
+          + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>'
+          + '<button type="button" class="flow-draft-play" data-flow-action="play-draft-session" title="Start session" aria-label="Start session">&#9654;</button>'
+        : '<div class="flow-node-title">' + escapeHtml(rec.title) + '</div>'
+          + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>';
       return '<div class="flow-node ' + escapeAttr(rec.className) + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
-        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject
+        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath
         + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;">'
         + deleteBtn
+        + addBtn
         + '<div class="flow-node-kicker">' + escapeHtml(rec.kicker) + '</div>'
-        + '<div class="flow-node-title">' + escapeHtml(rec.title) + '</div>'
-        + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>'
+        + bodyHtml
         + '</div>';
     });
     canvasHeight = Math.max(canvasHeight, yCursor + 40);
-    $flow.innerHTML = '<div class="flow-toolbar"><button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button></div>'
-      + '<div class="flow-canvas" style="min-width:' + Math.ceil(canvasWidth) + 'px;min-height:' + Math.ceil(canvasHeight) + 'px;">'
+    const baseWidth = Math.ceil(canvasWidth);
+    const baseHeight = Math.ceil(canvasHeight);
+    const scaledWidth = Math.ceil(baseWidth * flowZoom);
+    const scaledHeight = Math.ceil(baseHeight * flowZoom);
+    $flow.innerHTML = flowToolbarHtml()
+      + '<div class="flow-canvas" data-flow-base-width="' + baseWidth + '" data-flow-base-height="' + baseHeight + '" style="width:' + scaledWidth + 'px;height:' + scaledHeight + 'px;min-width:' + scaledWidth + 'px;min-height:' + scaledHeight + 'px;">'
+      + '<div class="flow-world" style="width:' + baseWidth + 'px;height:' + baseHeight + 'px;transform:scale(' + flowZoom + ');">'
       + '<svg class="flow-links" aria-hidden="true"></svg>'
       + nodeHtml.join('')
+      + '</div>'
       + '</div>';
     wireFlowBoard($flow);
-    requestAnimationFrame(() => redrawFlowLinks($flow));
+    setFlowExpanded(flowExpanded);
+    applyFlowZoom($flow, { preserve: false });
+    requestAnimationFrame(() => {
+      redrawFlowLinks($flow);
+      if (flowDraftFocusId) {
+        const focusId = flowDraftFocusId;
+        flowDraftFocusId = '';
+        focusFlowDraftInput(focusId);
+      }
+    });
   }
 
   function redrawFlowLinks(targetEl) {
     const canvas = targetEl && targetEl.querySelector('.flow-canvas');
-    const svg = canvas && canvas.querySelector('.flow-links');
-    if (!canvas || !svg) return;
+    const world = canvas && (canvas.querySelector('.flow-world') || canvas);
+    const svg = world && world.querySelector('.flow-links');
+    if (!canvas || !world || !svg) return;
     const nodeById = new Map();
-    canvas.querySelectorAll('.flow-node').forEach(node => {
+    world.querySelectorAll('.flow-node').forEach(node => {
       nodeById.set(node.dataset.flowNodeId, node);
     });
     const paths = [];
-    canvas.querySelectorAll('.flow-node[data-flow-parent]').forEach(node => {
+    world.querySelectorAll('.flow-node[data-flow-parent]').forEach(node => {
       const parent = nodeById.get(node.dataset.flowParent);
       if (!parent) return;
-      const sx = parent.offsetLeft + parent.offsetWidth / 2;
-      const sy = parent.offsetTop + parent.offsetHeight;
-      const ex = node.offsetLeft + node.offsetWidth / 2;
-      const ey = node.offsetTop;
-      const mid = Math.max(32, (ey - sy) / 2);
-      const d = 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + mid) + ', ' + ex + ' ' + (ey - mid) + ', ' + ex + ' ' + ey;
+      let sx = parent.offsetLeft + parent.offsetWidth / 2;
+      let sy = parent.offsetTop + parent.offsetHeight;
+      let ex = node.offsetLeft + node.offsetWidth / 2;
+      let ey = node.offsetTop;
+      let d = '';
+      if (node.offsetTop < parent.offsetTop + parent.offsetHeight + 8) {
+        const toRight = node.offsetLeft >= parent.offsetLeft;
+        sx = toRight ? parent.offsetLeft + parent.offsetWidth : parent.offsetLeft;
+        sy = parent.offsetTop + parent.offsetHeight / 2;
+        ex = toRight ? node.offsetLeft : node.offsetLeft + node.offsetWidth;
+        ey = node.offsetTop + node.offsetHeight / 2;
+        const mid = Math.max(32, Math.abs(ex - sx) / 2);
+        const c1 = toRight ? sx + mid : sx - mid;
+        const c2 = toRight ? ex - mid : ex + mid;
+        d = 'M ' + sx + ' ' + sy + ' C ' + c1 + ' ' + sy + ', ' + c2 + ' ' + ey + ', ' + ex + ' ' + ey;
+      } else {
+        const mid = Math.max(32, (ey - sy) / 2);
+        d = 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + mid) + ', ' + ex + ' ' + (ey - mid) + ', ' + ex + ' ' + ey;
+      }
       paths.push('<path d="' + d + '"></path>');
     });
-    svg.setAttribute('width', canvas.scrollWidth);
-    svg.setAttribute('height', canvas.scrollHeight);
+    const base = flowCanvasBaseSize(canvas);
+    svg.setAttribute('width', base.width);
+    svg.setAttribute('height', base.height);
     svg.innerHTML = paths.join('');
   }
 
   function wireFlowBoard(targetEl) {
     const canvas = targetEl && targetEl.querySelector('.flow-canvas');
+    const world = canvas && (canvas.querySelector('.flow-world') || canvas);
     const addBtn = targetEl && targetEl.querySelector('[data-flow-action="add-object"]');
     if (addBtn) addBtn.addEventListener('click', createFlowCustomObject);
-    if (!canvas) return;
-    canvas.querySelectorAll('.flow-node').forEach(node => {
+    const zoomOutBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-out"]');
+    const zoomInBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-in"]');
+    const zoomResetBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-reset"]');
+    const expandBtn = targetEl && targetEl.querySelector('[data-flow-action="toggle-expand"]');
+    if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => setFlowZoom(flowZoom / 1.15, targetEl));
+    if (zoomInBtn) zoomInBtn.addEventListener('click', () => setFlowZoom(flowZoom * 1.15, targetEl));
+    if (zoomResetBtn) zoomResetBtn.addEventListener('click', () => setFlowZoom(1, targetEl));
+    if (expandBtn) expandBtn.addEventListener('click', () => setFlowExpanded(!flowExpanded));
+    if (targetEl && !targetEl.dataset.flowBoardWired) {
+      targetEl.dataset.flowBoardWired = '1';
+      targetEl.addEventListener('wheel', handleFlowWheel, { passive: false });
+      targetEl.addEventListener('gesturestart', handleFlowGestureStart, { passive: false });
+      targetEl.addEventListener('gesturechange', handleFlowGestureChange, { passive: false });
+      document.addEventListener('keydown', ev => {
+        if (ev.key === 'Escape' && flowExpanded) setFlowExpanded(false);
+      });
+    }
+    if (targetEl) {
+      targetEl.querySelectorAll('[data-flow-action="add-draft-session"]').forEach(btn => {
+        btn.addEventListener('click', ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const node = btn.closest('.flow-node');
+          const isNodeParent = node && (node.dataset.flowKind === 'repo' || node.dataset.flowKind === 'object');
+          createFlowDraftSession(
+            isNodeParent ? flowRepoPathForNode(node) : '',
+            isNodeParent ? node.dataset.flowNodeId : ''
+          );
+        });
+      });
+    }
+    if (!canvas || !world) return;
+    world.querySelectorAll('.flow-node').forEach(node => {
       if (node.dataset.flowKind === 'session') {
         node.addEventListener('mouseenter', () => _convPrefetchSchedule(node.dataset.id));
         node.addEventListener('mouseleave', () => _convPrefetchCancel(node.dataset.id));
+      }
+      if (node.dataset.flowKind === 'draft-session') {
+        const input = node.querySelector('.flow-draft-input');
+        if (input) {
+          input.addEventListener('input', () => saveFlowDraftInput(node.dataset.draftId, input.value));
+          input.addEventListener('change', () => saveFlowDraftInput(node.dataset.draftId, input.value));
+          input.addEventListener('keydown', ev => {
+            if (ev.key === 'Enter') {
+              ev.preventDefault();
+              saveFlowDraftInput(node.dataset.draftId, input.value);
+              input.blur();
+            } else if (ev.key === 'Escape') {
+              input.blur();
+            }
+          });
+        }
+        const deleteBtn = node.querySelector('[data-flow-action="delete-draft-session"]');
+        if (deleteBtn) {
+          deleteBtn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            deleteFlowDraftSession(node.dataset.draftId);
+          });
+        }
+        const playBtn = node.querySelector('[data-flow-action="play-draft-session"]');
+        if (playBtn) {
+          playBtn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            playFlowDraftSession(node.dataset.draftId);
+          });
+        }
       }
       if (node.dataset.flowKind === 'object') {
         const deleteBtn = node.querySelector('[data-flow-action="delete-object"]');
@@ -5289,6 +5920,7 @@
         if (ev.button !== undefined && ev.button !== 0) return;
         if (ev.target.closest('button,input,textarea,a')) return;
         ev.preventDefault();
+        beginSidebarDrag();
         const startX = ev.clientX;
         const startY = ev.clientY;
         const startLeft = node.offsetLeft;
@@ -5303,7 +5935,7 @@
         };
         const findDropTarget = (x, y) => {
           const parentMap = {};
-          canvas.querySelectorAll('.flow-node[data-flow-parent]').forEach(el => {
+          world.querySelectorAll('.flow-node[data-flow-parent]').forEach(el => {
             parentMap[el.dataset.flowNodeId] = el.dataset.flowParent;
           });
           const els = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
@@ -5322,11 +5954,13 @@
         node.classList.add('dragging');
         try { node.setPointerCapture(ev.pointerId); } catch (_) {}
         const onMove = moveEv => {
-          const dx = moveEv.clientX - startX;
-          const dy = moveEv.clientY - startY;
-          if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
-          const maxLeft = Math.max(8, canvas.scrollWidth - node.offsetWidth - 12);
-          const maxTop = Math.max(8, canvas.scrollHeight - node.offsetHeight - 12);
+          const zoom = flowZoom || 1;
+          const dx = (moveEv.clientX - startX) / zoom;
+          const dy = (moveEv.clientY - startY) / zoom;
+          if (Math.abs(moveEv.clientX - startX) > 2 || Math.abs(moveEv.clientY - startY) > 2) moved = true;
+          const base = flowCanvasBaseSize(canvas);
+          const maxLeft = Math.max(8, base.width - node.offsetWidth - 12);
+          const maxTop = Math.max(8, base.height - node.offsetHeight - 12);
           const nextLeft = Math.max(12, Math.min(maxLeft, startLeft + dx));
           const nextTop = Math.max(12, Math.min(maxTop, startTop + dy));
           node.style.left = Math.round(nextLeft) + 'px';
@@ -5342,6 +5976,7 @@
           const finalDropTarget = dropTarget;
           setDropTarget(null);
           try { node.releasePointerCapture(upEv.pointerId); } catch (_) {}
+          endSidebarDrag();
           if (moved) {
             flowNodePositions[node.dataset.flowNodeId] = {
               x: Math.round(node.offsetLeft),
@@ -5371,6 +6006,7 @@
 
   function renderSidebar(convs) {
     if (_renameInProgress) return;
+    if (deferSidebarRenderIfDragging()) return;
     const $kanbanBoard = document.getElementById('kanbanBoard');
     const $flow = document.getElementById('flowBoard');
     const $convList = document.getElementById('convList');
@@ -9976,6 +10612,7 @@
 
   async function refreshConversationList() {
     if (isInlineRenameInProgress()) return;
+    if (deferSidebarRenderIfDragging()) return;
     if ($convRefreshBtn) $convRefreshBtn.classList.add('spinning');
     conversationsLoaded = false;
     await refreshArchiveData({ force: true });
@@ -17236,6 +17873,7 @@
     const $list = document.getElementById('convList');
     if (!$list) return;
     if (_renameInProgress) return;
+    if (deferSidebarRenderIfDragging()) return;
     const q = (filter || '').trim().toLowerCase();
     const scrollState = _captureArchiveListScroll(q, $list);
     const _finishArchiveRender = () => {
@@ -18616,6 +19254,7 @@
 	  setInterval(async () => {
 		    if (activeTab !== 'sessions') return;
 		    if (isInlineRenameInProgress()) return;
+        if (deferSidebarRenderIfDragging()) return;
 		    if (conversationPaneLoading) return;
     // Skip the rerender if the user is actively typing into the
     // composer — innerHTML on the full conv list pauses the main
@@ -18630,6 +19269,7 @@
     // JSONLs get re-scanned.
     try {
       await refreshArchiveData();
+      if (deferSidebarRenderIfDragging()) return;
       const $search = document.getElementById('convSearch');
       renderArchiveList($search ? $search.value : '');
 	    } catch (_) { /* best-effort */ }
@@ -19312,6 +19952,25 @@
     }
   }
 
+  function annUxFixesQueuePrompt(ann) {
+    return 'Add to UX fixes queue:\n\n' + annContextForClipboard(ann);
+  }
+
+  function annOpenUxFixesQueue(ann, closeFn, errEl) {
+    if (!ann) return;
+    try {
+      if (typeof enterNewSessionMode !== 'function') throw new Error('new session mode is unavailable');
+      enterNewSessionMode(annUxFixesQueuePrompt(ann));
+      if (typeof closeFn === 'function') closeFn();
+      showOpToast('Annotation loaded into UX fixes queue', 'success');
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = 'UX fixes queue failed: ' + ((err && err.message) || 'unknown');
+        errEl.hidden = false;
+      }
+    }
+  }
+
   function annShowEditor() {
     if (!annotationState || !annotationState.overlay) return;
     if (annotationState.editor) annotationState.editor.remove();
@@ -19326,6 +19985,7 @@
       '<div class="ann-editor-actions">' +
         '<button type="button" class="ann-btn" data-ann-cancel>Cancel</button>' +
         '<button type="button" class="ann-btn" data-ann-open-session>Open new session</button>' +
+        '<button type="button" class="ann-btn ann-queue-btn" data-ann-ux-queue>Add to UX fixes queue</button>' +
         '<button type="button" class="ann-btn ann-primary" data-ann-save>Save</button>' +
       '</div>';
     annotationState.overlay.appendChild(editor);
@@ -19336,6 +19996,7 @@
     const saveBtn = editor.querySelector('[data-ann-save]');
     const cancelBtn = editor.querySelector('[data-ann-cancel]');
     const openSessionBtn = editor.querySelector('[data-ann-open-session]');
+    const uxQueueBtn = editor.querySelector('[data-ann-ux-queue]');
     let savedAnnotation = null;
     const copySaved = async () => {
       if (!savedAnnotation) return;
@@ -19359,6 +20020,7 @@
       errEl.hidden = true;
       saveBtn.disabled = true;
       if (openSessionBtn) openSessionBtn.disabled = true;
+      if (uxQueueBtn) uxQueueBtn.disabled = true;
       saveBtn.textContent = busyLabel || 'Saving…';
       if (annotationState && annotationState.overlay) {
         annotationState.overlay.classList.add('ann-capturing');
@@ -19376,6 +20038,7 @@
         noteEl.disabled = true;
         if (cancelBtn) cancelBtn.hidden = true;
         if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
         saveBtn.disabled = false;
         saveBtn.textContent = 'Copy';
         showOpToast('Annotation saved', 'success');
@@ -19385,6 +20048,7 @@
         errEl.hidden = false;
         saveBtn.disabled = false;
         if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
         saveBtn.textContent = 'Save';
         return null;
       } finally {
@@ -19405,6 +20069,12 @@
       openSessionBtn.addEventListener('click', async () => {
         const ann = await persistAnnotation('Saving…');
         if (ann) annOpenNewSessionWithContext(ann, annStop, errEl);
+      });
+    }
+    if (uxQueueBtn) {
+      uxQueueBtn.addEventListener('click', async () => {
+        const ann = await persistAnnotation('Saving…');
+        if (ann) annOpenUxFixesQueue(ann, annStop, errEl);
       });
     }
     saveBtn.addEventListener('click', save);
@@ -19514,6 +20184,7 @@
         '<div class="ann-editor-actions">' +
           '<button type="button" class="ann-btn" data-ann-screen-close data-ann-screen-cancel>Cancel</button>' +
           '<button type="button" class="ann-btn" data-ann-screen-open-session>Open new session</button>' +
+          '<button type="button" class="ann-btn ann-queue-btn" data-ann-screen-ux-queue>Add to UX fixes queue</button>' +
           '<button type="button" class="ann-btn ann-primary" data-ann-screen-save>Save</button>' +
         '</div>' +
       '</div>';
@@ -19525,6 +20196,7 @@
     const saveBtn = modal.querySelector('[data-ann-screen-save]');
     const cancelBtn = modal.querySelector('[data-ann-screen-cancel]');
     const openSessionBtn = modal.querySelector('[data-ann-screen-open-session]');
+    const uxQueueBtn = modal.querySelector('[data-ann-screen-ux-queue]');
     const close = annCloseScreenModal;
     modal.querySelectorAll('[data-ann-screen-close]').forEach(btn => btn.addEventListener('click', close));
     let savedAnnotation = null;
@@ -19550,6 +20222,7 @@
       errEl.hidden = true;
       saveBtn.disabled = true;
       if (openSessionBtn) openSessionBtn.disabled = true;
+      if (uxQueueBtn) uxQueueBtn.disabled = true;
       saveBtn.textContent = busyLabel || 'Saving…';
       const payload = {
         note,
@@ -19573,6 +20246,7 @@
         noteEl.disabled = true;
         if (cancelBtn) cancelBtn.hidden = true;
         if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
         saveBtn.disabled = false;
         saveBtn.textContent = 'Copy';
         showOpToast('Screen annotation saved', 'success');
@@ -19582,6 +20256,7 @@
         errEl.hidden = false;
         saveBtn.disabled = false;
         if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
         saveBtn.textContent = 'Save';
         return null;
       }
@@ -19597,6 +20272,12 @@
       openSessionBtn.addEventListener('click', async () => {
         const ann = await persistAnnotation('Saving…');
         if (ann) annOpenNewSessionWithContext(ann, close, errEl);
+      });
+    }
+    if (uxQueueBtn) {
+      uxQueueBtn.addEventListener('click', async () => {
+        const ann = await persistAnnotation('Saving…');
+        if (ann) annOpenUxFixesQueue(ann, close, errEl);
       });
     }
     saveBtn.addEventListener('click', save);
@@ -19710,7 +20391,10 @@
             urlHtml +
             shot +
           '</div>' +
-          '<button type="button" class="ann-btn" data-ann-copy="' + escapeAttr(ann.id || '') + '">Copy context</button>' +
+          '<div class="ann-note-actions">' +
+            '<button type="button" class="ann-btn" data-ann-copy="' + escapeAttr(ann.id || '') + '">Copy context</button>' +
+            '<button type="button" class="ann-btn" data-ann-ux-queue="' + escapeAttr(ann.id || '') + '">Add to UX fixes queue</button>' +
+          '</div>' +
         '</div>';
       }).join('');
       const byId = new Map(notes.map(ann => [ann.id, ann]));
@@ -19725,6 +20409,13 @@
           } catch (_) {
             showOpToast('Copy failed', 'error');
           }
+        });
+      });
+      list.querySelectorAll('[data-ann-ux-queue]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const ann = byId.get(btn.getAttribute('data-ann-ux-queue'));
+          if (!ann) return;
+          annOpenUxFixesQueue(ann, close);
         });
       });
     } catch (err) {
@@ -20183,7 +20874,10 @@
   // ready to receive a prompt — pressing Enter spawns a fresh agent.
   const $sidebarNewBtn = document.getElementById('sidebarNewBtn');
   if ($sidebarNewBtn) {
-    $sidebarNewBtn.addEventListener('click', () => enterNewSessionMode());
+    $sidebarNewBtn.addEventListener('click', () => {
+      if (isFlowView()) createFlowDraftSession();
+      else enterNewSessionMode();
+    });
   }
 
   // ── Sidebar "+ New Group chat" button ──────────────────────────

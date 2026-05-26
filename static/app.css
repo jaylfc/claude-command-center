@@ -3295,14 +3295,23 @@
   .flow-board {
     flex: 1; min-height: 0; overflow: auto;
     padding: 0; background: var(--bg);
+    position: relative; overscroll-behavior: contain;
+  }
+  body.flow-expanded { overflow: hidden; }
+  .flow-board.is-expanded {
+    position: fixed; inset: 0; z-index: 9990;
+    width: 100vw; height: 100vh; max-width: none;
+    display: block !important;
+    background: var(--bg);
   }
   .flow-toolbar {
     position: sticky; top: 0; z-index: 4;
-    display: flex; align-items: center; gap: 6px;
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
     padding: 8px; border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
   }
+  .flow-toolbar-spacer { flex: 1 1 auto; min-width: 8px; }
   .flow-toolbar-btn {
     border: 1px solid var(--border); border-radius: 6px;
     background: var(--bg); color: var(--text);
@@ -3310,6 +3319,20 @@
     cursor: pointer;
   }
   .flow-toolbar-btn:hover { background: var(--surface-2); }
+  .flow-icon-btn {
+    width: 30px; height: 28px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .flow-icon-btn svg {
+    width: 15px; height: 15px; display: block;
+    fill: none; stroke: currentColor; stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .flow-zoom-controls { display: inline-flex; align-items: center; gap: 4px; }
+  .flow-zoom-value {
+    min-width: 48px; padding-left: 8px; padding-right: 8px;
+    font-variant-numeric: tabular-nums; color: var(--text-muted);
+  }
   .flow-empty-state {
     margin: 12px; padding: 18px 12px; text-align: center;
     color: var(--text-muted); font-size: 12px;
@@ -3318,6 +3341,10 @@
   }
   .flow-canvas {
     position: relative; box-sizing: border-box;
+  }
+  .flow-world {
+    position: absolute; left: 0; top: 0;
+    transform-origin: 0 0;
     background:
       linear-gradient(var(--border) 1px, transparent 1px),
       linear-gradient(90deg, var(--border) 1px, transparent 1px);
@@ -3360,6 +3387,24 @@
     border-left-color: var(--orange);
     background: linear-gradient(rgba(210,153,34,0.10), rgba(210,153,34,0.10)), var(--surface);
   }
+  .flow-node-draft {
+    border-left-color: var(--green);
+    background: linear-gradient(rgba(63,185,80,0.12), rgba(63,185,80,0.12)), var(--surface);
+    padding-bottom: 42px;
+  }
+  .flow-node-add-session {
+    position: absolute; right: 8px; top: 7px;
+    width: 22px; height: 22px; border-radius: 4px;
+    border: 1px solid rgba(88,166,255,0.32);
+    background: rgba(88,166,255,0.10);
+    color: var(--accent); cursor: pointer; line-height: 1;
+    font-size: 15px; font-weight: 700;
+  }
+  .flow-node-add-session:hover {
+    background: rgba(88,166,255,0.20);
+    border-color: rgba(88,166,255,0.58);
+  }
+  .flow-node-object .flow-node-add-session { right: 34px; }
   .flow-node-delete {
     position: absolute; right: 8px; top: 7px;
     width: 20px; height: 20px; border-radius: 4px;
@@ -3384,13 +3429,40 @@
     background: rgba(210,153,34,0.14); border: 1px solid rgba(210,153,34,0.32);
     border-radius: 4px; padding: 1px 5px;
   }
+  .flow-node-draft .flow-node-delete {
+    opacity: 0.65;
+  }
+  .flow-draft-input {
+    width: 100%; box-sizing: border-box;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--text);
+    font: inherit; font-size: 13px; line-height: 1.3;
+    padding: 7px 8px; outline: none;
+  }
+  .flow-draft-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(88,166,255,0.16);
+  }
+  .flow-draft-play {
+    position: absolute; right: 10px; bottom: 9px;
+    width: 28px; height: 26px; border-radius: 5px;
+    border: 1px solid rgba(63,185,80,0.42);
+    background: rgba(63,185,80,0.14);
+    color: var(--green); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; line-height: 1;
+  }
+  .flow-draft-play:hover {
+    background: rgba(63,185,80,0.24);
+    border-color: rgba(63,185,80,0.65);
+  }
   .flow-node-kicker {
     color: var(--text-muted); font-size: 10px; font-weight: 700;
     line-height: 1.2; text-transform: uppercase; letter-spacing: 0;
     margin-bottom: 5px; padding-right: 66px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .flow-node-repo .flow-node-kicker { padding-right: 0; }
+  .flow-node-repo .flow-node-kicker { padding-right: 34px; }
   .flow-node-title {
     color: var(--text); font-size: 13px; font-weight: 600;
     line-height: 1.3; overflow-wrap: anywhere;
@@ -4201,6 +4273,7 @@
   }
   .ann-editor-actions {
     display: flex; justify-content: flex-end; gap: 7px;
+    flex-wrap: wrap;
   }
   .ann-btn {
     display: inline-flex; align-items: center; justify-content: center;
@@ -4216,6 +4289,9 @@
     color: #061b1a; font-weight: 700;
   }
   .ann-primary:hover { background: var(--cyan); opacity: 0.9; }
+  .ann-queue-btn {
+    flex: 1 1 100%;
+  }
   .ann-notes-dialog {
     width: min(760px, 94vw);
     max-height: min(720px, 88vh);
@@ -4249,6 +4325,10 @@
     background: var(--bg);
   }
   .ann-note-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .ann-note-actions {
+    display: flex; flex-direction: column; gap: 6px;
+    align-items: stretch;
+  }
   .ann-note-text {
     color: var(--text); font-size: 13px; line-height: 1.45;
     white-space: pre-wrap; overflow-wrap: anywhere;
@@ -4268,7 +4348,9 @@
   }
   @media (max-width: 640px) {
     .ann-note-row { grid-template-columns: minmax(0, 1fr); }
-    .ann-note-row .ann-btn { justify-self: start; }
+    .ann-note-actions {
+      flex-direction: row; flex-wrap: wrap; justify-content: flex-start;
+    }
   }
 
   /* Backlog column — no longer sticky, scrolls with the rest */
@@ -4575,6 +4657,66 @@
     word-break: normal;
   }
   .conv-live-tool-inline .cl-age { color: var(--text-muted); font-size: 11px; margin-left: auto; flex: 0 0 auto; }
+  .conv-live-tool-strip .cl-question-detail,
+  .conv-live-tool-inline .cl-question-detail {
+    flex: 1 1 calc(100% - 16px);
+    min-width: 0;
+    margin: 2px 0 0 16px;
+    padding: 8px 10px;
+    border-left: 3px solid rgba(88,166,255,0.55);
+    border-radius: 4px;
+    background: rgba(88,166,255,0.08);
+    color: var(--text);
+  }
+  .conv-live-tool-strip .cl-question-header,
+  .conv-live-tool-inline .cl-question-header {
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.25;
+    margin-bottom: 2px;
+  }
+  .conv-live-tool-strip .cl-question-text,
+  .conv-live-tool-inline .cl-question-text {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .conv-live-tool-strip .cl-question-options,
+  .conv-live-tool-inline .cl-question-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    list-style: none;
+    margin: 7px 0 0;
+    padding: 0;
+  }
+  .conv-live-tool-strip .cl-question-options li,
+  .conv-live-tool-inline .cl-question-options li {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    max-width: 100%;
+    padding: 4px 7px;
+    border: 1px solid rgba(88,166,255,0.28);
+    border-radius: 5px;
+    background: rgba(88,166,255,0.08);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.25;
+  }
+  .conv-live-tool-strip .cl-question-option-label,
+  .conv-live-tool-inline .cl-question-option-label {
+    overflow-wrap: anywhere;
+  }
+  .conv-live-tool-strip .cl-question-option-desc,
+  .conv-live-tool-inline .cl-question-option-desc {
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+  }
   /* When the live-tool strip is present above the sticky header, push the
      header down so they don't both stick at y=0 and overlap.
      `top: 24px` deliberately *underlaps* the strip's bottom edge by a few

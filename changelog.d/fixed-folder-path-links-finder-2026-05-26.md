@@ -1,0 +1,1 @@
+- Fixed extensionless absolute folder links in conversation messages so they open through Finder instead of being treated as browser routes.

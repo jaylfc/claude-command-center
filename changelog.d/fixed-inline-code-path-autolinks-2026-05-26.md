@@ -1,0 +1,1 @@
+- Stopped shortened placeholder paths and inline `/api/...` endpoint references from becoming broken clickable path links.

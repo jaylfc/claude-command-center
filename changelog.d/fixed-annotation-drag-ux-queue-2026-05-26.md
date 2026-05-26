@@ -1,0 +1,1 @@
+- Keep sidebar drag interactions from being interrupted by the periodic refresh, and add an annotation action for loading reports into the UX fixes queue prompt.

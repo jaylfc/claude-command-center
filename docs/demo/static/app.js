@@ -1182,6 +1182,49 @@
     return bits.join(': ') + (value ? ': ' + value : '');
   }
 
+  function liveQuestionOptionParts() {
+    const opts = Array.isArray(liveStatus.questionOptions) ? liveStatus.questionOptions : [];
+    return opts.map(function (opt) {
+      if (opt && typeof opt === 'object') {
+        return {
+          label: cleanLiveActivityDetail(opt.label || ''),
+          description: cleanLiveActivityDetail(opt.description || ''),
+        };
+      }
+      return { label: cleanLiveActivityDetail(opt), description: '' };
+    }).filter(function (opt) {
+      return !!opt.label;
+    });
+  }
+
+  function liveQuestionDetailHtml(fallbackDetail) {
+    const header = cleanLiveActivityDetail(liveStatus.questionHeader || '');
+    let question = cleanLiveActivityDetail(liveStatus.questionText || fallbackDetail || '');
+    const options = liveQuestionOptionParts();
+    if (header && question.toLowerCase().startsWith(header.toLowerCase() + ':')) {
+      question = question.slice(header.length + 1).trim();
+    }
+    if (!liveStatus.questionText && options.length) {
+      question = question.replace(/\bOptions:\s*.*$/i, '').trim();
+    }
+    if (!header && !question && !options.length) return '';
+    const headerHtml = header
+      ? '<div class="cl-question-header">' + escapeHtml(header) + '</div>'
+      : '';
+    const questionHtml = question
+      ? '<div class="cl-question-text">' + escapeHtml(question) + '</div>'
+      : '';
+    const optionsHtml = options.length
+      ? '<ul class="cl-question-options">' + options.map(function (opt) {
+          return '<li>'
+            + '<span class="cl-question-option-label">' + escapeHtml(opt.label) + '</span>'
+            + (opt.description ? '<span class="cl-question-option-desc">' + escapeHtml(opt.description) + '</span>' : '')
+            + '</li>';
+        }).join('') + '</ul>'
+      : '';
+    return '<div class="cl-question-detail">' + headerHtml + questionHtml + optionsHtml + '</div>';
+  }
+
   function updateLiveStripOffset($view, strip) {
     if (!$view) return;
     if (!strip) {
@@ -1231,11 +1274,15 @@
     const ageLbl = isQuestion ? 'waiting for answer' : (inFlight ? 'running ' + dur : dur + ' ago');
     const toolLabel = isQuestion ? 'Question' : liveActivityToolLabel(tool);
     const title = liveActivityTitle(isQuestion ? 'Waiting for answer' : (inFlight ? 'Currently running' : 'Last completed'), tool, file);
+    const detailHtml = isQuestion
+      ? liveQuestionDetailHtml(file)
+      : (shortFile ? ' <span class="cl-file' + liveActivityDetailClass(tool) + '">' + escapeHtml(shortFile) + '</span>' : '');
     const html =
         '<span class="cl-pulse"></span>'
       + '<span class="cl-tool">' + (inFlight && !isQuestion ? '▶ ' : '') + escapeHtml(toolLabel) + '</span>'
-      + (shortFile ? ' <span class="cl-file' + liveActivityDetailClass(tool) + '">' + escapeHtml(shortFile) + '</span>' : '')
-      + '<span class="cl-age">' + ageLbl + '</span>';
+      + (isQuestion ? '' : detailHtml)
+      + '<span class="cl-age">' + ageLbl + '</span>'
+      + (isQuestion ? detailHtml : '');
     if (!strip) {
       strip = document.createElement('div');
       strip.className = 'conv-live-tool-strip';
@@ -2794,6 +2841,22 @@
     );
   }
 
+  const INLINE_CODE_PATH_RE = /^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/;
+  function _isPlaceholderPathToken(token) {
+    return String(token || '').indexOf('...') !== -1;
+  }
+  function _isInternalApiPathToken(token) {
+    const clean = normalizeMarkdownLinkTarget(token).split(/[?#]/)[0];
+    return clean === '/api' || clean.startsWith('/api/');
+  }
+  function _shouldLinkifyInlineCodePath(token) {
+    const target = normalizeMarkdownLinkTarget(token);
+    if (!INLINE_CODE_PATH_RE.test(target)) return false;
+    if (_isPlaceholderPathToken(target)) return false;
+    if (_isInternalApiPathToken(target)) return false;
+    return true;
+  }
+
   function highlightCode(code, lang) {
     const key = _CB_LANG_ALIAS[String(lang || '').toLowerCase()] || String(lang || '').toLowerCase();
     const patterns = _CB_LANG_PATTERNS[key];
@@ -2842,7 +2905,7 @@
     s = escapeHtml(s);
     // Inline code `x` (also make paths inside code clickable)
     s = s.replace(/`([^`]+)`/g, (m, inner) => {
-      if (/^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/.test(inner)) {
+      if (_shouldLinkifyInlineCodePath(inner)) {
         return '<code class="md-code">' + linkifyPath(inner) + '</code>';
       }
       // Mixed inline content (e.g. `see http://… for details`) — link
@@ -2940,11 +3003,17 @@
   //   • web routes       → open in a browser tab on the project's deploy
   //                        URL (Vercel) when known, else the same origin
   // Heuristic: if it starts with `/` AND the last segment has a file
-  // extension, treat as a file. Otherwise treat as a web route. Routes
-  // like `/api/foo/bar` (no extension on the last segment) win the
-  // browser-tab path; files like `static/index.html` win the file path.
+  // extension, treat as a file. Extensionless macOS/Linux filesystem roots
+  // also win the file path so folder links open in Finder. Everything else
+  // is treated as a web route: `/api/foo/bar` opens in the browser, while
+  // `/Users/me/project/screenshots/` goes through `/api/open`.
+  function _isAbsoluteFilesystemPath(p) {
+    const clean = String(p || '').trim().replace(/^file:\/\//i, '').split(/[?#]/)[0];
+    return /^\/(?:Users|Volumes|Applications|Library|System|private|tmp|var|etc|opt|usr|bin|sbin|home)(?:\/|$)/.test(clean);
+  }
   function _isWebRoutePath(p) {
     if (!p.startsWith('/')) return false;
+    if (_isAbsoluteFilesystemPath(p)) return false;
     const last = p.split('/').pop() || '';
     // Strip query/fragment before extension check.
     const cleanLast = last.split(/[?#]/)[0];

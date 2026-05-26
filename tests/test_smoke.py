@@ -172,9 +172,39 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("data-ann-open-session", app_js)
         self.assertIn("function annOpenNewSessionWithContext", app_js)
         self.assertIn("enterNewSessionMode(text)", app_js)
+        self.assertIn("data-ann-ux-queue", app_js)
+        self.assertIn("function annOpenUxFixesQueue", app_js)
+        self.assertIn("Add to UX fixes queue", app_js)
         self.assertIn("Session ID: ", app_js)
         self.assertIn("persistAnnotation", app_js)
         self.assertNotIn("other tool", app_js.lower())
+
+    def test_sidebar_refresh_defers_while_dragging(self):
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        self.assertIn("function deferSidebarRenderIfDragging", app_js)
+        self.assertIn(".flow-node.dragging", app_js)
+        self.assertIn("beginSidebarDrag();", app_js)
+        self.assertIn("if (deferSidebarRenderIfDragging()) return;", app_js)
+
+    def test_flow_new_session_drafts_wait_for_play(self):
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        self.assertIn("ccc-flow-draft-sessions", app_js)
+        self.assertIn("function createFlowDraftSession", app_js)
+        self.assertIn("function playFlowDraftSession", app_js)
+        self.assertIn("function flowRepoPathForNode", app_js)
+        self.assertIn("data-flow-action=\"play-draft-session\"", app_js)
+        self.assertIn("New session draft connected here", app_js)
+        self.assertIn("if (isFlowView()) createFlowDraftSession();", app_js)
+
+    def test_live_question_indicator_renders_prompt_and_options(self):
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        self.assertIn("function liveQuestionDetailHtml", app_js)
+        self.assertIn("liveStatus.questionText", app_js)
+        self.assertIn("liveQuestionOptionParts", app_js)
+        self.assertIn("cl-question-options", app_js)
+        self.assertIn(".conv-live-tool-inline .cl-question-detail", app_css)
+        self.assertIn(".conv-live-tool-inline .cl-question-options", app_css)
 
 
 class TestPrStateResolution(unittest.TestCase):
@@ -2289,6 +2319,24 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIn("function _isMarkdownPath", js)
         self.assertIn("function normalizeMarkdownLinkTarget", js)
         self.assertIn("payload.launch = true", js)
+
+    def test_absolute_folder_path_links_are_not_web_routes(self):
+        """Extensionless /Users/... folders should still go through /api/open."""
+        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
+        self.assertIn("function _isAbsoluteFilesystemPath", js)
+        self.assertIn(
+            "Users|Volumes|Applications|Library|System|private|tmp|var|etc|opt|usr|bin|sbin|home",
+            js,
+        )
+        self.assertIn("if (_isAbsoluteFilesystemPath(p)) return false;", js)
+
+    def test_inline_code_skips_placeholder_and_api_path_links(self):
+        """Auto-linking should avoid shortened paths and internal API mentions."""
+        js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text()
+        self.assertIn("function _shouldLinkifyInlineCodePath", js)
+        self.assertIn("function _isPlaceholderPathToken", js)
+        self.assertIn("function _isInternalApiPathToken", js)
+        self.assertIn("if (_shouldLinkifyInlineCodePath(inner))", js)
 
     def test_archive_progress_does_not_replace_search_empty_state(self):
         """Background archive refresh must not clobber no-match search results."""
