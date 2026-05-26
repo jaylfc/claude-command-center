@@ -21759,6 +21759,12 @@ def extract_session_usage(session_id):
     diagnostic_latest = 0
     diagnostic_peak = 0
     max_observed_window = 0
+    # Claude Code re-records the same Anthropic API response (same
+    # `message.id`) under a fresh event uuid every time a session is
+    # resumed or forked from a parent turn. Tracking which message.ids
+    # have already contributed to the totals keeps cost from inflating
+    # by the resume count — see issue #60.
+    seen_message_ids = set()
     # `/compact` (manual or auto) emits a `{type: system, subtype: compact_boundary}`
     # event. Pre-compact assistant turns no longer contribute to the live
     # context window, so reset both latest and peak whenever we cross a
@@ -21812,11 +21818,19 @@ def extract_session_usage(session_id):
                 tcr = u.get("cache_read_input_tokens") or 0
                 tout = u.get("output_tokens") or 0
                 window = ti + tcw + tcr
+                # Window/peak observe every event — re-seeing the same
+                # usage is harmless for a max() — but totals must skip
+                # message.ids we've already billed.
                 if window:
                     latest = window
                     if window > peak:
                         peak = window
                     max_observed_window = max(max_observed_window, window)
+                mid = msg.get("id") if isinstance(msg.get("id"), str) else None
+                if mid:
+                    if mid in seen_message_ids:
+                        continue
+                    seen_message_ids.add(mid)
                 if isinstance(ti, int):
                     total_in += ti
                 if isinstance(tcw, int):
@@ -22190,6 +22204,10 @@ def _stats_aggregate_file(path):
       }
     """
     agg = {"session_id": None, "by_date": {}}
+    # Dedupe assistant usage by `message.id` for the same reason as
+    # extract_session_usage — resumes replay each API response under
+    # fresh event uuids but the same message.id. See issue #60.
+    seen_message_ids = set()
     try:
         with open(path, "r") as f:
             for line in f:
@@ -22227,6 +22245,11 @@ def _stats_aggregate_file(path):
                     model = msg.get("model")
                     if model and model not in _STATS_MODEL_BLOCKLIST:
                         day["models"][model] = day["models"].get(model, 0) + 1
+                    mid = msg.get("id") if isinstance(msg.get("id"), str) else None
+                    if mid:
+                        if mid in seen_message_ids:
+                            continue
+                        seen_message_ids.add(mid)
                     u = msg.get("usage")
                     if isinstance(u, dict):
                         in_tok = u.get("input_tokens") or 0

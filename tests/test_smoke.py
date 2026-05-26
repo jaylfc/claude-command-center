@@ -3169,5 +3169,121 @@ class TestPendingInputs(unittest.TestCase):
         self.assertTrue(events[2]["pending"])
 
 
+class TestSessionUsageDedup(unittest.TestCase):
+    """Claude Code's JSONL re-records the same API response (same
+    `message.id`) under fresh event UUIDs whenever a session is resumed
+    or forked. Cost/token totals must dedupe by `message.id` so a session
+    that resumed 4 times doesn't show 4x the real cost — see issue #60."""
+
+    def setUp(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        self.server = importlib.import_module("server")
+        self.tmp = tempfile.mkdtemp(prefix="ccc-usage-")
+        self.prev_root = self.server.PROJECTS_ROOT
+        self.server.PROJECTS_ROOT = pathlib.Path(self.tmp)
+
+    def tearDown(self):
+        self.server.PROJECTS_ROOT = self.prev_root
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_session(self, sid, events):
+        proj = pathlib.Path(self.tmp) / "-some-project"
+        proj.mkdir(parents=True, exist_ok=True)
+        jsonl = proj / f"{sid}.jsonl"
+        with jsonl.open("w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+        return jsonl
+
+    def _assistant(self, uuid, msg_id, usage, model="claude-opus-4-7"):
+        return {
+            "type": "assistant",
+            "uuid": uuid,
+            "sessionId": "any",
+            "message": {
+                "id": msg_id,
+                "role": "assistant",
+                "model": model,
+                "usage": usage,
+                "content": [{"type": "text", "text": "ok"}],
+            },
+        }
+
+    def test_duplicate_message_ids_counted_once(self):
+        """Two assistant events carrying the same `message.id` come from
+        one Anthropic API response replayed by a session resume — totals
+        and cost must count them exactly once."""
+        sid = "00000000-0000-4000-8000-000000000abc"
+        usage = {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 1_000,
+            "cache_read_input_tokens": 10_000,
+            "output_tokens": 200,
+        }
+        # Same msg_id replayed 4 times under different event uuids — the
+        # exact pattern observed in real ~/.claude/projects/*.jsonl files
+        # after multiple resumes.
+        events = [
+            self._assistant(f"uuid-{i}", "msg_unique", usage)
+            for i in range(4)
+        ]
+        # Plus one genuinely-different turn.
+        other = {
+            "input_tokens": 50,
+            "cache_creation_input_tokens": 500,
+            "cache_read_input_tokens": 5_000,
+            "output_tokens": 100,
+        }
+        events.append(self._assistant("uuid-other", "msg_other", other))
+        self._write_session(sid, events)
+
+        result = self.server.extract_session_usage(sid)
+
+        # Each input bucket should be counted ONCE for msg_unique plus
+        # ONCE for msg_other — not 4x + 1x = 5x.
+        self.assertEqual(result["total_input_tokens"], 150)
+        self.assertEqual(result["total_cache_creation_tokens"], 1_500)
+        self.assertEqual(result["total_cache_read_tokens"], 15_000)
+        self.assertEqual(result["total_output_tokens"], 300)
+
+        # Opus rates from server._MODEL_RATES: 15 / 18.75 / 1.50 / 75 per Mtok.
+        expected = (150 * 15 + 1_500 * 18.75
+                    + 15_000 * 1.50 + 300 * 75) / 1_000_000
+        self.assertAlmostEqual(result["cost_usd"], round(expected, 4), places=4)
+
+    def test_events_without_message_id_still_summed(self):
+        """Defensive: if the JSONL ever lacks `message.id` we must still
+        count usage — falling back to a per-event identity rather than
+        silently dropping the turn."""
+        sid = "00000000-0000-4000-8000-000000000abd"
+        usage = {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 20,
+        }
+        events = [
+            {
+                "type": "assistant",
+                "uuid": f"u-{i}",
+                "sessionId": "any",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "usage": usage,
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            }
+            for i in range(3)
+        ]
+        self._write_session(sid, events)
+
+        result = self.server.extract_session_usage(sid)
+        # Three distinct events, none deduped (no shared id to dedupe by).
+        self.assertEqual(result["total_input_tokens"], 30)
+        self.assertEqual(result["total_output_tokens"], 60)
+
+
 if __name__ == "__main__":
     unittest.main()
