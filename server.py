@@ -4514,6 +4514,12 @@ CLAUDE_JOBS_ROOT = Path.home() / ".claude" / "jobs"
 # Backwards-compat alias — older code / forks may import the previous name.
 LOG_VIEWER_STATE_DIR = COMMAND_CENTER_STATE_DIR
 SESSION_NAMES_FILE = COMMAND_CENTER_STATE_DIR / "session-names.json"  # side-car overrides
+# Cap session-name overrides defensively. Annotation prompts and other
+# multi-kilobyte text occasionally end up flowing into the name slot
+# (codex's SQLite `title`, a stray paste, etc.) and a row title that
+# wide breaks the sidebar layout for every session it scrolls past.
+# 120 matches `summarize_session_title`'s self-cap.
+SESSION_NAME_MAX_CHARS = 120
 CONVERSATION_ORDER_FILE = COMMAND_CENTER_STATE_DIR / "conversation-order.json"  # [session_id,...]
 ARCHIVED_CONVERSATIONS_FILE = COMMAND_CENTER_STATE_DIR / "archived-conversations.json"  # [session_id,...]
 PINNED_CONVERSATIONS_FILE = COMMAND_CENTER_STATE_DIR / "pinned-conversations.json"  # [session_id,...]
@@ -5019,12 +5025,37 @@ def _extract_tail_meta(path):
     return meta
 
 
+def _truncate_session_name(name):
+    """Clamp a session-name override to SESSION_NAME_MAX_CHARS. Whitespace is
+    collapsed first so a multi-line paste reads as a single sentence in the
+    sidebar instead of stretching the column or breaking layout."""
+    if name is None:
+        return None
+    s = re.sub(r"\s+", " ", str(name)).strip()
+    if not s:
+        return s
+    if len(s) <= SESSION_NAME_MAX_CHARS:
+        return s
+    return s[: SESSION_NAME_MAX_CHARS - 1].rstrip() + "…"
+
+
 def _load_session_name_overrides():
-    """Load user-set names from the side-car file. Returns {session_id: name}."""
+    """Load user-set names from the side-car file. Returns {session_id: name}.
+
+    Values are truncated to SESSION_NAME_MAX_CHARS on read so that legacy
+    entries (annotation context dumped as a "name") cannot inflate the
+    sidebar even before the next write rewrites the file."""
     try:
-        return json.loads(SESSION_NAMES_FILE.read_text())
+        data = json.loads(SESSION_NAMES_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        k: _truncate_session_name(v)
+        for k, v in data.items()
+        if isinstance(k, str) and v
+    }
 
 
 def _load_conversation_order():
@@ -5473,11 +5504,13 @@ def close_github_issue_with_commit(issue_number, conv):
 
 
 def _save_session_name_override(session_id, name):
-    """Write a user-set name to the side-car file."""
+    """Write a user-set name to the side-car file. Names are clamped to
+    SESSION_NAME_MAX_CHARS so no upstream path can persist a multi-kilobyte
+    "title" that bloats the row and the wire payload."""
     LOG_VIEWER_STATE_DIR.mkdir(parents=True, exist_ok=True)
     current = _load_session_name_overrides()
     if name:
-        current[session_id] = name
+        current[session_id] = _truncate_session_name(name)
     else:
         current.pop(session_id, None)
     SESSION_NAMES_FILE.write_text(json.dumps(current, indent=2))
@@ -5533,6 +5566,11 @@ def rename_session(session_id, name, source="user"):
     if not session_id:
         result["error"] = "missing session_id"
         return result
+    if name:
+        # Clamp before writing through to the JSONL custom-title event,
+        # so a multi-kilobyte paste cannot be picked up by `claude --resume`
+        # as the next session title either.
+        name = _truncate_session_name(name)
 
     cwd = find_session_cwd(session_id)
     status = session_live_status(session_id, cwd)
@@ -12008,10 +12046,13 @@ def find_codex_conversations(
         # — otherwise the ✨ glyph would show on rows where Codex did no
         # summarization.
         codex_ai_title = title if (title and title != first_message) else None
+        # Codex's SQLite `title` is the raw first user message when the
+        # prompt was too short to summarize — for annotation prompts that
+        # can be many kilobytes, so clamp before it becomes the row title.
         display_name = (
             name_overrides.get(sid)
             or (row.get("agent_nickname") or "").strip()
-            or title
+            or _truncate_session_name(title)
             or (first_message[:80] if first_message else None)
         )
         branch = row.get("git_branch") or ""

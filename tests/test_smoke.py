@@ -3073,6 +3073,25 @@ class TestModelPicker(unittest.TestCase):
         self.assertIn("'calc'", js)
         self.assertIn("' · /ctx '", js)
 
+    def test_truncate_session_name_clamps_long_pastes(self):
+        """A row title that's a full annotation context blob would stretch
+        the sidebar and bloat /api/sessions responses; clamp it instead."""
+        for mod in ("server",):
+            sys.modules.pop(mod, None)
+        import server
+        self.assertIsNone(server._truncate_session_name(None))
+        self.assertEqual(server._truncate_session_name(""), "")
+        self.assertEqual(server._truncate_session_name("   "), "")
+        self.assertEqual(server._truncate_session_name("Short title"), "Short title")
+        self.assertEqual(
+            server._truncate_session_name("hello\n\n   world"),
+            "hello world",
+        )
+        long = "Annotation note: " + ("blah " * 4000)
+        clipped = server._truncate_session_name(long)
+        self.assertLessEqual(len(clipped), server.SESSION_NAME_MAX_CHARS)
+        self.assertTrue(clipped.endswith("…"))
+
     def test_parse_conversation_surfaces_compact_boundary(self):
         """The transcript pane should show feedback when `/compact` finishes."""
         for mod in ("server",):
