@@ -12,6 +12,7 @@
 
 import Cocoa
 import WebKit
+import Sparkle
 
 // MARK: - Constants
 
@@ -70,8 +71,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     var loadingLabel: NSTextField!
     var serverProcess: Process?
     var pollTimer: Timer?
+    // Sparkle drives "Check for Updates…" via the appcast at SUFeedURL in
+    // Info.plist. Public EdDSA key (SUPublicEDKey) verifies the DMG signature.
+    // startingUpdater: true means Sparkle will run its scheduled background
+    // check (interval and "automatically check" flag are controlled by the
+    // user via the standard Sparkle update prompt the first time it runs).
+    var updaterController: SPUStandardUpdaterController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        updaterController = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
         buildMenuBar()
         buildWindow()
         bootstrap()
@@ -108,6 +120,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         appMenu.addItem(withTitle: "About CCC",
                         action: #selector(showAbout),
                         keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        // Sparkle's standard updater controller handles validation of the
+        // -checkForUpdates: selector — when it's wired to updaterController
+        // as the target, the menu item auto-disables while a check is in
+        // flight. No keyEquivalent: macOS HIG says updates aren't a hotkey.
+        let updatesItem = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        updatesItem.target = updaterController
+        appMenu.addItem(updatesItem)
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Hide CCC",
                         action: #selector(NSApplication.hide(_:)),
