@@ -3303,6 +3303,84 @@ class TestGroupChatSidecarHelpers(unittest.TestCase):
             self.assertEqual(data2.get("topic"), "hi")
             self.assertIs(data2.get("archived"), False)
 
+    def test_list_group_chats_backfills_uuid_identity(self):
+        """Legacy path-keyed group chats should gain stable UUIDs."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            gcd = pathlib.Path(tmp) / "group-chats"
+            gcd.mkdir()
+            md = gcd / "demo.md"
+            md.write_text("# Group Chat — Demo\n", encoding="utf-8")
+            (gcd / "demo.json").write_text(json.dumps({
+                "session_ids": [],
+                "topic": "Demo",
+                "mode": "topic",
+                "name_map": {},
+                "archived": False,
+            }), encoding="utf-8")
+
+            orig_expanduser = server.os.path.expanduser
+
+            def fake_expanduser(path):
+                if path == "~/.claude/group-chats":
+                    return str(gcd)
+                return orig_expanduser(path)
+
+            with mock.patch.object(server.os.path, "expanduser", side_effect=fake_expanduser):
+                chats = server._list_group_chats(include_archived=False)
+
+            self.assertEqual(len(chats), 1)
+            self.assertRegex(chats[0]["uuid"], r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+            self.assertEqual(chats[0]["id"], chats[0]["uuid"])
+            sidecar = json.loads((gcd / "demo.json").read_text(encoding="utf-8"))
+            self.assertEqual(sidecar["uuid"], chats[0]["uuid"])
+
+    def test_group_chat_header_syncs_sidecar_topic_and_participants(self):
+        """Reader refresh should repair stale markdown headers without
+        touching the message history.
+        """
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            md = pathlib.Path(tmp) / "chat.md"
+            sid = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+            md.write_text(
+                "# Group Chat — empty chat\n"
+                "**Started:** 2026-05-27 Wednesday 11:58:58 PDT\n"
+                "**Mode:** topic\n"
+                "**Participants:** `human`\n"
+                "**Wake-status:**\n"
+                "- (no participants)\n"
+                "---\n\n"
+                "## 2026-05-27 Wednesday 12:07:59 PDT — Human\n\n"
+                "please sync\n",
+                encoding="utf-8",
+            )
+            (pathlib.Path(tmp) / "chat.json").write_text(json.dumps({
+                "session_ids": [sid],
+                "topic": "APIFY sync",
+                "mode": "topic",
+                "name_map": {sid: "Agent One"},
+                "include_human": True,
+            }), encoding="utf-8")
+
+            with mock.patch.object(
+                server,
+                "_group_chat_participant_meta",
+                return_value={"is_live": False, "last_activity": 0},
+            ):
+                server._group_chat_update_header_if_changed(str(md), force_write=True)
+
+            updated = md.read_text(encoding="utf-8")
+            self.assertIn("# Group Chat — APIFY sync", updated)
+            self.assertIn("**Participants:** `Agent One`, `human`", updated)
+            self.assertIn("- `Agent One` (aaaaaaaa): offline", updated)
+            self.assertIn("## 2026-05-27 Wednesday 12:07:59 PDT — Human", updated)
+            self.assertIn("please sync", updated)
+
     def test_message_count_counts_h2_lines(self):
         for mod in ("server", "morning", "morning_store"):
             sys.modules.pop(mod, None)

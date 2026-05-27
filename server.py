@@ -38,6 +38,7 @@ import threading
 import time
 import ssl
 import copy
+import uuid
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -17299,14 +17300,10 @@ def list_spawned_sessions():
     return result
 
 
-def _group_chat_post(path, text):
+def _group_chat_post(path, text, chat_uuid=""):
     """Append a human entry to a group-chat file."""
-    group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
-    try:
-        real_path = os.path.realpath(os.path.expanduser(path))
-    except Exception:
-        return {"ok": False, "error": "forbidden"}
-    if not real_path.startswith(group_chats_dir + os.sep):
+    real_path = _resolve_group_chat_ref(path, chat_uuid)
+    if not real_path:
         return {"ok": False, "error": "forbidden"}
     now = datetime.now()
     day_name = now.strftime("%A")
@@ -17319,19 +17316,20 @@ def _group_chat_post(path, text):
     try:
         with open(real_path, "a", encoding="utf-8") as fh:
             fh.write(entry)
+        sidecar = _load_group_chat_sidecar(real_path)
+        if not sidecar.get("archived"):
+            _update_group_chat_sidecar(real_path, closed_at=None)
+            _register_coordination(real_path)
+        _group_chat_update_header_if_changed(real_path, force_write=True)
         return {"ok": True}
     except OSError as exc:
         return {"ok": False, "error": str(exc)}
 
 
-def _group_chat_read(path):
+def _group_chat_read(path, chat_uuid=""):
     """Read a group-chat file. Returns (result_dict, None) or (None, 'forbidden')."""
-    group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
-    try:
-        real_path = os.path.realpath(os.path.expanduser(path))
-    except Exception:
-        return None, "forbidden"
-    if not (real_path.startswith(group_chats_dir + os.sep) or real_path == group_chats_dir):
+    real_path = _resolve_group_chat_ref(path, chat_uuid)
+    if not real_path:
         return None, "forbidden"
     try:
         _group_chat_update_header_if_changed(real_path)
@@ -17443,6 +17441,7 @@ def _coordinate_sessions(payload):
         return {"ok": False, "error": f"cannot create group-chats dir: {exc}"}
 
     chat_path = os.path.join(group_chats_dir, f"{slug}-{ts}.md")
+    chat_uuid = str(uuid.uuid4())
 
     name_map = {m["session_id"]: m.get("display_name") or m["session_id"]
                 for m in sessions_meta if isinstance(m, dict) and m.get("session_id")}
@@ -17492,10 +17491,12 @@ def _coordinate_sessions(payload):
     try:
         with open(sidecar_path, "w", encoding="utf-8") as fh:
             json.dump({
+                "uuid": chat_uuid,
                 "session_ids": session_ids,
                 "topic": topic,
                 "mode": mode,
                 "name_map": name_map,
+                "include_human": include_human,
                 "started_at": time.time(),
                 "archived": False,
                 "closed_at": None,
@@ -17522,7 +17523,13 @@ def _coordinate_sessions(payload):
 
     _group_chat_update_header_if_changed(chat_path, force_write=True)
     chat_path_tilde = "~/.claude/group-chats/" + f"{slug}-{ts}.md"
-    return {"ok": True, "chat_path": chat_path_tilde, "results": results}
+    return {
+        "ok": True,
+        "chat_path": chat_path_tilde,
+        "id": chat_uuid,
+        "uuid": chat_uuid,
+        "results": results,
+    }
 
 
 def _group_chat_update_header_if_changed(chat_path, force_write=False):
@@ -17550,7 +17557,18 @@ def _group_chat_update_header_if_changed(chat_path, force_write=False):
     session_ids = meta.get("session_ids") or []
     name_map = meta.get("name_map") or {}
 
-    # Build the wake status block
+    boundary_idx = content.find("\n---")
+    if boundary_idx == -1:
+        boundary_idx = content.find("\n## ")
+
+    if boundary_idx != -1:
+        header_part = content[:boundary_idx]
+        rest_part = content[boundary_idx:]
+    else:
+        header_part = content
+        rest_part = ""
+
+    # Build the wake status block.
     wake_status_lines = ["**Wake-status:**"]
     for sid in session_ids:
         label = name_map.get(sid) or sid
@@ -17569,36 +17587,21 @@ def _group_chat_update_header_if_changed(chat_path, force_write=False):
     if not session_ids:
         wake_status_lines.append("- (no participants)")
 
-    wake_status_block = "\n".join(wake_status_lines)
+    started_line = ""
+    for line in header_part.splitlines():
+        if line.startswith("**Started:**"):
+            started_line = line
+            break
 
-    boundary_idx = content.find("\n---")
-    if boundary_idx == -1:
-        boundary_idx = content.find("\n## ")
-
-    if boundary_idx != -1:
-        header_part = content[:boundary_idx]
-        rest_part = content[boundary_idx:]
-    else:
-        header_part = content
-        rest_part = ""
-
-    if "**Wake-status:**" in header_part:
-        # Find where it starts
-        start_idx = header_part.find("**Wake-status:**")
-        # Replace from start_idx to the end of header_part
-        header_part = header_part[:start_idx].rstrip() + "\n" + wake_status_block
-    else:
-        # Append it after **Participants:** line
-        parts = header_part.split("\n")
-        inserted = False
-        for i, line in enumerate(parts):
-            if line.startswith("**Participants:**"):
-                parts.insert(i + 1, wake_status_block)
-                inserted = True
-                break
-        if not inserted:
-            parts.append(wake_status_block)
-        header_part = "\n".join(parts)
+    topic = (meta.get("topic") or "").strip()
+    mode = (meta.get("mode") or "topic").strip() or "topic"
+    header_lines = [f"# Group Chat — {topic}" if topic else "# Group Chat"]
+    if started_line:
+        header_lines.append(started_line)
+    header_lines.append(f"**Mode:** {mode}")
+    header_lines.append(f"**Participants:** {_group_chat_participants_str(meta, header_part)}")
+    header_lines.extend(wake_status_lines)
+    header_part = "\n".join(header_lines)
 
     new_content = header_part.rstrip() + "\n" + rest_part.lstrip()
 
@@ -17620,14 +17623,10 @@ def _group_chat_update_header_if_changed(chat_path, force_write=False):
             pass
 
 
-def _group_chat_nudge(path):
+def _group_chat_nudge(path, chat_uuid=""):
     """Re-inject /group-chat into participant sessions, skipping the last writer."""
-    group_chats_dir = os.path.realpath(os.path.expanduser("~/.claude/group-chats"))
-    try:
-        real_path = os.path.realpath(os.path.expanduser(path))
-    except Exception:
-        return {"ok": False, "error": "forbidden"}
-    if not real_path.startswith(group_chats_dir + os.sep):
+    real_path = _resolve_group_chat_ref(path, chat_uuid)
+    if not real_path:
         return {"ok": False, "error": "forbidden"}
     sidecar_path = real_path[:-3] + ".json" if real_path.endswith(".md") else real_path + ".json"
     try:
@@ -17789,6 +17788,50 @@ def _update_group_chat_sidecar(chat_path: str, **fields) -> bool:
         return True
     except OSError:
         return False
+
+
+def _valid_group_chat_uuid(value: str) -> bool:
+    """Return True when value is a canonical UUID string."""
+    try:
+        return str(uuid.UUID(str(value or "").strip())) == str(value or "").strip().lower()
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _ensure_group_chat_uuid(chat_path: str, meta: dict | None = None) -> str:
+    """Return a stable UUID for a group chat, backfilling old sidecars.
+
+    Early group-chat sidecars were identified only by their markdown path.
+    Backfilling a UUID lets the UI key rows by identity even when the topic
+    changes or two chats share the same title.
+    """
+    data = meta if isinstance(meta, dict) else _load_group_chat_sidecar(chat_path)
+    existing = str((data or {}).get("uuid") or (data or {}).get("id") or "").strip().lower()
+    if _valid_group_chat_uuid(existing):
+        if (data or {}).get("uuid") != existing:
+            _update_group_chat_sidecar(chat_path, uuid=existing)
+        return existing
+    generated = str(uuid.uuid4())
+    _update_group_chat_sidecar(chat_path, uuid=generated)
+    return generated
+
+
+def _group_chat_include_human(meta: dict, header_part: str = "") -> bool:
+    """Infer whether the human is a participant for legacy sidecars."""
+    if isinstance(meta, dict) and "include_human" in meta:
+        return bool(meta.get("include_human"))
+    m = re.search(r"^\*\*Participants:\*\*(.*)$", header_part or "", re.MULTILINE)
+    if m and re.search(r"\bhuman\b", m.group(1), re.IGNORECASE):
+        return True
+    return False
+
+
+def _group_chat_participants_str(meta: dict, header_part: str = "") -> str:
+    name_map = (meta or {}).get("name_map") or {}
+    names = [name_map.get(sid) or sid for sid in ((meta or {}).get("session_ids") or [])]
+    if _group_chat_include_human(meta or {}, header_part):
+        names.append("human")
+    return ", ".join(f"`{n}`" for n in names) or "`human`"
 
 
 def _group_chat_message_count(md_path: str) -> int:
@@ -18065,7 +18108,7 @@ def _group_chat_compute_waiting(real_path: str, session_ids: list, name_map: dic
 def _list_group_chats(include_archived: bool = False, only_archived: bool = False) -> list:
     """Scan ~/.claude/group-chats/ and build a list of chat entries.
 
-    Each entry: {path, path_tilde, topic, mode, session_ids, status,
+    Each entry: {id, uuid, path, path_tilde, topic, mode, session_ids, status,
     started_at, closed_at, archived_at, last_mtime, last_activity,
     message_count}. Status is one of "active" / "closed" / "archived":
       - active = .md exists AND chat is in _active_coordinations dict.
@@ -18119,6 +18162,7 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
         last_activity = (active_meta.get(md_path) or {}).get("last_activity") or stat.st_mtime
         sids = meta.get("session_ids") or []
         nm = meta.get("name_map") or {}
+        chat_uuid = _ensure_group_chat_uuid(md_path, meta)
         # Per-participant status snapshot (live, last activity, WIP).
         # Keyed by full session_id so the UI can match it against the
         # name_map / participants list it already renders.
@@ -18128,6 +18172,8 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
         # the watcher would actually do.
         waiting = _group_chat_compute_waiting(md_path, sids, nm)
         out.append({
+            "id": chat_uuid,
+            "uuid": chat_uuid,
             "path": md_path,
             "path_tilde": "~/.claude/group-chats/" + os.path.basename(md_path),
             "topic": meta.get("topic", ""),
@@ -18188,12 +18234,36 @@ def _resolve_group_chat_path(raw: str) -> str:
     return real_path
 
 
-def _group_chat_set_archived(raw_path: str, archived: bool) -> dict:
+def _resolve_group_chat_ref(raw_path: str = "", raw_uuid: str = "") -> str:
+    """Resolve a group chat by path or UUID to its canonical markdown path."""
+    real_path = _resolve_group_chat_path(raw_path)
+    if real_path:
+        return real_path
+    chat_uuid = str(raw_uuid or "").strip().lower()
+    if not _valid_group_chat_uuid(chat_uuid):
+        return ""
+    group_chats_dir = os.path.expanduser("~/.claude/group-chats")
+    try:
+        fnames = os.listdir(group_chats_dir)
+    except OSError:
+        return ""
+    for fname in fnames:
+        if not fname.endswith(".json"):
+            continue
+        md_path = os.path.join(group_chats_dir, fname[:-5] + ".md")
+        meta = _load_group_chat_sidecar(md_path)
+        existing = str(meta.get("uuid") or meta.get("id") or "").strip().lower()
+        if existing == chat_uuid and os.path.exists(md_path):
+            return os.path.realpath(md_path)
+    return ""
+
+
+def _group_chat_set_archived(raw_path: str, archived: bool, raw_uuid: str = "") -> dict:
     """Flip the archived flag on a chat sidecar. Drops the chat from the
     active watcher dict on archive (so it stops getting nudged). Returns
     the same shape as other group-chat handlers: {ok, error?}.
     """
-    real_path = _resolve_group_chat_path(raw_path)
+    real_path = _resolve_group_chat_ref(raw_path, raw_uuid)
     if not real_path:
         return {"ok": False, "error": "forbidden"}
     if not os.path.exists(real_path):
@@ -18250,7 +18320,7 @@ def _group_chat_log_system(real_path: str, message: str) -> None:
             entry["mtime"] = new_mtime
 
 
-def _group_chat_clear(raw_path: str) -> dict:
+def _group_chat_clear(raw_path: str, raw_uuid: str = "") -> dict:
     """Wipe message history from a chat: rewrite the .md with a fresh
     header (topic / Started / Mode / Participants), append a system
     log line marking the clear, then nudge all participants so they
@@ -18261,7 +18331,7 @@ def _group_chat_clear(raw_path: str) -> dict:
     chat; Clear is the equivalent of erasing the whiteboard with
     everyone still in the room.
     """
-    real_path = _resolve_group_chat_path(raw_path)
+    real_path = _resolve_group_chat_ref(raw_path, raw_uuid)
     if not real_path:
         return {"ok": False, "error": "forbidden"}
     if not os.path.exists(real_path):
@@ -18270,10 +18340,12 @@ def _group_chat_clear(raw_path: str) -> dict:
     sidecar = _load_group_chat_sidecar(real_path)
     topic = sidecar.get("topic") or ""
     mode = sidecar.get("mode") or "topic"
-    name_map = sidecar.get("name_map") or {}
-    session_ids = sidecar.get("session_ids") or []
-    participant_names = [name_map.get(sid) or sid for sid in session_ids]
-    participants_str = ", ".join(f"`{n}`" for n in participant_names) or "`human`"
+    try:
+        with open(real_path, "r", encoding="utf-8") as fh:
+            existing_header = fh.read(4000)
+    except OSError:
+        existing_header = ""
+    participants_str = _group_chat_participants_str(sidecar, existing_header)
 
     # Count existing messages so the system log can record what was wiped.
     prior_count = _group_chat_message_count(real_path)
@@ -18316,14 +18388,13 @@ def _group_chat_clear(raw_path: str) -> dict:
     return {"ok": True, "wiped": prior_count, "nudge": nudge}
 
 
-def _group_chat_rename(raw_path: str, new_topic: str) -> dict:
+def _group_chat_rename(raw_path: str, new_topic: str, raw_uuid: str = "") -> dict:
     """Rename a chat by updating the sidecar's `topic` field. The chat
-    file's header line is left as-is (rewriting it would require parsing
-    every appended message); the UI reads `topic` from the sidecar so
-    the new name appears immediately. New posts to the chat will use
-    the updated topic in their inject text.
+    file header is repaired from the sidecar without touching appended
+    messages. New posts to the chat will use the updated topic in their
+    inject text.
     """
-    real_path = _resolve_group_chat_path(raw_path)
+    real_path = _resolve_group_chat_ref(raw_path, raw_uuid)
     if not real_path:
         return {"ok": False, "error": "forbidden"}
     if not os.path.exists(real_path):
@@ -18344,17 +18415,18 @@ def _group_chat_rename(raw_path: str, new_topic: str) -> dict:
     elif not old_topic:
         _group_chat_log_system(real_path, f"set topic to `{new_topic}`")
 
+    _group_chat_update_header_if_changed(real_path, force_write=True)
     return {"ok": True, "topic": new_topic}
 
 
-def _group_chat_remove_participant(raw_path: str, session_id: str) -> dict:
+def _group_chat_remove_participant(raw_path: str, session_id: str, raw_uuid: str = "") -> dict:
     """Drop a session from an existing chat: remove from session_ids /
     name_map. The session's running /group-chat skill will keep cycling
     until it self-leaves (or is killed) — we just stop nudging it via
     the watcher because nudge reads session_ids fresh from the sidecar.
     Idempotent — removing an absent session is a no-op success.
     """
-    real_path = _resolve_group_chat_path(raw_path)
+    real_path = _resolve_group_chat_ref(raw_path, raw_uuid)
     if not real_path:
         return {"ok": False, "error": "forbidden"}
     if not os.path.exists(real_path):
@@ -18380,16 +18452,17 @@ def _group_chat_remove_participant(raw_path: str, session_id: str) -> dict:
 
     removed_label = sidecar.get("name_map", {}).get(sid) or sid
     _group_chat_log_system(real_path, f"removed `{removed_label}` ({sid[:8]})")
+    _group_chat_update_header_if_changed(real_path, force_write=True)
 
     return {"ok": True, "session_id": sid, "was_participant": True}
 
 
-def _group_chat_add_participant(raw_path: str, session_id: str, display_name: str = "") -> dict:
+def _group_chat_add_participant(raw_path: str, session_id: str, display_name: str = "", raw_uuid: str = "") -> dict:
     """Add a session to an existing chat: append to sidecar's session_ids /
     name_map, then inject /group-chat into the session so it joins live.
     Idempotent — re-adding an existing participant is a no-op success.
     """
-    real_path = _resolve_group_chat_path(raw_path)
+    real_path = _resolve_group_chat_ref(raw_path, raw_uuid)
     if not real_path:
         return {"ok": False, "error": "forbidden"}
     if not os.path.exists(real_path):
@@ -18428,6 +18501,7 @@ def _group_chat_add_participant(raw_path: str, session_id: str, display_name: st
         inject_result = _inject_text_into_session(sid, text)
         added_label = name_map.get(sid) or display_name or sid
         _group_chat_log_system(real_path, f"added `{added_label}` ({sid[:8]})")
+    _group_chat_update_header_if_changed(real_path, force_write=True)
 
     return {
         "ok": True,
@@ -24730,10 +24804,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/group-chat/read":
             qs_params = urllib.parse.parse_qs(parsed.query)
             chat_path = (qs_params.get("path") or [""])[0]
-            if not chat_path:
-                self.send_json({"ok": False, "error": "missing path"})
+            chat_uuid = (qs_params.get("id") or qs_params.get("uuid") or [""])[0]
+            if not chat_path and not chat_uuid:
+                self.send_json({"ok": False, "error": "missing path or id"})
                 return
-            result, forbidden = _group_chat_read(chat_path)
+            result, forbidden = _group_chat_read(chat_path, chat_uuid)
             if forbidden:
                 self.send_json({"ok": False, "error": "forbidden"}, 403)
             else:
@@ -26676,11 +26751,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
             text = (payload.get("text") or "").strip()
-            if not chat_path or not text:
-                self.send_json({"ok": False, "error": "missing path or text"})
+            if (not chat_path and not chat_uuid) or not text:
+                self.send_json({"ok": False, "error": "missing path/id or text"})
                 return
-            result = _group_chat_post(chat_path, text)
+            result = _group_chat_post(chat_path, text, chat_uuid)
             if not result.get("ok") and result.get("error") == "forbidden":
                 self.send_json(result, 403)
             else:
@@ -26693,10 +26769,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
-            if not chat_path:
-                self.send_json({"ok": False, "error": "missing path"})
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
+            if not chat_path and not chat_uuid:
+                self.send_json({"ok": False, "error": "missing path or id"})
                 return
-            result = _group_chat_nudge(chat_path)
+            result = _group_chat_nudge(chat_path, chat_uuid)
             if not result.get("ok") and result.get("error") == "forbidden":
                 self.send_json(result, 403)
             else:
@@ -26713,10 +26790,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
-            if not chat_path:
-                self.send_json({"ok": False, "error": "missing path"})
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
+            if not chat_path and not chat_uuid:
+                self.send_json({"ok": False, "error": "missing path or id"})
                 return
-            result = _group_chat_set_archived(chat_path, True)
+            result = _group_chat_set_archived(chat_path, True, chat_uuid)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":
@@ -26735,10 +26813,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
-            if not chat_path:
-                self.send_json({"ok": False, "error": "missing path"})
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
+            if not chat_path and not chat_uuid:
+                self.send_json({"ok": False, "error": "missing path or id"})
                 return
-            result = _group_chat_set_archived(chat_path, False)
+            result = _group_chat_set_archived(chat_path, False, chat_uuid)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":
@@ -26756,12 +26835,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
             session_id = (payload.get("session_id") or "").strip()
             display_name = (payload.get("display_name") or "").strip()
-            if not chat_path or not session_id:
-                self.send_json({"ok": False, "error": "missing path or session_id"})
+            if (not chat_path and not chat_uuid) or not session_id:
+                self.send_json({"ok": False, "error": "missing path/id or session_id"})
                 return
-            result = _group_chat_add_participant(chat_path, session_id, display_name)
+            result = _group_chat_add_participant(chat_path, session_id, display_name, chat_uuid)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":
@@ -26780,10 +26860,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
-            if not chat_path:
-                self.send_json({"ok": False, "error": "missing path"})
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
+            if not chat_path and not chat_uuid:
+                self.send_json({"ok": False, "error": "missing path or id"})
                 return
-            result = _group_chat_clear(chat_path)
+            result = _group_chat_clear(chat_path, chat_uuid)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":
@@ -26791,8 +26872,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json(result)
         elif path == "/api/group-chats/rename":
-            # Rename a group chat's topic. Updates the sidecar; the chat
-            # file's header isn't rewritten (it's append-only history).
+            # Rename a group chat's topic. Updates the sidecar and repairs
+            # the markdown header while leaving appended history intact.
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
             try:
@@ -26800,11 +26881,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
             new_topic = (payload.get("topic") or "").strip()
-            if not chat_path or not new_topic:
-                self.send_json({"ok": False, "error": "missing path or topic"})
+            if (not chat_path and not chat_uuid) or not new_topic:
+                self.send_json({"ok": False, "error": "missing path/id or topic"})
                 return
-            result = _group_chat_rename(chat_path, new_topic)
+            result = _group_chat_rename(chat_path, new_topic, chat_uuid)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":
@@ -26824,11 +26906,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 payload = {}
             chat_path = (payload.get("path") or "").strip()
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
             session_id = (payload.get("session_id") or "").strip()
-            if not chat_path or not session_id:
-                self.send_json({"ok": False, "error": "missing path or session_id"})
+            if (not chat_path and not chat_uuid) or not session_id:
+                self.send_json({"ok": False, "error": "missing path/id or session_id"})
                 return
-            result = _group_chat_remove_participant(chat_path, session_id)
+            result = _group_chat_remove_participant(chat_path, session_id, chat_uuid)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":
