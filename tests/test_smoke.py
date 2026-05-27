@@ -252,6 +252,19 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("cl-question-option-btn", app_css)
         self.assertIn("cl-question-option-desc", app_css)
 
+    def test_live_refresh_has_active_group_chat_pill(self):
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        index_html = pathlib.Path(PROJECT_ROOT, "static", "index.html").read_text(encoding="utf-8")
+        server_py = pathlib.Path(PROJECT_ROOT, "server.py").read_text(encoding="utf-8")
+        self.assertIn("activeGroupChatPill", index_html)
+        self.assertIn("Active Group chat", index_html)
+        self.assertIn(".active-group-chat-pill", app_css)
+        self.assertIn("function updateActiveGroupChatPill", app_js)
+        self.assertIn("function openActiveGroupChatPillTarget", app_js)
+        self.assertIn("orchestrator_timer_active", app_js)
+        self.assertIn("orchestrator_last_trigger_at", server_py)
+
 
 class TestPrStateResolution(unittest.TestCase):
     def setUp(self):
@@ -3380,6 +3393,125 @@ class TestGroupChatSidecarHelpers(unittest.TestCase):
             self.assertIn("- `Agent One` (aaaaaaaa): offline", updated)
             self.assertIn("## 2026-05-27 Wednesday 12:07:59 PDT — Human", updated)
             self.assertIn("please sync", updated)
+
+    def test_group_chat_header_rewrite_preserves_pre_boundary_history(self):
+        """Header repair must preserve legacy text before the first separator."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            md = pathlib.Path(tmp) / "chat.md"
+            sid = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+            md.write_text(
+                "# Group Chat — empty chat\n"
+                "**Started:** 2026-05-27 Wednesday 11:58:58 PDT\n"
+                "**Mode:** topic\n"
+                "**Participants:** `human`\n"
+                "**Wake-status:**\n"
+                "- (no participants)\n"
+                "Agent pre-history line one\n"
+                "- Agent pre-history bullet\n"
+                "> _2026-05-27 12:00:00 PDT — system: created chat_\n"
+                "---\n\n"
+                "## 2026-05-27 Wednesday 12:07:59 PDT — Human\n\n"
+                "please sync\n",
+                encoding="utf-8",
+            )
+            (pathlib.Path(tmp) / "chat.json").write_text(json.dumps({
+                "session_ids": [sid],
+                "topic": "APIFY sync",
+                "mode": "topic",
+                "name_map": {sid: "Agent One"},
+                "include_human": True,
+            }), encoding="utf-8")
+
+            with mock.patch.object(
+                server,
+                "_group_chat_participant_meta",
+                return_value={"is_live": False, "last_activity": 0},
+            ):
+                server._group_chat_update_header_if_changed(str(md), force_write=True)
+
+            updated = md.read_text(encoding="utf-8")
+            self.assertIn("# Group Chat — APIFY sync", updated)
+            self.assertIn("Agent pre-history line one", updated)
+            self.assertIn("- Agent pre-history bullet", updated)
+            self.assertIn("system: created chat", updated)
+            self.assertIn("## 2026-05-27 Wednesday 12:07:59 PDT — Human", updated)
+            self.assertIn("please sync", updated)
+
+    def test_group_chat_header_rewrite_preserves_system_log_without_boundary(self):
+        """Creation logs can exist before any message separator is present."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            md = pathlib.Path(tmp) / "chat.md"
+            md.write_text(
+                "# Group Chat — empty chat\n"
+                "**Started:** 2026-05-27 Wednesday 11:58:58 PDT\n"
+                "**Mode:** topic\n"
+                "**Participants:** `human`\n"
+                "> _2026-05-27 12:00:00 PDT — system: created empty chat_\n",
+                encoding="utf-8",
+            )
+            (pathlib.Path(tmp) / "chat.json").write_text(json.dumps({
+                "session_ids": [],
+                "topic": "APIFY sync",
+                "mode": "topic",
+                "name_map": {},
+                "include_human": True,
+            }), encoding="utf-8")
+
+            server._group_chat_update_header_if_changed(str(md), force_write=True)
+
+            updated = md.read_text(encoding="utf-8")
+            self.assertIn("**Wake-status:**", updated)
+            self.assertIn("- (no participants)", updated)
+            self.assertIn("system: created empty chat", updated)
+
+    def test_group_chat_nudge_only_reminds_once_per_latest_post(self):
+        """Repeated nudges for one chat turn must not flood recipients."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as tmp:
+            md = pathlib.Path(tmp) / "chat.md"
+            sid_a = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+            sid_b = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+            md.write_text(
+                "# Group Chat - Demo\n"
+                "## 2026-05-27 Wednesday 12:07:59 PDT — aaaaaaaa: Agent A\n\n"
+                "I need another agent to review this.\n",
+                encoding="utf-8",
+            )
+            (pathlib.Path(tmp) / "chat.json").write_text(json.dumps({
+                "session_ids": [sid_a, sid_b],
+                "topic": "Demo",
+                "mode": "topic",
+                "name_map": {sid_a: "Agent A", sid_b: "Agent B"},
+                "include_human": True,
+            }), encoding="utf-8")
+
+            with mock.patch.object(server, "_resolve_group_chat_ref", return_value=str(md)), \
+                    mock.patch.object(server, "_inject_text_into_session", return_value={"ok": True}) as inject:
+                first = server._group_chat_nudge(str(md))
+                second = server._group_chat_nudge(str(md))
+                md.write_text(
+                    md.read_text(encoding="utf-8")
+                    + "## 2026-05-27 Wednesday 12:08:30 PDT — Human\n\n"
+                    + "Agent A, please follow up.\n",
+                    encoding="utf-8",
+                )
+                third = server._group_chat_nudge(str(md))
+
+            self.assertTrue(first["ok"])
+            self.assertTrue(second["ok"])
+            self.assertEqual(second.get("skipped"), "already reminded")
+            self.assertTrue(third["ok"])
+            self.assertEqual(inject.call_count, 2)
+            self.assertEqual(inject.call_args_list[0].args[0], sid_b)
+            self.assertEqual(inject.call_args_list[1].args[0], sid_a)
 
     def test_message_count_counts_h2_lines(self):
         for mod in ("server", "morning", "morning_store"):

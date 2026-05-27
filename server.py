@@ -17532,6 +17532,65 @@ def _coordinate_sessions(payload):
     }
 
 
+def _first_group_chat_content_boundary(content: str) -> int:
+    """Return the first separator/message marker after the managed header."""
+    positions = [idx for marker in ("\n---", "\n## ") if (idx := content.find(marker)) != -1]
+    return min(positions) if positions else -1
+
+
+def _is_group_chat_wake_status_line(line: str) -> bool:
+    """Return True for lines written by the managed wake-status block."""
+    if line == "- (no participants)":
+        return True
+    return bool(re.match(r"^- `.*` \([0-9a-fA-F]{8}\): ", line))
+
+
+def _split_group_chat_header_for_rewrite(content: str) -> tuple[str, str, str]:
+    """Split chat markdown into managed header, pre-boundary text, and body.
+
+    Older chat files can have agent/system text before the first message
+    separator. Header repair must not treat that text as disposable header.
+    """
+    boundary_idx = _first_group_chat_content_boundary(content)
+    if boundary_idx != -1:
+        header_candidate = content[:boundary_idx]
+        rest_part = content[boundary_idx:]
+    else:
+        header_candidate = content
+        rest_part = ""
+
+    lines = header_candidate.splitlines()
+    idx = 0
+    if idx < len(lines) and lines[idx].startswith("# Group Chat"):
+        idx += 1
+
+    while idx < len(lines):
+        line = lines[idx]
+        if not line.strip():
+            idx += 1
+            continue
+        if (
+            line.startswith("**Started:**")
+            or line.startswith("**Mode:**")
+            or line.startswith("**Participants:**")
+        ):
+            idx += 1
+            continue
+        if line.startswith("**Wake-status:**"):
+            idx += 1
+            while idx < len(lines):
+                wake_line = lines[idx]
+                if not wake_line.strip() or _is_group_chat_wake_status_line(wake_line):
+                    idx += 1
+                    continue
+                break
+            continue
+        break
+
+    preserved_part = "\n".join(lines[idx:]).strip()
+    return header_candidate, preserved_part, rest_part
+
+
 def _group_chat_update_header_if_changed(chat_path, force_write=False):
     """Read the chat markdown file, compute the current wake status of all
     agent participants, and update the markdown header if it differs from
@@ -17557,16 +17616,7 @@ def _group_chat_update_header_if_changed(chat_path, force_write=False):
     session_ids = meta.get("session_ids") or []
     name_map = meta.get("name_map") or {}
 
-    boundary_idx = content.find("\n---")
-    if boundary_idx == -1:
-        boundary_idx = content.find("\n## ")
-
-    if boundary_idx != -1:
-        header_part = content[:boundary_idx]
-        rest_part = content[boundary_idx:]
-    else:
-        header_part = content
-        rest_part = ""
+    header_part, preserved_part, rest_part = _split_group_chat_header_for_rewrite(content)
 
     # Build the wake status block.
     wake_status_lines = ["**Wake-status:**"]
@@ -17603,7 +17653,12 @@ def _group_chat_update_header_if_changed(chat_path, force_write=False):
     header_lines.extend(wake_status_lines)
     header_part = "\n".join(header_lines)
 
-    new_content = header_part.rstrip() + "\n" + rest_part.lstrip()
+    content_parts = [header_part.rstrip()]
+    if preserved_part:
+        content_parts.append(preserved_part)
+    if rest_part.strip():
+        content_parts.append(rest_part.lstrip())
+    new_content = "\n".join(content_parts) + "\n"
 
     if force_write or new_content != content:
         try:
@@ -17657,6 +17712,7 @@ def _group_chat_nudge(path, chat_uuid=""):
     #   "## <ts> — Human" (human posts via the reader's input bar)
     exclude_sid = None
     only_sid = None
+    reminder_key = ""
     try:
         with open(real_path, "r", encoding="utf-8") as fh:
             content = fh.read()
@@ -17672,14 +17728,24 @@ def _group_chat_nudge(path, chat_uuid=""):
             r'^##\s+.+?—\s+(?:([0-9a-fA-F]{8})\b|(Human)\b)',
             re.MULTILINE,
         )
-        authors = [(m.group(1) or m.group(2)) for m in author_pat.finditer(tail)]
-        if not authors:
+        matches = list(author_pat.finditer(content))
+        if not matches:
             # No author has posted in the recent window — only system
             # nudges. Don't fire; there's nothing for participants to
             # respond to and another ping just feeds the loop. This is
             # the dominant case when a chat goes quiet for an extended
             # period; the watcher's idle-timeout will eventually drop it.
             return {"ok": True, "results": [], "skipped": "no recent author"}
+        tail_start = max(0, len(content) - len(tail))
+        authors = [
+            (m.group(1) or m.group(2))
+            for m in matches
+            if m.start() >= tail_start
+        ]
+        if not authors:
+            return {"ok": True, "results": [], "skipped": "no recent author"}
+        last_match = matches[-1]
+        reminder_key = f"{len(matches)}:{last_match.group(0).strip()}"
         last = authors[-1]
         if last == "Human":
             # Find the most recent non-Human author before this turn.
@@ -17701,6 +17767,7 @@ def _group_chat_nudge(path, chat_uuid=""):
 
     results = []
     pinged_labels = []
+    target_sids = []
     for sid in session_ids:
         # only_sid wins when set — Human just replied and we want to
         # nudge only the specific agent the reply is most likely for.
@@ -17710,6 +17777,23 @@ def _group_chat_nudge(path, chat_uuid=""):
         if sid == exclude_sid:
             results.append({"session_id": sid, "ok": True, "skipped": "last writer"})
             continue
+        target_sids.append(sid)
+
+    if reminder_key and target_sids:
+        with _coord_lock:
+            latest_meta = _load_group_chat_sidecar(real_path)
+            if latest_meta.get("last_reminder_key") == reminder_key:
+                for sid in target_sids:
+                    results.append({"session_id": sid, "ok": True, "skipped": "already reminded"})
+                return {"ok": True, "results": results, "skipped": "already reminded"}
+            _update_group_chat_sidecar(
+                real_path,
+                last_reminder_key=reminder_key,
+                last_reminder_at=time.time(),
+                last_reminder_targets=[sid[:8] for sid in target_sids],
+            )
+
+    for sid in target_sids:
         text = _group_chat_inject_text(real_path, topic, mode, sid)
         r = _inject_text_into_session(sid, text)
         results.append({"session_id": sid, "ok": bool(r.get("ok")), "error": r.get("error", "")})
@@ -17744,6 +17828,7 @@ def _group_chat_nudge(path, chat_uuid=""):
 #     None while still active. Falls back to .md mtime if the watcher missed it.
 #   - archived: explicit "stop showing in In Group Chat" flag (default False).
 #   - archived_at: unix ts the user pressed Archive (None if never archived).
+#   - last_reminder_key: latest real chat post that already received a reminder.
 # Both helpers are best-effort: missing files / corrupt JSON return {} rather
 # than raising, so a hand-edited or partially-written sidecar can't take the
 # whole list endpoint down.
@@ -18110,7 +18195,8 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
 
     Each entry: {id, uuid, path, path_tilde, topic, mode, session_ids, status,
     started_at, closed_at, archived_at, last_mtime, last_activity,
-    message_count}. Status is one of "active" / "closed" / "archived":
+    orchestrator_timer_active, orchestrator_last_trigger_at, message_count}.
+    Status is one of "active" / "closed" / "archived":
       - active = .md exists AND chat is in _active_coordinations dict.
       - closed = sidecar present, archived flag falsy, NOT in _active_coordinations.
       - archived = sidecar's archived flag is true.
@@ -18159,7 +18245,14 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
         closed_at = meta.get("closed_at")
         if status == "closed" and not closed_at:
             closed_at = stat.st_mtime
-        last_activity = (active_meta.get(md_path) or {}).get("last_activity") or stat.st_mtime
+        active_entry = active_meta.get(md_path) or {}
+        last_activity = active_entry.get("last_activity") or stat.st_mtime
+        last_nudge_at = active_entry.get("last_nudge") or 0
+        last_reminder_at = meta.get("last_reminder_at") or 0
+        try:
+            orchestrator_last_trigger_at = max(float(last_nudge_at or 0), float(last_reminder_at or 0))
+        except (TypeError, ValueError):
+            orchestrator_last_trigger_at = last_nudge_at or last_reminder_at or 0
         sids = meta.get("session_ids") or []
         nm = meta.get("name_map") or {}
         chat_uuid = _ensure_group_chat_uuid(md_path, meta)
@@ -18189,6 +18282,11 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
             "archived_at": meta.get("archived_at"),
             "last_mtime": stat.st_mtime,
             "last_activity": last_activity,
+            "orchestrator_timer_active": status == "active",
+            "orchestrator_last_nudge_at": last_nudge_at,
+            "orchestrator_last_trigger_at": orchestrator_last_trigger_at,
+            "last_reminder_at": last_reminder_at,
+            "last_reminder_targets": meta.get("last_reminder_targets") or [],
             "message_count": _group_chat_message_count(md_path),
             "participant_meta": participant_meta,
             "last_author_hash": waiting["last_author_hash"],
