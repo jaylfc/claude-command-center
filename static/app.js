@@ -302,6 +302,15 @@
       // Current template: "Fix issue #N — {title}\n\nRun `gh issue view N` …"
       .replace(/^\s*Fix issue #\d+\s*(?:—|-)\s*/i, '')
       .replace(/\n+Run `gh issue view \d+`[^\n]*(title may be truncated\)\.?)?\s*$/i, '')
+      // Slash-command markup Claude Code injects into user messages
+      // (`<command-name>/foo</command-name> <command-message>foo</command-message>
+      // <command-args>bar</command-args>`). Collapse to `/foo bar` so the
+      // sticky-header earlier-ask slot doesn't show raw XML-like tags.
+      .replace(
+        /<command-name>([^<]*)<\/command-name>\s*<command-message>[^<]*<\/command-message>\s*<command-args>([^<]*)<\/command-args>/g,
+        (_, name, args) => (name + (args ? ' ' + args : '')).trim()
+      )
+      .replace(/<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/g, '')
       .trim();
   }
 
@@ -7110,9 +7119,31 @@
     }
   }
 
+  // Tag rendered blockquotes whose first text line is "<ts> — system: …" so
+  // CSS can mute them. These are the orchestrator's lifecycle log entries
+  // (pinged, removed, re-injected) that get appended to the prior message
+  // instead of being their own heading — without this hook they read at the
+  // same weight as real conversation.
+  function markSystemBlockquotes(html) {
+    if (!html || html.indexOf('<blockquote') === -1) return html;
+    return html.replace(/<blockquote\b([^>]*)>([\s\S]*?)<\/blockquote>/g, (full, attrs, inner) => {
+      const flat = inner.replace(/<[^>]+>/g, '').trim();
+      if (!/—\s*system[:\s]/i.test(flat)) return full;
+      const cls = / class="([^"]*)"/.exec(attrs);
+      const newAttrs = cls
+        ? attrs.replace(/ class="([^"]*)"/, ' class="$1 gc-system-note"')
+        : attrs + ' class="gc-system-note"';
+      return `<blockquote${newAttrs}>${inner}</blockquote>`;
+    });
+  }
+
   function renderGroupChatMarkdown(content) {
     const text = String(content || '');
-    const matches = Array.from(text.matchAll(/^##\s+(.+?—\s+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b).*)$/gm));
+    // Speaker headings come in three flavors: participant hash (8 hex),
+    // "Human", or "system" (lifecycle entries the orchestrator appends).
+    // Capturing all three lets us style system lines without scattering
+    // them through the previous participant's message body.
+    const matches = Array.from(text.matchAll(/^##\s+(.+?—\s+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b|system(?::|\b)).*)$/gm));
 
     let firstSpeaker = '';
     let lastSpeaker = '';
@@ -7144,17 +7175,20 @@
       const parts = heading.split(/\s+—\s+/);
       const when = parts.length > 1 ? parts.shift() : '';
       const speaker = parts.length ? parts.join(' — ') : heading;
+      const isSystem = /^\s*system\b/i.test(speaker);
 
-      if (i === 0) firstSpeaker = speaker;
-      if (i === matches.length - 1) lastSpeaker = speaker;
+      if (!isSystem) {
+        if (!firstSpeaker) firstSpeaker = speaker;
+        lastSpeaker = speaker;
+      }
 
-      html += '<article class="gc-message">'
+      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + '">'
         + '<div class="gc-message-meta">'
           + '<span class="gc-message-speaker">' + escapeHtml(speaker) + '</span>'
-          + (when ? '<span class="gc-message-time">' + escapeHtml(when) + '</span>' : '')
+          + (when ? '<span class="gc-message-time">' + gcTimeChip(when) + '</span>' : '')
         + '</div>'
         + '<div class="gc-message-body assistant-text">'
-          + (body ? renderMarkdown(body) : '<em class="gc-message-empty">(no text)</em>')
+          + (body ? markSystemBlockquotes(renderMarkdown(body)) : '<em class="gc-message-empty">(no text)</em>')
         + '</div>'
       + '</article>';
     }
@@ -7542,22 +7576,40 @@
       }
     }
 
+    // Look up the friendly name for a participant hash. Returns the bare
+    // string (caller is responsible for escaping); use renderNameHtml when
+    // emitting into HTML so the hash gets shown as a secondary chip.
     const renderName = (hash) => {
       if (!hash) return 'None';
-      if (hash.toLowerCase() === 'human' || hash === true) return 'Human';
+      if (hash === true || String(hash).toLowerCase() === 'human') return 'Human';
       const full = sids.find(s => s.toLowerCase().startsWith(hash)) || hash;
       return nm[full] || hash;
     };
 
+    // HTML form: "Name (hash)" with the hash de-emphasized and the full
+    // session id surfaced as a tooltip. Falls back to just the hash when
+    // no name is known. Always returns safe HTML.
+    const renderNameHtml = (hash) => {
+      if (!hash) return 'None';
+      if (hash === true || String(hash).toLowerCase() === 'human') return 'Human';
+      const full = sids.find(s => s.toLowerCase().startsWith(hash)) || hash;
+      const name = nm[full];
+      const short = String(hash).toLowerCase().substring(0, 8);
+      if (name) {
+        return `<span title="${escapeAttr(full)}">${escapeHtml(name)} <span class="gco-part-id">(${escapeHtml(short)})</span></span>`;
+      }
+      return escapeHtml(short);
+    };
+
     let html = '<div class="gco-section"><div class="gco-title">Orchestrator</div>';
-    
+
     html += `<div class="gco-row"><span class="gco-label">Timer Active:</span> <span class="gco-val">${data.orchestrator_timer_active ? 'Yes' : 'No'}</span></div>`;
-    
-    const waitingOn = (waiting.waiting_on_hashes || []).map(renderName);
-    html += `<div class="gco-row"><span class="gco-label">Waiting On:</span> <span class="gco-val">${waitingOn.length ? escapeHtml(waitingOn.join(', ')) : 'None'}</span></div>`;
-    
-    const lastSpokenName = waiting.last_author_is_human ? 'Human' : renderName(waiting.last_author_hash);
-    html += `<div class="gco-row"><span class="gco-label">Last Spoken:</span> <span class="gco-val">${escapeHtml(lastSpokenName)}</span></div>`;
+
+    const waitingOnHtml = (waiting.waiting_on_hashes || []).map(renderNameHtml);
+    html += `<div class="gco-row"><span class="gco-label">Waiting on:</span> <span class="gco-val">${waitingOnHtml.length ? waitingOnHtml.join(', ') : 'None'}</span></div>`;
+
+    const lastSpokenHtml = waiting.last_author_is_human ? 'Human' : renderNameHtml(waiting.last_author_hash);
+    html += `<div class="gco-row"><span class="gco-label">Last spoken:</span> <span class="gco-val">${lastSpokenHtml}</span></div>`;
     
     html += '</div>';
 
@@ -7565,26 +7617,70 @@
     for (const sid of sids) {
       const short = sid.substring(0, 8).toLowerCase();
       const name = nm[sid] || short;
-      
+
       html += `<div class="gco-part-card">`;
       html += `<div class="gco-part-name">${escapeHtml(name)} <span class="gco-part-id">(${short})</span></div>`;
-      
-      const spoken = lastSpoken[short] || 'Never';
-      html += `<div class="gco-part-stat"><span class="gco-label">Spoken:</span> ${escapeHtml(spoken)}</div>`;
-      
+
+      const spoken = lastSpoken[short];
+      html += `<div class="gco-part-stat"><span class="gco-label">Spoken:</span> <span class="gco-val">${spoken ? gcTimeChip(spoken) : 'Never'}</span></div>`;
+
       const mention = lastMentioned[short];
       if (mention) {
-        html += `<div class="gco-part-stat"><span class="gco-label">Last Mentioned:</span> ${escapeHtml(mention.when)} by ${escapeHtml(renderName(mention.by))}</div>`;
+        html += `<div class="gco-part-stat"><span class="gco-label">Last mentioned:</span> <span class="gco-val">${gcTimeChip(mention.when)} by ${renderNameHtml(mention.by)}</span></div>`;
         html += `<div class="gco-part-snippet">"${escapeHtml(mention.snippet)}"</div>`;
       } else {
-        html += `<div class="gco-part-stat"><span class="gco-label">Last Mentioned:</span> Never</div>`;
+        html += `<div class="gco-part-stat"><span class="gco-label">Last mentioned:</span> <span class="gco-val">Never</span></div>`;
       }
-      
+
       html += `</div>`;
     }
     html += '</div>';
 
     panel.innerHTML = html;
+  }
+
+  // Parses the timestamp formats CCC writes into chat files
+  // (e.g. "2026-05-27 20:43:30 PDT", "2026-05-27 Tuesday 20:43:30 PDT")
+  // into a Date. Returns null if it can't make sense of the input —
+  // callers should fall back to the raw text in that case.
+  function gcParseChatTimestamp(s) {
+    if (!s) return null;
+    const cleaned = String(s).trim().replace(/\s+(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s+/i, ' ');
+    const m = cleaned.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+([A-Z]{2,5}))?$/);
+    if (!m) {
+      const d = new Date(cleaned);
+      return isNaN(d.getTime()) ? null : d;
+    }
+    // Treat the parsed pieces as local-clock and let the browser apply
+    // the host TZ. The trailing PDT/UTC token is informational — we don't
+    // try to reapply it because the wall time was already written for that
+    // zone (whoever wrote the file), and the difference is usually <1 day.
+    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function gcRelativeTime(s) {
+    const d = gcParseChatTimestamp(s);
+    if (!d) return String(s || '');
+    const delta = Date.now() - d.getTime();
+    const abs = Math.abs(delta);
+    const sec = Math.round(abs / 1000);
+    if (sec < 45) return 'just now';
+    const min = Math.round(sec / 60);
+    if (min < 60) return min + 'm ago';
+    const hr = Math.round(min / 60);
+    if (hr < 24) return hr + 'h ago';
+    const day = Math.round(hr / 24);
+    if (day < 14) return day + 'd ago';
+    const wk = Math.round(day / 7);
+    if (wk < 8) return wk + 'w ago';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function gcTimeChip(s) {
+    const rel = gcRelativeTime(s);
+    if (rel === String(s || '')) return escapeHtml(rel);
+    return `<span class="gco-time" title="${escapeAttr(String(s))}">${escapeHtml(rel)}</span>`;
   }
 
   async function pollGroupChatReader() {
@@ -14084,7 +14180,7 @@
     // so scrollHeight does not change mid-scroll.
     st.currentIdx = idx;
     item.classList.add('is-dynamic-pinned-in-sticky');
-    if (st.earlierFirst) st.earlierFirst.innerHTML = linkifyPastedImages(escapeHtml(text));
+    if (st.earlierFirst) st.earlierFirst.innerHTML = linkifyPastedImages(escapeHtml(cleanIssuePrompt(text)));
     _updateStickyAskSlots();
   }
   // Coordinator: decides where the .csh-ask-earlier block lives based on

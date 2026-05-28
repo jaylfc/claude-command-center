@@ -320,6 +320,8 @@
         <span class="sh-meta-row">
           Last updated <span id="cccLastUpdated">…</span>
           <span class="sh-meta-sep">·</span>
+          <a href="#" class="sh-check-updates" id="cccCheckUpdatesLink" title="Check GitHub for a newer release">check for updates</a>
+          <span class="sh-meta-sep">·</span>
           <a href="#" class="sh-whats-new-link" id="cccWhatsNewLink" title="View what is new in this version">what's new</a>
         </span>
         <a class="sh-repo-link" id="cccRepoLink" href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Open the repo on GitHub">git: amirfish1/claude-command-center</a>
@@ -863,6 +865,29 @@
        amirfish1/claude-command-center. If gh is missing or fails, the
        handler returns a rendered markdown blob and we offer a
        copy-to-clipboard fallback. -->
+  <div id="chatFindModal" style="display:none; position:fixed; top:20px; right:40px; background:var(--bg-1); border:1px solid var(--border-color); padding:8px; z-index:99999; border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.5); gap:6px; align-items:center;">
+    <input type="text" id="chatFindInput" placeholder="Find in page..." style="background:var(--bg-0); color:var(--text-1); border:1px solid var(--border-color); padding:4px 8px; border-radius:4px; outline:none; width:180px;">
+    <button id="chatFindPrev" class="btn" style="padding:2px 8px;">↑</button>
+    <button id="chatFindNext" class="btn" style="padding:2px 8px;">↓</button>
+    <button id="chatFindClose" class="btn" style="padding:2px 8px; margin-left:4px;">×</button>
+  </div>
+
+  <div id="promptModal" class="upd-overlay" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+    <div class="upd-modal">
+      <div class="upd-header">
+        <h2 class="upd-title" id="promptTitle">Prompt</h2>
+        <button class="upd-close" id="promptCloseBtn" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="upd-body">
+        <input type="text" id="promptInput" class="repo-picker-search" style="width: 100%; margin-top: 10px;" />
+      </div>
+      <div class="upd-footer" style="display:flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn" id="promptCancelBtn">Cancel</button>
+        <button class="btn btn-primary" id="promptOkBtn">OK</button>
+      </div>
+    </div>
+  </div>
+
   <div id="bugReportModal" class="upd-overlay" role="dialog" aria-modal="true" aria-labelledby="bugReportTitle">
     <div class="upd-backdrop" id="bugReportBackdrop"></div>
     <div class="upd-dialog" style="width:min(560px,92vw);">
@@ -1810,7 +1835,11 @@
   if (!$banner || !$body || !$btn || !$close) return;
 
   const DISMISS_KEY = 'ccc-pwa-install-dismissed';
-  const RENAG_AFTER_MS = 14 * 24 * 3600 * 1000;
+  // ~5 years. Effectively "don't show again" — the original 14-day re-nag
+  // was too aggressive for users who'd already decided to skip the install.
+  // Reinstalling the app or running `appinstalled` clears the key, so
+  // legitimate first-time installs still get the banner.
+  const RENAG_AFTER_MS = 5 * 365 * 24 * 3600 * 1000;
   let deferred = null;
 
   // Standalone detection covers all known PWA modes plus the legacy iOS

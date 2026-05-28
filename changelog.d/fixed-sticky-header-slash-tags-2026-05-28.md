@@ -1,0 +1,1 @@
+Strip the raw `<command-name>` / `<command-message>` / `<command-args>` markup that Claude Code injects into slash-command user messages before showing them in the sticky-header "earlier ask" slot, so the slot shows `/rename` instead of the literal XML-like tags.
