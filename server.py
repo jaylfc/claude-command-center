@@ -8501,14 +8501,25 @@ def _extract_text_from_content(content):
 _IMAGE_CACHE_PATH_RE = re.compile(r"/image-cache/([0-9a-fA-F-]+)/([^/\s\"'\]]+\.(?:png|jpe?g|gif|webp))", re.IGNORECASE)
 
 
-def _extract_images_from_content(content):
+def _extract_images_from_content(content, line=None):
     """Return a list of image descriptors from a message content field.
 
     Each entry is one of:
       {"kind": "path", "session_id": str, "filename": str}
-      {"kind": "base64", "media_type": str, "data": str}
+      {"kind": "base64", "media_type": str, "data": str, "idx": int}
+      {"kind": "base64", "media_type": str, "line": int, "idx": int}
+
+    When `line` is supplied, base64 image bodies are NOT inlined — a
+    (line, idx) reference is emitted instead so the browser can lazy-fetch
+    each image via /api/conv-image. This keeps multi-MB base64 blobs out of
+    the parse payload (a single transcript with a few pasted screenshots can
+    otherwise balloon to 10+ MB and stall the initial load). `idx` counts
+    base64 images within the message so /api/conv-image can re-extract the
+    Nth one deterministically. Call with line=None (the default) to inline
+    the data, e.g. from /api/conv-image itself or transient queued events.
     """
     out = []
+    b64_idx = 0
     if not isinstance(content, list):
         # Claude Code also sometimes emits text blocks containing
         # "[Image: source: /Users/.../.claude/image-cache/<sid>/<N>.png]".
@@ -8527,7 +8538,13 @@ def _extract_images_from_content(content):
                 data = src.get("data") or ""
                 mt = src.get("media_type") or "image/png"
                 if data:
-                    out.append({"kind": "base64", "media_type": mt, "data": data})
+                    if line is not None:
+                        out.append({"kind": "base64", "media_type": mt,
+                                    "line": int(line), "idx": b64_idx})
+                    else:
+                        out.append({"kind": "base64", "media_type": mt,
+                                    "data": data, "idx": b64_idx})
+                    b64_idx += 1
             else:
                 p = src.get("path") or src.get("file_path") or ""
                 if isinstance(p, str):
@@ -10916,7 +10933,7 @@ def _parse_conversation_event(ev, line_num):
                 if cmd_name:
                     return {"line": line_num, "ts": ts, "type": "user_text", "text": cmd_name, "images": []}
             return None
-        images = _extract_images_from_content(content)
+        images = _extract_images_from_content(content, line=line_num)
         if text or images:
             # Preview placeholder "[image]" shouldn't leak into the rendered message.
             display_text = "" if (text == "[image]" and images) else text
@@ -24486,6 +24503,66 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing id parameter"}, 400)
             else:
                 self.send_json(pkood_tail(agent_id))
+        elif path == "/api/conv-image":
+            # Lazy-load a base64 image embedded in a conversation transcript.
+            # parse_conversation() emits a (line, idx) reference instead of the
+            # inline base64 body (see _extract_images_from_content); the browser
+            # fetches each image here on demand via <img loading="lazy">. Keeps
+            # initial conversation loads fast for transcripts with pasted images.
+            qs = urllib.parse.parse_qs(parsed.query)
+            conv_id = (qs.get("conversation_id", [""])[0] or "").strip()
+            try:
+                line_no = int(qs.get("line", ["0"])[0])
+                idx = int(qs.get("idx", ["0"])[0])
+            except (TypeError, ValueError):
+                self.send_json({"error": "bad request"}, 400)
+                return
+            if (not conv_id or not re.match(r"^[A-Za-z0-9_-]+$", conv_id)
+                    or line_no < 1 or idx < 0):
+                self.send_json({"error": "not found"}, 404)
+                return
+            repo_path = (qs.get("repo_path", [""])[0] or "").strip() or None
+            fp = _resolve_conversation_path(conv_id, repo_path=repo_path)
+            if not fp.is_file():
+                self.send_json({"error": "not found"}, 404)
+                return
+            raw_line = None
+            try:
+                with open(fp, "r") as f:
+                    for n, ln in enumerate(f, 1):
+                        if n == line_no:
+                            raw_line = ln
+                            break
+            except OSError:
+                self.send_json({"error": "not found"}, 404)
+                return
+            if raw_line is None:
+                self.send_json({"error": "not found"}, 404)
+                return
+            try:
+                ev = json.loads(raw_line)
+            except json.JSONDecodeError:
+                self.send_json({"error": "not found"}, 404)
+                return
+            msg = _safe_parse_message(ev.get("message", {})) if isinstance(ev, dict) else {}
+            content = msg.get("content", "") if isinstance(msg, dict) else ""
+            imgs = [im for im in _extract_images_from_content(content)
+                    if im.get("kind") == "base64"]
+            if idx >= len(imgs):
+                self.send_json({"error": "not found"}, 404)
+                return
+            try:
+                body = base64.b64decode(imgs[idx].get("data") or "")
+            except Exception:
+                self.send_json({"error": "not found"}, 404)
+                return
+            mt = imgs[idx].get("media_type") or "image/png"
+            self.send_response(200)
+            self.send_header("Content-Type", mt)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/api/pasted-image":
             # Serve a user-pasted image referenced by absolute path inside a
             # message body — e.g. `/Users/foo/Apps/repo/.claude/pasted-images/
@@ -27518,13 +27595,37 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             last_keepalive = time.time()
+            is_ag = _is_antigravity_session(conversation_id)
             parse_fn = (
                 _parse_antigravity_conversation
-                if _is_antigravity_session(conversation_id)
+                if is_ag
                 else _parse_gemini_conversation
             )
+            # mtime guard — same rationale as the claude path below: skip the
+            # full re-parse when the backing file hasn't changed so an idle
+            # session doesn't re-read its transcript a couple times a second.
+            def _stream_mtime():
+                try:
+                    p = (_antigravity_transcript_path(conversation_id) if is_ag
+                         else _resolve_gemini_chat_path(conversation_id))
+                    return p.stat().st_mtime if p else None
+                except OSError:
+                    return None
+            last_mtime = -1.0
             try:
                 while True:
+                    cur_mtime = _stream_mtime()
+                    # cur_mtime None → resolver failed; fall back to always-read.
+                    if cur_mtime is not None and cur_mtime == last_mtime:
+                        now = time.time()
+                        if now - last_keepalive >= 5:
+                            self.wfile.write(b"event: keepalive\ndata: {}\n\n")
+                            self.wfile.flush()
+                            last_keepalive = now
+                        time.sleep(0.5)
+                        continue
+                    if cur_mtime is not None:
+                        last_mtime = cur_mtime
                     result = parse_fn(conversation_id, after_line=after_line)
                     events = result.get("events") or []
                     if events:
@@ -27558,6 +27659,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
 
         line_num = 0
         last_keepalive = time.time()
+        last_mtime = -1.0
         # No server-side timeout — SSE is designed for persistent connections,
         # and the 5s keepalive below is what keeps proxies/browsers happy.
         # Connection closes when the client disconnects (BrokenPipeError below)
@@ -27565,6 +27667,24 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         try:
             while True:
                 events = []
+                # Only re-read when the file actually changed. Without this the
+                # loop re-opens and re-parses the ENTIRE transcript from line 0
+                # every 0.3s forever — a multi-MB file (one had 11 MB / 2367
+                # lines) then pegs CPU and disk continuously even while the
+                # session sits idle and nothing new is being written.
+                try:
+                    cur_mtime = os.stat(filepath).st_mtime
+                except OSError:
+                    cur_mtime = last_mtime
+                if cur_mtime == last_mtime:
+                    now = time.time()
+                    if now - last_keepalive >= 5:
+                        self.wfile.write(b"event: keepalive\ndata: {}\n\n")
+                        self.wfile.flush()
+                        last_keepalive = now
+                    time.sleep(0.3)
+                    continue
+                last_mtime = cur_mtime
                 try:
                     with open(filepath, "r") as f:
                         for line in f:
