@@ -5944,9 +5944,55 @@
     return parentMap;
   }
 
-  function createFlowCustomObject() {
-    let title = '';
-    try { title = (window.prompt('Object name', 'New object') || '').trim(); } catch (_) {}
+  function promptModal(title, defaultValue) {
+    return new Promise(resolve => {
+      const modal = document.getElementById('promptModal');
+      if (!modal) return resolve(window.prompt(title, defaultValue));
+      const titleEl = document.getElementById('promptTitle');
+      const input = document.getElementById('promptInput');
+      const okBtn = document.getElementById('promptOkBtn');
+      const cancelBtn = document.getElementById('promptCancelBtn');
+      const closeBtn = document.getElementById('promptCloseBtn');
+      
+      titleEl.textContent = title;
+      input.value = defaultValue || '';
+      modal.classList.add('open');
+      
+      let resolved = false;
+      function cleanup() {
+        modal.classList.remove('open');
+        okBtn.removeEventListener('click', onOk);
+        cancelBtn.removeEventListener('click', onCancel);
+        closeBtn.removeEventListener('click', onCancel);
+        input.removeEventListener('keydown', onKey);
+      }
+      function onOk() {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(input.value);
+      }
+      function onCancel() {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(null);
+      }
+      function onKey(e) {
+        if (e.key === 'Enter') onOk();
+        if (e.key === 'Escape') onCancel();
+      }
+      okBtn.addEventListener('click', onOk);
+      cancelBtn.addEventListener('click', onCancel);
+      closeBtn.addEventListener('click', onCancel);
+      input.addEventListener('keydown', onKey);
+      
+      setTimeout(() => input.focus(), 50);
+    });
+  }
+
+  async function createFlowCustomObject() {
+    const title = (await promptModal('Object name', 'New object') || '').trim();
     if (!title) return;
     const now = Date.now();
     const id = 'obj-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
@@ -5963,11 +6009,10 @@
     renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
   }
 
-  function renameFlowCustomObject(id) {
+  async function renameFlowCustomObject(id) {
     const obj = flowCustomObjects.find(o => o && o.id === id);
     if (!obj) return;
-    let title = '';
-    try { title = (window.prompt('Object name', obj.title || '') || '').trim(); } catch (_) {}
+    const title = (await promptModal('Object name', obj.title || '') || '').trim();
     if (!title || title === obj.title) return;
     obj.title = title;
     obj.updated_at = Date.now();
@@ -7002,6 +7047,7 @@
   // captured at boot stay live. We only hide those bars while the reader
   // is mounted; the cleanup re-shows them.
   let _gcReaderHiddenInputBar = false;
+  let _gcReaderHiddenRailItems = false;
 
   function stopGroupChatReader(opts = {}) {
     if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
@@ -7018,6 +7064,18 @@
       if (inputCtx) inputCtx.style.display = '';
       _gcReaderHiddenInputBar = false;
     }
+    if (_gcReaderHiddenRailItems) {
+      const rail = document.getElementById('statusRail');
+      if (rail) {
+        const filesPanel = rail.querySelector('#filesPanel');
+        if (filesPanel) filesPanel.style.display = '';
+        const railActions = rail.querySelector('#railActions');
+        if (railActions) railActions.style.display = '';
+        const orchPanel = document.getElementById('gcOrchestratorPanel');
+        if (orchPanel) orchPanel.style.display = 'none';
+      }
+      _gcReaderHiddenRailItems = false;
+    }
     if (opts && opts.rerenderSidebar && typeof renderSidebar === 'function'
         && typeof filterConversations === 'function'
         && typeof $convSearch !== 'undefined' && $convSearch) {
@@ -7028,7 +7086,17 @@
   function renderGroupChatMarkdown(content) {
     const text = String(content || '');
     const matches = Array.from(text.matchAll(/^##\s+(.+?—\s+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b).*)$/gm));
+
+    let firstSpeaker = '';
+    let lastSpeaker = '';
+
     if (!matches.length) {
+      const origEl = document.getElementById('gcOriginalSpeaker');
+      const lastEl = document.getElementById('gcLastSpeaker');
+      const metaWrap = document.getElementById('gcReaderStickyMeta');
+      if (origEl && lastEl && metaWrap) {
+        metaWrap.style.display = 'none';
+      }
       return '<div class="assistant-text gc-chat-doc">' + renderMarkdown(text) + '</div>';
     }
 
@@ -7049,6 +7117,10 @@
       const parts = heading.split(/\s+—\s+/);
       const when = parts.length > 1 ? parts.shift() : '';
       const speaker = parts.length ? parts.join(' — ') : heading;
+
+      if (i === 0) firstSpeaker = speaker;
+      if (i === matches.length - 1) lastSpeaker = speaker;
+
       html += '<article class="gc-message">'
         + '<div class="gc-message-meta">'
           + '<span class="gc-message-speaker">' + escapeHtml(speaker) + '</span>'
@@ -7059,6 +7131,20 @@
         + '</div>'
       + '</article>';
     }
+
+    const origEl = document.getElementById('gcOriginalSpeaker');
+    const viewingEl = document.getElementById('gcViewingSpeaker');
+    const metaWrap = document.getElementById('gcReaderStickyMeta');
+    if (origEl && viewingEl && metaWrap) {
+      if (firstSpeaker && lastSpeaker) {
+        origEl.textContent = firstSpeaker;
+        viewingEl.textContent = lastSpeaker; // Default, will be updated by scroll listener
+        metaWrap.style.display = '';
+      } else {
+        metaWrap.style.display = 'none';
+      }
+    }
+
     return html;
   }
 
@@ -7087,6 +7173,16 @@
         + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
         + '<span class="gc-mode-badge">' + modeSafe + '</span>'
       + '</div>'
+      + '<div class="gc-reader-sticky-meta" id="gcReaderStickyMeta" style="display:none;">'
+        + '<div class="csh-col">'
+          + '<div class="label original-label">Original Poster</div>'
+          + '<div class="speaker-name" id="gcOriginalSpeaker">—</div>'
+        + '</div>'
+        + '<div class="csh-col">'
+          + '<div class="label last-label">Viewing Poster</div>'
+          + '<div class="speaker-name" id="gcViewingSpeaker">—</div>'
+        + '</div>'
+      + '</div>'
       + '<div class="gc-reader-body" id="gcReaderBody" tabindex="0">Loading…</div>'
       + (includeHuman
         ? '<div class="gc-reader-input-row" id="gcInputRow">'
@@ -7114,6 +7210,26 @@
     if (inputBar) inputBar.style.display = 'none';
     if (inputCtx) inputCtx.style.display = 'none';
     _gcReaderHiddenInputBar = true;
+
+    const rail = document.getElementById('statusRail');
+    if (rail) {
+      rail.querySelectorAll('.csh-ask-original, .csh-col-activity').forEach(el => el.remove());
+      const filesPanel = rail.querySelector('#filesPanel');
+      if (filesPanel) filesPanel.style.display = 'none';
+      const railActions = rail.querySelector('#railActions');
+      if (railActions) railActions.style.display = 'none';
+
+      let orchPanel = document.getElementById('gcOrchestratorPanel');
+      if (!orchPanel) {
+        orchPanel = document.createElement('div');
+        orchPanel.id = 'gcOrchestratorPanel';
+        orchPanel.className = 'gc-orchestrator-panel';
+        rail.appendChild(orchPanel);
+      }
+      orchPanel.style.display = '';
+      orchPanel.innerHTML = '<div class="gco-section"><div class="gco-title">Orchestrator</div><div class="gco-body">Loading...</div></div>';
+      _gcReaderHiddenRailItems = true;
+    }
 
     if (includeHuman) {
       const gcSendBtn = document.getElementById('gcSendBtn');
@@ -7160,6 +7276,25 @@
     if (_gcReaderInterval) clearInterval(_gcReaderInterval);
     pollGroupChatReader();
     _gcReaderInterval = setInterval(pollGroupChatReader, 3000);
+
+    // Scroll listener for dynamic "Viewing Poster" update
+    const gcBody = document.getElementById('gcReaderBody');
+    if (gcBody) {
+      gcBody.addEventListener('scroll', () => {
+        const viewingEl = document.getElementById('gcViewingSpeaker');
+        if (!viewingEl) return;
+        const messages = gcBody.querySelectorAll('.gc-message');
+        const bodyTop = gcBody.getBoundingClientRect().top;
+        for (let i = 0; i < messages.length; i++) {
+          const rect = messages[i].getBoundingClientRect();
+          if (rect.bottom > bodyTop) {
+            const speakerEl = messages[i].querySelector('.gc-message-speaker');
+            if (speakerEl) viewingEl.textContent = speakerEl.textContent;
+            break;
+          }
+        }
+      });
+    }
 
     // Space → jump to the top of the next message in the gc reader.
     // Each message starts with `## ts — hash: name` which renders as
@@ -7268,6 +7403,163 @@
     );
   }
 
+  function replaceParticipantMentions(container, nameMap) {
+    if (!nameMap) return;
+    const shortToName = {};
+    for (const [fullSid, name] of Object.entries(nameMap)) {
+      const short = fullSid.substring(0, 8).toLowerCase();
+      shortToName[short] = name;
+    }
+    const shortIds = Object.keys(shortToName);
+    if (!shortIds.length) return;
+
+    const regexStr = '(?:@)?\\b(' + shortIds.join('|') + ')\\b';
+    const regex = new RegExp(regexStr, 'gi');
+
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          let parent = node.parentElement;
+          while (parent && parent !== container) {
+            const tag = parent.tagName.toLowerCase();
+            if (tag === 'pre' || tag === 'code' || tag === 'a') return NodeFilter.FILTER_REJECT;
+            parent = parent.parentElement;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    const textNodes = [];
+    let currentNode = walker.nextNode();
+    while (currentNode) {
+      textNodes.push(currentNode);
+      currentNode = walker.nextNode();
+    }
+
+    for (const node of textNodes) {
+      const text = node.textContent;
+      if (!regex.test(text)) continue;
+
+      regex.lastIndex = 0;
+      const fragment = document.createDocumentFragment();
+      let lastIndex = 0;
+      let match;
+      while ((match = regex.exec(text)) !== null) {
+        const matchIndex = match.index;
+        const shortId = match[1].toLowerCase();
+        const name = shortToName[shortId];
+
+        if (matchIndex > lastIndex) {
+          fragment.appendChild(document.createTextNode(text.substring(lastIndex, matchIndex)));
+        }
+
+        const span = document.createElement('span');
+        span.className = 'gc-mention';
+        span.textContent = '@' + name;
+        span.title = `Session: ${shortId}`;
+        fragment.appendChild(span);
+
+        lastIndex = regex.lastIndex;
+      }
+
+      if (lastIndex < text.length) {
+        fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
+      }
+
+      node.replaceWith(fragment);
+    }
+  }
+
+  function updateOrchestratorPanel(data, content) {
+    const panel = document.getElementById('gcOrchestratorPanel');
+    if (!panel || panel.style.display === 'none') return;
+
+    const nm = data.name_map || {};
+    const sids = data.session_ids || [];
+    const waiting = data.waiting || {};
+
+    const lastSpoken = {};
+    const lastMentioned = {};
+    
+    const text = String(content || '');
+    const matches = Array.from(text.matchAll(/^##\s+(.+?)—\s+([0-9a-fA-F]{8}(?::[^\n]*)?|Human\b).*$/gm));
+    
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i];
+      const when = match[1].trim();
+      let authorHash = match[2];
+      if (authorHash.length > 8 && authorHash !== 'Human') authorHash = authorHash.substring(0, 8);
+      authorHash = authorHash.toLowerCase();
+
+      const nextIndex = i + 1 < matches.length ? matches[i + 1].index : text.length;
+      const bodyText = text.slice(match.index + match[0].length, nextIndex);
+
+      lastSpoken[authorHash] = when;
+
+      for (const [fullSid, name] of Object.entries(nm)) {
+        const short = fullSid.substring(0, 8).toLowerCase();
+        const regex = new RegExp('(?:@)?\\b' + short + '\\b', 'i');
+        const mentionMatch = bodyText.match(regex);
+        if (mentionMatch) {
+          const idx = mentionMatch.index;
+          const start = Math.max(0, idx - 20);
+          const end = Math.min(bodyText.length, idx + short.length + 20);
+          let snippet = bodyText.substring(start, end).replace(/\\s+/g, ' ');
+          if (start > 0) snippet = '…' + snippet;
+          if (end < bodyText.length) snippet += '…';
+          lastMentioned[short] = { when, snippet, by: authorHash };
+        }
+      }
+    }
+
+    const renderName = (hash) => {
+      if (!hash) return 'None';
+      if (hash.toLowerCase() === 'human' || hash === true) return 'Human';
+      const full = sids.find(s => s.toLowerCase().startsWith(hash)) || hash;
+      return nm[full] || hash;
+    };
+
+    let html = '<div class="gco-section"><div class="gco-title">Orchestrator</div>';
+    
+    html += `<div class="gco-row"><span class="gco-label">Timer Active:</span> <span class="gco-val">${data.orchestrator_timer_active ? 'Yes' : 'No'}</span></div>`;
+    
+    const waitingOn = (waiting.waiting_on_hashes || []).map(renderName);
+    html += `<div class="gco-row"><span class="gco-label">Waiting On:</span> <span class="gco-val">${waitingOn.length ? escapeHtml(waitingOn.join(', ')) : 'None'}</span></div>`;
+    
+    const lastSpokenName = waiting.last_author_is_human ? 'Human' : renderName(waiting.last_author_hash);
+    html += `<div class="gco-row"><span class="gco-label">Last Spoken:</span> <span class="gco-val">${escapeHtml(lastSpokenName)}</span></div>`;
+    
+    html += '</div>';
+
+    html += '<div class="gco-section"><div class="gco-title">Participants</div>';
+    for (const sid of sids) {
+      const short = sid.substring(0, 8).toLowerCase();
+      const name = nm[sid] || short;
+      
+      html += `<div class="gco-part-card">`;
+      html += `<div class="gco-part-name">${escapeHtml(name)} <span class="gco-part-id">(${short})</span></div>`;
+      
+      const spoken = lastSpoken[short] || 'Never';
+      html += `<div class="gco-part-stat"><span class="gco-label">Spoken:</span> ${escapeHtml(spoken)}</div>`;
+      
+      const mention = lastMentioned[short];
+      if (mention) {
+        html += `<div class="gco-part-stat"><span class="gco-label">Last Mentioned:</span> ${escapeHtml(mention.when)} by ${escapeHtml(renderName(mention.by))}</div>`;
+        html += `<div class="gco-part-snippet">"${escapeHtml(mention.snippet)}"</div>`;
+      } else {
+        html += `<div class="gco-part-stat"><span class="gco-label">Last Mentioned:</span> Never</div>`;
+      }
+      
+      html += `</div>`;
+    }
+    html += '</div>';
+
+    panel.innerHTML = html;
+  }
+
   async function pollGroupChatReader() {
     if (!_gcReaderPath && !_gcReaderId) return;
     const body = document.getElementById('gcReaderBody');
@@ -7287,8 +7579,18 @@
         const isFirstLoad = _gcLastMtime === null;
         _gcLastMtime = data.mtime;
         const atBottom = body.scrollHeight - body.scrollTop <= body.clientHeight + 40;
+        
         body.innerHTML = renderGroupChatMarkdown(_gcExpandHashIds(data.content));
+        if (data.name_map) {
+          replaceParticipantMentions(body, data.name_map);
+        }
+        updateOrchestratorPanel(data, data.content);
+
         if (atBottom) body.scrollTop = body.scrollHeight;
+        
+        // Trigger scroll listener to update Viewing Poster immediately
+        body.dispatchEvent(new CustomEvent('scroll'));
+
         // Nudge all participants when content changes (but not on first load, and debounced to 15s).
         if (!isFirstLoad) {
           const now = Date.now();
@@ -7940,9 +8242,9 @@
         const _isKanbanGemini = c.source === 'gemini' || c.engine === 'gemini';
         const _isKanbanAntigravity = c.source === 'antigravity' || c.engine === 'antigravity';
         const _kanbanActivityAge = c.sidecar_ts ? (Date.now() / 1000 - c.sidecar_ts) : (c.last_interacted ? (Date.now() / 1000 - c.last_interacted) : 9999);
-        const _codexKanbanWip = _isKanbanCodex && !c.sidecar_status && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60));
-        const _geminiKanbanWip = _isKanbanGemini && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
-        const _antigravityKanbanWip = _isKanbanAntigravity && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
+        const _codexKanbanWip = _isKanbanCodex && c.is_live && !c.sidecar_status && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60));
+        const _geminiKanbanWip = _isKanbanGemini && c.is_live && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
+        const _antigravityKanbanWip = _isKanbanAntigravity && c.is_live && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
         const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip || _antigravityKanbanWip ? ' truly-active' : '';
         const pendingSpawn = c.pending_spawn ? ' pending-spawn' : '';
         const recentlyBorn = isRecentlyBorn(c.session_id) ? ' recently-born' : '';
@@ -9238,18 +9540,21 @@
       const _hasLivePendingTool = c.is_live && !!c.pending_tool;
       const _codexHasOpenTool = isCodexRow && !c.sidecar_status && !!c.pending_tool;
       const _codexOpenTurn = isCodexRow
+        && c.is_live
         && !c.sidecar_status
         && (_codexHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
             && _rowActivityAge < (30 * 60)));
       const _geminiHasOpenTool = isGeminiRow && !c.sidecar_status && !!c.pending_tool;
       const _geminiOpenTurn = isGeminiRow
+        && c.is_live
         && !c.sidecar_status
         && (_geminiHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
             && _rowActivityAge < (30 * 60)));
       const _antigravityHasOpenTool = isAntigravityRow && !c.sidecar_status && !!c.pending_tool;
       const _antigravityOpenTurn = isAntigravityRow
+        && c.is_live
         && !c.sidecar_status
         && (_antigravityHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
@@ -10840,7 +11145,16 @@
     if (!convId) return false;
     const row = rowForConversationId(convId);
     if (row && row.source === 'github_pr') {
-      if (row.tail_pr_url) window.open(row.tail_pr_url, '_blank', 'noopener');
+      if (row.tail_pr_url) {
+        const popup = window.open(row.tail_pr_url, '_blank', 'noopener');
+        if (!popup) {
+          fetch('/api/open-browser', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: row.tail_pr_url })
+          });
+        }
+      }
       return true;
     }
     const url = conversationPopoutUrl(convId, repoPathForConversationPopout(convId, repoPath));
@@ -10856,7 +11170,16 @@
       showOpToast('Conversation opened in a pop-up');
       return true;
     }
-    showOpToast('Pop-up blocked. Allow pop-ups for CCC and try again.', 'error');
+    fetch('/api/open-browser', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url })
+    }).then(r => r.json()).then(data => {
+      if (data.ok) showOpToast('Conversation opened in external browser');
+      else showOpToast('Pop-up blocked. Allow pop-ups for CCC.', 'error');
+    }).catch(err => {
+      showOpToast('Pop-up blocked. Allow pop-ups for CCC.', 'error');
+    });
     return false;
   }
 
@@ -18720,19 +19043,20 @@
       if (extra.length) rows = rows.concat(extra);
     }
 
-    if (!archiveLoaded && !archiveRows.length) {
+    const hasGc = _gcActiveChats && _gcActiveChats.length > 0;
+    if (!archiveLoaded && !archiveRows.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state archive-loading-placeholder">Loading archive&hellip;</div>');
       return;
     }
-    if (!archiveRows.length) {
+    if (!archiveRows.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state">No conversations on disk.</div>');
       return;
     }
-    if (!byFolder.length) {
+    if (!byFolder.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state">No conversations in this folder.</div>');
       return;
     }
-    if (!rows.length) {
+    if (!rows.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state">No conversations match your filter.</div>');
       return;
     }
@@ -20261,8 +20585,7 @@
       const r = await fetch('/api/version', { cache: 'no-store' });
       const d = await r.json();
       if ($cccVersionLabel && d && d.version) {
-        const major = String(d.version).split('.')[0];
-        $cccVersionLabel.textContent = 'V' + major + '.' + (String(d.version).split('.')[1] || '0');
+        $cccVersionLabel.textContent = 'V' + String(d.version);
         $cccVersionLabel.title = 'Installed version: v' + d.version;
       }
       if ($cccLastUpdated) {
@@ -20841,7 +21164,7 @@
   }
 
   function annUxFixesQueuePrompt(ann) {
-    return annContextForClipboard(ann);
+    return 'Fix the following UX issue based on this annotation:\n\n' + annContextForClipboard(ann);
   }
 
   async function annOpenUxFixesQueue(ann, closeFn, errEl) {
@@ -20853,6 +21176,7 @@
         body: JSON.stringify({
           annotation_id: ann.id || '',
           text: annUxFixesQueuePrompt(ann),
+          engine: getSpawnEngine(),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -22170,6 +22494,7 @@
         + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">' + escapeHtml(newSessionHelp) + '</div>'
         + '</div>';
     }
+    if (typeof syncSpawnEngineDependentUi === 'function') syncSpawnEngineDependentUi();
     updateInputBar();
     // Toggle the context strip into new-session mode so the picker is
     // visible and the workspace pill is hidden (the workspace pill
@@ -22924,7 +23249,59 @@
       // back to direct setConvPanelOpen for safety.
       if (typeof setConvPanelOpen === 'function') setConvPanelOpen(!convPanelOpen);
     }
+    if (meta && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const modal = document.getElementById('chatFindModal');
+      const input = document.getElementById('chatFindInput');
+      if (modal && input) {
+        modal.style.display = 'flex';
+        input.focus();
+        input.select();
+      }
+      return;
+    }
   });
+
+  const $chatFindInput = document.getElementById('chatFindInput');
+  const $chatFindNext = document.getElementById('chatFindNext');
+  const $chatFindPrev = document.getElementById('chatFindPrev');
+  const $chatFindClose = document.getElementById('chatFindClose');
+  if ($chatFindInput) {
+    function doFind(backward) {
+      const text = $chatFindInput.value;
+      if (!text) return;
+      if (typeof window.find === 'function') {
+        window.find(text, false, backward, true, false, false, false);
+      }
+    }
+    $chatFindInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doFind(e.shiftKey);
+      }
+      if (e.key === 'Escape') {
+        document.getElementById('chatFindModal').style.display = 'none';
+        // Return focus to conversation input if open
+        const cpInput = document.getElementById('cpInput');
+        if (cpInput) cpInput.focus();
+      }
+    });
+    let _lastFind = '';
+    $chatFindInput.addEventListener('input', () => {
+      const text = $chatFindInput.value;
+      if (!text || text === _lastFind) return;
+      if (text.startsWith(_lastFind)) {
+        const sel = window.getSelection();
+        if (sel.rangeCount > 0) sel.collapseToStart();
+      }
+      _lastFind = text;
+      doFind(false);
+    });
+    if ($chatFindNext) $chatFindNext.addEventListener('click', () => doFind(false));
+    if ($chatFindPrev) $chatFindPrev.addEventListener('click', () => doFind(true));
+    if ($chatFindClose) $chatFindClose.addEventListener('click', () => document.getElementById('chatFindModal').style.display = 'none');
+  }
 
   // Settings popover: clicking the ⌘K row also opens the search modal.
   const $settingsCmdkBtn = document.getElementById('settingsCmdkBtn');

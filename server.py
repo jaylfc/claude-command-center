@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "4.3.2.1"
+__version__ = "4.3.2.5"
 
 import ast
 import base64
@@ -3966,7 +3966,7 @@ def _find_annotation_ux_queue_session(queue_name=ANNOTATION_UX_FIXES_QUEUE_NAME)
     return matches[0]
 
 
-def enqueue_annotation_ux_fixes_queue(text, queue_name=ANNOTATION_UX_FIXES_QUEUE_NAME):
+def enqueue_annotation_ux_fixes_queue(text, queue_name=ANNOTATION_UX_FIXES_QUEUE_NAME, engine="claude"):
     """Send annotation context to the shared CCC UX-fixes queue session.
 
     If a Claude session named ``queue_name`` already exists in this repo, the
@@ -4001,7 +4001,13 @@ def enqueue_annotation_ux_fixes_queue(text, queue_name=ANNOTATION_UX_FIXES_QUEUE
             "inject": injected,
         }
 
-    spawned = spawn_session(text, name=queue_name, repo_path=repo_path)
+    if engine == "antigravity":
+        spawned = spawn_session_antigravity(text, name=queue_name, repo_path=repo_path)
+    elif engine == "gemini":
+        spawned = spawn_session_gemini(text, name=queue_name, repo_path=repo_path)
+    else:
+        spawned = spawn_session(text, name=queue_name, repo_path=repo_path)
+        
     if not spawned.get("ok"):
         out = {
             "ok": False,
@@ -11699,13 +11705,17 @@ def _codex_spawn_pid_by_thread_id():
     for s in _spawned_sessions:
         if s.get("engine") != "codex":
             continue
-        sid = s.get("resumed_sid") or _extract_codex_thread_id_from_log(s.get("log"))
-        if sid and sid not in out:
-            try:
-                alive = _poll_spawn_entry(s) is None
-            except Exception:
-                alive = False
-            out[sid] = {"pid": s.get("pid"), "alive": alive}
+        sid = s.get("session_id") or s.get("resumed_sid") or _extract_codex_thread_id_from_log(s.get("log"))
+        if sid:
+            if not s.get("session_id"):
+                s["session_id"] = sid
+                _update_spawn_session_id_in_registry(s.get("pid"), sid)
+            if sid not in out:
+                try:
+                    alive = _poll_spawn_entry(s) is None
+                except Exception:
+                    alive = False
+                out[sid] = {"pid": s.get("pid"), "alive": alive}
     return out
 
 
@@ -13385,17 +13395,21 @@ def _gemini_spawn_pid_by_session_id():
     for s in _spawned_sessions:
         if s.get("engine") != "gemini":
             continue
-        sid = s.get("resumed_sid") or _extract_gemini_session_id_from_log(s.get("log"))
-        if sid and sid not in out:
-            try:
-                alive = _poll_spawn_entry(s) is None
-            except Exception:
-                alive = False
-            out[sid] = {
-                "pid": s.get("pid"),
-                "alive": alive,
-                "log": s.get("log"),
-            }
+        sid = s.get("session_id") or s.get("resumed_sid") or _extract_gemini_session_id_from_log(s.get("log"))
+        if sid:
+            if not s.get("session_id"):
+                s["session_id"] = sid
+                _update_spawn_session_id_in_registry(s.get("pid"), sid)
+            if sid not in out:
+                try:
+                    alive = _poll_spawn_entry(s) is None
+                except Exception:
+                    alive = False
+                out[sid] = {
+                    "pid": s.get("pid"),
+                    "alive": alive,
+                    "log": s.get("log"),
+                }
     return out
 
 
@@ -13894,6 +13908,7 @@ def find_gemini_conversations(
         spawn_info = antigravity_spawn_by_sid.get(sid) or {}
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
+        is_live = spawn_alive if spawn_pid else (time.time() - modified) < _ANTIGRAVITY_LIVE_WINDOW_S
         first_message = (spawn_info.get("prompt") or "").strip()
         ai_title = antigravity_summary_titles.get(sid)
         display_name = (
@@ -13953,11 +13968,11 @@ def find_gemini_conversations(
             "verified": sid in verified_set,
             "pinned_repo": pinned_repo,
             "last_interacted": last_interactions.get(sid),
-            "is_live": bool(spawn_alive) or (time.time() - modified) < _ANTIGRAVITY_LIVE_WINDOW_S,
+            "is_live": is_live,
             "spawn_pid": spawn_pid,
             "can_headless_resume": True,
             "can_app_resume": False,
-            **_antigravity_activity_fields_from_tail({}, spawn_alive),
+            **_antigravity_activity_fields_from_tail({}, is_live),
             "needs_approval": False,
             "needs_approval_message": "",
             "model": meta.get("model") or spawn_info.get("model") or "",
@@ -14574,24 +14589,29 @@ def _antigravity_spawn_pid_by_session_id():
             continue
         meta = {}
         log = s.get("log") or ""
-        if log:
-            meta = _antigravity_cli_log_meta(str(log) + ".agy.log")
-            if not (meta.get("session_id") or meta.get("cwd") or meta.get("model")):
-                meta = _antigravity_cli_log_meta(log)
-        sid = s.get("resumed_sid") or meta.get("session_id") or ""
-        if not sid or sid in out:
-            continue
-        try:
-            alive = _poll_spawn_entry(s) is None
-        except Exception:
-            alive = False
-        out[sid] = {
-            "pid": s.get("pid"),
-            "alive": alive,
-            "log": log,
-            "prompt": s.get("prompt") or "",
-            "model": meta.get("model") or s.get("model") or "",
-        }
+        sid = s.get("session_id") or s.get("resumed_sid")
+        if not sid:
+            if log:
+                meta = _antigravity_cli_log_meta(str(log) + ".agy.log")
+                if not (meta.get("session_id") or meta.get("cwd") or meta.get("model")):
+                    meta = _antigravity_cli_log_meta(log)
+            sid = meta.get("session_id") or ""
+        if sid:
+            if not s.get("session_id"):
+                s["session_id"] = sid
+                _update_spawn_session_id_in_registry(s.get("pid"), sid)
+            if sid not in out:
+                try:
+                    alive = _poll_spawn_entry(s) is None
+                except Exception:
+                    alive = False
+                out[sid] = {
+                    "pid": s.get("pid"),
+                    "alive": alive,
+                    "log": log,
+                    "prompt": s.get("prompt") or "",
+                    "model": meta.get("model") or s.get("model") or "",
+                }
     return out
 
 
@@ -15223,6 +15243,7 @@ def find_antigravity_conversations(
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
         modified = tail.get("last_meaningful_ts") or st.st_mtime
+        is_live = spawn_alive if spawn_pid else (time.time() - modified) < _ANTIGRAVITY_LIVE_WINDOW_S
         if spawn_info.get("log"):
             try:
                 modified = max(modified, Path(spawn_info["log"]).stat().st_mtime)
@@ -15311,14 +15332,14 @@ def find_antigravity_conversations(
             "verified": sid in verified_set,
             "pinned_repo": pinned_repo,
             "last_interacted": last_interactions.get(sid),
-            "is_live": bool(spawn_alive) or (time.time() - modified) < _ANTIGRAVITY_LIVE_WINDOW_S,
+            "is_live": is_live,
             "spawn_pid": spawn_pid,
             "can_headless_resume": bool(
                 _antigravity_cli_conversation_path(sid)
                 and _antigravity_cli_conversation_path(sid).is_file()
             ),
             "can_app_resume": bool(_antigravity_app_conversation_path(sid)),
-            **_antigravity_activity_fields_from_tail(tail, spawn_alive),
+            **_antigravity_activity_fields_from_tail(tail, is_live),
             "needs_approval": False,
             "needs_approval_message": "",
             "model": tail.get("model") or cli_meta.get("model") or spawn_info.get("model") or "",
@@ -15941,6 +15962,23 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model
 
     cmd = _antigravity_command_words(resolved)
     user_args = cmd[1:]
+    
+    session_id = str(uuid.uuid4())
+    try:
+        brain_dir = Path.home() / ".gemini" / "antigravity-cli" / "brain" / session_id
+        logs_dir = brain_dir / ".system_generated" / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        transcript_path = logs_dir / "transcript.jsonl"
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "type": "USER_INPUT",
+                "source": "USER_EXPLICIT",
+                "content": prompt,
+                "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            }) + "\n")
+    except Exception as e:
+        print(f"  [antigravity-spawn] Failed to inject transcript for {session_id}: {e}", file=sys.stderr)
+
     if (
         os.environ.get("CCC_ANTIGRAVITY_SKIP_PERMISSIONS", "1").strip().lower()
         not in ("0", "false", "no", "off")
@@ -15955,6 +15993,8 @@ def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, model
     cli_log_path = Path(str(log_path) + ".agy.log")
     if not _antigravity_has_arg(user_args, "--log-file"):
         cmd.extend(["--log-file", str(cli_log_path)])
+    
+    cmd.extend(["--conversation", session_id])
     cmd.extend(["-p", prompt])
 
     log_fh = open(log_path, "w")
@@ -17124,6 +17164,24 @@ def _remove_spawn_from_registry(pid):
         _save_spawn_registry(pruned)
 
 
+def _update_spawn_session_id_in_registry(pid, session_id):
+    """Dynamically backfill the session_id for a spawned session in the on-disk registry."""
+    if not pid or not session_id:
+        return
+    try:
+        entries = _load_spawn_registry()
+        updated = False
+        for entry in entries:
+            if entry.get("pid") == pid and not entry.get("session_id"):
+                entry["session_id"] = session_id
+                updated = True
+        if updated:
+            _save_spawn_registry(entries)
+    except Exception as e:
+        print(f"  [spawn-registry] could not update session_id for pid {pid} ({e})")
+
+
+
 def _pid_is_engine_process(pid, engine):
     """Verify a PID is actually a process for the given engine before
     treating it as one of ours. PIDs get reused, so a bare `os.kill(pid, 0)`
@@ -17339,7 +17397,36 @@ def _group_chat_read(path, chat_uuid=""):
         stat_result = os.stat(real_path)
         with open(real_path, "r", encoding="utf-8") as fh:
             content = fh.read()
-        return {"ok": True, "content": content, "mtime": stat_result.st_mtime}, None
+        
+        meta = _load_group_chat_sidecar(real_path)
+        sids = meta.get("session_ids") or []
+        nm = meta.get("name_map") or {}
+        
+        with _coord_lock:
+            active_entry = _active_coordinations.get(real_path) or {}
+            status = "active" if real_path in _active_coordinations else ("archived" if meta.get("archived") else "closed")
+            
+        last_nudge_at = active_entry.get("last_nudge") or 0
+        last_reminder_at = meta.get("last_reminder_at") or 0
+        
+        waiting = _group_chat_compute_waiting(real_path, sids, nm)
+        participant_meta = {sid: _group_chat_participant_meta(sid) for sid in sids}
+        
+        return {
+            "ok": True,
+            "content": content,
+            "mtime": stat_result.st_mtime,
+            "topic": meta.get("topic", ""),
+            "mode": meta.get("mode", "topic"),
+            "session_ids": sids,
+            "name_map": nm,
+            "status": status,
+            "waiting": waiting,
+            "participant_meta": participant_meta,
+            "orchestrator_timer_active": status == "active",
+            "orchestrator_last_nudge_at": last_nudge_at,
+            "orchestrator_last_reminder_at": last_reminder_at,
+        }, None
     except FileNotFoundError:
         return {"ok": False, "error": "not found"}, None
     except OSError as exc:
@@ -25210,7 +25297,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 self.send_json({"ok": False, "error": "expected JSON object"}, 400)
                 return
-            result = enqueue_annotation_ux_fixes_queue(payload.get("text") or "")
+            engine = str(payload.get("engine") or "claude").strip().lower()
+            result = enqueue_annotation_ux_fixes_queue(payload.get("text") or "", engine=engine)
             status = int(result.pop("status", 200 if result.get("ok") else 500))
             self.send_json(result, status)
             return
@@ -25690,6 +25778,28 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         self.send_json({"ok": True, "path": target})
                     except Exception as e:
                         self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/open-browser":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            target_url = (payload.get("url") or "").strip()
+            if not target_url.startswith(("/", "http://127.0.0.1:", "http://localhost:", "https://github.com/")):
+                self.send_json({"ok": False, "error": "Invalid URL"}, 400)
+            else:
+                if target_url.startswith("/"):
+                    # Resolve to local server
+                    port = self.server.server_address[1]
+                    target_url = f"http://127.0.0.1:{port}{target_url}"
+                try:
+                    subprocess.Popen(["open", target_url])
+                    self.send_json({"ok": True})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)}, 500)
         elif path == "/api/open":
             # SECURITY: macOS `open` can execute scripts/apps. Keep launch
             # behavior clamped to the concrete repo/log dir. Session-cwd transcript
