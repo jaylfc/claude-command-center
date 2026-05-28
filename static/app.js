@@ -6992,6 +6992,8 @@
   let _gcReaderInterval = null;
   let _gcReaderPath = null;
   let _gcReaderId = null;
+  let _gcReaderTopic = '';
+  let _gcReaderMode = 'topic';
   let _gcLastMtime = null;
   let _gcPollFailCount = 0;
   let _gcLastNudgeTime = 0;
@@ -7005,6 +7007,8 @@
     if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
     _gcReaderPath = null;
     _gcReaderId = null;
+    _gcReaderTopic = '';
+    _gcReaderMode = 'topic';
     _gcLastMtime = null;
     _gcPollFailCount = 0;
     if (_gcReaderHiddenInputBar) {
@@ -7061,6 +7065,8 @@
   function openGroupChatReader(chatPath, topic, mode, includeHuman, chatId) {
     _gcReaderPath = chatPath;
     _gcReaderId = chatId || null;
+    _gcReaderTopic = topic || '';
+    _gcReaderMode = mode || 'topic';
     _gcLastMtime = null;
     _gcPollFailCount = 0;
     _gcLastNudgeTime = 0;
@@ -7288,6 +7294,7 @@
           const now = Date.now();
           if (now - _gcLastNudgeTime > 15000) {
             _gcLastNudgeTime = now;
+            markActiveGroupChatTrigger(_gcReaderPath, _gcReaderId, _gcReaderTopic, _gcReaderMode);
             ccPostJson('/api/group-chat/nudge', {
               path: _gcReaderPath,
               id: _gcReaderId,
@@ -17829,10 +17836,107 @@
   }
 
   const $gcActiveBtn = document.getElementById('gcActiveBtn');
+  const $activeGroupChatPill = document.getElementById('activeGroupChatPill');
+  const GC_ACTIVE_TRIGGER_RECENT_MS = 60 * 1000;
   // _gcActiveChats now contains active + closed (unarchived) chats. The
   // topbar badge uses the .status field to count active-only; the sidebar
   // section renders both, ghosting the closed ones.
   let _gcActiveChats = [];
+  let _gcLastLocalTrigger = null;
+
+  function gcEpochMs(value) {
+    if (value === null || value === undefined || value === '') return 0;
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n > 100000000000 ? n : n * 1000;
+    const parsed = Date.parse(String(value));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function gcTriggerMs(chat) {
+    if (!chat) return 0;
+    return Math.max(
+      gcEpochMs(chat.orchestrator_last_trigger_at),
+      gcEpochMs(chat.orchestrator_last_nudge_at),
+      gcEpochMs(chat.last_reminder_at)
+    );
+  }
+
+  function gcSortMs(chat) {
+    if (!chat) return 0;
+    return Math.max(
+      gcTriggerMs(chat),
+      gcEpochMs(chat.last_activity),
+      gcEpochMs(chat.last_mtime),
+      gcEpochMs(chat.started_at)
+    );
+  }
+
+  function gcShouldShowActivePill(chat, now) {
+    if (!chat) return false;
+    if (chat.status === 'active' || chat.orchestrator_timer_active) return true;
+    const triggerAt = gcTriggerMs(chat);
+    return triggerAt > 0 && (now - triggerAt) <= GC_ACTIVE_TRIGGER_RECENT_MS;
+  }
+
+  function activeGroupChatPillTarget() {
+    const now = Date.now();
+    const matches = (_gcActiveChats || [])
+      .filter(chat => gcShouldShowActivePill(chat, now))
+      .sort((a, b) => gcSortMs(b) - gcSortMs(a));
+    if (matches.length) return matches[0];
+    if (_gcLastLocalTrigger && (now - _gcLastLocalTrigger.at) <= GC_ACTIVE_TRIGGER_RECENT_MS) {
+      return _gcLastLocalTrigger.chat;
+    }
+    return null;
+  }
+
+  function updateActiveGroupChatPill() {
+    if (!$activeGroupChatPill) return;
+    const chat = activeGroupChatPillTarget();
+    if (!chat) {
+      $activeGroupChatPill.hidden = true;
+      $activeGroupChatPill.removeAttribute('data-chat-id');
+      return;
+    }
+    const chatId = chat.uuid || chat.id || '';
+    const topic = chat.topic || 'Group chat';
+    $activeGroupChatPill.hidden = false;
+    if (chatId) $activeGroupChatPill.dataset.chatId = chatId;
+    $activeGroupChatPill.title = 'Active group-chat orchestration: ' + topic + '. Click to open the latest active chat.';
+  }
+
+  function markActiveGroupChatTrigger(chatPath, chatId, topic, mode) {
+    _gcLastLocalTrigger = {
+      at: Date.now(),
+      chat: {
+        id: chatId || '',
+        uuid: chatId || '',
+        path: chatPath || '',
+        path_tilde: chatPath || '',
+        topic: topic || 'Group chat',
+        mode: mode || 'topic',
+        orchestrator_timer_active: true,
+        orchestrator_last_trigger_at: Date.now() / 1000,
+      },
+    };
+    updateActiveGroupChatPill();
+  }
+
+  function openActiveGroupChatPillTarget() {
+    const chat = activeGroupChatPillTarget();
+    if (!chat) return;
+    const chatId = chat.uuid || chat.id || null;
+    const chatPath = chat.path_tilde || chat.path || '';
+    const sameId = chatId && _gcReaderId && chatId === _gcReaderId;
+    const samePath = chatPath && _gcReaderPath && (chatPath === _gcReaderPath || chat.path === _gcReaderPath);
+    if (sameId || samePath) {
+      const body = document.getElementById('gcReaderBody');
+      if (body) body.focus();
+      return;
+    }
+    openGroupChatReader(chatPath, chat.topic || 'Group chat', chat.mode || 'topic', true, chatId);
+  }
+
   // Compute a stable key for row identity plus visible metadata. Topic,
   // participants, mtime, and waiting-on changes need to redraw the row
   // even when the chat count and status stay unchanged.
@@ -17843,6 +17947,9 @@
         c.status || '',
         c.topic || '',
         c.last_mtime || 0,
+        c.orchestrator_timer_active ? 1 : 0,
+        c.orchestrator_last_trigger_at || 0,
+        c.last_reminder_at || 0,
         c.message_count || 0,
         (c.session_ids || []).join(','),
         (c.waiting_on_hashes || []).join(','),
@@ -17859,6 +17966,7 @@
       _gcActiveChats = (data.chats || []);
       const nextKey = _gcChatsKey(_gcActiveChats);
       const activeCount = _gcActiveChats.filter(c => c.status === 'active').length;
+      updateActiveGroupChatPill();
       if ($gcActiveBtn) {
         if (activeCount === 0) {
           $gcActiveBtn.style.display = 'none';
@@ -17876,7 +17984,9 @@
         const $s = document.getElementById('convSearch');
         renderArchiveList($s ? $s.value : '');
       }
-    } catch (_) {}
+    } catch (_) {
+      updateActiveGroupChatPill();
+    }
   }
   if ($gcActiveBtn) {
     $gcActiveBtn.addEventListener('click', () => {
@@ -17889,6 +17999,12 @@
         const c = activeChats[0];
         openGroupChatReader(c.path_tilde, c.topic, c.mode, true, c.uuid || c.id || null);
       }
+    });
+  }
+  if ($activeGroupChatPill) {
+    $activeGroupChatPill.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      openActiveGroupChatPillTarget();
     });
   }
 

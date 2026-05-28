@@ -1925,10 +1925,17 @@
      text-like input is focused (which is when setInterval callbacks
      are globally muted). Lets the user confirm at a glance that the
      "muted while typing" optimization isn't permanently stuck on. -->
-<div id="liveRefreshPill" class="live-refresh-pill" role="status" aria-live="off"
-     title="Background refresh is running. Pauses automatically while you're typing to keep the input smooth.">
-  <span class="live-refresh-dot" aria-hidden="true"></span>
-  <span class="live-refresh-label">Live refresh</span>
+<div id="liveRefreshCluster" class="live-refresh-cluster">
+  <div id="liveRefreshPill" class="live-refresh-pill" role="status" aria-live="off"
+       title="Background refresh is running. Pauses automatically while you're typing to keep the input smooth.">
+    <span class="live-refresh-dot" aria-hidden="true"></span>
+    <span class="live-refresh-label">Live refresh</span>
+  </div>
+  <button id="activeGroupChatPill" class="active-group-chat-pill" type="button" hidden
+          title="Active group-chat orchestration is scheduling reminders. Click to open the latest active chat.">
+    <span class="active-group-chat-dot" aria-hidden="true"></span>
+    <span class="active-group-chat-label">Active Group chat</span>
+  </button>
 </div>
 
 </body>
