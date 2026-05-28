@@ -17419,16 +17419,29 @@ def _group_chat_read(path, chat_uuid=""):
         sids = meta.get("session_ids") or []
         nm = meta.get("name_map") or {}
         
+        is_paused = bool(meta.get("paused"))
         with _coord_lock:
             active_entry = _active_coordinations.get(real_path) or {}
-            status = "active" if real_path in _active_coordinations else ("archived" if meta.get("archived") else "closed")
-            
+            in_watcher = real_path in _active_coordinations
+        if meta.get("archived"):
+            status = "archived"
+        elif is_paused:
+            status = "paused"
+        elif in_watcher:
+            status = "active"
+        else:
+            status = "closed"
+
         last_nudge_at = active_entry.get("last_nudge") or 0
         last_reminder_at = meta.get("last_reminder_at") or 0
-        
+        last_activity = active_entry.get("last_activity") or 0
+
         waiting = _group_chat_compute_waiting(real_path, sids, nm)
         participant_meta = {sid: _group_chat_participant_meta(sid) for sid in sids}
-        
+        # Count participant sessions CCC currently considers live — these are the
+        # ones a nudge would wake (the actual token cost).
+        live_count = sum(1 for m in participant_meta.values() if m and m.get("is_live"))
+
         return {
             "ok": True,
             "content": content,
@@ -17438,11 +17451,22 @@ def _group_chat_read(path, chat_uuid=""):
             "session_ids": sids,
             "name_map": nm,
             "status": status,
+            "paused": is_paused,
+            "paused_at": meta.get("paused_at"),
             "waiting": waiting,
             "participant_meta": participant_meta,
             "orchestrator_timer_active": status == "active",
             "orchestrator_last_nudge_at": last_nudge_at,
             "orchestrator_last_reminder_at": last_reminder_at,
+            "orchestrator_last_activity_at": last_activity,
+            "orchestrator_last_reminder_targets": meta.get("last_reminder_targets") or [],
+            # Watcher cadence — lets the panel say "checks every 30s, nudges at
+            # most every Ns" instead of leaving the loop opaque.
+            "orchestrator_poll_interval": _COORD_POLL_INTERVAL,
+            "orchestrator_nudge_interval": _COORD_NUDGE_INTERVAL,
+            "orchestrator_idle_timeout": _COORD_DEATH_TIMEOUT,
+            "participant_count": len(sids),
+            "participant_live_count": live_count,
         }, None
     except FileNotFoundError:
         return {"ok": False, "error": "not found"}, None
@@ -17787,6 +17811,9 @@ def _group_chat_nudge(path, chat_uuid=""):
     real_path = _resolve_group_chat_ref(path, chat_uuid)
     if not real_path:
         return {"ok": False, "error": "forbidden"}
+    # Honor the disable knob even if a stray caller reaches here.
+    if _group_chat_is_paused(real_path):
+        return {"ok": False, "error": "paused"}
     sidecar_path = real_path[:-3] + ".json" if real_path.endswith(".md") else real_path + ".json"
     try:
         with open(sidecar_path, "r", encoding="utf-8") as fh:
@@ -18052,6 +18079,10 @@ def _register_coordination(chat_path: str) -> None:
     change + last_nudge=0 (debounce passed), and fire its own competing
     nudge — producing two `pinged ...` log lines at the same second.
     """
+    # Disabled chats stay out of the watcher entirely — even if a post or
+    # add-participant flow calls this, the user's "disable" knob wins.
+    if _group_chat_is_paused(chat_path):
+        return
     try:
         mtime = os.stat(chat_path).st_mtime
     except OSError:
@@ -18331,15 +18362,20 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
             continue
         if not include_archived and is_archived:
             continue
-        if md_path in active_paths:
+        is_paused = bool(meta.get("paused"))
+        if is_archived:
+            status = "archived"
+        elif is_paused:
+            # User-disabled: inert, not in the watcher, but distinct from a
+            # naturally-closed chat so the UI can offer "Enable".
+            status = "paused"
+        elif md_path in active_paths:
             status = "active"
             try:
                 _group_chat_update_header_if_changed(md_path)
                 stat = os.stat(md_path)
             except Exception:
                 pass
-        elif is_archived:
-            status = "archived"
         else:
             status = "closed"
         # Closed_at fallback: if the watcher was bypassed (server restarted
@@ -18381,6 +18417,8 @@ def _list_group_chats(include_archived: bool = False, only_archived: bool = Fals
             # round-trip per session.
             "name_map": nm,
             "status": status,
+            "paused": is_paused,
+            "paused_at": meta.get("paused_at"),
             "started_at": meta.get("started_at"),
             "closed_at": closed_at,
             "archived_at": meta.get("archived_at"),
@@ -18486,6 +18524,50 @@ def _group_chat_set_archived(raw_path: str, archived: bool, raw_uuid: str = "") 
             _active_coordinations.pop(real_path, None)
     else:
         _group_chat_log_system(real_path, "unarchived chat")
+    return {"ok": True}
+
+
+def _group_chat_is_paused(chat_path: str) -> bool:
+    """True if the chat's orchestration has been disabled by the user.
+
+    Paused chats are inert: the watcher never nudges them, _register_coordination
+    refuses to (re)add them to the active dict, and _group_chat_nudge bails. This
+    is the user-facing "disable" knob — it stops CCC's token-burning loop for the
+    chat without touching the participant sessions themselves.
+    """
+    try:
+        return bool(_load_group_chat_sidecar(chat_path).get("paused"))
+    except Exception:
+        return False
+
+
+def _group_chat_set_paused(raw_path: str, paused: bool, raw_uuid: str = "") -> dict:
+    """Flip the paused flag on a chat sidecar — the enable/disable knob.
+
+    On pause: drop the chat from _active_coordinations so the watcher stops
+    nudging immediately. On resume: re-register so the watcher picks it back up
+    on the next file change. Mirrors _group_chat_set_archived's contract.
+    """
+    real_path = _resolve_group_chat_ref(raw_path, raw_uuid)
+    if not real_path:
+        return {"ok": False, "error": "forbidden"}
+    if not os.path.exists(real_path):
+        return {"ok": False, "error": "not found"}
+    fields = {"paused": bool(paused)}
+    fields["paused_at"] = time.time() if paused else None
+    if not _update_group_chat_sidecar(real_path, **fields):
+        return {"ok": False, "error": "could not update sidecar"}
+    if paused:
+        # Log BEFORE the watcher pop (same ordering rationale as archive) so the
+        # baseline-mtime bump in _group_chat_log_system can still find the entry.
+        _group_chat_log_system(real_path, "orchestration disabled — no further nudges")
+        with _coord_lock:
+            _active_coordinations.pop(real_path, None)
+    else:
+        _group_chat_log_system(real_path, "orchestration enabled")
+        # Re-arm the watcher. _register_coordination re-reads the (now cleared)
+        # paused flag and adds it back.
+        _register_coordination(real_path)
     return {"ok": True}
 
 
@@ -27103,6 +27185,30 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing path or id"})
                 return
             result = _group_chat_set_archived(chat_path, False, chat_uuid)
+            if result.get("error") == "forbidden":
+                self.send_json(result, 403)
+            elif result.get("error") == "not found":
+                self.send_json(result, 404)
+            else:
+                self.send_json(result)
+        elif path == "/api/group-chats/pause":
+            # Enable/disable knob. paused=true halts the coordination watcher's
+            # nudges for this chat (the token-burning loop) without touching the
+            # participant sessions; paused=false re-arms it. Same path/id contract
+            # as /archive.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            chat_path = (payload.get("path") or "").strip()
+            chat_uuid = (payload.get("id") or payload.get("uuid") or "").strip()
+            paused = bool(payload.get("paused", True))
+            if not chat_path and not chat_uuid:
+                self.send_json({"ok": False, "error": "missing path or id"})
+                return
+            result = _group_chat_set_paused(chat_path, paused, chat_uuid)
             if result.get("error") == "forbidden":
                 self.send_json(result, 403)
             elif result.get("error") == "not found":

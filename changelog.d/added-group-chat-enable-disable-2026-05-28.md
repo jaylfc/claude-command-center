@@ -1,0 +1,1 @@
+Added a per-group-chat enable/disable knob in the conversation list. Disabling halts the orchestration loop (nudges/reminders) for that chat so it stops consuming tokens, without touching the participant sessions.
