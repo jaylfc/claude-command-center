@@ -7646,7 +7646,29 @@
       return escapeHtml(short);
     };
 
-    let html = '<div class="gco-section"><div class="gco-title">Orchestrator</div>';
+    let html = '';
+
+    // Chat identity strip — the chat ID and on-disk path. Surfaces what the
+    // reader is currently pointed at so the user (and any debugging me)
+    // can name the chat when reporting an issue (e.g. "loading is slow on
+    // chat XYZ"). Both fields select-all on click so copy/paste is one
+    // keystroke. _gcReaderId / _gcReaderPath are module-level state set
+    // by openGroupChatReader.
+    const chatId = (typeof _gcReaderId !== 'undefined' && _gcReaderId) ? _gcReaderId : '';
+    const chatPath = (typeof _gcReaderPath !== 'undefined' && _gcReaderPath) ? _gcReaderPath : '';
+    if (chatId || chatPath) {
+      html += '<div class="gco-section"><div class="gco-title">Chat</div>';
+      if (chatId) {
+        html += `<div class="gco-row"><span class="gco-label">ID:</span> <span class="gco-val gco-copy" title="Click to select — Cmd+C to copy">${escapeHtml(chatId)}</span></div>`;
+      }
+      if (chatPath) {
+        const file = chatPath.split('/').pop() || chatPath;
+        html += `<div class="gco-row"><span class="gco-label">File:</span> <span class="gco-val gco-copy" title="${escapeAttr(chatPath)}">${escapeHtml(file)}</span></div>`;
+      }
+      html += '</div>';
+    }
+
+    html += '<div class="gco-section"><div class="gco-title">Orchestrator</div>';
 
     html += `<div class="gco-row"><span class="gco-label">Timer Active:</span> <span class="gco-val">${data.orchestrator_timer_active ? 'Yes' : 'No'}</span></div>`;
 
@@ -9382,12 +9404,42 @@
     }
   }
 
-  // Markup of the last committed conversation-list render. Used to skip a
-  // wholesale innerHTML rebuild when the freshly-built rows are byte-identical
-  // to what's already on screen (see the no-op guard before the commit below).
-  // Cleared (null) by every path that wipes $convList to an empty/error state,
-  // so a later identical render after a wipe still commits.
+  // Structural signature of the last committed conversation-list render, with
+  // volatile time labels blanked (see _VOLATILE_TIME_RE). Used to skip a
+  // wholesale innerHTML rebuild when the only thing that changed since the last
+  // render is the ticking clocks. Cleared (null) by every path that wipes
+  // $convList to an empty/error state, so a later render after a wipe commits.
   let _convListRenderSig = null;
+
+  // Per-tick volatile time labels in the sidebar rows: the relative "last
+  // activity" stamp (.conv-rel) and the group-chat "when" labels. These tick
+  // every few seconds and, baked into row markup, were the sole driver of the
+  // periodic full-list rebuild flicker. The capture groups are (open-tag,
+  // inner-text, close-tag) so a `$1$3` replace blanks just the text for the
+  // structural signature, and exec() can lift the fresh text for in-place
+  // patching. Leaf spans (no nested tags), so [^<]* for the inner text is safe.
+  const _VOLATILE_TIME_RE = /(<span class="[^"]*\b(?:conv-rel|conv-ingroupchat-row-when|conv-ingroupchat-participant-when)\b[^"]*"[^>]*>)([^<]*)(<\/span>)/g;
+
+  // Update only the volatile time labels in place from freshly-built markup,
+  // leaving the rest of the live DOM (and its attached handlers) untouched.
+  // Called when the structural signature is unchanged, i.e. only clocks moved.
+  function _patchVolatileTimes(newHtml) {
+    const $convList = document.getElementById('convList');
+    if (!$convList) return;
+    const texts = [];
+    let m;
+    _VOLATILE_TIME_RE.lastIndex = 0;
+    while ((m = _VOLATILE_TIME_RE.exec(newHtml)) !== null) texts.push(m[2]);
+    const spans = $convList.querySelectorAll(
+      'span.conv-rel, span.conv-ingroupchat-row-when, span.conv-ingroupchat-participant-when');
+    // querySelectorAll yields document order, which matches source/regex order.
+    // If counts ever drift, bail rather than mis-assign — the next structural
+    // render corrects it.
+    if (spans.length !== texts.length) return;
+    for (let i = 0; i < spans.length; i++) {
+      if (spans[i].innerHTML !== texts[i]) spans[i].innerHTML = texts[i];
+    }
+  }
 
   function renderConversationList(convs) {
     convs = filterGhIssues(convs);
@@ -10549,20 +10601,24 @@
     // progress (which now also contains the group-chat rows at the
     // top) → Archived.
     const _convListHtml = _idSearchRowsHtml + _ghIssuesHtml + _readyToMergeHtml + _inProgressHtml + _archivedHtml;
-    // No-op guard against the periodic flicker. The 10s bulk-sessions poll and
-    // the 5s live-status tick both re-run this render even when nothing about
-    // the rows changed; the wholesale innerHTML reset below then tears down and
-    // rebuilds every row, which the user sees as the whole list flickering (and
-    // it silently drops :hover, focus, in-flight CSS animations, and any
-    // already-painted lazy content). When the new markup is byte-identical to
-    // what's committed, the existing DOM — and its already-attached per-row
-    // handlers — are still correct, so return without touching it. Live pills
-    // and relative-time labels are baked into the row markup, so genuine updates
-    // change the string and fall through to a real render.
-    if (_convListRenderSig === _convListHtml && $convList.childElementCount > 0) {
+    // Flicker guard. The 10s bulk-sessions poll and the 5s live-status tick both
+    // re-run this render constantly. The wholesale innerHTML reset below tears
+    // down and rebuilds every row, which the user sees as the whole list
+    // flickering (and it silently drops :hover, focus, in-flight CSS animations,
+    // and any already-painted lazy content). Between otherwise-identical renders
+    // the only thing that moves is the volatile time labels (relative stamp +
+    // group-chat "when" labels) ticking every few seconds — and because they're
+    // baked into row markup, each tick changed the full string and forced a
+    // rebuild. Compare a STRUCTURAL signature with those labels blanked: if it's
+    // unchanged, only the clocks moved, so patch just those spans in place (no
+    // teardown, no flicker) and bail. Any real change alters the structural sig
+    // and falls through to a normal rebuild.
+    const _structSig = _convListHtml.replace(_VOLATILE_TIME_RE, '$1$3');
+    if (_convListRenderSig === _structSig && $convList.childElementCount > 0) {
+      _patchVolatileTimes(_convListHtml);
       return;
     }
-    _convListRenderSig = _convListHtml;
+    _convListRenderSig = _structSig;
     //
     // FLIP-style reorder animation: capture each existing row's top
     // BEFORE the innerHTML reset, then on the new DOM, translate

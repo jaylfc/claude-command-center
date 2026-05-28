@@ -6021,6 +6021,28 @@
   .sidebar-footer-btn:hover { background: var(--surface-2); color: var(--text); }
   .sidebar-footer-btn svg { width: 16px; height: 16px; display: block; }
   .sidebar-footer-spacer { flex: 1; }
+  /* Active-coordinations pill — bottom-left of the sidebar footer. Same
+     visual rhythm as the rest of the footer but with a brighter accent
+     so the "you have N chats waiting" signal is easy to spot. Hidden
+     entirely when there are zero active chats. */
+  .sidebar-footer-pill {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font: 500 11.5px inherit;
+    padding: 4px 9px;
+    border-radius: 999px;
+    cursor: pointer;
+    white-space: nowrap;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sidebar-footer-pill:hover {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
   .conv-bg-palette {
     display: grid;
     grid-template-columns: repeat(12, 14px);
@@ -8594,6 +8616,17 @@ body.status-pos-right .conv-sticky-header .csh-col-ask {
 .gco-time {
   cursor: help;
   border-bottom: 1px dotted var(--border-light);
+}
+
+/* Click-to-select identifiers (chat ID, chat file path) in the orchestrator
+   panel — `user-select: all` highlights the whole value with a single click
+   so the user can Cmd-C without dragging across hyphens. */
+.gco-copy {
+  user-select: all;
+  -webkit-user-select: all;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
 }
 
 /* Lifecycle entries — "system: removed X", "system: pinged …". Render at
