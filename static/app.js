@@ -23415,7 +23415,7 @@
     if (ev.key === CONV_BG_STORAGE_KEY) renderAllConversationBackgroundPalettes();
   });
 
-  function getThemePref() { return localStorage.getItem('ccc-theme') || 'system'; }
+  function getThemePref() { return localStorage.getItem('ccc-theme') || 'dark'; }
   function getFontPref() { return localStorage.getItem('ccc-font') || 'system'; }
   function getViewGhPref() { return localStorage.getItem('ccc-view-gh') || 'show'; }
 

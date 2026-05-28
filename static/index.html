@@ -110,7 +110,7 @@
         // pre-paint of the class is intentionally skipped now.
         // Apply persisted appearance (theme + font) before first paint to
         // avoid a flash of wrong theme.
-        const themePref = localStorage.getItem('ccc-theme') || 'system';
+        const themePref = localStorage.getItem('ccc-theme') || 'dark';
         let resolved = themePref;
         if (themePref === 'system') {
           resolved = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
