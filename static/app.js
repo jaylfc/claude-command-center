@@ -18328,12 +18328,21 @@
 
   function _captureArchiveListScroll(q, $list) {
     if (!$list || _lastArchiveRenderFilter !== q) return null;
-    const state = { filter: q, top: $list.scrollTop, anchorId: '', anchorOffset: 0 };
+    const state = { filter: q, top: $list.scrollTop, anchorAttr: '', anchorValue: '', anchorOffset: 0 };
     const listRect = $list.getBoundingClientRect();
-    for (const row of $list.querySelectorAll('.conv-item[data-id]')) {
+    for (const row of $list.querySelectorAll('[data-id], [data-gc-id], [data-collapse-key]')) {
       const rect = row.getBoundingClientRect();
       if (rect.bottom >= listRect.top && rect.top <= listRect.bottom) {
-        state.anchorId = row.dataset.id || '';
+        if (row.dataset.id) {
+          state.anchorAttr = 'data-id';
+          state.anchorValue = row.dataset.id;
+        } else if (row.dataset.gcId) {
+          state.anchorAttr = 'data-gc-id';
+          state.anchorValue = row.dataset.gcId;
+        } else if (row.dataset.collapseKey) {
+          state.anchorAttr = 'data-collapse-key';
+          state.anchorValue = row.dataset.collapseKey;
+        }
         state.anchorOffset = rect.top - listRect.top;
         break;
       }
@@ -18351,6 +18360,17 @@
     requestAnimationFrame(() => {
       $list.scrollTop = _archiveScrollTopWithinBounds($list, scrollTop);
     });
+  }
+
+  function _findArchiveListScrollAnchor($list, state) {
+    if (!$list || !state || !state.anchorAttr || !state.anchorValue) return null;
+    const attr = state.anchorAttr;
+    const value = state.anchorValue;
+    if (window.CSS && CSS.escape) {
+      return $list.querySelector('[' + attr + '="' + CSS.escape(value) + '"]');
+    }
+    return Array.from($list.querySelectorAll('[' + attr + ']'))
+      .find(row => row.getAttribute(attr) === value) || null;
   }
 
   function _findConversationRowElement(convId) {
@@ -18373,20 +18393,20 @@
 
   function _restoreArchiveListScroll(state, $list) {
     if (!state || !$list) return;
-    requestAnimationFrame(() => {
+    const restore = () => {
       if (state.filter !== _lastArchiveRenderFilter) return;
-      if (state.anchorId && window.CSS && CSS.escape) {
-        const row = $list.querySelector('.conv-item[data-id="' + CSS.escape(state.anchorId) + '"]');
-        if (row) {
-          const listRect = $list.getBoundingClientRect();
-          const rowRect = row.getBoundingClientRect();
-          const nextTop = $list.scrollTop + ((rowRect.top - listRect.top) - state.anchorOffset);
-          $list.scrollTop = _archiveScrollTopWithinBounds($list, nextTop);
-          return;
-        }
+      const row = _findArchiveListScrollAnchor($list, state);
+      if (row) {
+        const listRect = $list.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        const nextTop = $list.scrollTop + ((rowRect.top - listRect.top) - state.anchorOffset);
+        $list.scrollTop = _archiveScrollTopWithinBounds($list, nextTop);
+        return;
       }
       $list.scrollTop = _archiveScrollTopWithinBounds($list, state.top);
-    });
+    };
+    restore();
+    requestAnimationFrame(restore);
   }
 
   // Dedupe concurrent /api/conversations/all fetches keyed by URL. Recovery,
