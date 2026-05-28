@@ -196,7 +196,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <key>SUPublicEDKey</key><string>+oU5VeStRaidpogMHUktYpr/JxKuSn9wY1xEgN106lY=</string>
   <key>SUEnableInstallerLauncherService</key><true/>
   <key>SUEnableAutomaticChecks</key><true/>
-  <key>SUScheduledCheckInterval</key><integer>86400</integer>
+  <key>SUScheduledCheckInterval</key><integer>3600</integer>
 </dict>
 </plist>
 EOF

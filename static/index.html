@@ -320,8 +320,6 @@
         <span class="sh-meta-row">
           Last updated <span id="cccLastUpdated">…</span>
           <span class="sh-meta-sep">·</span>
-          <a href="#" class="sh-check-updates" id="cccCheckUpdatesLink" title="Check GitHub for a newer release">check for updates</a>
-          <span class="sh-meta-sep">·</span>
           <a href="#" class="sh-whats-new-link" id="cccWhatsNewLink" title="View what is new in this version">what's new</a>
         </span>
         <a class="sh-repo-link" id="cccRepoLink" href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Open the repo on GitHub">git: amirfish1/claude-command-center</a>
@@ -618,41 +616,49 @@
           </svg>
         </button>
         <div class="conv-input-bar" id="convInputBar">
-          <textarea id="convInput" rows="1" placeholder="Send to terminal..." autocomplete="off" spellcheck="false"></textarea>
-          <!-- Engine picker for new-session mode. Occupies the same slot as
-               the Esc button (mutually exclusive — Esc only appears for live
-               sessions, this only for `__new__`). updateInputBar() toggles
-               visibility. -->
-          <select id="convInputEngineSelect" class="engine-select" title="Engine that starts this new session — claude, codex, or antigravity" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
-            <option value="claude">claude</option>
-            <option value="codex">codex</option>
-            <option value="antigravity">antigravity</option>
-            <option value="gemini">gemini</option>
-          </select>
-          <select id="convInputModelSelect" class="model-select" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
-            <!-- Populated dynamically via app.js -->
-          </select>
-          <select id="convInputIssueAction" title="Action to take on this issue" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
-            <option value="spawn">Fix (session)</option>
-            <option value="needs_attention">Reply + Needs-Attention</option>
-            <option value="close">Reply + Close</option>
-            <option value="completed">Close: completed</option>
-            <option value="not_planned">Close: not planned</option>
-            <option value="duplicate">Close: duplicate #</option>
-          </select>
-          <button class="esc-btn" id="convEscBtn" title="Send Esc to terminal — cancels in-flight response (or kills a headless spawn)">Esc</button>
-          <button class="send-btn" id="convSendBtn" title="Send to terminal" aria-label="Send to terminal">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 19 L12 5 M6 11 L12 5 L18 11"></path>
-            </svg>
-          </button>
-          <button class="tts-btn" id="convTtsBtn" title="Read last message" aria-label="Read last message" aria-pressed="false">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
-              <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
-              <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
-            </svg>
-          </button>
+          <div class="conv-input-row-top">
+            <textarea id="convInput" rows="1" placeholder="Send to terminal..." autocomplete="off" spellcheck="false"></textarea>
+          </div>
+          <div class="conv-input-row-bottom">
+            <div class="conv-input-selectors">
+              <!-- Engine picker for new-session mode. Occupies the same slot as
+                   the Esc button (mutually exclusive — Esc only appears for live
+                   sessions, this only for `__new__`). updateInputBar() toggles
+                   visibility. -->
+              <select id="convInputEngineSelect" class="engine-select" title="Engine that starts this new session — claude, codex, or antigravity" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+                <option value="claude">claude</option>
+                <option value="codex">codex</option>
+                <option value="antigravity">antigravity</option>
+                <option value="gemini">gemini</option>
+              </select>
+              <select id="convInputModelSelect" class="model-select" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+                <!-- Populated dynamically via app.js -->
+              </select>
+              <select id="convInputIssueAction" title="Action to take on this issue" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+                <option value="spawn">Fix (session)</option>
+                <option value="needs_attention">Reply + Needs-Attention</option>
+                <option value="close">Reply + Close</option>
+                <option value="completed">Close: completed</option>
+                <option value="not_planned">Close: not planned</option>
+                <option value="duplicate">Close: duplicate #</option>
+              </select>
+            </div>
+            <div class="conv-input-buttons">
+              <button class="esc-btn" id="convEscBtn" title="Send Esc to terminal — cancels in-flight response (or kills a headless spawn)">Esc</button>
+              <button class="tts-btn" id="convTtsBtn" title="Read last message" aria-label="Read last message" aria-pressed="false">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
+                  <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
+                  <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+                </svg>
+              </button>
+              <button class="send-btn" id="convSendBtn" title="Send to terminal" aria-label="Send to terminal">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 19 L12 5 M6 11 L12 5 L18 11"></path>
+                </svg>
+              </button>
+            </div>
+          </div>
         </div>
         <!-- Footer hint row beneath the input card — tty label on the left,
              keyboard-shortcut hint on the right. Kept out of the input row
