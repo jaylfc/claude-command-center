@@ -6510,6 +6510,16 @@
   line-height: 1.6;
   font-weight: 400;
 }
+/* Browser default p margin is 1em top + bottom (~16px). With line-height 1.6
+   that makes a single-paragraph message ~58px tall — reads as empty padding
+   and triggers "is this broken?" reactions. Tighten paragraph spacing inside
+   the chat body so short messages hug their speaker meta. Also drop the
+   first/last-child margins entirely so the body box snaps to the content. */
+.gc-message-body p { margin: 4px 0; }
+.gc-message-body p:first-child { margin-top: 0; }
+.gc-message-body p:last-child { margin-bottom: 0; }
+.gc-message-body > :first-child { margin-top: 0; }
+.gc-message-body > :last-child { margin-bottom: 0; }
 .gc-message-empty { color: var(--text-muted); }
 /* Group-chat reader input — matches the convo `.conv-input-bar` shape:
    single rounded card, soft focus-within ring, no inner-input border,

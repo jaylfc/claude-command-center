@@ -1,0 +1,1 @@
+Tighten paragraph spacing inside group-chat messages so short single-line messages no longer render with ~50px of padding-looking whitespace (browser-default `<p>` margins collide with the 1.6 line-height to make every message feel broken).
