@@ -25145,7 +25145,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     if cached.get("stale"):
                         _archive_refresh_response_cache_async(cache_key, cache_options)
                         cached["refreshing"] = True
-                    self.send_json(cached)
+                    self.send_json(cached, etag=True)
                     return
             if not background:
                 _archive_load_begin()
@@ -25164,7 +25164,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     _archive_load_complete(convs)
                 _archive_response_cache_put(cache_key, convs)
                 _save_conv_meta_cache()
-                self.send_json({"conversations": convs, "count": len(convs)})
+                self.send_json({"conversations": convs, "count": len(convs)}, etag=True)
             except Exception as e:
                 if not background:
                     _archive_load_fail(e)
@@ -27974,13 +27974,27 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_json(self, data, status=200):
-        body = json.dumps(data).encode()
+    def send_json(self, data, status=200, etag=False):
+        body_str = json.dumps(data)
+        etag_val = None
+        if etag:
+            etag_val = '"' + hashlib.sha1(body_str.encode()).hexdigest() + '"'
+            # Conditional GET: if the client already has this exact payload,
+            # answer 304 with no body — saves the ~500KB transfer plus the
+            # client-side parse and re-render on every poll when nothing changed.
+            if status == 200 and self.headers.get("If-None-Match") == etag_val:
+                self.send_response(304)
+                self.send_header("ETag", etag_val)
+                self.end_headers()
+                return
+        body = body_str.encode()
         ct = "application/json"
         body, enc = self._maybe_gzip(body, ct)
         self.send_response(status)
         self.send_header("Content-Type", ct)
         self.send_header("Content-Length", str(len(body)))
+        if etag_val:
+            self.send_header("ETag", etag_val)
         if enc:
             self.send_header("Content-Encoding", enc)
             self.send_header("Vary", "Accept-Encoding")

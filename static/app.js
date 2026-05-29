@@ -1270,7 +1270,7 @@
           row.question_options = Array.isArray(data.question_options) ? data.question_options : [];
           row.question_option_details = Array.isArray(data.question_option_details) ? data.question_option_details : [];
           if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
-            renderSidebar(filterConversations($convSearch.value));
+            _scheduleSidebarRender();
           }
         }
       }
@@ -6827,6 +6827,26 @@
     if ($convList) $convList.style.display = '';
     const $search = document.getElementById('convSearch');
     try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
+  }
+
+  // Coalesce poller-driven sidebar re-renders. liveStatus (5s), sessionsList
+  // (10s) and gcActive (15s) each re-render independently; routing them through
+  // one rAF collapses ticks that land in the same frame into a single render
+  // (and computes fresh convs at flush time). User-initiated renders still call
+  // renderSidebar / renderArchiveList directly so they stay immediate.
+  let _sidebarRenderRaf = 0;
+  function _scheduleSidebarRender() {
+    if (_sidebarRenderRaf) return;
+    _sidebarRenderRaf = requestAnimationFrame(() => {
+      _sidebarRenderRaf = 0;
+      try {
+        const $s = document.getElementById('convSearch');
+        const convs = (typeof filterConversations === 'function')
+          ? filterConversations($s ? $s.value : '')
+          : (conversationsData || []);
+        renderSidebar(convs);
+      } catch (_) {}
+    });
   }
 
   // Legacy list-view scroll/kanban rendering — kept for reference but no
@@ -19056,8 +19076,7 @@
       // "In Group Chat" header appears/disappears without waiting for
       // the next archive poll.
       if (nextKey !== prevKey) {
-        const $s = document.getElementById('convSearch');
-        renderArchiveList($s ? $s.value : '');
+        _scheduleSidebarRender();
       }
     } catch (_) {
       updateActiveGroupChatPill();
@@ -19538,6 +19557,8 @@
   // PR-hydration, and refresh paths all call loadArchiveAll independently;
   // without this they fire 3+ parallel ~500KB requests for the same payload.
   const _archiveAllInflight = new Map();
+  const _archiveAllEtag = new Map();  // url -> last ETag from the server
+  const _archiveAllData = new Map();  // url -> last conversations[] (reused on 304)
 
   async function loadArchiveAll(opts = {}) {
     const params = new URLSearchParams();
@@ -19556,13 +19577,25 @@
     if (pending) return pending;
     const p = (async () => {
       try {
-        const r = await fetch(url);
+        const prevEtag = _archiveAllEtag.get(url);
+        const r = await fetch(url, prevEtag ? { headers: { 'If-None-Match': prevEtag } } : undefined);
+        // 304 → the server confirms our cached payload is still current, so we
+        // skip re-parsing ~500KB and reuse the last conversations as-is. The
+        // caller re-renders, but the flicker guard skips the rebuild since the
+        // structural signature is unchanged.
+        if (r.status === 304) {
+          return (_archiveAllData.get(url) || []).slice();
+        }
         if (!r.ok) return [];
+        const etag = r.headers.get('ETag');
+        if (etag) _archiveAllEtag.set(url, etag);
         const d = await r.json();
         if (d && d.cached && d.stale && d.refreshing) {
           _scheduleArchiveStaleRetry();
         }
-        return Array.isArray(d.conversations) ? d.conversations : [];
+        const convs = Array.isArray(d.conversations) ? d.conversations : [];
+        _archiveAllData.set(url, convs);
+        return convs;
       } catch (_) { return []; }
     })();
     _archiveAllInflight.set(url, p);
@@ -21196,8 +21229,7 @@
     try {
       await refreshArchiveData();
       if (deferSidebarRenderIfDragging()) return;
-      const $search = document.getElementById('convSearch');
-      renderArchiveList($search ? $search.value : '');
+      _scheduleSidebarRender();
 	    } catch (_) { /* best-effort */ }
 	  }, 10000);
   }
