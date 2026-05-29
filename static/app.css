@@ -3033,13 +3033,23 @@
     /* Brighter than --text (#c9d1d9) so the prompt has the same legibility
        as Claude Desktop's input. Light-mode override below keeps it dark. */
     color: #f0f6fc;
-    /* Force the caret to the accent color. Default `caret-color: auto`
-       inherits from `color` (#f0f6fc near-white), which renders as a hair-
-       thin pale line over the dark transparent bar — easy to miss against
-       the dim placeholder text, especially in WKWebView. Pinning it to the
-       accent makes the "I clicked, I can type" signal obvious. */
-    caret-color: var(--accent);
+    /* Force a visible caret. The previous `caret-color: var(--accent)`
+       failed in .conv-pane.has-conv-bg, where --accent is remapped to
+       --conv-accent (the palette's accent), which can land close to the
+       bg color and render the caret invisible. The textarea text color
+       (`color` above, or --conv-text in has-conv-bg) is by definition
+       picked to read against the background, so matching the caret to
+       it guarantees contrast — and `-webkit-text-fill-color` keeps WKWeb
+       View from quietly hiding the caret over a transparent bg. */
+    -webkit-text-fill-color: currentColor;
+    caret-color: currentColor;
     font-size: 15px; font-weight: 500; font-family: inherit;
+  }
+  /* Belt-and-braces accent caret on focus — also helps in WKWebView
+     where the default ~1px caret over the dark bar can be lost. */
+  .conv-input-bar input:focus,
+  .conv-input-bar textarea:focus {
+    caret-color: var(--accent);
   }
   .conv-input-bar textarea {
     /* Single-row by default; autosize JS grows the height as the user
