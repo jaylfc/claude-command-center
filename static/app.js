@@ -10105,12 +10105,24 @@
         items.push({
           pinRank: c.pinned ? _pinRankValue(c) : Infinity,
           mtime: c.modified || 0,
+          id: c.session_id || c.id || '',
           html: _renderRow(c, opts),
         });
       }
       for (const gc of (gcItems || [])) items.push(gc);
+      // Same hysteresis as applyConvSort, applied to this flat ("by time")
+      // render path so it doesn't jitter either: items whose mtimes are within
+      // the window keep the prior render's relative order. Reuses the order
+      // memory applyConvSort persists (ccc-row-stable-order).
+      let _prevItemOrder = {};
+      try { _prevItemOrder = JSON.parse(localStorage.getItem(_ROW_ORDER_KEY) || '{}'); } catch (_) { /* corrupt/missing */ }
       items.sort((a, b) => {
         if (a.pinRank !== b.pinRank) return a.pinRank - b.pinRank;
+        if (Math.abs((a.mtime || 0) - (b.mtime || 0)) < _ROW_ORDER_HYSTERESIS_S) {
+          const ia = a.id ? _prevItemOrder[a.id] : undefined;
+          const ib = b.id ? _prevItemOrder[b.id] : undefined;
+          if (ia !== undefined && ib !== undefined && ia !== ib) return ia - ib;
+        }
         return (b.mtime || 0) - (a.mtime || 0);
       });
       let _gapShown = false;
