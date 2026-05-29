@@ -1,0 +1,1 @@
+Sending an annotation to the UX-fixes-queue now optimistically marks the receiving session as "Sending…" in the conversation list, the same way a user-typed message does. Previously the inject landed in the target session's terminal but the sidebar showed no activity signal until the next sidecar tick, which read as "did anything happen?".

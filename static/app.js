@@ -15506,8 +15506,20 @@
     // whenever the override has been set but the JSONL hasn't recorded
     // that model yet (or when the inject explicitly returned applied=queued).
     const ovr = u.override || null;
-    const displayModel = ovr ? ovr.model : (u.model || '');
+    // Claude Code writes "<synthetic>" (and occasionally other angle-bracket
+    // sentinels like "<unknown>") into the JSONL `model` field when a
+    // message was synthesized client-side — interrupts, /clear stubs,
+    // fallback errors — rather than coming from a real API call. That's an
+    // SDK implementation detail and reads as a bug when surfaced in the
+    // model pill. Treat any angle-bracketed sentinel as "no known model"
+    // so the pill stops parroting it.
+    const rawModel = ovr ? ovr.model : (u.model || '');
+    const isSyntheticModel = /^\s*<[^>]+>\s*$/.test(String(rawModel));
     const engine = u.engine || (ovr && ovr.engine) || 'claude';
+    // Fall back to the engine name when the model is unknown / synthetic so
+    // the picker affordance stays — clicking the pill still opens the model
+    // chooser. The tooltip (modelTip, built below) explains the fallback.
+    const displayModel = isSyntheticModel ? engine : rawModel;
     const liveContextTokens = Number(u.live_context_tokens || 0);
     const liveContextLimit = Number(u.live_context_limit || 0);
     const hasLiveContext = engine === 'claude' && liveContextTokens > 0;
@@ -15528,7 +15540,9 @@
         || displayModel.toLowerCase().includes('[1m]')
       );
       const shortModel = displayModel.replace(/^claude-/, '').replace(/\[1m\]/i, '').trim();
-      const modelTip = displayModel
+      const modelTip = (isSyntheticModel
+          ? engine + ' (model unknown — latest event was synthesized by the client; the next real turn will populate this)'
+          : displayModel)
         + (isOneM ? '\n(1M context window — anthropic-beta: context-1m)' : '')
         + (queued ? '\n(Applied on next ask — change is queued)' : '')
         + (engine === 'antigravity' ? '' : '\n\nClick to change model');
@@ -21994,6 +22008,18 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+      // Optimistically mark the receiving UX-fixes-queue session as
+      // sending so its row shows "Sending…" / WIP immediately, just like
+      // a user-typed message would. Without this, the inject lands in
+      // the target session's terminal but the conv list shows no
+      // activity signal until the next sidecar tick — reads as "did
+      // anything actually happen?"
+      const _targetSid = data.session_id
+        || (data.inject && data.inject.session_id)
+        || '';
+      if (_targetSid && typeof markSessionSending === 'function') {
+        markSessionSending(_targetSid);
+      }
       if (typeof closeFn === 'function') closeFn();
       showOpToast(data.action === 'spawned' ? 'UX fixes queue session created' : 'Annotation sent to UX fixes queue', 'success');
       try {
