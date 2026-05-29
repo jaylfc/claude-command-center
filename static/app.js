@@ -19305,12 +19305,31 @@
     if (!state || !$list) return;
     const restore = () => {
       if (state.filter !== _lastArchiveRenderFilter) return;
+      // If the scroll position is still essentially where we captured it, the
+      // list wasn't rebuilt this pass (the render was a no-op skipped by the
+      // flicker guard, so innerHTML never reset scrollTop to 0). Running the
+      // anchor math anyway re-seats the viewport on sub-pixel/row-height
+      // differences and, fired on every poll, drifts the list steadily toward
+      // the top — the "list keeps jumping" symptom. Nothing to restore here.
+      if (Math.abs($list.scrollTop - state.top) < 4) return;
       const row = _findArchiveListScrollAnchor($list, state);
       if (row) {
         const listRect = $list.getBoundingClientRect();
         const rowRect = row.getBoundingClientRect();
         const nextTop = $list.scrollTop + ((rowRect.top - listRect.top) - state.anchorOffset);
-        $list.scrollTop = _archiveScrollTopWithinBounds($list, nextTop);
+        // The anchor exists only to absorb small reflows (a row or two
+        // added/removed above the viewport). If honoring it would move the list
+        // more than that, the anchor relocated — e.g. opening an archived
+        // conversation re-classifies it out of the Archived section, and chasing
+        // it yanks the viewport toward the top (the click-jump). In that case
+        // keep the captured pixel position so the view stays put; a small
+        // residual shift is far better than a leap. 160px ≈ 2-3 rows.
+        const ANCHOR_REFLOW_MAX = 160;
+        if (Math.abs(nextTop - state.top) > ANCHOR_REFLOW_MAX) {
+          $list.scrollTop = _archiveScrollTopWithinBounds($list, state.top);
+        } else {
+          $list.scrollTop = _archiveScrollTopWithinBounds($list, nextTop);
+        }
         return;
       }
       $list.scrollTop = _archiveScrollTopWithinBounds($list, state.top);
