@@ -8,10 +8,6 @@
   // Disabling a poller is a pure no-op (timer keeps firing, callback returns
   // early), so it's instant and reversible with zero teardown.
   window.__pollersOff = window.__pollersOff || {};
-  // Boot timestamp — used to scope load-time-only behaviors (e.g. the GH
-  // Issues placeholder that reserves the section's slot during the first
-  // render so late-hydrated issues don't shove the list down).
-  const _cccBootAt = Date.now();
   function _pollerOff(name) { return !!(window.__pollersOff && window.__pollersOff[name]); }
   function _gated(name, fn) {
     return function () { if (_pollerOff(name)) return; return fn.apply(this, arguments); };
@@ -10638,13 +10634,6 @@
     // work the user might want to start. State persists in localStorage.
     let _ghIssuesHtml = '';
     if (_ghIssueConvs.length > 0) {
-      // Remember GH issues exist + how many, so the next first paint can
-      // reserve a collapsed placeholder for this section (see the else branch)
-      // and avoid the load-time reshuffle when the late-hydrated issues land.
-      try {
-        localStorage.setItem('ccc-ghissues-seen', '1');
-        localStorage.setItem('ccc-ghissues-last-count', String(_ghIssueConvs.length));
-      } catch (_) { /* localStorage disabled */ }
       const _ghCollapsed = localStorage.getItem('ccc-ghissues-collapsed') === '1';
       const _ghArrow = _ghCollapsed ? '▸' : '▾';
       const _ghHasFolderChips = _ghIssueConvs.some(c => c.folder_label_chip);
@@ -10731,36 +10720,6 @@
         + '</button>'
         + '<div class="conv-ghissues-list">' + _ghRows + '</div>'
         + '</div>';
-    } else {
-      // Reserve the GH Issues slot with a COLLAPSED placeholder header during
-      // the first render, so when the separately-hydrated issues arrive a
-      // moment later they populate into this already-present (collapsed,
-      // zero-height-body) section instead of inserting the whole section and
-      // shoving the list down — the load-time reshuffle. Only within the boot
-      // window: after that, an empty section means there genuinely are no GH
-      // issues, so we don't leave a ghost header.
-      try {
-        if (localStorage.getItem('ccc-ghissues-seen') === '1'
-            && (Date.now() - _cccBootAt) < 30000) {
-          // Respect the persisted collapse pref. Collapsed (the common case)
-          // → real issues populate into a zero-height body → no shift at all.
-          // Expanded → the body grows when rows land (a shift), but that's no
-          // worse than today's absent→present-expanded; the header slot is at
-          // least reserved.
-          const _ghPhCollapsed = localStorage.getItem('ccc-ghissues-collapsed') === '1';
-          const _ghPhCount = localStorage.getItem('ccc-ghissues-last-count') || '';
-          const _ghPhTitle = getViewGhPref() === 'hide' ? 'Backlog' : 'GH Issues';
-          _ghIssuesHtml =
-            '<div class="conv-ghissues-section' + (_ghPhCollapsed ? ' collapsed' : '') + '" data-role="ghissues-section" data-ghissues-placeholder="1">'
-            + '<button type="button" class="conv-ghissues-header" data-role="ghissues-toggle" aria-expanded="' + (!_ghPhCollapsed) + '">'
-            +   '<span class="conv-ghissues-arrow">' + (_ghPhCollapsed ? '▸' : '▾') + '</span>'
-            +   '<span class="conv-ghissues-label">' + _ghPhTitle + '</span>'
-            +   '<span class="conv-ghissues-count">' + _ghPhCount + '</span>'
-            + '</button>'
-            + '<div class="conv-ghissues-list"></div>'
-            + '</div>';
-        }
-      } catch (_) { /* localStorage disabled — skip placeholder */ }
     }
     // Archived section: always present so the destination is obvious,
     // collapsed by default so it doesn't crowd the active list. State
