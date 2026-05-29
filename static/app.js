@@ -13706,27 +13706,39 @@
 
     // Thumbnail / Icon placeholder
     if (row.category === 'images') {
-      const img = document.createElement('img');
-      img.className = 'sidebar-file-thumb';
-      img.alt = row.label;
-      img.loading = 'lazy';
+      const target = row.target || '';
       const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
-      // Remote URLs (e.g. an image link pasted into the chat) can't go through
-      // /api/pasted-image — that route only serves local sandboxed files, so it
-      // 404s and spams the console. Load those directly; the proxy is only for
-      // CCC's local pasted-image files. onerror below still falls back to 📷.
-      img.src = /^https?:\/\//i.test(row.target)
-        ? row.target
-        : '/api/pasted-image?path=' + encodeURIComponent(row.target) + (sid ? '&session_id=' + encodeURIComponent(sid) : '');
-      img.onerror = () => {
+      const isHttp = /^https?:\/\//i.test(target);
+      // The proxy only serves CCC's own pasted-image files (and the active
+      // session sandbox). Anything else — absolute paths outside the sandbox,
+      // /tmp, other repos, root-relative web paths like /favicon.png — 403s or
+      // 404s and spams the console for an image that can't be shown anyway.
+      // Only fetch what's actually servable; for the rest, render the icon
+      // placeholder with NO network request (kills the console noise).
+      const isCccPasted = /\/\.claude\/(?:command-center\/)?pasted-images\/paste-/.test(target);
+      if (isHttp || isCccPasted) {
+        const img = document.createElement('img');
+        img.className = 'sidebar-file-thumb';
+        img.alt = row.label;
+        img.loading = 'lazy';
+        img.src = isHttp
+          ? target
+          : '/api/pasted-image?path=' + encodeURIComponent(target) + (sid ? '&session_id=' + encodeURIComponent(sid) : '');
+        img.onerror = () => {
+          const placeholder = document.createElement('div');
+          placeholder.className = 'sidebar-file-icon-placeholder';
+          placeholder.textContent = row.categoryIcon || '📷';
+          if (img.parentNode) {
+            img.parentNode.replaceChild(placeholder, img);
+          }
+        };
+        rowEl.appendChild(img);
+      } else {
         const placeholder = document.createElement('div');
         placeholder.className = 'sidebar-file-icon-placeholder';
         placeholder.textContent = row.categoryIcon || '📷';
-        if (img.parentNode) {
-          img.parentNode.replaceChild(placeholder, img);
-        }
-      };
-      rowEl.appendChild(img);
+        rowEl.appendChild(placeholder);
+      }
     } else {
       const placeholder = document.createElement('div');
       placeholder.className = 'sidebar-file-icon-placeholder';
