@@ -18762,7 +18762,19 @@
   // _gcActiveChats now contains active + closed (unarchived) chats. The
   // topbar badge uses the .status field to count active-only; the sidebar
   // section renders both, ghosting the closed ones.
-  let _gcActiveChats = [];
+  //
+  // Seed from the last-known set cached in localStorage so the VERY FIRST
+  // list render already includes the group-chat rows. Without this the list
+  // paints empty of group chats, then pollGcActive's /api/group-chats/active
+  // fetch (a slow server-side sidecar scan) lands ~5-10s later, flips the
+  // chats-key empty→populated, and re-renders — the one late reshuffle users
+  // saw. With a warm cache the late fetch usually matches the seed, so the
+  // key is unchanged and no re-render fires.
+  const _GC_ACTIVE_CACHE_KEY = 'ccc-gc-active-cache';
+  let _gcActiveChats = (() => {
+    try { const v = JSON.parse(localStorage.getItem(_GC_ACTIVE_CACHE_KEY) || '[]'); return Array.isArray(v) ? v : []; }
+    catch (_) { return []; }
+  })();
   let _gcLastLocalTrigger = null;
 
   function gcEpochMs(value) {
@@ -18899,6 +18911,9 @@
       // changes, and activity updates redraw the group-chat rows.
       const prevKey = _gcChatsKey(_gcActiveChats);
       _gcActiveChats = (data.chats || []);
+      // Persist so the next page load seeds the first render from this set and
+      // avoids the empty→populated reshuffle.
+      try { localStorage.setItem(_GC_ACTIVE_CACHE_KEY, JSON.stringify(_gcActiveChats)); } catch (_) {}
       const nextKey = _gcChatsKey(_gcActiveChats);
       const activeCount = _gcActiveChats.filter(c => c.status === 'active').length;
       updateActiveGroupChatPill();
