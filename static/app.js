@@ -10601,54 +10601,142 @@
     // Archived group chats are interleaved into this section, sorted by
     // mtime alongside session rows. They render as a slim custom row with
     // a 💬 prefix so users can tell them apart from session rows.
+    //
+    // Grouping: a by-project / by-time toggle in the header mirrors the
+    // In Progress and GH Issues sections. When by-project is active (only
+    // possible when there are folder chips and we're not already filtered
+    // to a single repo), session rows are bucketed under collapsible
+    // folder headers and group-chat rows fall through to a flat tail
+    // below. A small "expand/collapse all" control lets the user blast
+    // through everything at once — useful because archived can get long.
     let _archivedHtml = '';
-    // Build a merged list of (mtime, html) tuples so session rows and
-    // archived group-chat rows appear together in chronological order.
-    const _archivedItems = [];
-    for (const c of _archivedConvs) {
-      _archivedItems.push({
-        pinRank: c.pinned ? _pinRankValue(c) : Infinity,
-        mtime: c.modified || c.last_interacted || 0,
-        html: _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter }),
-      });
-    }
-    if (Array.isArray(_archivedGroupChats) && _archivedGroupChats.length) {
-      for (const gc of _archivedGroupChats) {
-        const gcId = gc.uuid || gc.id || '';
-        const topic = gc.topic ? escapeHtml(gc.topic.slice(0, 80)) : '(untitled)';
-        const ago = (gc.archived_at || gc.closed_at || gc.last_mtime) || 0;
-        const partCount = (gc.session_ids || []).length;
-        const partLabel = partCount
-          ? '<span class="archive-row-gc-partcount">' + partCount + '</span>'
-          : '';
-        const html =
-          '<div class="conv-item conv-item-archived-gc" data-role="archived-gc-row"'
-          + ' data-gc-id="' + escapeHtml(gcId) + '"'
-          + ' data-gc-path="' + escapeHtml(gc.path_tilde) + '"'
-          + ' data-gc-topic="' + escapeHtml(gc.topic || '') + '"'
-          + ' data-gc-mode="' + escapeHtml(gc.mode || 'topic') + '"'
-          + ' title="Archived group chat — click to open reader">'
-          +   '<span class="archive-row-gc-icon" title="Group chat">💬</span>'
-          +   '<span class="archive-row-gc-topic">' + topic + '</span>'
-          +   partLabel
-          + '</div>';
-        _archivedItems.push({ pinRank: Infinity, mtime: ago, html });
+    const _arcHasFolderChips = _archivedConvs.some(c => c.folder_label_chip);
+    const _arcGrouping = (() => {
+      try { return localStorage.getItem('ccc-archived-grouping') || 'time'; }
+      catch (_) { return 'time'; }
+    })();
+    const _arcShouldGroupByFolder = _arcHasFolderChips
+      && _arcGrouping === 'project'
+      && !_isSpecificFolderFilter;
+
+    const _renderArchivedGcRow = (gc) => {
+      const gcId = gc.uuid || gc.id || '';
+      const topic = gc.topic ? escapeHtml(gc.topic.slice(0, 80)) : '(untitled)';
+      const partCount = (gc.session_ids || []).length;
+      const partLabel = partCount
+        ? '<span class="archive-row-gc-partcount">' + partCount + '</span>'
+        : '';
+      return '<div class="conv-item conv-item-archived-gc" data-role="archived-gc-row"'
+        + ' data-gc-id="' + escapeHtml(gcId) + '"'
+        + ' data-gc-path="' + escapeHtml(gc.path_tilde) + '"'
+        + ' data-gc-topic="' + escapeHtml(gc.topic || '') + '"'
+        + ' data-gc-mode="' + escapeHtml(gc.mode || 'topic') + '"'
+        + ' title="Archived group chat — click to open reader">'
+        +   '<span class="archive-row-gc-icon" title="Group chat">💬</span>'
+        +   '<span class="archive-row-gc-topic">' + topic + '</span>'
+        +   partLabel
+        + '</div>';
+    };
+
+    let _arcRows = '';
+    let _arcCount = 0;
+    let _arcFolderCollapseKeys = [];
+
+    if (_arcShouldGroupByFolder) {
+      // Bucket session rows by folder; chats stay flat below the folder
+      // groups (they're not project-scoped). Sort folders by their
+      // most-recent archived-row mtime, descending.
+      const _byFolder = new Map();
+      for (const c of _archivedConvs) {
+        const key = c.folder_label_chip || c.folder_path || '(unknown)';
+        if (!_byFolder.has(key)) _byFolder.set(key, []);
+        _byFolder.get(key).push(c);
       }
-    }
-    if (_archivedItems.length > 0) {
+      const _folderEntries = Array.from(_byFolder.entries()).sort((a, b) => {
+        const aMax = a[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        const bMax = b[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        return bMax - aMax;
+      });
+      const _folderRowsHtml = _folderEntries.map(([folder, cards]) => {
+        const hue = (cards[0].folder_chip_hue | 0);
+        const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
+        const collapseKey = cards[0].folder_path || folder;
+        _arcFolderCollapseKeys.push(_folderGroupStorageKey('archived', collapseKey));
+        const collapsed = _isFolderGroupCollapsed('archived', collapseKey);
+        return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
+          + _folderGroupHeaderHtml('archived', folder, cards.length, hue, orphan, collapseKey)
+          + cards.map(c => _renderRow(c, { suppressFolderChip: true })).join('')
+          + '</div>';
+      }).join('');
+      const _gcRowsFlat = (Array.isArray(_archivedGroupChats) && _archivedGroupChats.length)
+        ? _archivedGroupChats
+            .slice()
+            .sort((a, b) => ((b.archived_at || b.closed_at || b.last_mtime || 0) - (a.archived_at || a.closed_at || a.last_mtime || 0)))
+            .map(_renderArchivedGcRow)
+            .join('')
+        : '';
+      _arcRows = _folderRowsHtml + _gcRowsFlat;
+      _arcCount = _archivedConvs.length + (Array.isArray(_archivedGroupChats) ? _archivedGroupChats.length : 0);
+    } else {
+      // Flat chronological list — original behavior.
+      const _archivedItems = [];
+      for (const c of _archivedConvs) {
+        _archivedItems.push({
+          pinRank: c.pinned ? _pinRankValue(c) : Infinity,
+          mtime: c.modified || c.last_interacted || 0,
+          html: _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter }),
+        });
+      }
+      if (Array.isArray(_archivedGroupChats) && _archivedGroupChats.length) {
+        for (const gc of _archivedGroupChats) {
+          const ago = (gc.archived_at || gc.closed_at || gc.last_mtime) || 0;
+          _archivedItems.push({ pinRank: Infinity, mtime: ago, html: _renderArchivedGcRow(gc) });
+        }
+      }
       _archivedItems.sort((a, b) => {
         if (a.pinRank !== b.pinRank) return a.pinRank - b.pinRank;
         return (b.mtime || 0) - (a.mtime || 0);
       });
+      _arcRows = _archivedItems.map(it => it.html).join('');
+      _arcCount = _archivedItems.length;
+    }
+
+    if (_arcCount > 0) {
       const _arcCollapsed = localStorage.getItem('ccc-archived-collapsed') !== '0';
       const _arcArrow = _arcCollapsed ? '▸' : '▾';
-      const _arcRows = _archivedItems.map(it => it.html).join('');
+      const _arcGroupingToggle = _arcHasFolderChips && !_isSpecificFolderFilter
+        ? '<span class="conv-grouping-toggle" data-role="archived-grouping-toggle">'
+            + '<span class="grouping-opt' + (_arcGrouping !== 'time' ? ' is-active' : '') + '" data-grouping="project">by project</span>'
+            + '<span class="grouping-opt' + (_arcGrouping === 'time' ? ' is-active' : '') + '" data-grouping="time">by time</span>'
+          + '</span>'
+        : '';
+      // Expand / collapse all only meaningful when by-project rendered
+      // multiple folder groups. Visible state ("Expand all" vs "Collapse
+      // all") tracks the majority — if any group is collapsed, show
+      // "Expand all"; otherwise "Collapse all".
+      const _arcExpandAllToggle = (_arcShouldGroupByFolder && _arcFolderCollapseKeys.length > 1)
+        ? (() => {
+            let anyCollapsed = false;
+            try {
+              for (const k of _arcFolderCollapseKeys) {
+                if (localStorage.getItem(k) === '1') { anyCollapsed = true; break; }
+              }
+            } catch (_) {}
+            const verb = anyCollapsed ? 'Expand all' : 'Collapse all';
+            const dir = anyCollapsed ? 'expand' : 'collapse';
+            return '<span class="conv-archived-expandall" data-role="archived-expand-all" data-dir="' + dir + '" role="button" tabindex="0" title="' + verb + ' project groups">' + verb + '</span>';
+          })()
+        : '';
+      const _arcTools = (_arcGroupingToggle || _arcExpandAllToggle)
+        ? '<span class="conv-archived-tools">' + _arcGroupingToggle + _arcExpandAllToggle + '</span>'
+        : '';
       _archivedHtml =
         '<div class="conv-archived-section' + (_arcCollapsed ? ' collapsed' : '') + '" data-role="archived-section">'
         + '<button type="button" class="conv-archived-header" data-role="archived-toggle" aria-expanded="' + (!_arcCollapsed) + '">'
         +   '<span class="conv-archived-arrow">' + _arcArrow + '</span>'
         +   '<span class="conv-archived-label">Archived</span>'
-        +   '<span class="conv-archived-count">' + _archivedItems.length + '</span>'
+        +   '<span class="conv-archived-count">' + _arcCount + '</span>'
+        +   _arcTools
         + '</button>'
         + '<div class="conv-archived-list">' + _arcRows + '</div>'
         + '</div>';
@@ -10739,6 +10827,10 @@
     const $archivedToggle = $convList.querySelector('[data-role="archived-toggle"]');
     if ($archivedToggle) {
       $archivedToggle.addEventListener('click', (ev) => {
+        // Inner tools (grouping toggle, expand-all) live INSIDE the header
+        // button — bail before the collapse toggle so clicking them does
+        // not also fold the whole section.
+        if (ev.target.closest('[data-role="archived-grouping-toggle"], [data-role="archived-expand-all"]')) return;
         ev.stopPropagation();
         const section = $archivedToggle.closest('[data-role="archived-section"]');
         if (!section) return;
@@ -10747,6 +10839,38 @@
         const arrowEl = $archivedToggle.querySelector('.conv-archived-arrow');
         if (arrowEl) arrowEl.textContent = wasCollapsed ? '▸' : '▾';
         $archivedToggle.setAttribute('aria-expanded', String(!wasCollapsed));
+      });
+    }
+    const $archivedGroupingToggle = $convList.querySelector('[data-role="archived-grouping-toggle"]');
+    if ($archivedGroupingToggle) {
+      $archivedGroupingToggle.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const opt = ev.target.closest('[data-grouping]');
+        if (!opt) return;
+        const value = opt.getAttribute('data-grouping') === 'time' ? 'time' : 'project';
+        try { localStorage.setItem('ccc-archived-grouping', value); } catch (_) {}
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
+      });
+    }
+    const $archivedExpandAll = $convList.querySelector('[data-role="archived-expand-all"]');
+    if ($archivedExpandAll) {
+      const apply = () => {
+        const dir = $archivedExpandAll.getAttribute('data-dir') || 'collapse';
+        const groups = $convList.querySelectorAll('[data-role="archived-section"] .conv-folder-group');
+        groups.forEach(group => {
+          const header = group.querySelector('[data-role="folder-group-toggle"]');
+          const key = header && header.getAttribute('data-collapse-key');
+          if (!key) return;
+          try {
+            if (dir === 'expand') localStorage.removeItem(key);
+            else localStorage.setItem(key, '1');
+          } catch (_) {}
+        });
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
+      };
+      $archivedExpandAll.addEventListener('click', (ev) => { ev.stopPropagation(); apply(); });
+      $archivedExpandAll.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); apply(); }
       });
     }
 
