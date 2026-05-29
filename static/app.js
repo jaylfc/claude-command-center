@@ -20,6 +20,40 @@
     allOn() { window.__pollersOff = {}; return this.list(); },
     list() { return this.names.map(n => (_pollerOff(n) ? 'OFF ' : 'on  ') + n); },
   };
+  // No-console toggle for the Mac app (WKWebView has no devtools): press
+  // Cmd/Ctrl + Shift + 0 to flip ALL periodic triggers off/on. The choice
+  // persists in localStorage so a relaunch stays in whatever state you left.
+  // Seed from that flag at startup so the pollers come up disabled if you
+  // left them off.
+  try { if (localStorage.getItem('ccc-pollers-off') === '1') window.cccPollers.allOff(); } catch (_) {}
+  function _cccPollerToast(msg) {
+    let el = document.getElementById('__cccPollerToast');
+    if (!el && document.body) {
+      el = document.createElement('div');
+      el.id = '__cccPollerToast';
+      el.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:99999;background:#1f1f1f;color:#fff;font:600 12px/1.4 system-ui;padding:8px 12px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.4);pointer-events:none;opacity:0;transition:opacity .15s;';
+      document.body.appendChild(el);
+    }
+    if (!el) return;
+    el.textContent = msg;
+    el.style.opacity = '1';
+    clearTimeout(el.__t);
+    el.__t = setTimeout(() => { el.style.opacity = '0'; }, 1800);
+  }
+  document.addEventListener('keydown', (e) => {
+    if (!((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === 'Digit0')) return;
+    e.preventDefault();
+    const allOffNow = window.cccPollers.names.every(n => _pollerOff(n));
+    if (allOffNow) {
+      window.cccPollers.allOn();
+      try { localStorage.removeItem('ccc-pollers-off'); } catch (_) {}
+      _cccPollerToast('▶ Periodic triggers: ALL ON');
+    } else {
+      window.cccPollers.allOff();
+      try { localStorage.setItem('ccc-pollers-off', '1'); } catch (_) {}
+      _cccPollerToast('⏸ Periodic triggers: ALL OFF (14)');
+    }
+  });
 
   // ── Demo mode (GH Pages, issue #49) ─────────────────────────────────────
   // When the demo flag is set, every `fetch('/api/...')` and `new EventSource(
