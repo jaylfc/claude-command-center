@@ -9815,28 +9815,39 @@
       const _isWaitingForUser = c.is_live && (c.needs_approval || _isQuestionWaiting);
       const _knownActivityTool = c.sidecar_tool || c.pending_tool || '';
       const _hasLivePendingTool = c.is_live && !!c.pending_tool;
+      // 30-min open-turn window was too generous — flagged a session as
+      // "working" for up to half an hour after the user last typed, even
+      // when the agent had clearly stopped. 5 min is enough to bridge a
+      // slow streaming response without misreading idle sessions.
+      const _OPEN_TURN_FRESH_S = 5 * 60;
       const _codexHasOpenTool = isCodexRow && !c.sidecar_status && !!c.pending_tool;
       const _codexOpenTurn = isCodexRow
         && c.is_live
         && !c.sidecar_status
         && (_codexHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
-            && _rowActivityAge < (30 * 60)));
+            && _rowActivityAge < _OPEN_TURN_FRESH_S));
       const _geminiHasOpenTool = isGeminiRow && !c.sidecar_status && !!c.pending_tool;
       const _geminiOpenTurn = isGeminiRow
         && c.is_live
         && !c.sidecar_status
         && (_geminiHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
-            && _rowActivityAge < (30 * 60)));
+            && _rowActivityAge < _OPEN_TURN_FRESH_S));
       const _antigravityHasOpenTool = isAntigravityRow && !c.sidecar_status && !!c.pending_tool;
       const _antigravityOpenTurn = isAntigravityRow
         && c.is_live
         && !c.sidecar_status
         && (_antigravityHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
-            && _rowActivityAge < (30 * 60)));
-      const _isWip = !!c.gh_in_progress || !!c.pending_spawn
+            && _rowActivityAge < _OPEN_TURN_FRESH_S));
+      // _isWip = "the session is actually doing something right now". The
+      // gh_in_progress flag (linked GitHub issue carries the
+      // claude-in-progress label) is NOT a liveness signal — the label
+      // can persist on an idle session for days — so it's surfaced as a
+      // calmer separate chip below instead of dressing the row up like
+      // live work.
+      const _isWip = !!c.pending_spawn
         || _hasLivePendingTool
         || _isWaitingForUser
         || _codexOpenTurn
@@ -9848,13 +9859,16 @@
           ? ((c.sidecar_in_flight ? 'Currently running' : 'Last known tool') + ': ' + _knownActivityTool)
           : (_isWaitingForUser
               ? (c.needs_approval_message || c.sidecar_file || c.question_text || 'Agent is waiting for your input')
-              : (c.gh_in_progress
-              ? 'Linked GitHub issue is marked in progress'
-              : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : (isAntigravityRow ? 'Antigravity is working' : 'Agent is working')))));
+              : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : (isAntigravityRow ? 'Antigravity is working' : 'Agent is working'))));
         const wipLabel = _isQuestionWaiting
           ? 'QUESTION'
           : ((_codexOpenTurn || _geminiOpenTurn || _antigravityOpenTurn || _isWaitingForUser) ? 'WIP' : (_knownActivityTool || 'WIP'));
         signals += '<span class="conv-signal activity-working" title="' + escapeHtml(wipTitle) + '">' + escapeHtml(wipLabel) + '</span>';
+      } else if (c.gh_in_progress && !liveToolHtml) {
+        // Calmer "issue is in progress" chip — distinct from live WIP so
+        // the row doesn't masquerade as actively running. Uses a muted
+        // class (.gh-in-progress) instead of .activity-working.
+        signals += '<span class="conv-signal gh-in-progress" title="Linked GitHub issue carries the claude-in-progress label">issue: in progress</span>';
       }
       if (c.source === 'pkood') {
         const ps = (c.pkood_status || '').toUpperCase();
@@ -10448,6 +10462,20 @@
         const _emptyWindowLabel = _ipWindow === 'all' ? '' : (' in the last ' + (_ipWindow === '7d' ? '7 days' : 'day'));
         _activeRowsHtml = '<div class="archive-empty-state">No in-progress sessions' + _emptyWindowLabel + '.</div>';
       }
+    }
+    // Footer affordance when the 1d/7d window is hiding older sessions —
+    // without this, rows older than the window simply vanish and the
+    // section reads as "rows disappeared" instead of "filtered". Clicking
+    // the footer flips the window to "all".
+    const _ipHiddenCount = (_sessionConvs.length || 0) - (_visibleSessionConvs.length || 0);
+    if (_ipHiddenCount > 0 && _ipWindow !== 'all') {
+      const _winLabel = _ipWindow === '7d' ? '7d' : '1d';
+      _activeRowsHtml += '<div class="conv-inprogress-window-footer" data-role="inprogress-window-footer"'
+        + ' role="button" tabindex="0"'
+        + ' title="' + _ipHiddenCount + ' session' + (_ipHiddenCount === 1 ? '' : 's') + ' older than ' + _winLabel + ' are hidden by the window filter. Click to show All.">'
+        + '+ ' + _ipHiddenCount + ' older session' + (_ipHiddenCount === 1 ? '' : 's') + ' hidden by ' + _winLabel
+        + ' — <span class="conv-inprogress-window-footer-cta">show All</span>'
+        + '</div>';
     }
     // In progress section: every row that's not a backlog card or archived.
     // Mirrors the kanban "In progress" column (key: 'working' under the
@@ -11149,6 +11177,17 @@
         if (value !== '1d' && value !== '7d' && value !== 'all') return;
         try { localStorage.setItem('ccc-inprogress-window', value); } catch (_) {}
         renderArchiveList(document.getElementById('convSearch')?.value || '');
+      });
+    }
+    const $ipWindowFooter = $convList.querySelector('[data-role="inprogress-window-footer"]');
+    if ($ipWindowFooter) {
+      const showAll = () => {
+        try { localStorage.setItem('ccc-inprogress-window', 'all'); } catch (_) {}
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
+      };
+      $ipWindowFooter.addEventListener('click', (ev) => { ev.stopPropagation(); showAll(); });
+      $ipWindowFooter.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); showAll(); }
       });
     }
     $convList.querySelectorAll('[data-role="folder-group-toggle"]').forEach(hdr => {

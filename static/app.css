@@ -2931,6 +2931,14 @@
    * with the lifecycle chip (committed/pushed/PR/uncommitted) on the
    * same row. */
   .conv-signal.gh-link { background: rgba(139,148,158,0.12); color: var(--text-muted); font-weight: 600; }
+  /* Calmer "linked GH issue carries claude-in-progress label" chip — no
+     yellow, no pulse. Pure reference info, not a liveness signal. */
+  .conv-signal.gh-in-progress {
+    background: rgba(139,148,158,0.10);
+    color: var(--text-muted);
+    border: 1px solid color-mix(in srgb, var(--text-muted) 30%, transparent);
+    font-weight: 500;
+  }
   .conv-item .source-badge.pkood { background: rgba(210,153,34,0.2); color: var(--orange); }
   .conv-item .source-badge.codex { background: rgba(88,166,255,0.18); color: #79c0ff; }
   .conv-item .source-badge.gemini { background: rgba(122,162,255,0.16); color: #9bb7ff; }
@@ -5206,6 +5214,39 @@
     background: var(--surface-2);
     color: var(--text);
     border-color: var(--text-muted);
+  }
+  /* Footer affordance when In Progress is hiding sessions outside the
+     1d/7d window. Quiet by default — appears only when something is
+     being filtered out, and surfaces the cardinality so the user knows
+     the section isn't broken (rows didn't "disappear", they got filtered).
+     The "show All" CTA at the end is the click target, but the whole
+     row is clickable for big-target ergonomics. */
+  .conv-inprogress-window-footer {
+    margin-top: 6px;
+    padding: 6px 12px;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    background: rgba(139,148,158,0.05);
+    border-top: 1px dashed var(--border);
+    border-radius: 0 0 4px 4px;
+    cursor: pointer;
+    user-select: none;
+    text-align: center;
+    transition: background 0.12s, color 0.12s;
+  }
+  .conv-inprogress-window-footer:hover {
+    background: rgba(139,148,158,0.10);
+    color: var(--text);
+  }
+  .conv-inprogress-window-footer-cta {
+    color: var(--accent);
+    font-weight: 600;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
+  }
+  .conv-inprogress-window-footer:hover .conv-inprogress-window-footer-cta {
+    text-decoration-style: solid;
   }
   .conv-ghissues-refresh {
     width: 22px;
