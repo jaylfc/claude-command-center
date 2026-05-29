@@ -9,9 +9,33 @@
   // early), so it's instant and reversible with zero teardown.
   window.__pollersOff = window.__pollersOff || {};
   function _pollerOff(name) { return !!(window.__pollersOff && window.__pollersOff[name]); }
-  function _gated(name, fn) {
-    return function () { if (_pollerOff(name)) return; return fn.apply(this, arguments); };
+  // Always-on background pollers that have nothing to do while the window is
+  // hidden — paused on document.hidden, kicked once on re-focus. View-
+  // conditional pollers (gcReader, pkoodTail, codexLog, hiStatus, peer) and the
+  // transient archiveProgress are NOT listed: they only run while their view is
+  // open / during load and clear themselves, so there's nothing to gate.
+  const _PAUSE_WHEN_HIDDEN = new Set([
+    'liveStatus', 'liveToolStrip', 'sessionsList', 'gcActive', 'issues',
+    'vercelDeploy', 'localhost', 'worktreesBadge',
+  ]);
+  function _pollerSkip(name) {
+    return _pollerOff(name) || (_PAUSE_WHEN_HIDDEN.has(name) && document.hidden);
   }
+  function _gated(name, fn) {
+    return function () { if (_pollerSkip(name)) return; return fn.apply(this, arguments); };
+  }
+  // Back to the foreground → refresh the paused background pollers once rather
+  // than waiting up to a full interval for fresh data. The heavy sessions/
+  // issues pollers catch up on their own next tick.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    try { if (typeof refreshLiveStatus === 'function') refreshLiveStatus(); } catch (_) {}
+    try { if (typeof updateLiveToolStrip === 'function') updateLiveToolStrip(); } catch (_) {}
+    try { if (typeof pollGcActive === 'function') pollGcActive(); } catch (_) {}
+    try { if (typeof pollVercelDeploy === 'function') pollVercelDeploy(); } catch (_) {}
+    try { if (typeof pollLocalhost === 'function') pollLocalhost(); } catch (_) {}
+    try { if (typeof refreshWorktreesBadge === 'function') refreshWorktreesBadge(); } catch (_) {}
+  });
   window.cccPollers = {
     names: ['liveStatus','liveToolStrip','gcReader','pkoodTail','codexLog','worktreesBadge','hiStatus','issues','archiveProgress','gcActive','peer','sessionsList','vercelDeploy','localhost'],
     off(n) { window.__pollersOff[n] = true; return this.list(); },
@@ -18063,7 +18087,7 @@
   // Start polling issues + log list every 10s for real-time status
   function startIssuesPolling() {
     if (issuesPolling) return;
-    issuesPolling = setInterval(() => { if (_pollerOff('issues')) return;
+    issuesPolling = setInterval(() => { if (_pollerSkip('issues')) return;
       loadIssues();
     }, 10000);
   }
@@ -18187,9 +18211,15 @@
     const row = convId ? ((conversationsData || []).find(x => x.id === convId) || null) : null;
     const rowRepo = row ? (row.repo_path || row.folder_path || '') : '';
     const selectedRepo = selectedRepoPath();
-    const repoPath = selectedRepo || rowRepo || '';
+    let repoPath = selectedRepo || rowRepo || '';
     const mapCwd = (row && typeof sessionCwdByConv !== 'undefined') ? (sessionCwdByConv[row.id] || '') : '';
     let cwd = mapCwd || (row && (row.session_cwd || row.spawn_cwd || row.cwd)) || '';
+    // Only an absolute filesystem path is a valid repo_path/cwd for the server's
+    // require_repo_context. A dash-encoded project-dir name (e.g. leaked popout
+    // state like "-Users-amirfish-GStack-test") 400s every 15s — drop it and let
+    // the pill fall back to "no-repo" instead of spamming failed calls.
+    if (repoPath && !repoPath.startsWith('/')) repoPath = '';
+    if (cwd && !cwd.startsWith('/')) cwd = '';
     if (repoPath && cwd && cwd !== repoPath) {
       const root = repoPath.replace(/\/+$/, '');
       if (cwd !== root && !cwd.startsWith(root + '/')) cwd = '';
@@ -21121,7 +21151,7 @@
   // divergence here was what caused new-session rows to flicker.
   if (!CONV_POPOUT_MODE) {
 	  setInterval(async () => {
-		    if (_pollerOff('sessionsList')) return; if (activeTab !== 'sessions') return;
+		    if (_pollerSkip('sessionsList')) return; if (activeTab !== 'sessions') return;
 		    if (isInlineRenameInProgress()) return;
         if (deferSidebarRenderIfDragging()) return;
 		    if (conversationPaneLoading) return;
