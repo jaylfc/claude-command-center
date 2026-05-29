@@ -13538,7 +13538,29 @@
     const url = '/api/conversations/' + streamConvId + '/stream?after=' + streamPane.lastLine;
     const source = new EventSource(url);
     streamPane.eventSource = source;
+    // Watchdog: WKWebView (and Chromium on flaky links) sometimes lets an
+    // EventSource silently die without firing onerror, so the stream goes
+    // quiet and the conv pane stops updating even though the terminal is
+    // clearly running. Server sends `event: keepalive` every 5s — if we
+    // hear nothing (no data, no keepalive) for 15s, force a reconnect
+    // ourselves. Reconnect uses the freshly-advanced streamPane.lastLine
+    // so we catch up on any events that landed during the silent gap.
+    const WATCHDOG_MS = 15000;
+    const reconnect = () => {
+      const pane = paneByPaneId(streamPaneId);
+      if (!pane || pane.eventSource !== source) return;
+      stopConvStream(streamPaneId);
+      setTimeout(() => startConvStream(streamPaneId), 500);
+    };
+    let watchdog = setTimeout(reconnect, WATCHDOG_MS);
+    const bumpWatchdog = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(reconnect, WATCHDOG_MS);
+    };
+    streamPane._eventSourceWatchdog = () => clearTimeout(watchdog);
+    source.addEventListener('keepalive', bumpWatchdog);
     source.onmessage = (ev) => {
+      bumpWatchdog();
       try {
         const data = JSON.parse(ev.data);
         if (data.events && data.events.length > 0) {
@@ -13560,6 +13582,12 @@
             ffcInvalidate(currentConversation);
             renderConversationEvents(data.events, streamPaneId);
             convLastLine = data.last_line;
+            // Advance the pane's own lastLine so reconnects (post-error
+            // or post-watchdog) request events from the right offset
+            // instead of replaying from the original stream-start.
+            if (typeof data.last_line === 'number' && data.last_line > streamPane.lastLine) {
+              streamPane.lastLine = data.last_line;
+            }
           } finally {
             // Always restore activeIndex, even if renderConversationEvents
             // throws — otherwise the shim stays pointed at streamPaneId
@@ -13593,6 +13621,10 @@
       if (pane && pane.eventSource) {
         pane.eventSource.close();
         pane.eventSource = null;
+      }
+      if (pane && typeof pane._eventSourceWatchdog === 'function') {
+        try { pane._eventSourceWatchdog(); } catch (_) {}
+        pane._eventSourceWatchdog = null;
       }
       return;
     }
