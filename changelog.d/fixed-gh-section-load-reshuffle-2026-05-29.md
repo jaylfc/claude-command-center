@@ -1,0 +1,1 @@
+Reserve the GH Issues section's slot with a collapsed placeholder on first paint, so late-hydrated issues populate in place instead of inserting the whole section and shifting the conversation list down on load.
