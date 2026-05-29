@@ -18919,18 +18919,20 @@
   // participants, mtime, and waiting-on changes need to redraw the row
   // even when the chat count and status stay unchanged.
   function _gcChatsKey(chats) {
+    // STRUCTURAL fields only — what determines whether the group-chat rows
+    // need to be laid out differently. Deliberately excludes volatile activity
+    // counters (last_mtime, message_count, orchestrator_last_trigger_at,
+    // last_reminder_at, waiting_on_hashes): those advance on every poll for a
+    // live chat, and including them made pollGcActive re-render the whole list
+    // every 15s — shoving all ~500 rows down (the reshuffle). Live counts/times
+    // still refresh via the regular sidebar render + in-place time patching.
     return (chats || [])
       .map(c => JSON.stringify([
         c.uuid || c.id || c.path || c.path_tilde || '',
         c.status || '',
         c.topic || '',
-        c.last_mtime || 0,
         c.orchestrator_timer_active ? 1 : 0,
-        c.orchestrator_last_trigger_at || 0,
-        c.last_reminder_at || 0,
-        c.message_count || 0,
         (c.session_ids || []).join(','),
-        (c.waiting_on_hashes || []).join(','),
       ]))
       .sort()
       .join('|');
