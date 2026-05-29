@@ -10633,7 +10633,15 @@
     // scan matches the board. Expanded by default — these are pending
     // work the user might want to start. State persists in localStorage.
     let _ghIssuesHtml = '';
-    if (_ghIssueConvs.length > 0) {
+    // The GH Issues section is ALWAYS rendered (collapsed by default) unless
+    // the user hides it via the Settings view pref. Its slot is therefore
+    // reserved from the very first paint, so issues that hydrate a few seconds
+    // later populate the (collapsed, zero-height) body without shoving the
+    // list down — no load-time reshuffle, no cache, no placeholder. The count
+    // is shown only when we actually have issues (don't display a number we
+    // don't know yet).
+    const _ghHidden = getViewGhPref() === 'hide';
+    if (!_ghHidden || _ghIssueConvs.length > 0) {
       const _ghCollapsed = localStorage.getItem('ccc-ghissues-collapsed') === '1';
       const _ghArrow = _ghCollapsed ? '▸' : '▾';
       const _ghHasFolderChips = _ghIssueConvs.some(c => c.folder_label_chip);
@@ -10716,7 +10724,7 @@
         +   '<span class="conv-ghissues-arrow">' + _ghArrow + '</span>'
         +   '<span class="conv-ghissues-label">' + sectionTitle + '</span>'
         +   _ghTools
-        +   '<span class="conv-ghissues-count">' + _ghIssueConvs.length + '</span>'
+        +   (_ghIssueConvs.length > 0 ? '<span class="conv-ghissues-count">' + _ghIssueConvs.length + '</span>' : '')
         + '</button>'
         + '<div class="conv-ghissues-list">' + _ghRows + '</div>'
         + '</div>';

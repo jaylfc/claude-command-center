@@ -1,0 +1,1 @@
+The GH Issues section is now always present (collapsed by default) unless hidden via the Settings view preference, so it no longer pops in a few seconds after load and shifts the conversation list. The count is shown only once issues have loaded.
