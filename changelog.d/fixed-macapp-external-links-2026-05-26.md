@@ -1,0 +1,1 @@
+Fix external links in the native macOS app: clicking a `target="_blank"` link inside assistant text (or any non-localhost URL) now opens in the user's default browser instead of being silently dropped or replacing the dashboard.

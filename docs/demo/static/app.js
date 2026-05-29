@@ -59,17 +59,6 @@
     // so demo fixtures don't have to enumerate every variant. Numeric path
     // segments are replaced by "_id" so e.g. /api/issues/42/details maps to
     // /api/issues/_id/details.json — fixtures share across IDs.
-    // Pool size for per-session transcript fixtures. The transcript endpoint
-    // /api/conversations/<uuid> fans out to _id-1.json .. _id-N.json by
-    // hashing the UUID, so clicking different sidebar cards shows distinct
-    // transcripts. Sub-paths like .../files still share the single _id/
-    // fixture set — those are uniform enough across cards that one suffices.
-    const CONV_POOL_SIZE = 4;
-    function hashStr(s) {
-      let h = 0;
-      for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-      return Math.abs(h);
-    }
     function fixturePathFor(rawUrl) {
       try {
         const u = new URL(rawUrl, window.location.href);
@@ -81,17 +70,7 @@
         // /demo/api/conversations/_id/files.json — one file covers every
         // seeded card.
         const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        const segs = p.split('/');
-        // Special case: /api/conversations/<uuid> (the transcript fetch,
-        // no further segment) maps to one of N pool fixtures based on a
-        // stable hash of the UUID. Every other endpoint — including
-        // /api/conversations/<uuid>/files — keeps the shared `_id` collapse.
-        const isConvTranscript = segs.length === 2 && segs[0] === 'conversations' && UUID_RE.test(segs[1]);
-        if (isConvTranscript) {
-          const idx = (hashStr(segs[1].toLowerCase()) % CONV_POOL_SIZE) + 1;
-          return FIXTURE_BASE + '/conversations/_id-' + idx + '.json';
-        }
-        p = segs.map(seg => {
+        p = p.split('/').map(seg => {
           if (/^\d+$/.test(seg)) return '_id';
           if (UUID_RE.test(seg)) return '_id';
           return seg;
@@ -174,7 +153,7 @@
     document.addEventListener('click', function(e) {
       const t = e.target;
       if (!t || !t.closest) return;
-      const trigger = t.closest('[data-action], button.kanban-action, .conv-archive-btn, .conv-verify-btn');
+      const trigger = t.closest('[data-action], button.kanban-action, .conv-pin-btn, .conv-archive-btn, .conv-verify-btn');
       if (!trigger) return;
       // Read-only intents (open issue, jump to terminal, etc.) shouldn't
       // trigger the banner — only mutations do. The fetch wrapper above
@@ -194,9 +173,44 @@
     }
   })();
 
+  // ── DEBUG: mute every setInterval callback while user is typing ──────
+  // Wrap window.setInterval so any timer-driven work CCC registers from
+  // this point on bails out when a TEXTAREA or text-style INPUT is
+  // focused. Re-applies the same guard we already sprinkled onto a few
+  // specific intervals, but globally — so we can confirm whether any
+  // remaining ticker is the source of typing hitches, then un-wrap one
+  // at a time. SSE / requestAnimationFrame / one-shot setTimeouts are
+  // intentionally NOT wrapped: SSE only fires on real server events,
+  // RAFs only on paint, and setTimeouts run user-visible debounced work
+  // (toast hide, refresh-on-action, etc.) we want firing on schedule.
+  (function muteTickersWhileTyping() {
+    if (window.__cccTickerMuteInstalled) return;
+    window.__cccTickerMuteInstalled = true;
+    const _origSetInterval = window.setInterval;
+    const _isTyping = () => {
+      const ae = document.activeElement;
+      if (!ae) return false;
+      if (ae.tagName === 'TEXTAREA') return true;
+      if (ae.tagName !== 'INPUT') return false;
+      const t = (ae.type || 'text').toLowerCase();
+      return /^(text|search|email|url|tel|password)$/.test(t);
+    };
+    window.setInterval = function patchedSetInterval(fn, delay) {
+      if (typeof fn !== 'function') {
+        return _origSetInterval.apply(this, arguments);
+      }
+      const extra = Array.prototype.slice.call(arguments, 2);
+      const wrapped = function() {
+        if (_isTyping()) return;
+        return fn.apply(this, arguments);
+      };
+      return _origSetInterval.call(this, wrapped, delay, ...extra);
+    };
+  })();
+
   // App config from server — populated before anything else renders.
   let APP_CONFIG = {
-    app_name: 'Claude Command Center',
+    app_name: 'Command Center for Claude, Codex, and Anti-Gravity',
     title_strip: [],
     repo: '',
     vercel_enabled: false,
@@ -241,7 +255,7 @@
   // Legacy client-side trailer that older CCC builds appended to spawn
   // prompts. Kept so the UI can scrub existing transcripts; current Claude
   // spawns receive the reminder as a hidden backend system prompt instead.
-  const SESSION_STATE_INSTRUCTION = "\n\nBefore your final reply, end with a block formatted EXACTLY like this (the Claude Command Center dashboard parses it):\n<session-state>\nDID: <one sentence — what you actually changed/learned>\nINSIGHT: <one sentence — the main finding, root cause, or surprise>\nNEXT_STEP_USER: <one sentence — the exact next thing the user should do>\n</session-state>";
+  const SESSION_STATE_INSTRUCTION = "\n\nBefore your final reply, end with a block formatted EXACTLY like this (the Command Center dashboard parses it):\n<session-state>\nDID: <one sentence — what you actually changed/learned>\nINSIGHT: <one sentence — the main finding, root cause, or surprise>\nNEXT_STEP_USER: <one sentence — the exact next thing the user should do>\n</session-state>";
 
   // When a prompt starts with the sibling-orchestrator preamble ("You are
   // a sibling Claude Code session…"), the boilerplate that follows (your
@@ -288,6 +302,15 @@
       // Current template: "Fix issue #N — {title}\n\nRun `gh issue view N` …"
       .replace(/^\s*Fix issue #\d+\s*(?:—|-)\s*/i, '')
       .replace(/\n+Run `gh issue view \d+`[^\n]*(title may be truncated\)\.?)?\s*$/i, '')
+      // Slash-command markup Claude Code injects into user messages
+      // (`<command-name>/foo</command-name> <command-message>foo</command-message>
+      // <command-args>bar</command-args>`). Collapse to `/foo bar` so the
+      // sticky-header earlier-ask slot doesn't show raw XML-like tags.
+      .replace(
+        /<command-name>([^<]*)<\/command-name>\s*<command-message>[^<]*<\/command-message>\s*<command-args>([^<]*)<\/command-args>/g,
+        (_, name, args) => (name + (args ? ' ' + args : '')).trim()
+      )
+      .replace(/<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/g, '')
       .trim();
   }
 
@@ -395,12 +418,92 @@
   }
   loadAppConfig();
 
+  // ── Anonymous opt-in telemetry bar ──
+  // Defaults OFF. Renders only when the server reports opt_in === null
+  // (never asked) AND the env kill switch is not set. Once the user clicks
+  // any button the bar is hidden forever; the choice is persisted server-
+  // side and mirrored to localStorage so multi-tab dashboards don't double-
+  // prompt during the same session. See docs/telemetry.md for the contract.
+  const TELEMETRY_DISMISSED_LS = 'ccc-telemetry-bar-dismissed';
+  async function loadTelemetryStatus() {
+    let status = null;
+    try {
+      const res = await fetch('/api/telemetry/status');
+      if (!res.ok) return;
+      status = await res.json();
+    } catch (_) {
+      return;
+    }
+    if (!status) return;
+    const $bar = document.getElementById('telemetryOptInBar');
+    if (!$bar) return;
+    // Env kill switch wins — the bar must never appear when telemetry is
+    // disabled at the process level (e.g. corporate policy, CI runs).
+    if (status.env_disabled) { $bar.hidden = true; return; }
+    // null → never asked → show the bar. true/false → already decided → hide.
+    if (status.opt_in !== null && status.opt_in !== undefined) {
+      $bar.hidden = true;
+      return;
+    }
+    let dismissed = false;
+    try { dismissed = localStorage.getItem(TELEMETRY_DISMISSED_LS) === '1'; } catch (_) {}
+    if (dismissed) { $bar.hidden = true; return; }
+    // Wire docs link from server (kept in sync with server-side constant
+    // so a future GH org rename only touches one place).
+    if (status.docs_url) {
+      const $link = document.getElementById('telemetryDetailsLink');
+      if ($link) $link.setAttribute('href', status.docs_url);
+    }
+    $bar.hidden = false;
+  }
+  async function postTelemetryOptIn(enable) {
+    try {
+      const res = await fetch('/api/telemetry/opt-in', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enable: !!enable }),
+      });
+      // Even on failure we hide the bar — the localStorage flag stops it
+      // from coming back this session, and the user can re-open the
+      // settings menu to flip the decision.
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (_) {
+      return null;
+    }
+  }
+  function dismissTelemetryBar() {
+    const $bar = document.getElementById('telemetryOptInBar');
+    if ($bar) $bar.hidden = true;
+    try { localStorage.setItem(TELEMETRY_DISMISSED_LS, '1'); } catch (_) {}
+  }
+  (function wireTelemetryBar() {
+    const $enable = document.getElementById('telemetryEnableBtn');
+    const $skip = document.getElementById('telemetrySkipBtn');
+    if ($enable) {
+      $enable.addEventListener('click', async () => {
+        await postTelemetryOptIn(true);
+        dismissTelemetryBar();
+      });
+    }
+    if ($skip) {
+      $skip.addEventListener('click', async () => {
+        await postTelemetryOptIn(false);
+        dismissTelemetryBar();
+      });
+    }
+    // The "What gets sent?" link is a plain anchor — opens docs/telemetry.md
+    // in a new tab on click; no JS needed beyond the default behaviour.
+  })();
+  loadTelemetryStatus();
+
   // ── Repo selection state ──
   // The repo dropdown is a local archive filter, not a server-side switch.
   // Keep this block early: worktrees, Vercel, terminal, and issue actions
   // can all run during startup and need a concrete selected repo when scoped.
   const ARCHIVE_FOLDER_ALL = '__all__';
   const ARCHIVE_FOLDER_FILTER_KEY = 'ccc-archive-folder-filter';
+  const _ARCHIVE_MODE_KEY = 'ccc-archive-mode';
   const $convFolderFilter = document.getElementById('convFolderFilter');
   let repoListState = { repos: [], current: '', recent: [] };
   let archiveFolderFilter = (() => {
@@ -520,7 +623,11 @@
     const engine = currentSession && currentSession.source;
     const resumeCmd = engine === 'codex'
       ? 'codex resume ' + sid
-      : (engine === 'gemini' ? 'gemini --resume ' + sid : 'claude --resume ' + sid + ' --dangerously-skip-permissions');
+      : (engine === 'gemini'
+        ? 'gemini --resume ' + sid
+        : (engine === 'antigravity'
+          ? 'agy --conversation ' + sid
+          : 'claude --resume ' + sid + ' --dangerously-skip-permissions'));
     if (!cwd) return resumeCmd;
     // Derive worktree branch from a `.claude/worktrees/...` path:
     // e.g. /Users/.../.claude/worktrees/claude-fix/issue-88 -> branch "claude-fix/issue-88"
@@ -564,17 +671,32 @@
   function allLaunchChoiceMenus() { return [$launchChoiceMenuConv, document.getElementById('cpLaunchChoiceMenu')].filter(Boolean); }
   function allDesktopButtons() { return []; }
 
+  function antigravityCanSend(session) {
+    return !session
+      || session.source !== 'antigravity'
+      || session.can_headless_resume === true
+      || session.can_app_resume === true;
+  }
+
+  function antigravityInputPlaceholder(session) {
+    if (session && session.can_headless_resume === true) return 'Resume Antigravity headlessly and send...';
+    if (session && session.can_app_resume === true) return 'Send to running Antigravity app...';
+    return 'Open Antigravity to continue this app session...';
+  }
+
   function launchTargetsForCurrentSession() {
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
+    const antigravityTerminalHint = currentSession.can_headless_resume === true ? 'AGY conversation' : '/open in AGY';
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentSession.id || '');
     return [
-      { id: 'terminal', label: 'Terminal', hint: 'default', disabled: false },
+      { id: 'terminal', label: 'Terminal', hint: isAntigravity ? antigravityTerminalHint : 'default', disabled: false },
       {
         id: 'desktop',
         label: 'Claude Desktop',
-        hint: (!isCodex && !isGemini && isUuid) ? 'app' : 'Claude only',
-        disabled: isCodex || isGemini || !isUuid,
+        hint: (!isCodex && !isGemini && !isAntigravity && isUuid) ? 'app' : 'Claude only',
+        disabled: isCodex || isGemini || isAntigravity || !isUuid,
       },
       {
         id: 'codex',
@@ -683,7 +805,8 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
-    if (!sid || isPkood || isCodex || isGemini) {
+    const isAntigravity = currentSession.source === 'antigravity';
+    if (!sid || isPkood || isCodex || isGemini || isAntigravity) {
       $announceBtnConv.style.display = 'none';
       delete $announceBtnConv.dataset.sessionId;
       return;
@@ -737,6 +860,24 @@
     $convOverflowMenu.classList.remove('open');
     $convOverflowMenu.setAttribute('aria-hidden', 'true');
     if ($convOverflowBtn) $convOverflowBtn.setAttribute('aria-expanded', 'false');
+  }
+  function _convOverflowHasActions() {
+    const sid = currentSession && currentSession.id;
+    return !!sid;
+  }
+  function updateConvOverflowButton() {
+    const wrap = $convOverflowBtn && $convOverflowBtn.closest('.conv-overflow-wrap');
+    if (!wrap) return;
+    const hasActions = _convOverflowHasActions();
+    wrap.style.display = hasActions ? '' : 'none';
+    wrap.setAttribute('aria-hidden', hasActions ? 'false' : 'true');
+    if ($convOverflowBtn) {
+      $convOverflowBtn.disabled = !hasActions;
+      $convOverflowBtn.title = hasActions
+        ? 'More actions for this session'
+        : 'No extra actions for this session';
+    }
+    if (!hasActions) _closeConvOverflow();
   }
   function _renderConvOverflowMenu() {
     if (!$convOverflowMenu) return;
@@ -820,6 +961,10 @@
   if ($convOverflowBtn) {
     $convOverflowBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!_convOverflowHasActions()) {
+        updateConvOverflowButton();
+        return;
+      }
       const isOpen = $convOverflowMenu.classList.contains('open');
       if (isOpen) {
         _closeConvOverflow();
@@ -854,6 +999,7 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
     const canJump = live && liveStatus.tty && liveStatus.terminalApp;
     const canShowLaunch = !!sid && !isPkood;
 
@@ -892,7 +1038,8 @@
       if (canShowLaunch) {
         btn.style.display = 'inline-flex';
         btn.title = isCodex ? 'Open a Terminal window and run codex resume'
-          : (isGemini ? 'Open a Terminal window and run gemini --resume' : 'Open a Terminal window and run claude --resume');
+          : (isGemini ? 'Open a Terminal window and run gemini --resume'
+            : (isAntigravity ? 'Open AGY in Terminal; use /resume inside the TUI' : 'Open a Terminal window and run claude --resume'));
         btn.querySelector('.jump-label').textContent = 'Launch';
         renderLaunchChoiceMenu($launchChoiceMenuConv);
       } else {
@@ -1039,10 +1186,10 @@
     liveStatusRenderTicker = setInterval(updateLiveToolStrip, 1000);
   }
 
-  // Render a live "what's running right now" strip docked above the
-  // conversation transcript. Reads from liveStatus (refreshed every 5s
-  // by /api/session-status) so the chat pane shows the same in-progress
-  // signal the kanban card now shows.
+  // Render a live "what's running right now" indicator at the bottom of the
+  // conversation transcript. Reads from liveStatus (refreshed every 5s by
+  // /api/session-status) so the chat pane shows the same in-progress signal
+  // the kanban card now shows without duplicating it at the top.
   // Optimistic "agent starting" indicator. Rendered the moment the user
   // hits send so they see motion before /api/session-status (5s poll)
   // catches up to the real sidecar event. Auto-removed once the real
@@ -1137,14 +1284,18 @@
   }
 
   function isCommandActivityTool(tool) {
-    const name = String(tool || '');
-    return name === 'Bash' || name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command';
+    const name = toolDisplayName(String(tool || ''));
+    return name === 'Bash'
+      || name === 'exec_command'
+      || name === 'shell_command'
+      || name === 'run_shell_command'
+      || name === 'run_command';
   }
 
   function liveActivityToolLabel(tool) {
     const name = String(tool || '');
     if (name === 'Bash') return 'Bash command';
-    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command') return 'Shell command';
+    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command' || name === 'run_command') return 'Shell command';
     if (name === 'Read') return 'Reading file';
     if (name === 'Edit' || name === 'MultiEdit') return 'Editing file';
     if (name === 'Write') return 'Writing file';
@@ -1158,7 +1309,7 @@
   function liveActivityCompactToolLabel(tool) {
     const name = String(tool || '');
     if (name === 'Bash') return 'Bash';
-    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command') return 'Shell';
+    if (name === 'exec_command' || name === 'shell_command' || name === 'run_shell_command' || name === 'run_command') return 'Shell';
     return liveActivityToolLabel(tool);
   }
 
@@ -1337,13 +1488,40 @@
     requestAnimationFrame(apply);
   }
 
+  // Tracks whether the live-tool indicator is currently in the DOM, so the
+  // 1s ticker can skip ALL work (no querySelectorAll, no innerHTML) on the
+  // common idle path where no session is live.
+  let _liveStripShown = false;
   function updateLiveToolStrip() {
+    // Skip while the user is typing into a textarea / text input. This
+    // runs on a 1s ticker; each pass does a document.querySelectorAll
+    // plus an innerHTML write that can stall typing by tens of ms on
+    // a deep conv view. The strip catches up on the next tick.
+    const _ae = document.activeElement;
+    if (_ae && (_ae.tagName === 'TEXTAREA'
+      || (_ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_ae.type || 'text')))) {
+      return;
+    }
     const $view = (typeof getConvView === 'function') ? getConvView() : null;
     if (!$view) return;
+    // Idle fast-path: nothing is live, so there's nothing to show. Bail
+    // before the per-second document.querySelectorAll + innerHTML below —
+    // on a deep conversation that's pure waste when no session is running.
+    // Tear the indicator down once on the live->idle transition, then do
+    // zero DOM work each tick until a session goes live again.
+    if (!liveStatus.live) {
+      if (_liveStripShown) {
+        document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(n => n.remove());
+        updateLiveStripOffset($view, null);
+        _liveStripShown = false;
+      }
+      return;
+    }
     document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(node => {
       if (node.parentElement !== $view) node.remove();
     });
-    let strip = $view.querySelector('.conv-live-tool-strip');
+    const strip = $view.querySelector('.conv-live-tool-strip');
+    if (strip) strip.remove();
     // Match only the *real* inline indicator — leave the optimistic
     // twin alone so it lingers until either real data lands or its
     // own 60s safety timeout fires.
@@ -1354,9 +1532,9 @@
     const isQuestion = tool === 'AskUserQuestion' || !!liveStatus.questionWaiting;
     const shouldShow = liveStatus.live && tool && liveStatus.sidecarStatus === 'active' && (ageSec < 300 || isQuestion);
     if (!shouldShow) {
-      if (strip) strip.remove();
       if (inline) inline.remove();
       updateLiveStripOffset($view, null);
+      _liveStripShown = false;
       return;
     }
     // Real data arrived — drop the optimistic placeholder (right pane)
@@ -1381,19 +1559,8 @@
       + (isQuestion ? '' : detailHtml)
       + '<span class="cl-age">' + ageLbl + '</span>'
       + (isQuestion ? detailHtml : '');
-    if (!strip) {
-      strip = document.createElement('div');
-      strip.className = 'conv-live-tool-strip';
-      $view.insertBefore(strip, $view.firstChild);
-    } else if (strip.parentElement !== $view) {
-      $view.insertBefore(strip, $view.firstChild);
-    }
-    strip.classList.toggle('in-flight', inFlight);
-    strip.classList.toggle('is-question', isQuestion);
-    strip.title = title;
-    strip.innerHTML = html;
-    updateLiveStripOffset($view, strip);
-    // Inline twin at the bottom of the transcript. Re-append on every
+    updateLiveStripOffset($view, null);
+    // Inline indicator at the bottom of the transcript. Re-append on every
     // refresh so it stays the last child even when new events have
     // streamed in since the last poll.
     if (!inline) {
@@ -1407,6 +1574,7 @@
     if (inline.parentElement !== $view || inline !== $view.lastElementChild) {
       $view.appendChild(inline);
     }
+    _liveStripShown = true;
   }
 
   const $convSessionId = document.getElementById('convSessionId');
@@ -1475,6 +1643,12 @@
   });
 
   function setCurrentSession(source, sid, cwd, cwdExists, spawnPid, repoPath) {
+    const row = (Array.isArray(conversationsData) ? conversationsData : []).find(c => (
+      c && (
+        (sid && (c.session_id === sid || c.id === sid))
+        || (currentConversation && c.id === currentConversation)
+      )
+    )) || null;
     currentSession = {
       id: sid || null,
       cwd: cwd || null,
@@ -1482,6 +1656,8 @@
       source: source,
       spawnPid: spawnPid || null,
       repoPath: repoPath || null,
+      can_headless_resume: source === 'antigravity' ? !!(row && row.can_headless_resume === true) : true,
+      can_app_resume: source === 'antigravity' ? !!(row && row.can_app_resume === true) : false,
     };
     // Leaving new-session mode (sid set) drops the .is-new-session class
     // so the spawn-cwd picker hides and the workspace pill returns. The
@@ -1491,6 +1667,7 @@
       if (_cic) _cic.classList.remove('is-new-session');
     }
     setCopyableSessionId($convSessionId, sid);
+    updateConvOverflowButton();
     if (source === 'pkood') {
       // Pkood sessions don't need live status polling or resume button
       if (liveStatusTimer) { clearInterval(liveStatusTimer); liveStatusTimer = null; }
@@ -1554,7 +1731,7 @@
   async function openInClaudeDesktop(ev) {
     const btn = ev && ev.currentTarget;
     if (!btn || !currentSession.id) return;
-    if (currentSession.source === 'codex' || currentSession.source === 'gemini') return;
+    if (currentSession.source === 'codex' || currentSession.source === 'gemini' || currentSession.source === 'antigravity') return;
     const snapshot = actionButtonSnapshot(btn);
     btn.classList.add('opening');
     btn.disabled = true;
@@ -1769,6 +1946,8 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
+    const antigravityCanSendNow = antigravityCanSend(currentSession);
     const live = liveStatus.live && liveStatus.tty;
     const isConvTab = activeTab === 'sessions';
     const hasSession = !!currentSession.id;
@@ -1798,9 +1977,16 @@
         $convTtyLabel.textContent = 'new';
         const cwdForPrompt = (typeof getSpawnCwd === 'function' && getSpawnCwd()) || selectedRepoPath();
         const repoLabel = (typeof spawnCwdLabel === 'function' && spawnCwdLabel(cwdForPrompt)) || _pathLeaf(cwdForPrompt);
-        $convInput.placeholder = repoLabel
-          ? 'Type a prompt to start a new session in ' + repoLabel + '…'
-          : 'Pick a folder before starting a new session…';
+        const spawnEngine = getSpawnEngine();
+        if (spawnEngine === 'antigravity') {
+          $convInput.placeholder = repoLabel
+            ? 'Type a prompt to start a headless Antigravity run in ' + repoLabel + '…'
+            : 'Pick a folder before starting Antigravity…';
+        } else {
+          $convInput.placeholder = repoLabel
+            ? 'Type a prompt to start a new session in ' + repoLabel + '…'
+            : 'Pick a folder before starting a new session…';
+        }
       } else if (isPkood) {
         $convTtyLabel.textContent = 'pkood';
         $convInput.placeholder = 'Send to pkood agent...';
@@ -1810,12 +1996,24 @@
       } else if (isGemini) {
         $convTtyLabel.textContent = live ? (liveStatus.tty || 'gemini') : 'gemini';
         $convInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
+      } else if (isAntigravity) {
+        $convTtyLabel.textContent = liveStatus.live ? (liveStatus.tty || 'antigravity') : 'antigravity';
+        $convInput.placeholder = antigravityInputPlaceholder(currentSession);
       } else if (live) {
         $convTtyLabel.textContent = liveStatus.tty;
         $convInput.placeholder = 'Send to terminal...';
       } else {
         $convTtyLabel.textContent = 'dormant';
         $convInput.placeholder = 'Resume and send…';
+      }
+      const canSend = !isAntigravity || antigravityCanSendNow;
+      if ($convInput) {
+        $convInput.readOnly = !canSend;
+        $convInput.classList.toggle('is-readonly', !canSend);
+      }
+      if ($convSendBtn) {
+        $convSendBtn.disabled = !canSend;
+        $convSendBtn.title = canSend ? 'Send' : 'Open Antigravity to continue this app session';
       }
       // Esc only makes sense when there's something live to interrupt — and
       // we don't support pkood interrupts. Hide it everywhere else so the
@@ -1833,8 +2031,26 @@
       if ($convInputEngineSelect) {
         $convInputEngineSelect.style.display = isNewSession ? '' : 'none';
       }
+      if ($convInputModelSelect) {
+        if (!isNewSession) {
+          $convInputModelSelect.style.display = 'none';
+        } else {
+          const engine = getSpawnEngine();
+          const options = MODEL_OPTIONS_BY_ENGINE[engine] || [];
+          const defaultModel = _defaultModelsByEngine[engine] || '';
+          $convInputModelSelect.style.display = (options.length === 0 && !defaultModel) ? 'none' : '';
+        }
+      }
     } else {
       $convInputBar.classList.remove('visible');
+      if ($convInput) {
+        $convInput.readOnly = false;
+        $convInput.classList.remove('is-readonly');
+      }
+      if ($convSendBtn) {
+        $convSendBtn.disabled = false;
+        $convSendBtn.title = 'Send';
+      }
     }
   }
 
@@ -1887,6 +2103,7 @@
     const source = currentSession && currentSession.source;
     if (source === 'codex') return 'Codex sessions do not use Claude slash commands';
     if (source === 'gemini') return 'Gemini sessions do not use Claude slash commands';
+    if (source === 'antigravity') return 'Antigravity sessions do not use Claude slash commands';
     if (source === 'pkood') return 'pkood agents do not use Claude slash commands';
     if (currentConversation === '__new__') {
       const engine = (typeof getSpawnEngine === 'function') ? getSpawnEngine() : 'claude';
@@ -2077,6 +2294,7 @@
       const idx = pending.list.indexOf(pending.entry);
       if (idx >= 0) pending.list.splice(idx, 1);
     }
+    if (pending.sid) clearSessionSending(pending.sid);
   }
 
   function restoreInputAfterSendFailure($input, text) {
@@ -2096,7 +2314,7 @@
     // (built by buildPaneElement) had their ids stripped, so we have
     // to query by class/tag scoped to the pane element.
     const _paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId || activePaneId()}"]`);
-    const $input = (_paneEl && _paneEl.querySelector('textarea, input[type="text"]')) || $convInput;
+    const $input = (_paneEl && _paneEl.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]')) || $convInput;
     const $sendBtn = (_paneEl && _paneEl.querySelector('.send-btn')) || $convSendBtn;
     const text = ($input && $input.value || '').trim();
     const draftConversation = currentConversation;
@@ -2129,6 +2347,11 @@
     }
     const sid = currentSession.id;
     if (!sid) return;
+    if (currentSession.source === 'antigravity' && !antigravityCanSend(currentSession)) {
+      if ($input) $input.blur();
+      return;
+    }
+    const compactCommand = /^\/compact(?:\s|$)/i.test(text);
     $sendBtn.disabled = true;
     const flashRed = () => {
       $input.style.borderColor = 'var(--red)';
@@ -2160,7 +2383,20 @@
         showOpToast(data.warning || 'Text typed into Terminal but was not submitted. Press Enter in that terminal tab.', 'error');
       } else if (res.ok && data.ok) {
         if (data.queued) {
-          showOpToast('Queued until the terminal session is idle.');
+          showOpToast(compactCommand
+            ? 'Queued /compact until the terminal session is idle.'
+            : 'Queued until the terminal session is idle.');
+        } else if (data.via === 'antigravity-resume') {
+          showOpToast('Antigravity headless follow-up started.');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
+        } else if (data.via === 'antigravity-app') {
+          showOpToast('Sent to Antigravity app.');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
+        } else if (compactCommand) {
+          showOpToast('Compact requested. Waiting for Claude to write the compact boundary.');
+          scheduleCompactUsageRefresh(sid);
         }
       } else {
         removePendingSendEcho(pendingSend);
@@ -2186,7 +2422,7 @@
   let _ttsStatusFailures = 0;
 
   function ttsButtons() {
-    return Array.from(document.querySelectorAll('.conv-input-bar .tts-btn'));
+    return Array.from(document.querySelectorAll('.conv-input-bar .tts-btn, .gc-reader .tts-btn'));
   }
 
   function setTtsButtonsBusy(busy) {
@@ -2198,20 +2434,9 @@
     return pane && pane.dataset ? pane.dataset.paneId : '';
   }
 
-  function clearTtsStatusTimer() {
-    if (_ttsStatusTimer) {
-      clearTimeout(_ttsStatusTimer);
-      _ttsStatusTimer = null;
-    }
-  }
-
   function setTtsButtonsState(active, failed, paneId) {
     _ttsActive = !!active;
     _ttsActivePaneId = active ? (paneId || _ttsActivePaneId || activePaneId()) : null;
-    if (!active) {
-      clearTtsStatusTimer();
-      _ttsStatusFailures = 0;
-    }
     ttsButtons().forEach(btn => {
       const pressed = !!active && ttsButtonPaneId(btn) === _ttsActivePaneId;
       btn.classList.toggle('speaking', pressed);
@@ -2225,26 +2450,112 @@
     }
   }
 
-  function scheduleTtsStatusPoll(delay) {
-    clearTtsStatusTimer();
-    _ttsStatusTimer = setTimeout(pollTtsStatus, delay || 700);
+  let _ttsUtterance = null;
+  let _ttsTextMapping = [];
+
+  function clearTtsHighlight() {
+    if (window.CSS && CSS.highlights && CSS.highlights.has('tts-highlight')) {
+      CSS.highlights.delete('tts-highlight');
+    }
   }
 
-  function normalizeTtsText(text) {
-    return String(text || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n[ \t]+/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .replace(/[ \t]{2,}/g, ' ')
-      .trim();
+  function highlightTtsWord(charIndex, charLength) {
+    if (!window.CSS || !CSS.highlights) return;
+    const range = new Range();
+    let startFound = false;
+    let endFound = false;
+    
+    for (const m of _ttsTextMapping) {
+      if (!startFound && charIndex >= m.start && charIndex < m.end) {
+        const offset = charIndex - m.start;
+        try {
+          range.setStart(m.node, m.nodeOffsetStart + offset);
+          startFound = true;
+        } catch(e) {}
+      }
+      const charEndIndex = charIndex + charLength;
+      if (startFound && !endFound && charEndIndex > m.start && charEndIndex <= m.end) {
+        const offset = charEndIndex - m.start;
+        try {
+          range.setEnd(m.node, m.nodeOffsetStart + offset);
+          endFound = true;
+        } catch(e) {}
+        break;
+      }
+    }
+    
+    if (startFound) {
+      if (!endFound) {
+        try {
+          range.setEnd(range.startContainer, range.startContainer.nodeValue.length);
+        } catch(e) {}
+      }
+      try {
+        const highlight = new Highlight(range);
+        CSS.highlights.set("tts-highlight", highlight);
+      } catch(e) {}
+    }
   }
 
-  function clippedTtsText(text) {
-    const clean = normalizeTtsText(text);
-    return clean.length > TTS_TEXT_MAX_CHARS
-      ? clean.slice(0, TTS_TEXT_MAX_CHARS).trim() + '...'
-      : clean;
+  function buildTtsDataFromElements(elements) {
+    let text = "";
+    const mapping = [];
+    
+    for (const el of elements) {
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+        acceptNode: function(node) {
+          const parent = node.parentElement;
+          if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE')) return NodeFilter.FILTER_REJECT;
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }, false);
+      
+      let node;
+      while ((node = walker.nextNode())) {
+        const nodeText = node.nodeValue;
+        mapping.push({ node, start: text.length, end: text.length + nodeText.length, nodeOffsetStart: 0 });
+        text += nodeText;
+      }
+      text += " "; 
+    }
+    
+    const clipped = text.length > TTS_TEXT_MAX_CHARS ? text.slice(0, TTS_TEXT_MAX_CHARS) : text;
+    return { text: clipped, mapping };
+  }
+
+  function buildTtsDataFromRange(range) {
+    let text = "";
+    const mapping = [];
+    
+    const walker = document.createTreeWalker(range.commonAncestorContainer, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(node) {
+        if (!range.intersectsNode(node)) return NodeFilter.FILTER_REJECT;
+        const parent = node.parentElement;
+        if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    }, false);
+    
+    let node;
+    while ((node = walker.nextNode())) {
+      let nodeText = node.nodeValue;
+      let startIndex = 0;
+      let endIndex = nodeText.length;
+      
+      if (node === range.startContainer) {
+        startIndex = range.startOffset;
+      }
+      if (node === range.endContainer) {
+        endIndex = range.endOffset;
+      }
+      
+      const chunk = nodeText.substring(startIndex, endIndex);
+      if (chunk) {
+        mapping.push({ node, start: text.length, end: text.length + chunk.length, nodeOffsetStart: startIndex });
+        text += chunk;
+      }
+    }
+    return { text, mapping };
   }
 
   function elementForSelectionNode(node) {
@@ -2252,24 +2563,26 @@
     return node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
   }
 
-  function selectedConversationTextForTts(paneId) {
+  function selectedConversationTtsData(paneId) {
     const sel = window.getSelection && window.getSelection();
-    if (!sel || sel.isCollapsed || !sel.rangeCount) return '';
-    const text = clippedTtsText(sel.toString());
-    if (!text) return '';
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
     const pane = document.querySelector(`.conv-pane[data-pane-id="${paneId || activePaneId()}"]`);
-    if (!pane) return '';
+    if (!pane) return null;
     const anchorEl = elementForSelectionNode(sel.anchorNode);
     const focusEl = elementForSelectionNode(sel.focusNode);
     const rangeEl = elementForSelectionNode(sel.getRangeAt(0).commonAncestorContainer);
     const inPane = anchorEl && focusEl && pane.contains(anchorEl) && pane.contains(focusEl);
-    const inComposer = [anchorEl, focusEl, rangeEl].some(el => el && el.closest && el.closest('.conv-input-bar'));
-    return inPane && !inComposer ? text : '';
+    const inComposer = [anchorEl, focusEl, rangeEl].some(el => el && el.closest && el.closest('.conv-input-bar, .gc-reader-input-row'));
+    
+    if (inPane && !inComposer) {
+      return buildTtsDataFromRange(sel.getRangeAt(0));
+    }
+    return null;
   }
 
-  function lastMessageTextForTts(paneId) {
+  function lastMessageTtsData(paneId) {
     const view = getConvViewForPane(paneId || activePaneId()) || getConvView();
-    if (!view) return '';
+    if (!view) return null;
     const candidates = Array.from(view.querySelectorAll(
       '.stream-bubble, .event.assistant:not(.tool-only), .event.user_text:not(.pending), .assistant-text'
     ));
@@ -2277,88 +2590,134 @@
       const el = candidates[i];
       if (!el || el.closest('.conv-sticky-header')) continue;
       if (el.classList.contains('assistant-text') && el.closest('.event')) continue;
-      let text = '';
+      let nodesToExtract = [];
       if (el.classList.contains('stream-bubble')) {
         const blocks = el.querySelector('.stream-bubble-blocks');
-        text = blocks ? (blocks.innerText || blocks.textContent || '') : '';
+        if (blocks) nodesToExtract = [blocks];
       } else if (el.classList.contains('assistant')) {
-        text = Array.from(el.querySelectorAll('.assistant-text'))
-          .map(node => node.innerText || node.textContent || '')
-          .join('\n\n');
+        nodesToExtract = Array.from(el.querySelectorAll('.assistant-text'));
       } else if (el.classList.contains('user_text')) {
         const msg = el.querySelector('.user-msg');
-        text = (msg && msg.getAttribute('data-raw-text')) || (msg && (msg.innerText || msg.textContent)) || '';
+        if (msg) nodesToExtract = [msg];
       } else if (el.classList.contains('assistant-text')) {
-        text = el.innerText || el.textContent || '';
+        nodesToExtract = [el];
       }
-      text = clippedTtsText(text);
-      if (text) return text;
+      
+      if (nodesToExtract.length > 0) {
+        const data = buildTtsDataFromElements(nodesToExtract);
+        if (data && data.text.trim()) return data;
+      }
     }
-    return '';
+    return null;
   }
 
-  async function pollTtsStatus() {
-    _ttsStatusTimer = null;
-    if (!_ttsActive) return;
-    try {
-      const data = await ccPostJson('/api/tts/status', {});
-      _ttsStatusFailures = 0;
-      if (!data.speaking) {
-        setTtsButtonsState(false, false);
-        return;
-      }
-    } catch (_) {
-      _ttsStatusFailures += 1;
-      if (_ttsStatusFailures >= 5) {
-        setTtsButtonsState(false, false);
-        return;
-      }
-    }
-    if (_ttsActive) scheduleTtsStatusPoll(700);
-  }
+  let _ttsRate = 1.0;
+  let _ttsLastCharIndex = 0;
 
   async function stopTextToSpeech() {
-    clearTtsStatusTimer();
-    setTtsButtonsBusy(true);
-    try {
-      await ccPostJson('/api/tts/stop', {});
-    } catch (_) {
-      // Stopping speech is best-effort; clear the local state either way.
-    } finally {
-      setTtsButtonsBusy(false);
-      setTtsButtonsState(false, false);
+    clearTtsHighlight();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
     }
+    _ttsUtterance = null;
+    _ttsTextMapping = [];
+    _ttsRate = 1.0;
+    _ttsLastCharIndex = 0;
+    setTtsButtonsBusy(false);
+    setTtsButtonsState(false, false);
   }
 
   async function readLastMessageAloud(paneId) {
+    if (!window.speechSynthesis) {
+      showOpToast('Your browser does not support text-to-speech.', 'error');
+      return;
+    }
+
+    let textToSpeak = null;
+    let mappingToUse = null;
+
     if (_ttsActive) {
-      await stopTextToSpeech();
-      return;
+      if (_ttsRate === 1.0) {
+        _ttsRate = 1.5;
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        
+        textToSpeak = _ttsUtterance.text.substring(_ttsLastCharIndex);
+        mappingToUse = _ttsTextMapping.filter(m => m.end > _ttsLastCharIndex).map(m => {
+          let newStart = m.start - _ttsLastCharIndex;
+          let newNodeOffset = m.nodeOffsetStart;
+          if (newStart < 0) {
+            newNodeOffset += Math.abs(newStart);
+            newStart = 0;
+          }
+          return {
+            node: m.node,
+            start: newStart,
+            end: m.end - _ttsLastCharIndex,
+            nodeOffsetStart: newNodeOffset
+          };
+        });
+      } else {
+        await stopTextToSpeech();
+        return;
+      }
+    } else {
+      _ttsRate = 1.0;
+      _ttsLastCharIndex = 0;
+      paneId = paneId || activePaneId();
+      const data = selectedConversationTtsData(paneId) || lastMessageTtsData(paneId);
+      
+      if (!data || !data.text.trim()) {
+        setTtsButtonsState(false, true);
+        showOpToast('No message to read yet.', 'error');
+        return;
+      }
+      textToSpeak = data.text;
+      mappingToUse = data.mapping;
     }
+    
     paneId = paneId || activePaneId();
-    const text = selectedConversationTextForTts(paneId) || lastMessageTextForTts(paneId);
-    if (!text) {
-      setTtsButtonsState(false, true);
-      showOpToast('No message to read yet.', 'error');
-      return;
-    }
     setActivePaneById(paneId);
     setTtsButtonsBusy(true);
-    try {
-      const data = await ccPostJson('/api/tts/say', {
-        text,
-        conversation_id: currentConversation || '',
-      });
-      if (!data.ok) throw new Error(data.error || 'text-to-speech failed');
-      _ttsStatusFailures = 0;
+    
+    _ttsTextMapping = mappingToUse;
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    _ttsUtterance = utterance;
+    _ttsUtterance.rate = _ttsRate;
+    
+    _ttsUtterance.onstart = () => {
+      if (_ttsUtterance !== utterance) return;
       setTtsButtonsState(true, false, paneId);
-      scheduleTtsStatusPoll(700);
-    } catch (err) {
-      setTtsButtonsState(false, true);
-      showOpToast('Text-to-speech failed: ' + (err && err.message || 'unknown'), 'error');
-    } finally {
       setTtsButtonsBusy(false);
-    }
+      ttsButtons().forEach(btn => {
+        if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
+          btn.title = _ttsRate === 1.0 ? 'Reading at 1.0x (Click for 1.5x)' : 'Reading at 1.5x (Click to Stop)';
+        }
+      });
+    };
+    
+    _ttsUtterance.onend = () => {
+      if (_ttsUtterance === utterance) stopTextToSpeech();
+    };
+    
+    _ttsUtterance.onerror = (e) => {
+      if (_ttsUtterance !== utterance) return;
+      console.error("TTS Error:", e);
+      if (e.error !== 'canceled' && e.error !== 'interrupted') {
+        stopTextToSpeech();
+        showOpToast('Text-to-speech failed.', 'error');
+        setTtsButtonsState(false, true);
+      }
+    };
+    
+    _ttsUtterance.onboundary = (e) => {
+      if (_ttsUtterance !== utterance) return;
+      if (e.name === 'word') {
+        _ttsLastCharIndex = e.charIndex;
+        highlightTtsWord(e.charIndex, e.charLength);
+      }
+    };
+    
+    window.speechSynthesis.speak(_ttsUtterance);
   }
 
   function formatInjectFailure(data, status) {
@@ -2429,6 +2788,23 @@
     });
     $convInput.addEventListener('focus', () => refreshSlashCommandMenu($convInput));
     $convInput.addEventListener('click', () => refreshSlashCommandMenu($convInput));
+    // Clicking anywhere in the input bar — the padding, the gap above/below
+    // the textarea, or the empty stretch of the bottom selector row — should
+    // drop the caret in the composer. Without this, only a direct hit on the
+    // 1-row textarea glyph area focuses it, so the bar feels "dead" on the
+    // first click (you click, no caret; you have to click again, on the text).
+    if ($convInputBar) {
+      $convInputBar.addEventListener('mousedown', (e) => {
+        if (e.target === $convInput) return;  // native caret placement
+        // Don't steal clicks from real controls (send/esc/tts buttons, the
+        // engine/model/issue selects, custom-select menus, links, the badge).
+        if (e.target.closest && e.target.closest(
+              'button, select, a, input, textarea, [role="button"], '
+              + '.custom-select-container, .custom-select-menu')) return;
+        e.preventDefault();  // stop the caret being dropped on a non-focusable node
+        try { $convInput.focus({ preventScroll: true }); } catch (_) { $convInput.focus(); }
+      });
+    }
     $convInput.addEventListener('keydown', (e) => {
       if (handleSlashCommandKeydown($convInput, e)) return;
       // Enter sends, Shift+Enter inserts a newline. Same as Claude Desktop,
@@ -2530,8 +2906,10 @@
   const PASTED_IMG_RE = /(?:file:\/\/)?(\/[^\s<>"']*?\/\.claude\/(?:command-center\/)?pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))/gi;
   const PASTED_IMG_MD_LINK_RE = /!?\[[^\]\n]*\]\((?:file:\/\/)?(\/[^\s<>"')]*?\/\.claude\/(?:command-center\/)?pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))(?:\s+(?:&quot;[^&]*&quot;|'[^']*'))?\)/gi;
   function pastedImageTag(path) {
+    const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
     return '<img class="msg-image pasted-image-inline" src="/api/pasted-image?path='
       + encodeURIComponent(path)
+      + (sid ? '&session_id=' + encodeURIComponent(sid) : '')
       + '" alt="pasted image" loading="lazy">';
   }
   function linkifyPastedImages(escapedHtml) {
@@ -2548,6 +2926,16 @@
       let src = '';
       if (img.kind === 'path' && img.session_id && img.filename) {
         src = '/image-cache/' + encodeURIComponent(img.session_id) + '/' + encodeURIComponent(img.filename);
+      } else if (img.kind === 'base64' && img.line != null && img.data == null) {
+        // Lazy reference: the server stripped the base64 body out of the
+        // payload and gave us a (line, idx) pointer. Fetch on demand via
+        // /api/conv-image — loading="lazy" now does real work because the
+        // src is a URL, not a megabyte data: URI inlined into the DOM.
+        if (currentConversation) {
+          src = '/api/conv-image?conversation_id=' + encodeURIComponent(currentConversation)
+              + '&line=' + encodeURIComponent(img.line)
+              + '&idx=' + encodeURIComponent(img.idx != null ? img.idx : 0);
+        }
       } else if (img.kind === 'base64' && img.data) {
         src = 'data:' + (img.media_type || 'image/png') + ';base64,' + img.data;
       }
@@ -2848,7 +3236,9 @@
       }
       // Numbered list: consecutive `N. text` lines.
       if (/^\s*\d+\.\s+/.test(line)) {
-        let html = '<ol>';
+        const startMatch = line.match(/^\s*(\d+)\.\s+/);
+        const startVal = startMatch ? parseInt(startMatch[1], 10) : 1;
+        let html = startVal !== 1 ? '<ol start="' + startVal + '">' : '<ol>';
         while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
           const item = lines[i].replace(/^\s*\d+\.\s+/, '');
           html += '<li>' + renderInline(item) + '</li>';
@@ -2874,12 +3264,23 @@
       }
       // Regular text line (preserve as-is with <br>)
       if (line.trim() === '') {
-        out.push('<br>');
+        // Collapse consecutive blank lines: markdown semantics treat them as
+        // a single paragraph break, but the old "always push <br>" rule
+        // stacked one <br> per blank line — three blank lines became three
+        // visual line-heights of empty space, which is what made the group-
+        // chat transcript look broken when the orchestrator dumped a wad of
+        // "system: removed X" entries with blank gaps between them.
+        if (out.length && out[out.length - 1] !== '<br>') out.push('<br>');
       } else {
         out.push('<div>' + renderInline(line) + '</div>');
       }
       i++;
     }
+    // Trim leading/trailing blank-line <br>s so a body that starts or ends
+    // with whitespace doesn't render the gap. Inner runs are already
+    // collapsed to a single <br> by the loop above.
+    while (out.length && out[0] === '<br>') out.shift();
+    while (out.length && out[out.length - 1] === '<br>') out.pop();
     return out.join('');
   }
 
@@ -3001,6 +3402,9 @@
   function renderInline(s) {
     // Escape HTML first
     s = escapeHtml(s);
+    // Expand pasted images before other markdown formatting so their paths 
+    // don't get wrapped in backticks or a-tags by later rules.
+    s = linkifyPastedImages(s);
     // Inline code `x` (also make paths inside code clickable)
     s = s.replace(/`([^`]+)`/g, (m, inner) => {
       if (_shouldLinkifyInlineCodePath(inner)) {
@@ -3016,6 +3420,11 @@
     });
     // Bold **x**
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Images ![alt](url)
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (m, alt, url) => {
+      const target = normalizeMarkdownLinkTarget(url);
+      return '<img src="' + escapeAttr(target) + '" alt="' + escapeHtml(alt) + '" class="msg-image" loading="lazy">';
+    });
     // Markdown links [text](url)
     s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, url) => {
       const target = normalizeMarkdownLinkTarget(url);
@@ -3171,11 +3580,22 @@
       });
       const data = await res.json().catch(() => ({}));
       if (!data.ok) {
-        a.title = data.error || 'open failed';
+        const err = data.error || 'open failed';
+        a.title = err;
         a.style.color = 'var(--red)';
+        // Surface the failure — a brief opacity flicker alone is too easy
+        // to miss when nothing happens on disk. The path is included so it's
+        // obvious which link refused to open.
+        try {
+          const detail = err === 'not found' ? 'File not found: ' + p : 'Open failed: ' + err;
+          if (typeof showConvToast === 'function') showConvToast(detail);
+        } catch (_) {}
       }
     } catch (e) {
       a.title = String(e);
+      try {
+        if (typeof showConvToast === 'function') showConvToast('Open failed: ' + String(e));
+      } catch (_) {}
     } finally {
       setTimeout(() => { a.style.opacity = ''; }, 600);
     }
@@ -3199,6 +3619,7 @@
   const $convSearch = document.getElementById('convSearch');
   const $convSearchClear = document.getElementById('convSearchClear');
   const $kanbanBoard = document.getElementById('kanbanBoard');
+  const $flowBoard = document.getElementById('flowBoard');
   const $convKanbanToggle = document.getElementById('convKanbanToggle');
 
   // ── One-shot localStorage migration ──
@@ -3241,8 +3662,32 @@
     } catch (_) { /* localStorage may be disabled — fail silently */ }
   })();
 
-  let kanbanView = false;
-  try { kanbanView = localStorage.getItem('ccc-kanban-view') === 'true'; } catch (_) {}
+  function normalizeSidebarViewMode(value) {
+    if (value === 'flow' || value === 'list') return value;
+    if (value === 'board' || value === 'kanban') return 'flow';
+    return 'list';
+  }
+  function readSidebarViewMode() {
+    try {
+      const saved = localStorage.getItem('ccc-session-view');
+      if (saved) return normalizeSidebarViewMode(saved);
+      return localStorage.getItem('ccc-kanban-view') === 'true' ? 'flow' : 'list';
+    } catch (_) {
+      return 'list';
+    }
+  }
+  let sidebarViewMode = readSidebarViewMode();
+  let kanbanView = sidebarViewMode === 'board';
+  function isFlowView() { return sidebarViewMode === 'flow'; }
+  function setSidebarViewMode(mode) {
+    sidebarViewMode = normalizeSidebarViewMode(mode);
+    kanbanView = sidebarViewMode === 'board';
+    if (sidebarViewMode !== 'flow') setFlowExpanded(false);
+    try {
+      localStorage.setItem('ccc-session-view', sidebarViewMode);
+      localStorage.setItem('ccc-kanban-view', kanbanView ? 'true' : 'false');
+    } catch (_) {}
+  }
   let kanbanCollapsed = {}; // column_key -> bool, tracks user collapse state
   try { kanbanCollapsed = JSON.parse(localStorage.getItem('ccc-kanban-collapsed') || '{}'); } catch (_) {}
   let kanbanShowAll = {};   // column_key -> bool, tracks "show all" state for large columns
@@ -3418,6 +3863,97 @@
     activeIndex: 0,
     ratio: 0.5,
   };
+
+  function getLastConvKey() {
+    return 'ccc-last-conv:' + (selectedRepoPath() || 'all');
+  }
+
+  function getLastConvId() {
+    try {
+      return localStorage.getItem(getLastConvKey()) || localStorage.getItem('ccc-last-conv') || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function getSplitStateKey() {
+    return 'ccc-split-state:' + (selectedRepoPath() || 'all');
+  }
+
+  function saveSplitState() {
+    if (CONV_POPOUT_MODE) return;
+    const key = getSplitStateKey();
+    const data = {
+      orientation: splitState.orientation,
+      ratio: splitState.ratio,
+      activeIndex: splitState.activeIndex,
+      panes: splitState.panes.map(p => ({
+        id: p.id,
+        conversationId: p.conversationId
+      }))
+    };
+    try {
+      localStorage.setItem(key, JSON.stringify(data));
+    } catch (_) {}
+  }
+
+  function restoreSplitState() {
+    if (CONV_POPOUT_MODE) return;
+    const key = getSplitStateKey();
+    let saved = null;
+    try {
+      const val = localStorage.getItem(key);
+      if (val) saved = JSON.parse(val);
+    } catch (_) {}
+
+    if (saved && saved.panes && saved.panes.length > 0) {
+      splitState.orientation = saved.orientation;
+      splitState.ratio = typeof saved.ratio === 'number' ? saved.ratio : 0.5;
+      splitState.activeIndex = typeof saved.activeIndex === 'number' ? saved.activeIndex : 0;
+      splitState.panes = saved.panes.map(p => {
+        const pane = _newPaneState(p.id);
+        pane.conversationId = p.conversationId;
+        return pane;
+      });
+    } else {
+      splitState.orientation = null;
+      splitState.ratio = 0.5;
+      splitState.activeIndex = 0;
+      const pane = _newPaneState('p1');
+      pane.conversationId = getLastConvId() || null;
+      splitState.panes = [pane];
+    }
+    renderSplitLayout();
+  }
+
+  async function restoreLastConversation() {
+    if (CONV_POPOUT_MODE) return;
+    if (!conversationsLoaded) return;
+
+    let anyRestored = false;
+    const savedActiveIndex = splitState.activeIndex;
+
+    for (let i = 0; i < splitState.panes.length; i++) {
+      const pane = splitState.panes[i];
+      if (!pane.conversationId || pane.restored) continue;
+
+      const exists = conversationsData.some(c => c.id === pane.conversationId);
+      if (exists) {
+        pane.restored = true;
+        anyRestored = true;
+        await selectConversation(pane.conversationId, pane.id);
+      } else if (archiveLoaded) {
+        pane.restored = true;
+      }
+    }
+
+    if (anyRestored) {
+      const activePane = splitState.panes[savedActiveIndex];
+      if (activePane) {
+        setActivePaneById(activePane.id);
+      }
+    }
+  }
   function activePaneId() { return splitState.panes[splitState.activeIndex].id; }
   function paneByPaneId(pid) { return splitState.panes.find(p => p.id === pid) || null; }
   function paneIndexByPaneId(pid) {
@@ -3445,11 +3981,17 @@
         el.classList.toggle('active', el.dataset.id === convId);
       });
     }
+    if ($flowBoard) {
+      $flowBoard.querySelectorAll('.flow-node-session').forEach(el => {
+        el.classList.toggle('active', el.dataset.id === convId);
+      });
+    }
   }
   function setActivePaneById(paneId, activeConvId) {
     const idx = paneIndexByPaneId(paneId);
     if (idx < 0) return false;
     splitState.activeIndex = idx;
+    saveSplitState();
     if (arguments.length > 1) syncActivePaneChrome(activeConvId);
     else syncActivePaneChrome();
     return true;
@@ -3542,10 +4084,10 @@
   }
   function setPopoutTitle(row) {
     if (!CONV_POPOUT_MODE) return;
-    const title = (row && (row.display_name || firstSentenceOf(row.first_message || '', 70)))
+    const title = (row && (row.display_name || row.ai_title || firstSentenceOf(row.first_message || '', 70)))
       || CONV_POPOUT_TARGET.slice(0, 8)
       || 'Conversation';
-    document.title = title + ' - Claude Command Center';
+    document.title = title + ' - Command Center for Claude, Codex, and Anti-Gravity';
   }
   function renderPopoutMissingConversation() {
     if (_popoutMissingShown || currentConversation) return;
@@ -3651,14 +4193,14 @@
     return true;
   }
 
-  // Optimistic state overrides for archived/verified flags. When the user
-  // archives or verifies a card we mutate the in-memory copy, but a /api/sessions
+  // Optimistic state overrides for archived/verified/pinned flags. When the user
+  // archives, verifies, or pins a card we mutate the in-memory copy, but a /api/sessions
   // poll already in flight will return *pre-click* data and overwrite that
   // mutation when it lands — the card briefly reappears in its old column
   // before the next poll picks up the persisted change. This map shields the
   // optimistic value until the server's response agrees, with a 30s TTL so a
   // failed write doesn't pin a stale override forever.
-  const _optimisticOverrides = new Map();  // sid -> {archived?, verified?, ts}
+  const _optimisticOverrides = new Map();  // sid -> {archived?, verified?, pinned?, pin_rank?, ts}
   const _OPTIMISTIC_TTL_MS = 30000;
   function setOptimisticOverride(sid, patch) {
     if (!sid) return;
@@ -3681,6 +4223,12 @@
       if ('verified' in ov) {
         if (c.verified !== ov.verified) { c.verified = ov.verified; allMatch = false; }
       }
+      if ('pinned' in ov) {
+        if (c.pinned !== ov.pinned) { c.pinned = ov.pinned; allMatch = false; }
+      }
+      if ('pin_rank' in ov) {
+        if (c.pin_rank !== ov.pin_rank) { c.pin_rank = ov.pin_rank; allMatch = false; }
+      }
       // Server now agrees on every field we were holding — stop overriding.
       if (allMatch) _optimisticOverrides.delete(c.session_id);
     }
@@ -3689,12 +4237,37 @@
   // Pending spawn placeholders (optimistic UI) — keyed by pid.
   const pendingSpawns = new Map();
 
+  function carryFlowPendingSpawnNode(placeholder, realCard) {
+    if (!placeholder || !realCard) return;
+    try {
+      const placeholderSessionId = placeholder.session_id || placeholder.id;
+      const realSessionId = realCard.session_id || realCard.id;
+      if (!placeholderSessionId || !realSessionId) return;
+      const placeholderNodeId = flowNodeKey('session', placeholderSessionId);
+      const realNodeId = flowNodeKey('session', realSessionId);
+      const savedParent = flowNodeParents[placeholderNodeId] || placeholder.flow_parent_node_id || '';
+      const savedPos = flowNodePositions[placeholderNodeId] || placeholder.flow_node_position || null;
+      if (savedParent) flowNodeParents[realNodeId] = savedParent;
+      if (savedPos && Number.isFinite(Number(savedPos.x)) && Number.isFinite(Number(savedPos.y))) {
+        flowNodePositions[realNodeId] = {
+          x: Math.round(Number(savedPos.x)),
+          y: Math.round(Number(savedPos.y)),
+        };
+      }
+      delete flowNodeParents[placeholderNodeId];
+      delete flowNodePositions[placeholderNodeId];
+      persistFlowNodeParents();
+      persistFlowNodePositions();
+    } catch (_) {}
+  }
+
   function renderPendingSpawnConversation(card, paneId) {
     const $view = getConvViewForPane(paneId || activePaneId()) || $conversationsView;
     if (!$view || !card) return;
     const prompt = (card.first_message || card.prompt || card.display_name || '').trim();
     const engineLabel = card.source === 'codex' ? 'Codex'
       : card.source === 'gemini' ? 'Gemini'
+      : card.source === 'antigravity' ? 'Antigravity'
       : card.source === 'pkood' ? 'pkood'
       : 'Claude';
     const cwd = card.spawn_cwd || card.repo_path || card.folder_path || card.cwd || '';
@@ -3707,6 +4280,7 @@
       + '<span class="label">User</span>'
       + '<div class="user-msg" data-raw-text="' + escapeAttr(prompt || card.display_name || 'New session') + '">' + promptHtml + '</div>'
       + (meta ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">' + escapeHtml(meta) + '</div>' : '')
+      + (card.source === 'antigravity' ? '<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">Antigravity is running headless with AGY print mode. Use Launch on a completed row for manual /resume in the TUI.</div>' : '')
       + '</div>';
     showOptimisticAgentIndicator($view);
     scrollConversationToEnd($view);
@@ -3718,7 +4292,7 @@
       || conversationsData.find(x => x && x.id === 'spawning-' + tempPid);
     if (!placeholder) return null;
     placeholder.spawn_pid = realPid;
-    if ((placeholder.source === 'codex' || placeholder.source === 'gemini') && logPath) {
+    if ((placeholder.source === 'codex' || placeholder.source === 'gemini' || placeholder.source === 'antigravity') && logPath) {
       placeholder.agent_log_path = logPath;
       if (placeholder.source === 'codex') placeholder.codex_log_path = logPath;
     }
@@ -3730,6 +4304,16 @@
 
   function normalizePendingPrompt(value) {
     return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function previewRepeatsTitle(titleText, previewText) {
+    const title = normalizePendingPrompt(titleText).replace(/[.!?]+$/, '');
+    const preview = normalizePendingPrompt(previewText).replace(/[.!?]+$/, '');
+    if (!title || !preview) return false;
+    if (title === preview) return true;
+    if (title.length >= 32 && preview.startsWith(title)) return true;
+    if (preview.length >= 32 && title.startsWith(preview)) return true;
+    return false;
   }
 
   function pendingSpawnMatchesRow(pid, placeholder, row) {
@@ -3763,6 +4347,7 @@
       if (!realCard) continue;
       const placeholderId = placeholder.id || ('spawning-' + pid);
       const defaultPlaceholderId = 'spawning-' + pid;
+      carryFlowPendingSpawnNode(placeholder, realCard);
       if (currentConversation === placeholderId || currentConversation === defaultPlaceholderId) {
         selectionSwap = { realCard, placeholderId };
       }
@@ -3779,7 +4364,13 @@
     const sid = real.session_id || realId;
     if (!realId) return;
     currentConversation = realId;
-    try { if (!CONV_POPOUT_MODE) localStorage.setItem('ccc-last-conv', realId); } catch (_) {}
+    try {
+      if (!CONV_POPOUT_MODE) {
+        localStorage.setItem(getLastConvKey(), realId);
+        localStorage.setItem('ccc-last-conv', realId);
+      }
+    } catch (_) {}
+    saveSplitState();
     if (typeof stopConvStream === 'function') stopConvStream();
     if (typeof stopSpawnStream === 'function') stopSpawnStream();
     setCurrentSession(
@@ -3807,7 +4398,7 @@
     const id = 'spawning-' + pid;
     // Backwards-compat: this used to take `usePkood: bool`. Accept
     // either the legacy boolean (true → 'pkood') or a new explicit
-    // string ('claude' | 'codex' | 'pkood' | 'interactive').
+    // string ('claude' | 'codex' | 'gemini' | 'antigravity' | 'pkood' | 'interactive').
     let source;
     if (sourceOrEngine === true) source = 'pkood';
     else if (sourceOrEngine === false || sourceOrEngine == null) source = 'interactive';
@@ -3828,7 +4419,7 @@
       name_overridden: false,
       // Fire-and-watch engines also get durable engine-native sessions; the
       // log path is only a fallback while the real row is materializing.
-      agent_log_path: (source === 'codex' || source === 'gemini') ? (logPath || null) : null,
+      agent_log_path: (source === 'codex' || source === 'gemini' || source === 'antigravity') ? (logPath || null) : null,
       codex_log_path: source === 'codex' ? (logPath || null) : null,
     };
     if (meta && typeof meta === 'object') {
@@ -3857,7 +4448,7 @@
     // Auto-cleanup after 30s for Claude placeholders. Fire-and-watch placeholders
     // stick around until the durable thread row appears, with the spawn log
     // as a fallback if the CLI exits before creating a thread.
-    if (source !== 'codex' && source !== 'gemini') {
+    if (source !== 'codex' && source !== 'gemini' && source !== 'antigravity') {
       setTimeout(() => {
         const direct = pendingSpawns.has(pid) ? [pid, pendingSpawns.get(pid)] : null;
         const adopted = direct || Array.from(pendingSpawns.entries()).find(([, c]) => c && c.id === id);
@@ -3952,6 +4543,7 @@
           const placeholderCol = columnOverrides[placeholderId] || columnOverrides[defaultPlaceholderId];
           const realCard = fresh.find(c => String(c.spawn_pid) === String(pid));
           if (realCard && realCard.session_id) {
+            carryFlowPendingSpawnNode(placeholder, realCard);
             _firstSeenSessions.set(realCard.session_id, Date.now());
             if (placeholderCol && !realCard.verified && !realCard.archived) {
               _stickyInitialCol.set(realCard.session_id, {
@@ -4035,14 +4627,11 @@
       // shouldn't yank a card out from under an active selection.
       if (CONV_POPOUT_MODE) {
         maybeSelectPopoutConversation();
-      } else if (!currentConversation) {
-        let lastId = '';
-        try { lastId = localStorage.getItem('ccc-last-conv') || ''; } catch (_) {}
-        if (lastId && conversationsData.some(c => c.id === lastId)) {
-          selectConversation(lastId);
-        }
+      } else {
+        restoreLastConversation();
       }
     } catch (err) {
+      _convListRenderSig = null;
       $convList.innerHTML = '<div class="empty-state" style="height:auto;padding:20px;font-size:13px;">Failed to load sessions: ' + escapeHtml(err.message) + '</div>';
       hideLoadingOverlay();  // even on error — don't leave the user stuck on a spinner
       _markFirstSessionsLoaded();  // even on error — don't pin the archive load
@@ -4404,6 +4993,110 @@
     }
   })();
 
+  // Collapse toggle for the files panel (persisted).
+  (function () {
+    const $panel = document.getElementById('filesPanel');
+    const $toggle = document.getElementById('filesToggle');
+    if (!$panel || !$toggle) return;
+    try {
+      const stored = localStorage.getItem('ccc-files-collapsed');
+      if (stored === '1') {
+        $panel.classList.add('collapsed');
+      } // else (null or '0') → stay expanded (HTML default)
+    } catch (_) {}
+    function setCollapsed(collapsed) {
+      $panel.classList.toggle('collapsed', collapsed);
+      try {
+        localStorage.setItem('ccc-files-collapsed', collapsed ? '1' : '0');
+      } catch (_) {}
+    }
+    $toggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setCollapsed(!$panel.classList.contains('collapsed'));
+    });
+    const $searchInput = document.getElementById('filesSearchInput');
+    if ($searchInput) {
+      $searchInput.addEventListener('input', (e) => {
+        const term = e.target.value.toLowerCase();
+        const rows = document.querySelectorAll('#sidebarFilesList .sidebar-file-row');
+        for (const row of rows) {
+          const text = row.textContent.toLowerCase();
+          row.style.display = text.includes(term) ? '' : 'none';
+        }
+      });
+      $searchInput.addEventListener('click', (e) => e.stopPropagation());
+    }
+    const $header = $panel.querySelector('.files-header');
+    if ($header) {
+      $header.addEventListener('click', (e) => {
+        if (!$panel.classList.contains('collapsed')) return;
+        if (e.target.closest('button')) return;
+        setCollapsed(false);
+      });
+    }
+
+    // Resize handle: drag DOWN to grow the files panel, shrinking kanban below.
+    const FILES_HEIGHT_KEY = 'ccc-files-height';
+    const FILES_MIN_PX = 80;
+    const $handle = document.getElementById('filesResizeHandle');
+
+    function filesMaxPx() {
+      const parent = $panel.parentElement;
+      if (!parent) return 9999;
+      return Math.max(FILES_MIN_PX, Math.floor(parent.clientHeight * 0.7));
+    }
+    function applyFilesHeight(h) {
+      const clamped = Math.max(FILES_MIN_PX, Math.min(filesMaxPx(), h));
+      $panel.style.height = clamped + 'px';
+    }
+    function resetFilesHeight() {
+      $panel.style.height = '';
+      try { localStorage.removeItem(FILES_HEIGHT_KEY); } catch (_) {}
+    }
+    try {
+      const stored = parseInt(localStorage.getItem(FILES_HEIGHT_KEY) || '', 10);
+      if (!isNaN(stored) && stored > 0) {
+        requestAnimationFrame(() => applyFilesHeight(stored));
+      }
+    } catch (_) {}
+
+    if ($handle) {
+      let startY = 0;
+      let startH = 0;
+      let activePointerId = null;
+      $handle.addEventListener('pointerdown', (e) => {
+        if ($panel.classList.contains('collapsed')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        activePointerId = e.pointerId;
+        startY = e.clientY;
+        startH = $panel.getBoundingClientRect().height;
+        $handle.classList.add('is-dragging');
+        try { $handle.setPointerCapture(e.pointerId); } catch (_) {}
+      });
+      $handle.addEventListener('pointermove', (e) => {
+        if (activePointerId !== e.pointerId) return;
+        const dy = e.clientY - startY;
+        applyFilesHeight(startH - dy);
+      });
+      const endDrag = (e) => {
+        if (activePointerId !== e.pointerId) return;
+        $handle.classList.remove('is-dragging');
+        try { $handle.releasePointerCapture(e.pointerId); } catch (_) {}
+        activePointerId = null;
+        const finalH = $panel.getBoundingClientRect().height;
+        try { localStorage.setItem(FILES_HEIGHT_KEY, String(Math.round(finalH))); } catch (_) {}
+      };
+      $handle.addEventListener('pointerup', endDrag);
+      $handle.addEventListener('pointercancel', endDrag);
+      $handle.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        resetFilesHeight();
+      });
+    }
+  })();
+
   function relativeTime(ts) {
     // Compact format à la Omnara: just the number + unit, no "ago" word.
     // Saves ~30% of the row's right-side real estate which lets the time
@@ -4441,9 +5134,69 @@
     const $list = document.getElementById('convList');
     return !!($list && $list.querySelector('.conv-title-input'));
   }
+  let _sidebarDragInProgress = false;
+  let _sidebarRenderPendingAfterDrag = false;
+  let _sidebarRenderAfterDragRaf = 0;
+  function isSidebarDragInProgress() {
+    return _sidebarDragInProgress || !!document.querySelector(
+      '.flow-node.dragging,.kanban-card.dragging,.kanban-column-header.dragging-header,.conv-item.dragging'
+    );
+  }
+  function beginSidebarDrag() {
+    _sidebarDragInProgress = true;
+  }
+  function flushSidebarRenderAfterDrag() {
+    _sidebarRenderAfterDragRaf = 0;
+    if (isSidebarDragInProgress()) {
+      _sidebarRenderPendingAfterDrag = true;
+      return;
+    }
+    if (!_sidebarRenderPendingAfterDrag) return;
+    _sidebarRenderPendingAfterDrag = false;
+    try {
+      const $search = document.getElementById('convSearch');
+      renderArchiveList($search ? $search.value : '');
+    } catch (_) {}
+  }
+  function endSidebarDrag() {
+    _sidebarDragInProgress = false;
+    if (!_sidebarRenderPendingAfterDrag || _sidebarRenderAfterDragRaf) return;
+    _sidebarRenderAfterDragRaf = requestAnimationFrame(flushSidebarRenderAfterDrag);
+  }
+  function deferSidebarRenderIfDragging() {
+    if (!isSidebarDragInProgress()) return false;
+    _sidebarRenderPendingAfterDrag = true;
+    return true;
+  }
+  document.addEventListener('dragstart', ev => {
+    const target = ev.target && ev.target.closest && ev.target.closest('.conv-item,.kanban-card,.kanban-column-header');
+    if (!target || dragStartsFromTextEditor(ev.target)) return;
+    beginSidebarDrag();
+  }, true);
+  document.addEventListener('dragend', endSidebarDrag, true);
+  document.addEventListener('drop', endSidebarDrag, true);
+  function dragStartsFromTextEditor(target) {
+    return !!(target && target.closest && target.closest(
+      'input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), .conv-title-input, .kanban-rename-input'
+    ));
+  }
+  function filterGhIssues(convs) {
+    if (getViewGhPref() !== 'hide') return convs;
+    return (convs || []).filter(c => !(
+      c.source === 'github' ||
+      c.backlog_type === 'github' ||
+      c.source === 'github_pr' ||
+      c.issue_number ||
+      c.linked_issue ||
+      (c.id && c.id.startsWith('backlog-issue-'))
+    ));
+  }
+
   function renderKanbanSidebar(convs) {
+    convs = filterGhIssues(convs);
     const $kanbanBoard = document.getElementById('kanbanBoard');
     const $convList = document.getElementById('convList');
+    const $flow = document.getElementById('flowBoard');
     if (!$kanbanBoard) return;
 
     const scrolls = {};
@@ -4462,6 +5215,7 @@
     });
 
     if ($convList) $convList.style.display = 'none';
+    if ($flow) $flow.style.display = 'none';
     $kanbanBoard.style.display = '';
     renderKanbanBoard(convs || [], $kanbanBoard, false);
     if ($kanbanBoardSplit) renderKanbanBoard(convs || [], $kanbanBoardSplit, true);
@@ -4484,15 +5238,1487 @@
     });
   }
 
+  let flowNodePositions = {};
+  try { flowNodePositions = JSON.parse(localStorage.getItem('ccc-flow-node-positions') || '{}'); } catch (_) {}
+  let flowNodeParents = {};
+  try { flowNodeParents = JSON.parse(localStorage.getItem('ccc-flow-node-parents') || '{}'); } catch (_) {}
+  let flowCollapsedNodes = {};
+  try { flowCollapsedNodes = JSON.parse(localStorage.getItem('ccc-flow-collapsed-nodes') || '{}'); } catch (_) {}
+  let flowCustomObjects = [];
+  try {
+    const savedObjects = JSON.parse(localStorage.getItem('ccc-flow-custom-objects') || '[]');
+    if (Array.isArray(savedObjects)) flowCustomObjects = savedObjects;
+  } catch (_) {}
+  const FLOW_ZOOM_MIN = 0.45;
+  const FLOW_ZOOM_MAX = 2.25;
+  let flowZoom = 1;
+  try {
+    const savedZoom = Number(localStorage.getItem('ccc-flow-zoom'));
+    if (Number.isFinite(savedZoom)) flowZoom = Math.max(FLOW_ZOOM_MIN, Math.min(FLOW_ZOOM_MAX, savedZoom));
+  } catch (_) {}
+  let flowExpanded = false;
+  let flowGestureStartZoom = 1;
+  let flowDraftSessions = [];
+  try {
+    const savedDrafts = JSON.parse(localStorage.getItem('ccc-flow-draft-sessions') || '[]');
+    if (Array.isArray(savedDrafts)) {
+      flowDraftSessions = savedDrafts.filter(d => d && d.id && d.repo_path);
+    }
+  } catch (_) {}
+  let flowDraftFocusId = '';
+  let flowSelectedNodes = {};
+
+  function flowSelectedNodeIds() {
+    return Object.keys(flowSelectedNodes || {}).filter(id => flowSelectedNodes[id]);
+  }
+
+  function flowSelectedNodeCount() {
+    return flowSelectedNodeIds().length;
+  }
+
+  function updateFlowSelectionClasses(targetEl) {
+    const root = targetEl || document.getElementById('flowBoard');
+    if (!root) return;
+    root.querySelectorAll('.flow-node').forEach(node => {
+      node.classList.toggle('selected', !!flowSelectedNodes[node.dataset.flowNodeId]);
+    });
+  }
+
+  function setFlowSelectedNodes(nodeIds, targetEl) {
+    flowSelectedNodes = {};
+    (nodeIds || []).forEach(nodeId => {
+      if (nodeId) flowSelectedNodes[nodeId] = true;
+    });
+    updateFlowSelectionClasses(targetEl);
+  }
+
+  function clearFlowSelectedNodes(targetEl) {
+    flowSelectedNodes = {};
+    updateFlowSelectionClasses(targetEl);
+  }
+
+  function pruneFlowSelectedNodes(records) {
+    const ids = new Set((records || []).map(rec => rec.id));
+    let changed = false;
+    Object.keys(flowSelectedNodes || {}).forEach(nodeId => {
+      if (!ids.has(nodeId)) {
+        delete flowSelectedNodes[nodeId];
+        changed = true;
+      }
+    });
+    return changed;
+  }
+
+  function persistFlowNodePositions() {
+    try { localStorage.setItem('ccc-flow-node-positions', JSON.stringify(flowNodePositions)); } catch (_) {}
+  }
+
+  function persistFlowNodeParents() {
+    try { localStorage.setItem('ccc-flow-node-parents', JSON.stringify(flowNodeParents)); } catch (_) {}
+  }
+
+  function persistFlowCollapsedNodes() {
+    try { localStorage.setItem('ccc-flow-collapsed-nodes', JSON.stringify(flowCollapsedNodes)); } catch (_) {}
+  }
+
+  function persistFlowCustomObjects() {
+    try { localStorage.setItem('ccc-flow-custom-objects', JSON.stringify(flowCustomObjects)); } catch (_) {}
+  }
+
+  function persistFlowZoom() {
+    try { localStorage.setItem('ccc-flow-zoom', String(flowZoom)); } catch (_) {}
+  }
+
+  function persistFlowDraftSessions() {
+    try { localStorage.setItem('ccc-flow-draft-sessions', JSON.stringify(flowDraftSessions)); } catch (_) {}
+  }
+
+  function clampFlowZoom(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 1;
+    return Math.max(FLOW_ZOOM_MIN, Math.min(FLOW_ZOOM_MAX, n));
+  }
+
+  function flowZoomLabel() {
+    return Math.round(flowZoom * 100) + '%';
+  }
+
+  function flowExpandIconHtml() {
+    return flowExpanded
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3v6H3"/><path d="M15 21v-6h6"/><path d="M3 9l6-6"/><path d="M21 15l-6 6"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9V3h6"/><path d="M21 15v6h-6"/><path d="M9 3 3 9"/><path d="m15 21 6-6"/></svg>';
+  }
+
+  function flowRecencyValue() {
+    try {
+      if (recencyFilter === '1d' || recencyFilter === '7d') return recencyFilter;
+      if (recencyFilter === '10h') return '1d';
+    } catch (_) {}
+    try {
+      const raw = localStorage.getItem('ccc-show-recent') || '';
+      if (raw === '1' || raw === '10h') return '1d';
+      if (raw === '1d' || raw === '7d') return raw;
+    } catch (_) {}
+    return '';
+  }
+
+  function flowRecencyButtonHtml(value, label, current) {
+    const active = current === value;
+    return '<button type="button" class="flow-toolbar-btn' + (active ? ' active' : '') + '" data-flow-recency="' + escapeAttr(value) + '" aria-pressed="' + (active ? 'true' : 'false') + '">' + label + '</button>';
+  }
+
+  function flowToolbarHtml() {
+    const expandedLabel = flowExpanded ? 'Collapse flow view' : 'Expand flow view';
+    const recency = flowRecencyValue();
+    return '<div class="flow-toolbar">'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
+      + '<div class="flow-toolbar-group" role="group" aria-label="Flow recency">'
+      + flowRecencyButtonHtml('', 'All', recency)
+      + flowRecencyButtonHtml('1d', '1d', recency)
+      + flowRecencyButtonHtml('7d', '7d', recency)
+      + '</div>'
+      + '<div class="flow-toolbar-group" role="group" aria-label="Flow collapse controls">'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="collapse-all">Collapse all</button>'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="expand-all">Expand all</button>'
+      + '</div>'
+      + '<div class="flow-toolbar-spacer"></div>'
+      + '<div class="flow-zoom-controls" role="group" aria-label="Flow zoom">'
+      + '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>'
+      + '<button type="button" class="flow-toolbar-btn flow-zoom-value" data-flow-action="zoom-reset" title="Reset zoom" aria-label="Reset zoom">' + flowZoomLabel() + '</button>'
+      + '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>'
+      + '</div>'
+      + '<button type="button" class="flow-toolbar-btn flow-icon-btn flow-expand-btn" data-flow-action="toggle-expand" title="' + expandedLabel + '" aria-label="' + expandedLabel + '" aria-pressed="' + (flowExpanded ? 'true' : 'false') + '">' + flowExpandIconHtml() + '</button>'
+      + '</div>';
+  }
+
+  function updateFlowToolbarState(targetEl) {
+    if (!targetEl) return;
+    const zoomValue = targetEl.querySelector('[data-flow-action="zoom-reset"]');
+    if (zoomValue) zoomValue.textContent = flowZoomLabel();
+    const expandBtn = targetEl.querySelector('[data-flow-action="toggle-expand"]');
+    if (expandBtn) {
+      const label = flowExpanded ? 'Collapse flow view' : 'Expand flow view';
+      expandBtn.title = label;
+      expandBtn.setAttribute('aria-label', label);
+      expandBtn.setAttribute('aria-pressed', flowExpanded ? 'true' : 'false');
+      expandBtn.innerHTML = flowExpandIconHtml();
+    }
+    const recency = flowRecencyValue();
+    targetEl.querySelectorAll('[data-flow-recency]').forEach(btn => {
+      const active = (btn.getAttribute('data-flow-recency') || '') === recency;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function flowCanvasBaseSize(canvas) {
+    return {
+      width: Number(canvas && canvas.dataset.flowBaseWidth) || 760,
+      height: Number(canvas && canvas.dataset.flowBaseHeight) || 360,
+    };
+  }
+
+  function flowMinimumBaseSize(targetEl) {
+    if (!targetEl) return { width: 0, height: 0 };
+    const toolbar = targetEl.querySelector('.flow-toolbar');
+    const toolbarHeight = toolbar ? toolbar.offsetHeight : 46;
+    const rawWidth = targetEl.clientWidth || window.innerWidth || 0;
+    const rawHeight = Math.max(0, (targetEl.clientHeight || window.innerHeight || 0) - toolbarHeight);
+    const zoom = flowZoom || 1;
+    return {
+      width: Math.ceil(rawWidth / zoom),
+      height: Math.ceil(rawHeight / zoom),
+    };
+  }
+
+  function flowEffectiveBaseSize(targetEl, canvas) {
+    const base = flowCanvasBaseSize(canvas);
+    const min = flowMinimumBaseSize(targetEl);
+    return {
+      width: Math.max(base.width, min.width),
+      height: Math.max(base.height, min.height),
+    };
+  }
+
+  function flowZoomOrigin(targetEl, canvas, oldZoom, opts) {
+    const boardRect = targetEl.getBoundingClientRect();
+    let clientX = opts && Number.isFinite(opts.clientX) ? opts.clientX : NaN;
+    let clientY = opts && Number.isFinite(opts.clientY) ? opts.clientY : NaN;
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+      const toolbar = targetEl.querySelector('.flow-toolbar');
+      const toolbarHeight = toolbar ? toolbar.offsetHeight : 0;
+      clientX = boardRect.left + targetEl.clientWidth / 2;
+      clientY = boardRect.top + toolbarHeight + Math.max(0, targetEl.clientHeight - toolbarHeight) / 2;
+    }
+    const canvasRect = canvas.getBoundingClientRect();
+    const base = flowEffectiveBaseSize(targetEl, canvas);
+    return {
+      clientX,
+      clientY,
+      x: Math.max(0, Math.min(base.width, (clientX - canvasRect.left) / oldZoom)),
+      y: Math.max(0, Math.min(base.height, (clientY - canvasRect.top) / oldZoom)),
+    };
+  }
+
+  function applyFlowZoom(targetEl, opts) {
+    targetEl = targetEl || document.getElementById('flowBoard');
+    if (!targetEl) return;
+    const canvas = targetEl.querySelector('.flow-canvas');
+    const oldZoom = opts && Number.isFinite(opts.oldZoom) ? opts.oldZoom : flowZoom;
+    const origin = canvas && !(opts && opts.preserve === false)
+      ? flowZoomOrigin(targetEl, canvas, oldZoom || 1, opts || {})
+      : null;
+    if (canvas) {
+      const base = flowEffectiveBaseSize(targetEl, canvas);
+      const scaledWidth = Math.ceil(base.width * flowZoom);
+      const scaledHeight = Math.ceil(base.height * flowZoom);
+      canvas.style.width = scaledWidth + 'px';
+      canvas.style.height = scaledHeight + 'px';
+      canvas.style.minWidth = scaledWidth + 'px';
+      canvas.style.minHeight = scaledHeight + 'px';
+      const world = canvas.querySelector('.flow-world');
+      if (world) {
+        world.style.width = base.width + 'px';
+        world.style.height = base.height + 'px';
+        world.style.transform = 'scale(' + flowZoom + ')';
+      }
+      if (origin) {
+        const boardRect = targetEl.getBoundingClientRect();
+        targetEl.scrollLeft = Math.max(0, canvas.offsetLeft + origin.x * flowZoom - (origin.clientX - boardRect.left));
+        targetEl.scrollTop = Math.max(0, canvas.offsetTop + origin.y * flowZoom - (origin.clientY - boardRect.top));
+      }
+    }
+    updateFlowToolbarState(targetEl);
+  }
+
+  function setFlowZoom(nextZoom, targetEl, opts) {
+    const oldZoom = flowZoom;
+    flowZoom = clampFlowZoom(nextZoom);
+    persistFlowZoom();
+    applyFlowZoom(targetEl, Object.assign({}, opts || {}, { oldZoom }));
+  }
+
+  function setFlowExpanded(expanded) {
+    flowExpanded = !!expanded;
+    const board = document.getElementById('flowBoard');
+    if (board) {
+      board.classList.toggle('is-expanded', flowExpanded && isFlowView());
+      applyFlowZoom(board, { preserve: false });
+      updateFlowToolbarState(board);
+      requestAnimationFrame(() => redrawFlowLinks(board));
+    }
+    document.body.classList.toggle('flow-expanded', flowExpanded && isFlowView());
+  }
+
+  function handleFlowWheel(ev) {
+    if (!ev.ctrlKey) return;
+    const targetEl = ev.currentTarget;
+    if (!targetEl || targetEl.style.display === 'none') return;
+    if (ev.target && ev.target.closest && ev.target.closest('input,textarea,select')) return;
+    ev.preventDefault();
+    const delta = Number(ev.deltaY) || 0;
+    setFlowZoom(flowZoom * Math.exp(-delta * 0.01), targetEl, {
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+    });
+  }
+
+  function handleFlowGestureStart(ev) {
+    flowGestureStartZoom = flowZoom;
+    ev.preventDefault();
+  }
+
+  function handleFlowGestureChange(ev) {
+    ev.preventDefault();
+    const scale = Number(ev.scale);
+    if (!Number.isFinite(scale) || scale <= 0) return;
+    setFlowZoom(flowGestureStartZoom * scale, ev.currentTarget, {
+      clientX: ev.clientX,
+      clientY: ev.clientY,
+    });
+  }
+
+  function flowNodeKey(kind, value) {
+    return kind + ':' + String(value || 'unknown');
+  }
+
+  function isFlowNodeCollapsed(nodeId) {
+    return !!(nodeId && flowCollapsedNodes[nodeId] === true);
+  }
+
+  function setFlowNodeCollapsed(nodeId, collapsed) {
+    if (!nodeId) return false;
+    const next = !!collapsed;
+    if (flowCollapsedNodes[nodeId] === next) return false;
+    flowCollapsedNodes[nodeId] = next;
+    return true;
+  }
+
+  function ensureFlowDefaultRepoCollapsed(nodeId) {
+    if (!nodeId) return false;
+    if (Object.prototype.hasOwnProperty.call(flowCollapsedNodes, nodeId)) return false;
+    flowCollapsedNodes[nodeId] = true;
+    return true;
+  }
+
+  function flowParentForCollapse(nodeId, defaultParent) {
+    return flowNodeParents[nodeId] || defaultParent || '';
+  }
+
+  function flowHasCollapsedAncestor(nodeId, defaultParent) {
+    if (!nodeId) return false;
+    const seen = new Set([nodeId]);
+    let cur = flowParentForCollapse(nodeId, defaultParent);
+    while (cur && !seen.has(cur)) {
+      if (isFlowNodeCollapsed(cur)) return true;
+      seen.add(cur);
+      cur = flowNodeParents[cur] || '';
+    }
+    return false;
+  }
+
+  function flowHasAncestorNode(nodeId, ancestorId, defaultParent) {
+    if (!nodeId || !ancestorId) return false;
+    const seen = new Set([nodeId]);
+    let cur = flowParentForCollapse(nodeId, defaultParent);
+    while (cur && !seen.has(cur)) {
+      if (cur === ancestorId) return true;
+      seen.add(cur);
+      cur = flowNodeParents[cur] || '';
+    }
+    return false;
+  }
+
+  function expandFlowNodeAndAncestors(nodeId) {
+    if (!nodeId) return false;
+    let changed = false;
+    const seen = new Set();
+    let cur = nodeId;
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      changed = setFlowNodeCollapsed(cur, false) || changed;
+      cur = flowNodeParents[cur] || '';
+    }
+    return changed;
+  }
+
+  function toggleFlowNodeCollapsed(nodeId) {
+    if (!nodeId) return;
+    setFlowNodeCollapsed(nodeId, !isFlowNodeCollapsed(nodeId));
+    persistFlowCollapsedNodes();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function flowKnownCollapsibleNodeIds(targetEl) {
+    const ids = new Set();
+    if (targetEl) {
+      targetEl.querySelectorAll('.flow-node[data-flow-kind="repo"], .flow-node[data-flow-kind="object"]').forEach(node => {
+        if (node.dataset.flowNodeId) ids.add(node.dataset.flowNodeId);
+      });
+    }
+    (flowCustomObjects || []).forEach(obj => {
+      if (obj && obj.id) ids.add(flowNodeKey('object', obj.id));
+    });
+    Object.keys(flowCollapsedNodes || {}).forEach(nodeId => {
+      if (nodeId.startsWith('repo:') || nodeId.startsWith('object:')) ids.add(nodeId);
+    });
+    return ids;
+  }
+
+  function setFlowAllNodesCollapsed(collapsed, targetEl) {
+    const ids = flowKnownCollapsibleNodeIds(targetEl || document.getElementById('flowBoard'));
+    let changed = false;
+    ids.forEach(nodeId => {
+      changed = setFlowNodeCollapsed(nodeId, collapsed) || changed;
+    });
+    if (!changed && ids.size === 0) return;
+    persistFlowCollapsedNodes();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function flowRowTitle(c) {
+    const isBacklog = c && c.source === 'backlog';
+    const rawFirst = (!isBacklog && c && c.first_message)
+      ? firstSentenceOf(cleanIssuePrompt(c.first_message), 90)
+      : '';
+    let rawTitle = c && (c.name_overridden || c.spawn_named) && c.display_name
+      ? c.display_name
+      : (c && (c.ai_title || rawFirst || c.display_name)) || '(untitled)';
+    if (c && (c.backlog_type === 'github' || c.issue_number || c.linked_issue)) {
+      rawTitle = stripGhIssueProjectTag(rawTitle);
+    }
+    return stripTitle(String(rawTitle || '(untitled)')).replace(/-/g, ' ').trim() || '(untitled)';
+  }
+
+  function flowRepoLabel(path, rows) {
+    const first = (rows || []).find(Boolean) || {};
+    return first.folder_label_chip || first.folder_label || selectedRepoLabel()
+      || (path === '__repo__' ? '' : _pathLeaf(path)) || 'Repo';
+  }
+
+  function flowSessionSignal(c) {
+    if (!c) return { key: '', label: '' };
+    const isCodexRow = c.source === 'codex' || c.engine === 'codex';
+    const isGeminiRow = c.source === 'gemini' || c.engine === 'gemini';
+    const isAntigravityRow = c.source === 'antigravity' || c.engine === 'antigravity';
+    const activityAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
+    const activityTs = c.sidecar_ts || c.last_interacted || c.modified || 0;
+    const rowActivityAge = activityTs ? Math.max(0, Math.floor(Date.now() / 1000 - activityTs)) : 9999;
+    const midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow || isAntigravityRow) && c.last_event_type === 'user');
+    const isQuestionWaiting = c.is_live && (c.question_waiting || (c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion'));
+    if (isQuestionWaiting) return { key: 'waiting', label: 'QUESTION' };
+    if (c.needs_approval) return { key: 'waiting', label: 'needs approval' };
+    const codexOpenTurn = isCodexRow && !c.sidecar_status
+      && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
+    const geminiOpenTurn = isGeminiRow && !c.sidecar_status
+      && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
+    const antigravityOpenTurn = isAntigravityRow && !c.sidecar_status
+      && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
+    const isActiveSidecar = c.is_live && c.sidecar_status === 'active';
+    const isWip = !!c.gh_in_progress || !!c.pending_spawn || (c.is_live && !!c.pending_tool)
+      || codexOpenTurn || geminiOpenTurn || antigravityOpenTurn
+      || (isActiveSidecar && (activityAge < 300 || midTurn || !c.sidecar_ts));
+    if (isWip) return { key: 'working', label: 'WIP' };
+    if (c.source === 'pkood') {
+      const ps = (c.pkood_status || '').toUpperCase();
+      if (ps === 'RUNNING') return { key: 'working', label: 'running' };
+      if (ps === 'BLOCKED') return { key: 'waiting', label: 'blocked' };
+      if (c.pkood_is_stuck) return { key: 'attention', label: 'stuck' };
+    }
+    if (c.spawn_failed) return { key: 'failed', label: 'failed' };
+    if ((c.effective_kind === 'worktree' || c.session_cwd_is_worktree) && c.worktree_dirty) return { key: 'uncommitted', label: 'uncommitted' };
+    if (c.tail_pr_number) return { key: 'review', label: 'PR #' + c.tail_pr_number };
+    if (c.has_push) return { key: 'pushed', label: 'pushed' };
+    if (c.has_commit) return { key: 'committed', label: 'committed' };
+    if (hasReadOnlyWork(c)) return { key: 'read-only', label: 'read-only' };
+    if (hasNoEdits(c)) return { key: 'no-edits', label: 'no edits' };
+    return { key: '', label: '' };
+  }
+
+  function flowSessionStatus(c) {
+    const col = classifyKanbanColumn(c);
+    const signal = flowSessionSignal(c);
+    if (c.needs_approval || c.question_waiting || col === 'waiting') {
+      return { key: 'waiting', label: signal.label || 'waiting' };
+    }
+    if (signal.label) return signal;
+    if (col === 'working') return { key: 'working', label: '' };
+    if (col === 'review') return { key: 'review', label: '' };
+    if (col === 'testing') return { key: 'testing', label: 'testing' };
+    if (col === 'needs-attention') return { key: 'attention', label: 'needs attention' };
+    if (col === 'icebox') return { key: 'icebox', label: 'icebox' };
+    if (col === 'verified') return { key: 'verified', label: 'verified' };
+    return { key: 'working', label: '' };
+  }
+
+  function flowIsVisibleSession(c) {
+    if (!c) return false;
+    if (c.source === 'backlog' || c.source === 'github_pr') return false;
+    if (c.archived) return false;
+    const col = classifyKanbanColumn(c);
+    return col !== 'archived' && col !== 'backlog';
+  }
+
+  function flowTimestampSec(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n > 20000000000 ? Math.floor(n / 1000) : n;
+  }
+
+  function flowLastUpdatedLabel(value) {
+    const ts = flowTimestampSec(value);
+    return ts ? relativeTime(ts) : '';
+  }
+
+  function flowRowTime(c) {
+    return flowTimestampSec(c && (c.modified || c.mtime || c.last_interacted));
+  }
+
+  function flowObjectTime(obj) {
+    return flowTimestampSec(obj && (obj.updated_at || obj.created_at));
+  }
+
+  function flowDraftTime(draft) {
+    return flowTimestampSec(draft && (draft.updated_at || draft.created_at));
+  }
+
+  function flowDraftPrompt(draft) {
+    return String((draft && (draft.prompt || draft.title)) || '').trim();
+  }
+
+  function flowCurrentRepoForDraft() {
+    const selectedRow = (conversationsData || []).find(x => x && x.id === currentConversation);
+    return rowRepoPath(selectedRow) || selectedRepoPath();
+  }
+
+  function focusFlowDraftInput(id) {
+    if (!id) return;
+    requestAnimationFrame(() => {
+      const input = document.querySelector('#flowBoard .flow-draft-input[data-draft-id="' + String(id).replace(/"/g, '\\"') + '"]');
+      if (!input) return;
+      input.focus();
+      input.select();
+    });
+  }
+
+  function findFlowNodeElement(nodeId) {
+    const board = document.getElementById('flowBoard');
+    if (!board || !nodeId) return null;
+    return Array.from(board.querySelectorAll('.flow-node')).find(el => el.dataset.flowNodeId === nodeId) || null;
+  }
+
+  function flowPointerWorldPoint(ev, world) {
+    const rect = world.getBoundingClientRect();
+    const zoom = flowZoom || 1;
+    return {
+      x: (ev.clientX - rect.left) / zoom,
+      y: (ev.clientY - rect.top) / zoom,
+    };
+  }
+
+  function flowRectFromPoints(a, b) {
+    const left = Math.min(a.x, b.x);
+    const top = Math.min(a.y, b.y);
+    const right = Math.max(a.x, b.x);
+    const bottom = Math.max(a.y, b.y);
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
+  }
+
+  function flowNodeRect(node) {
+    return {
+      left: node.offsetLeft,
+      top: node.offsetTop,
+      right: node.offsetLeft + node.offsetWidth,
+      bottom: node.offsetTop + node.offsetHeight,
+    };
+  }
+
+  function flowRectsIntersect(a, b) {
+    return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
+  }
+
+  function flowRepoPathForNode(node) {
+    if (!node) return flowCurrentRepoForDraft();
+    if (node.dataset.repoPath) return node.dataset.repoPath;
+    let parentId = node.dataset.flowParent || flowNodeParents[node.dataset.flowNodeId] || '';
+    const seen = new Set([node.dataset.flowNodeId]);
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      const parentEl = findFlowNodeElement(parentId);
+      if (parentEl && parentEl.dataset.repoPath) return parentEl.dataset.repoPath;
+      parentId = (parentEl && parentEl.dataset.flowParent) || flowNodeParents[parentId] || '';
+    }
+    return flowCurrentRepoForDraft();
+  }
+
+  function flowDraftPositionForParent(parentNodeId, repoPath) {
+    const parentEl = findFlowNodeElement(parentNodeId || flowNodeKey('repo', repoPath));
+    const existingDrafts = flowDraftSessions.filter(d => d && d.repo_path === repoPath).length;
+    if (parentEl) {
+      return {
+        x: Math.round(parentEl.offsetLeft + 292),
+        y: Math.round(parentEl.offsetTop + existingDrafts * 92),
+      };
+    }
+    return { x: 320, y: 24 + existingDrafts * 92 };
+  }
+
+  function createFlowDraftSession(repoPath, parentNodeId) {
+    const targetRepo = repoPath || flowCurrentRepoForDraft();
+    if (!targetRepo || targetRepo === '__repo__') {
+      showOpToast('Pick a repo, or use + on a repo/object node.', 'error');
+      if ($convFolderFilter) {
+        try { $convFolderFilter.focus(); } catch (_) {}
+      }
+      return;
+    }
+    const now = Date.now();
+    const id = 'draft-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+    const repoId = flowNodeKey('repo', targetRepo);
+    const parentId = parentNodeId || repoId;
+    const draft = { id, repo_path: targetRepo, parent_node_id: parentId, title: '', created_at: now, updated_at: now };
+    const nodeId = flowNodeKey('draft-session', id);
+    const pos = flowDraftPositionForParent(parentId, targetRepo);
+    flowDraftSessions.unshift(draft);
+    flowNodePositions[nodeId] = pos;
+    flowNodeParents[nodeId] = parentId;
+    if (expandFlowNodeAndAncestors(parentId)) persistFlowCollapsedNodes();
+    flowDraftFocusId = id;
+    persistFlowDraftSessions();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function saveFlowDraftInput(id, value) {
+    const draft = flowDraftSessions.find(d => d && d.id === id);
+    if (!draft) return;
+    draft.title = String(value || '');
+    draft.prompt = draft.title;
+    draft.updated_at = Date.now();
+    persistFlowDraftSessions();
+  }
+
+  function deleteFlowDraftSession(id) {
+    const draft = flowDraftSessions.find(d => d && d.id === id);
+    if (!draft) return;
+    const nodeId = flowNodeKey('draft-session', id);
+    flowDraftSessions = flowDraftSessions.filter(d => d && d.id !== id);
+    delete flowNodePositions[nodeId];
+    delete flowNodeParents[nodeId];
+    for (const [child, parent] of Object.entries(flowNodeParents)) {
+      if (parent === nodeId) delete flowNodeParents[child];
+    }
+    persistFlowDraftSessions();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  async function archiveFlowSession(rowId) {
+    if (!rowId) return;
+    try {
+      await moveCardToColumn(rowId, 'archived');
+    } catch (err) {
+      showOpToast('Archive failed: ' + ((err && err.message) || 'unknown'), 'error');
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+    }
+  }
+
+  function sessionSubjectFromPrompt(text) {
+    const body = String(text || '').trim();
+    const chunks = body.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+    const first = chunks[0] || body;
+    return first.length > 120 ? first.slice(0, 120).trim() + '...' : first;
+  }
+
+  async function playFlowDraftSession(id) {
+    const draft = flowDraftSessions.find(d => d && d.id === id);
+    if (!draft) return;
+    const prompt = flowDraftPrompt(draft);
+    if (!prompt) {
+      focusFlowDraftInput(id);
+      showOpToast('Type a session task before pressing Play.', 'error');
+      return;
+    }
+    const repoPath = draft.repo_path || flowCurrentRepoForDraft();
+    if (!repoPath || repoPath === '__repo__') {
+      showOpToast('Draft session needs a repo.', 'error');
+      return;
+    }
+
+    const engine = getSpawnEngine();
+    const subject = sessionSubjectFromPrompt(prompt);
+    const cardSource = spawnSourceForEngine(engine);
+    const tempPid = 'tmp-' + Date.now();
+    const draftNodeId = flowNodeKey('draft-session', id);
+    const pendingNodeId = flowNodeKey('session', 'spawning-' + tempPid);
+    const savedPos = flowNodePositions[draftNodeId];
+    const savedParent = flowNodeParents[draftNodeId] || draft.parent_node_id || flowNodeKey('repo', repoPath);
+    const originalDraft = Object.assign({}, draft);
+
+    flowDraftSessions = flowDraftSessions.filter(d => d && d.id !== id);
+    delete flowNodePositions[draftNodeId];
+    delete flowNodeParents[draftNodeId];
+    if (savedPos) flowNodePositions[pendingNodeId] = savedPos;
+    if (savedParent) flowNodeParents[pendingNodeId] = savedParent;
+    persistFlowDraftSessions();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+
+    insertPendingSpawnCard(tempPid, subject, cardSource, null, {
+      first_message: prompt,
+      repo_path: repoPath,
+      folder_path: repoPath,
+      spawn_cwd: repoPath,
+      cwd: repoPath,
+      session_cwd: repoPath,
+      session_cwd_exists: true,
+      flow_parent_node_id: savedParent,
+      flow_node_position: savedPos ? { x: savedPos.x, y: savedPos.y } : null,
+    });
+
+    try {
+      const endpoint = spawnEndpointForEngine(engine);
+      const body = { prompt, name: subject, cwd: repoPath, repo_path: repoPath };
+      if (spawnSupportsWorktree(engine)) body.worktree = false;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
+      if (data.ok) {
+        const placeholder = adoptPendingSpawnPid(tempPid, data.pid, data.log);
+        if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
+          selectConversation(placeholder.id);
+        }
+        if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
+        setTimeout(refreshConversationList, 600);
+        setTimeout(refreshConversationList, 1500);
+        setTimeout(refreshConversationList, 3000);
+      } else {
+        throw new Error(data.error || ('HTTP ' + res.status));
+      }
+    } catch (err) {
+      _removePendingSpawnCard(tempPid);
+      delete flowNodePositions[pendingNodeId];
+      delete flowNodeParents[pendingNodeId];
+      flowDraftSessions.unshift(originalDraft);
+      flowNodePositions[draftNodeId] = savedPos || flowDraftPositionForParent(originalDraft.parent_node_id, repoPath);
+      flowNodeParents[draftNodeId] = savedParent;
+      flowDraftFocusId = id;
+      persistFlowDraftSessions();
+      persistFlowNodePositions();
+      persistFlowNodeParents();
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+      showOpToast('Spawn failed: ' + ((err && err.message) || 'network'), 'error');
+    }
+  }
+
+  function flowWouldCreateCycle(childId, parentId, parentMap) {
+    if (!childId || !parentId || childId === parentId) return true;
+    const seen = new Set([childId]);
+    let cur = parentId;
+    while (cur) {
+      if (seen.has(cur)) return true;
+      seen.add(cur);
+      cur = parentMap[cur] || '';
+    }
+    return false;
+  }
+
+  function flowParentMapFor(records) {
+    const ids = new Set(records.map(r => r.id));
+    const parentMap = {};
+    for (const rec of records) {
+      const saved = flowNodeParents[rec.id];
+      const candidate = saved && ids.has(saved) ? saved : rec.defaultParent;
+      if (candidate && ids.has(candidate) && candidate !== rec.id) parentMap[rec.id] = candidate;
+    }
+    for (const rec of records) {
+      const parent = parentMap[rec.id];
+      if (parent && flowWouldCreateCycle(rec.id, parent, parentMap)) {
+        const fallback = rec.defaultParent;
+        if (fallback && ids.has(fallback) && fallback !== rec.id && !flowWouldCreateCycle(rec.id, fallback, parentMap)) {
+          parentMap[rec.id] = fallback;
+        } else {
+          delete parentMap[rec.id];
+        }
+      }
+    }
+    return parentMap;
+  }
+
+  function promptModal(title, defaultValue) {
+    return new Promise(resolve => {
+      const modal = document.getElementById('promptModal');
+      if (!modal) return resolve(window.prompt(title, defaultValue));
+      const titleEl = document.getElementById('promptTitle');
+      const input = document.getElementById('promptInput');
+      const okBtn = document.getElementById('promptOkBtn');
+      const cancelBtn = document.getElementById('promptCancelBtn');
+      const closeBtn = document.getElementById('promptCloseBtn');
+      
+      titleEl.textContent = title;
+      input.value = defaultValue || '';
+      modal.classList.add('open');
+      
+      let resolved = false;
+      function cleanup() {
+        modal.classList.remove('open');
+        okBtn.removeEventListener('click', onOk);
+        cancelBtn.removeEventListener('click', onCancel);
+        closeBtn.removeEventListener('click', onCancel);
+        input.removeEventListener('keydown', onKey);
+      }
+      function onOk() {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(input.value);
+      }
+      function onCancel() {
+        if (resolved) return;
+        resolved = true;
+        cleanup();
+        resolve(null);
+      }
+      function onKey(e) {
+        if (e.key === 'Enter') onOk();
+        if (e.key === 'Escape') onCancel();
+      }
+      okBtn.addEventListener('click', onOk);
+      cancelBtn.addEventListener('click', onCancel);
+      closeBtn.addEventListener('click', onCancel);
+      input.addEventListener('keydown', onKey);
+      
+      setTimeout(() => input.focus(), 50);
+    });
+  }
+
+  async function createFlowCustomObject() {
+    const title = (await promptModal('Object name', 'New object') || '').trim();
+    if (!title) return;
+    const now = Date.now();
+    const id = 'obj-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+    const obj = { id, title, created_at: now, updated_at: now };
+    flowCustomObjects.unshift(obj);
+    const nodeId = flowNodeKey('object', id);
+    const existingObjects = document.querySelectorAll('#flowBoard .flow-node-object').length;
+    flowNodePositions[nodeId] = {
+      x: 28 + (existingObjects % 2) * 292,
+      y: 24 + Math.floor(existingObjects / 2) * 116,
+    };
+    persistFlowCustomObjects();
+    persistFlowNodePositions();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  async function renameFlowCustomObject(id) {
+    const obj = flowCustomObjects.find(o => o && o.id === id);
+    if (!obj) return;
+    const title = (await promptModal('Object name', obj.title || '') || '').trim();
+    if (!title || title === obj.title) return;
+    obj.title = title;
+    obj.updated_at = Date.now();
+    persistFlowCustomObjects();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function deleteFlowCustomObject(id) {
+    const obj = flowCustomObjects.find(o => o && o.id === id);
+    if (!obj) return;
+    let ok = false;
+    try { ok = window.confirm('Delete "' + (obj.title || 'object') + '"?'); } catch (_) {}
+    if (!ok) return;
+    const nodeId = flowNodeKey('object', id);
+    flowCustomObjects = flowCustomObjects.filter(o => o && o.id !== id);
+    delete flowNodePositions[nodeId];
+    delete flowNodeParents[nodeId];
+    for (const [child, parent] of Object.entries(flowNodeParents)) {
+      if (parent === nodeId) delete flowNodeParents[child];
+    }
+    persistFlowCustomObjects();
+    persistFlowNodePositions();
+    persistFlowNodeParents();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function renderFlowSidebar(convs) {
+    const $flow = document.getElementById('flowBoard');
+    const $kanbanBoard = document.getElementById('kanbanBoard');
+    const $convList = document.getElementById('convList');
+    if (!$flow) return;
+    if ($convList) $convList.style.display = 'none';
+    if ($kanbanBoard) $kanbanBoard.style.display = 'none';
+    $flow.style.display = '';
+
+    const rows = (convs || []).filter(flowIsVisibleSession).sort((a, b) => flowRowTime(b) - flowRowTime(a));
+    const customObjects = (flowCustomObjects || [])
+      .filter(obj => obj && obj.id)
+      .filter(obj => !flowHasCollapsedAncestor(flowNodeKey('object', obj.id)))
+      .slice()
+      .sort((a, b) => flowObjectTime(b) - flowObjectTime(a));
+    const draftSessions = (flowDraftSessions || [])
+      .filter(draft => draft && draft.id && draft.repo_path)
+      .slice()
+      .sort((a, b) => flowDraftTime(b) - flowDraftTime(a));
+    if (!rows.length && !customObjects.length && !draftSessions.length) {
+      $flow.innerHTML = flowToolbarHtml() + '<div class="flow-empty-state">No in-progress sessions.</div>';
+      wireFlowBoard($flow);
+      setFlowExpanded(flowExpanded);
+      return;
+    }
+
+    const groupsByRepo = new Map();
+    const ensureRepoGroup = repoPath => {
+      const path = repoPath || selectedRepoPath() || '__repo__';
+      if (!groupsByRepo.has(path)) groupsByRepo.set(path, { sessions: [], drafts: [] });
+      return groupsByRepo.get(path);
+    };
+    for (const row of rows) {
+      const repoPath = rowRepoPath(row) || row.folder_path || selectedRepoPath() || '__repo__';
+      ensureRepoGroup(repoPath).sessions.push(row);
+    }
+    for (const draft of draftSessions) {
+      ensureRepoGroup(draft.repo_path).drafts.push(draft);
+    }
+    const groups = Array.from(groupsByRepo.entries()).map(([path, group]) => {
+      const items = (group.sessions || []).slice().sort((a, b) => flowRowTime(b) - flowRowTime(a));
+      const drafts = (group.drafts || []).slice().sort((a, b) => flowDraftTime(b) - flowDraftTime(a));
+      return {
+        path,
+        label: flowRepoLabel(path, items),
+        items,
+        drafts,
+        newest: Math.max(
+          items.reduce((best, row) => Math.max(best, flowRowTime(row)), 0),
+          drafts.reduce((best, draft) => Math.max(best, flowDraftTime(draft)), 0)
+        ),
+      };
+    }).sort((a, b) => (b.newest - a.newest) || a.label.localeCompare(b.label));
+
+    const records = [];
+    let canvasWidth = 760;
+    let canvasHeight = 360;
+    let yCursor = 24;
+    let flowCollapsedDefaultsChanged = false;
+
+    customObjects.forEach((obj, idx) => {
+      const nodeId = flowNodeKey('object', obj.id);
+      const defaultPos = {
+        x: 28 + (idx % 2) * 292,
+        y: yCursor + Math.floor(idx / 2) * 116,
+      };
+      records.push({
+        id: nodeId,
+        kind: 'object',
+        objectId: obj.id,
+        defaultParent: '',
+        x: defaultPos.x,
+        y: defaultPos.y,
+        title: obj.title || 'Object',
+        kicker: 'Object',
+        meta: isFlowNodeCollapsed(nodeId)
+          ? 'collapsed'
+          : flowLastUpdatedLabel(obj.updated_at || obj.created_at),
+        className: 'flow-node-object',
+      });
+    });
+    if (customObjects.length) {
+      yCursor += Math.ceil(customObjects.length / 2) * 116 + 28;
+    }
+
+    for (const group of groups) {
+      const repoId = flowNodeKey('repo', group.path);
+      const repoDefault = { x: 28, y: yCursor };
+      flowCollapsedDefaultsChanged = ensureFlowDefaultRepoCollapsed(repoId) || flowCollapsedDefaultsChanged;
+      const repoCollapsed = isFlowNodeCollapsed(repoId);
+      const visibleDrafts = group.drafts.filter(draft => {
+        const nodeId = flowNodeKey('draft-session', draft.id);
+        return !flowHasCollapsedAncestor(nodeId, draft.parent_node_id || repoId);
+      });
+      const visibleItems = group.items.filter(row => {
+        const sessionId = row.session_id || row.id;
+        const nodeId = flowNodeKey('session', sessionId);
+        return !flowHasCollapsedAncestor(nodeId, repoId);
+      });
+      const repoMeta = [
+        group.items.length ? (group.items.length + ' in progress') : '',
+        group.drafts.length ? (group.drafts.length + ' draft' + (group.drafts.length === 1 ? '' : 's')) : '',
+        repoCollapsed ? 'collapsed' : '',
+        flowLastUpdatedLabel(group.newest),
+      ].filter(Boolean).join(' · ') || '0 in progress';
+      records.push({
+        id: repoId,
+        kind: 'repo',
+        repoPath: group.path,
+        defaultParent: '',
+        x: repoDefault.x,
+        y: repoDefault.y,
+        title: group.label,
+        kicker: 'Repo',
+        meta: repoMeta,
+        className: 'flow-node-repo',
+      });
+
+      visibleDrafts.forEach((draft, idx) => {
+        const nodeId = flowNodeKey('draft-session', draft.id);
+        const defaultPos = {
+          x: 320,
+          y: yCursor + idx * 92,
+        };
+        records.push({
+          id: nodeId,
+          kind: 'draft-session',
+          draftId: draft.id,
+          defaultParent: draft.parent_node_id || repoId,
+          x: defaultPos.x,
+          y: defaultPos.y,
+          title: flowDraftPrompt(draft),
+          kicker: 'Draft session',
+          meta: ['saved locally', flowLastUpdatedLabel(draft.updated_at || draft.created_at)].filter(Boolean).join(' · '),
+          className: 'flow-node-session flow-node-draft is-draft',
+        });
+      });
+
+      visibleItems.forEach((row, idx) => {
+        const sessionId = row.session_id || row.id;
+        const nodeId = flowNodeKey('session', sessionId);
+        const defaultPos = {
+          x: 28 + (idx % 2) * 292,
+          y: yCursor + 110 + Math.floor(idx / 2) * 116,
+        };
+        const status = flowSessionStatus(row);
+        const branch = row.effective_branch || row.branch || row.git_branch || '';
+        const rel = flowLastUpdatedLabel(row.last_interacted || row.modified || row.mtime);
+        const meta = [status.label, branch, rel].filter(Boolean).join(' · ');
+        const worktree = (row.worktree_label || row.session_cwd_is_worktree || row.effective_kind === 'worktree')
+          ? ' is-worktree'
+          : '';
+        records.push({
+          id: nodeId,
+          kind: 'session',
+          rowId: row.id,
+          sessionId,
+          defaultParent: repoId,
+          x: defaultPos.x,
+          y: defaultPos.y,
+          title: flowRowTitle(row),
+          kicker: row.source || row.engine || 'session',
+          meta,
+          className: 'flow-node-session is-' + status.key + worktree + (currentConversation === row.id ? ' active' : ''),
+        });
+      });
+      const repoLayoutDrafts = visibleDrafts.filter(draft => {
+        const nodeId = flowNodeKey('draft-session', draft.id);
+        return flowHasAncestorNode(nodeId, repoId, draft.parent_node_id || repoId);
+      });
+      const repoLayoutItems = visibleItems.filter(row => {
+        const sessionId = row.session_id || row.id;
+        return flowHasAncestorNode(flowNodeKey('session', sessionId), repoId, repoId);
+      });
+      const rowsTall = Math.ceil(repoLayoutItems.length / 2);
+      const visibleChildCount = repoLayoutItems.length + repoLayoutDrafts.length;
+      yCursor += visibleChildCount
+        ? 132 + Math.max(1, rowsTall) * 116 + Math.max(0, repoLayoutDrafts.length - 1) * 92
+        : 108;
+    }
+    if (flowCollapsedDefaultsChanged) persistFlowCollapsedNodes();
+    pruneFlowSelectedNodes(records);
+
+    const parentMap = flowParentMapFor(records);
+    const nodeHtml = records.map(rec => {
+      const savedPos = flowNodePositions[rec.id];
+      const pos = savedPos || { x: rec.x, y: rec.y };
+      canvasWidth = Math.max(canvasWidth, pos.x + 300);
+      canvasHeight = Math.max(canvasHeight, pos.y + 140);
+      const parent = parentMap[rec.id] || '';
+      const dataParent = parent ? ' data-flow-parent="' + escapeAttr(parent) + '"' : '';
+      const dataRow = rec.rowId ? ' data-id="' + escapeAttr(rec.rowId) + '"' : '';
+      const dataSession = rec.sessionId ? ' data-session-id="' + escapeAttr(rec.sessionId) + '"' : '';
+      const dataObject = rec.objectId ? ' data-object-id="' + escapeAttr(rec.objectId) + '"' : '';
+      const dataDraft = rec.draftId ? ' data-draft-id="' + escapeAttr(rec.draftId) + '"' : '';
+      const dataRepoPath = rec.repoPath ? ' data-repo-path="' + escapeAttr(rec.repoPath) + '"' : '';
+      const deleteBtn = rec.kind === 'object'
+        ? '<button type="button" class="flow-node-delete" data-flow-action="delete-object" title="Delete object" aria-label="Delete object">&times;</button>'
+        : rec.kind === 'draft-session'
+          ? '<button type="button" class="flow-node-delete" data-flow-action="delete-draft-session" title="Discard draft" aria-label="Discard draft">&times;</button>'
+          : '';
+      const addBtn = (rec.kind === 'repo' || rec.kind === 'object')
+        ? '<button type="button" class="flow-node-add-session" data-flow-action="add-draft-session" title="New session draft connected here" aria-label="New session draft connected here">+</button>'
+        : '';
+      const collapsed = isFlowNodeCollapsed(rec.id);
+      const collapseBtn = (rec.kind === 'repo' || rec.kind === 'object')
+        ? '<button type="button" class="flow-node-collapse" data-flow-action="toggle-collapse" title="' + (collapsed ? 'Expand' : 'Collapse') + '" aria-label="' + (collapsed ? 'Expand' : 'Collapse') + '" aria-pressed="' + (collapsed ? 'true' : 'false') + '">' + (collapsed ? '&#9656;' : '&#9662;') + '</button>'
+        : '';
+      const archiveBtn = rec.kind === 'session'
+        ? '<button type="button" class="flow-node-archive" data-flow-action="archive-session" title="Archive session" aria-label="Archive session">&#128229;</button>'
+        : '';
+      const bodyHtml = rec.kind === 'draft-session'
+        ? '<input type="text" class="flow-draft-input" data-draft-id="' + escapeAttr(rec.draftId) + '"'
+          + ' value="' + escapeAttr(rec.title || '') + '" placeholder="Name or task this session..." autocomplete="off">'
+          + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>'
+          + '<button type="button" class="flow-draft-play" data-flow-action="play-draft-session" title="Start session" aria-label="Start session">&#9654;</button>'
+        : '<div class="flow-node-title">' + escapeHtml(rec.title) + '</div>'
+          + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>';
+      const selectedClass = flowSelectedNodes[rec.id] ? ' selected' : '';
+      return '<div class="flow-node ' + escapeAttr(rec.className) + selectedClass + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
+        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath
+        + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;">'
+        + deleteBtn
+        + addBtn
+        + collapseBtn
+        + archiveBtn
+        + '<div class="flow-node-kicker">' + escapeHtml(rec.kicker) + '</div>'
+        + bodyHtml
+        + '</div>';
+    });
+    canvasHeight = Math.max(canvasHeight, yCursor + 40);
+    const minBase = flowMinimumBaseSize($flow);
+    const baseWidth = Math.ceil(Math.max(canvasWidth, minBase.width));
+    const baseHeight = Math.ceil(Math.max(canvasHeight, minBase.height));
+    const scaledWidth = Math.ceil(baseWidth * flowZoom);
+    const scaledHeight = Math.ceil(baseHeight * flowZoom);
+    $flow.innerHTML = flowToolbarHtml()
+      + '<div class="flow-canvas" data-flow-base-width="' + baseWidth + '" data-flow-base-height="' + baseHeight + '" style="width:' + scaledWidth + 'px;height:' + scaledHeight + 'px;min-width:' + scaledWidth + 'px;min-height:' + scaledHeight + 'px;">'
+      + '<div class="flow-world" style="width:' + baseWidth + 'px;height:' + baseHeight + 'px;transform:scale(' + flowZoom + ');">'
+      + '<svg class="flow-links" aria-hidden="true"></svg>'
+      + nodeHtml.join('')
+      + '</div>'
+      + '</div>';
+    wireFlowBoard($flow);
+    setFlowExpanded(flowExpanded);
+    applyFlowZoom($flow, { preserve: false });
+    requestAnimationFrame(() => {
+      redrawFlowLinks($flow);
+      if (flowDraftFocusId) {
+        const focusId = flowDraftFocusId;
+        flowDraftFocusId = '';
+        focusFlowDraftInput(focusId);
+      }
+    });
+  }
+
+  function redrawFlowLinks(targetEl) {
+    const canvas = targetEl && targetEl.querySelector('.flow-canvas');
+    const world = canvas && (canvas.querySelector('.flow-world') || canvas);
+    const svg = world && world.querySelector('.flow-links');
+    if (!canvas || !world || !svg) return;
+    const nodeById = new Map();
+    world.querySelectorAll('.flow-node').forEach(node => {
+      nodeById.set(node.dataset.flowNodeId, node);
+    });
+    const paths = [];
+    world.querySelectorAll('.flow-node[data-flow-parent]').forEach(node => {
+      const parent = nodeById.get(node.dataset.flowParent);
+      if (!parent) return;
+      let sx = parent.offsetLeft + parent.offsetWidth / 2;
+      let sy = parent.offsetTop + parent.offsetHeight;
+      let ex = node.offsetLeft + node.offsetWidth / 2;
+      let ey = node.offsetTop;
+      let d = '';
+      if (node.offsetTop < parent.offsetTop + parent.offsetHeight + 8) {
+        const toRight = node.offsetLeft >= parent.offsetLeft;
+        sx = toRight ? parent.offsetLeft + parent.offsetWidth : parent.offsetLeft;
+        sy = parent.offsetTop + parent.offsetHeight / 2;
+        ex = toRight ? node.offsetLeft : node.offsetLeft + node.offsetWidth;
+        ey = node.offsetTop + node.offsetHeight / 2;
+        const mid = Math.max(32, Math.abs(ex - sx) / 2);
+        const c1 = toRight ? sx + mid : sx - mid;
+        const c2 = toRight ? ex - mid : ex + mid;
+        d = 'M ' + sx + ' ' + sy + ' C ' + c1 + ' ' + sy + ', ' + c2 + ' ' + ey + ', ' + ex + ' ' + ey;
+      } else {
+        const mid = Math.max(32, (ey - sy) / 2);
+        d = 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + mid) + ', ' + ex + ' ' + (ey - mid) + ', ' + ex + ' ' + ey;
+      }
+      paths.push('<path d="' + d + '"></path>');
+    });
+    const base = flowEffectiveBaseSize(targetEl, canvas);
+    svg.setAttribute('width', base.width);
+    svg.setAttribute('height', base.height);
+    svg.innerHTML = paths.join('');
+  }
+
+  function startFlowRangeSelection(ev, targetEl, canvas, world) {
+    if (!targetEl || !canvas || !world) return;
+    if (ev.button !== undefined && ev.button !== 0) return;
+    if (ev.target.closest('.flow-node,button,input,textarea,a')) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    beginSidebarDrag();
+
+    const start = flowPointerWorldPoint(ev, world);
+    const box = document.createElement('div');
+    box.className = 'flow-selection-box';
+    world.appendChild(box);
+    let moved = false;
+
+    const updateBox = point => {
+      const rect = flowRectFromPoints(start, point);
+      box.style.left = Math.round(rect.left) + 'px';
+      box.style.top = Math.round(rect.top) + 'px';
+      box.style.width = Math.round(rect.width) + 'px';
+      box.style.height = Math.round(rect.height) + 'px';
+      const selected = [];
+      world.querySelectorAll('.flow-node').forEach(node => {
+        if (flowRectsIntersect(flowNodeRect(node), rect)) selected.push(node.dataset.flowNodeId);
+      });
+      setFlowSelectedNodes(selected, targetEl);
+    };
+
+    const cleanup = () => {
+      world.removeEventListener('pointermove', onMove);
+      world.removeEventListener('pointerup', onUp);
+      world.removeEventListener('pointercancel', onUp);
+      if (box.parentNode) box.parentNode.removeChild(box);
+      try { world.releasePointerCapture(ev.pointerId); } catch (_) {}
+      endSidebarDrag();
+    };
+
+    const onMove = moveEv => {
+      if (Math.abs(moveEv.clientX - ev.clientX) > 3 || Math.abs(moveEv.clientY - ev.clientY) > 3) moved = true;
+      updateBox(flowPointerWorldPoint(moveEv, world));
+    };
+    const onUp = upEv => {
+      if (moved) {
+        updateBox(flowPointerWorldPoint(upEv, world));
+      } else {
+        clearFlowSelectedNodes(targetEl);
+      }
+      cleanup();
+    };
+
+    try { world.setPointerCapture(ev.pointerId); } catch (_) {}
+    world.addEventListener('pointermove', onMove);
+    world.addEventListener('pointerup', onUp);
+    world.addEventListener('pointercancel', onUp);
+  }
+
+  function wireFlowBoard(targetEl) {
+    const canvas = targetEl && targetEl.querySelector('.flow-canvas');
+    const world = canvas && (canvas.querySelector('.flow-world') || canvas);
+    const addBtn = targetEl && targetEl.querySelector('[data-flow-action="add-object"]');
+    if (addBtn) addBtn.addEventListener('click', createFlowCustomObject);
+    const zoomOutBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-out"]');
+    const zoomInBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-in"]');
+    const zoomResetBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-reset"]');
+    const expandBtn = targetEl && targetEl.querySelector('[data-flow-action="toggle-expand"]');
+    const collapseAllBtn = targetEl && targetEl.querySelector('[data-flow-action="collapse-all"]');
+    const expandAllBtn = targetEl && targetEl.querySelector('[data-flow-action="expand-all"]');
+    if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => setFlowZoom(flowZoom / 1.15, targetEl));
+    if (zoomInBtn) zoomInBtn.addEventListener('click', () => setFlowZoom(flowZoom * 1.15, targetEl));
+    if (zoomResetBtn) zoomResetBtn.addEventListener('click', () => setFlowZoom(1, targetEl));
+    if (expandBtn) expandBtn.addEventListener('click', () => setFlowExpanded(!flowExpanded));
+    if (collapseAllBtn) collapseAllBtn.addEventListener('click', () => setFlowAllNodesCollapsed(true, targetEl));
+    if (expandAllBtn) expandAllBtn.addEventListener('click', () => setFlowAllNodesCollapsed(false, targetEl));
+    if (targetEl) {
+      targetEl.querySelectorAll('[data-flow-recency]').forEach(btn => {
+        btn.addEventListener('click', ev => {
+          ev.preventDefault();
+          setRecencyFilter(btn.getAttribute('data-flow-recency') || '');
+        });
+      });
+    }
+    if (targetEl && !targetEl.dataset.flowBoardWired) {
+      targetEl.dataset.flowBoardWired = '1';
+      targetEl.addEventListener('wheel', handleFlowWheel, { passive: false });
+      targetEl.addEventListener('gesturestart', handleFlowGestureStart, { passive: false });
+      targetEl.addEventListener('gesturechange', handleFlowGestureChange, { passive: false });
+      document.addEventListener('keydown', ev => {
+        if (ev.key === 'Escape' && flowExpanded) setFlowExpanded(false);
+      });
+      window.addEventListener('resize', () => {
+        if (!isFlowView()) return;
+        const board = document.getElementById('flowBoard');
+        if (!board) return;
+        applyFlowZoom(board, { preserve: false });
+        redrawFlowLinks(board);
+      });
+    }
+    if (targetEl) {
+      targetEl.querySelectorAll('[data-flow-action="add-draft-session"]').forEach(btn => {
+        btn.addEventListener('click', ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const node = btn.closest('.flow-node');
+          const isNodeParent = node && (node.dataset.flowKind === 'repo' || node.dataset.flowKind === 'object');
+          createFlowDraftSession(
+            isNodeParent ? flowRepoPathForNode(node) : '',
+            isNodeParent ? node.dataset.flowNodeId : ''
+          );
+        });
+      });
+    }
+    if (!canvas || !world) return;
+    world.addEventListener('pointerdown', ev => startFlowRangeSelection(ev, targetEl, canvas, world));
+    world.querySelectorAll('.flow-node').forEach(node => {
+      const collapseBtn = node.querySelector('[data-flow-action="toggle-collapse"]');
+      if (collapseBtn) {
+        collapseBtn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          toggleFlowNodeCollapsed(node.dataset.flowNodeId);
+        });
+      }
+      if (node.dataset.flowKind === 'session') {
+        const archiveBtn = node.querySelector('[data-flow-action="archive-session"]');
+        if (archiveBtn) {
+          archiveBtn.addEventListener('click', ev => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            archiveFlowSession(node.dataset.id);
+          });
+        }
+        node.addEventListener('mouseenter', () => _convPrefetchSchedule(node.dataset.id));
+        node.addEventListener('mouseleave', () => _convPrefetchCancel(node.dataset.id));
+      }
+      if (node.dataset.flowKind === 'draft-session') {
+        const input = node.querySelector('.flow-draft-input');
+        if (input) {
+          input.addEventListener('input', () => saveFlowDraftInput(node.dataset.draftId, input.value));
+          input.addEventListener('change', () => saveFlowDraftInput(node.dataset.draftId, input.value));
+          input.addEventListener('keydown', ev => {
+            if (ev.key === 'Enter') {
+              ev.preventDefault();
+              ev.stopPropagation();
+              saveFlowDraftInput(node.dataset.draftId, input.value);
+              input.blur();
+            } else if (ev.key === 'Escape') {
+              ev.stopPropagation();
+              input.blur();
+            }
+          });
+        }
+        const deleteBtn = node.querySelector('[data-flow-action="delete-draft-session"]');
+        if (deleteBtn) {
+          deleteBtn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            deleteFlowDraftSession(node.dataset.draftId);
+          });
+        }
+        const playBtn = node.querySelector('[data-flow-action="play-draft-session"]');
+        if (playBtn) {
+          playBtn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            playFlowDraftSession(node.dataset.draftId);
+          });
+        }
+      }
+      if (node.dataset.flowKind === 'object') {
+        const deleteBtn = node.querySelector('[data-flow-action="delete-object"]');
+        if (deleteBtn) {
+          deleteBtn.addEventListener('click', ev => {
+            ev.stopPropagation();
+            deleteFlowCustomObject(node.dataset.objectId);
+          });
+        }
+        node.addEventListener('dblclick', ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          renameFlowCustomObject(node.dataset.objectId);
+        });
+      }
+      node.addEventListener('pointerdown', ev => {
+        if (ev.button !== undefined && ev.button !== 0) return;
+        if (ev.target.closest('button,input,textarea,a')) return;
+        ev.preventDefault();
+        beginSidebarDrag();
+        const startX = ev.clientX;
+        const startY = ev.clientY;
+        const nodeId = node.dataset.flowNodeId;
+        const nodeWasSelected = !!flowSelectedNodes[nodeId];
+        if (!nodeWasSelected && flowSelectedNodeCount()) clearFlowSelectedNodes(targetEl);
+        const selectedIds = nodeWasSelected ? new Set(flowSelectedNodeIds()) : new Set([nodeId]);
+        const dragNodes = nodeWasSelected && selectedIds.size > 1
+          ? Array.from(world.querySelectorAll('.flow-node')).filter(el => selectedIds.has(el.dataset.flowNodeId))
+          : [node];
+        if (dragNodes.indexOf(node) === -1) dragNodes.push(node);
+        const dragItems = dragNodes.map(el => ({
+          el,
+          id: el.dataset.flowNodeId,
+          left: el.offsetLeft,
+          top: el.offsetTop,
+          width: el.offsetWidth,
+          height: el.offsetHeight,
+        })).filter(item => item.id);
+        const dragIds = new Set(dragItems.map(item => item.id));
+        const isGroupDrag = dragItems.length > 1;
+        const groupBounds = dragItems.reduce((acc, item) => ({
+          left: Math.min(acc.left, item.left),
+          top: Math.min(acc.top, item.top),
+          right: Math.max(acc.right, item.left + item.width),
+          bottom: Math.max(acc.bottom, item.top + item.height),
+        }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
+        let moved = false;
+        let dropTarget = null;
+        const setDropTarget = target => {
+          if (dropTarget === target) return;
+          if (dropTarget) dropTarget.classList.remove('flow-drop-target');
+          dropTarget = target;
+          if (dropTarget) dropTarget.classList.add('flow-drop-target');
+        };
+        const findDropTarget = (x, y) => {
+          const parentMap = {};
+          world.querySelectorAll('.flow-node[data-flow-parent]').forEach(el => {
+            parentMap[el.dataset.flowNodeId] = el.dataset.flowParent;
+          });
+          const els = document.elementsFromPoint ? document.elementsFromPoint(x, y) : [];
+          for (const el of els) {
+            const target = el && el.closest ? el.closest('.flow-node') : null;
+            if (!target || dragIds.has(target.dataset.flowNodeId) || !canvas.contains(target)) continue;
+            const targetId = target.dataset.flowNodeId;
+            const childId = node.dataset.flowNodeId;
+            if (!targetId || !childId) continue;
+            parentMap[childId] = targetId;
+            if (flowWouldCreateCycle(childId, targetId, parentMap)) continue;
+            return target;
+          }
+          return null;
+        };
+        dragItems.forEach(item => item.el.classList.add('dragging'));
+        try { node.setPointerCapture(ev.pointerId); } catch (_) {}
+        const onMove = moveEv => {
+          const zoom = flowZoom || 1;
+          let dx = (moveEv.clientX - startX) / zoom;
+          let dy = (moveEv.clientY - startY) / zoom;
+          if (Math.abs(moveEv.clientX - startX) > 2 || Math.abs(moveEv.clientY - startY) > 2) moved = true;
+          const base = flowEffectiveBaseSize(targetEl, canvas);
+          if (isGroupDrag) {
+            dx = Math.max(12 - groupBounds.left, Math.min(base.width - groupBounds.right - 12, dx));
+            dy = Math.max(12 - groupBounds.top, Math.min(base.height - groupBounds.bottom - 12, dy));
+            dragItems.forEach(item => {
+              item.el.style.left = Math.round(item.left + dx) + 'px';
+              item.el.style.top = Math.round(item.top + dy) + 'px';
+            });
+            setDropTarget(null);
+          } else {
+            const item = dragItems[0];
+            const maxLeft = Math.max(8, base.width - item.width - 12);
+            const maxTop = Math.max(8, base.height - item.height - 12);
+            const nextLeft = Math.max(12, Math.min(maxLeft, item.left + dx));
+            const nextTop = Math.max(12, Math.min(maxTop, item.top + dy));
+            item.el.style.left = Math.round(nextLeft) + 'px';
+            item.el.style.top = Math.round(nextTop) + 'px';
+            setDropTarget(findDropTarget(moveEv.clientX, moveEv.clientY));
+          }
+          redrawFlowLinks(targetEl);
+        };
+        const onUp = upEv => {
+          node.removeEventListener('pointermove', onMove);
+          node.removeEventListener('pointerup', onUp);
+          node.removeEventListener('pointercancel', onUp);
+          dragItems.forEach(item => item.el.classList.remove('dragging'));
+          const finalDropTarget = dropTarget;
+          setDropTarget(null);
+          try { node.releasePointerCapture(upEv.pointerId); } catch (_) {}
+          endSidebarDrag();
+          if (moved) {
+            dragItems.forEach(item => {
+              flowNodePositions[item.id] = {
+                x: Math.round(item.el.offsetLeft),
+                y: Math.round(item.el.offsetTop),
+              };
+            });
+            if (!isGroupDrag && finalDropTarget && finalDropTarget.dataset.flowNodeId) {
+              flowNodeParents[node.dataset.flowNodeId] = finalDropTarget.dataset.flowNodeId;
+              node.dataset.flowParent = finalDropTarget.dataset.flowNodeId;
+              persistFlowNodeParents();
+            }
+            persistFlowNodePositions();
+            redrawFlowLinks(targetEl);
+            return;
+          }
+          if (node.dataset.flowKind === 'session' && node.dataset.id) {
+            targetEl.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
+            node.classList.add('active');
+            selectConversation(node.dataset.id);
+          }
+        };
+        node.addEventListener('pointermove', onMove);
+        node.addEventListener('pointerup', onUp);
+        node.addEventListener('pointercancel', onUp);
+      });
+    });
+  }
+
   function renderSidebar(convs) {
     if (_renameInProgress) return;
+    if (deferSidebarRenderIfDragging()) return;
     const $kanbanBoard = document.getElementById('kanbanBoard');
+    const $flow = document.getElementById('flowBoard');
     const $convList = document.getElementById('convList');
     if (kanbanView) {
       renderKanbanSidebar(convs);
       return;
     }
+    if (isFlowView()) {
+      renderFlowSidebar(convs);
+      return;
+    }
     if ($kanbanBoard) $kanbanBoard.style.display = 'none';
+    if ($flow) $flow.style.display = 'none';
     if ($convList) $convList.style.display = '';
     const $search = document.getElementById('convSearch');
     try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
@@ -4867,7 +7093,7 @@
       // so the "In Group Chat" section appears right after creation rather
       // than waiting up to 15s for the next pollGcActive tick.
       try { pollGcActive(); } catch (_) {}
-      openGroupChatReader(result.chat_path, topic, mode, includeHuman);
+      openGroupChatReader(result.chat_path, topic, mode, includeHuman, result.uuid || result.id || null);
     } catch (err) {
       if (errorEl) { errorEl.textContent = 'Request failed: ' + err.message; errorEl.classList.add('visible'); }
     } finally {
@@ -4877,6 +7103,9 @@
 
   let _gcReaderInterval = null;
   let _gcReaderPath = null;
+  let _gcReaderId = null;
+  let _gcReaderTopic = '';
+  let _gcReaderMode = 'topic';
   let _gcLastMtime = null;
   let _gcPollFailCount = 0;
   let _gcLastNudgeTime = 0;
@@ -4885,12 +7114,160 @@
   // captured at boot stay live. We only hide those bars while the reader
   // is mounted; the cleanup re-shows them.
   let _gcReaderHiddenInputBar = false;
+  let _gcReaderHiddenRailItems = false;
 
-  function openGroupChatReader(chatPath, topic, mode, includeHuman) {
+  function stopGroupChatReader(opts = {}) {
+    if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
+    _gcReaderPath = null;
+    _gcReaderId = null;
+    _gcReaderTopic = '';
+    _gcReaderMode = 'topic';
+    _gcLastMtime = null;
+    _gcPollFailCount = 0;
+    if (_gcReaderHiddenInputBar) {
+      const inputBar = document.getElementById('convInputBar');
+      const inputCtx = document.getElementById('convInputContext');
+      if (inputBar) inputBar.style.display = '';
+      if (inputCtx) inputCtx.style.display = '';
+      _gcReaderHiddenInputBar = false;
+    }
+    if (_gcReaderHiddenRailItems) {
+      const rail = document.getElementById('statusRail');
+      if (rail) {
+        const filesPanel = rail.querySelector('#filesPanel');
+        if (filesPanel) filesPanel.style.display = '';
+        const railActions = rail.querySelector('#railActions');
+        if (railActions) railActions.style.display = '';
+        const orchPanel = document.getElementById('gcOrchestratorPanel');
+        if (orchPanel) orchPanel.style.display = 'none';
+      }
+      _gcReaderHiddenRailItems = false;
+    }
+    if (opts && opts.rerenderSidebar && typeof renderSidebar === 'function'
+        && typeof filterConversations === 'function'
+        && typeof $convSearch !== 'undefined' && $convSearch) {
+      renderSidebar(filterConversations($convSearch.value));
+    }
+  }
+
+  // Tag any rendered fragment whose first text line is "<ts> — system: …" so
+  // CSS can mute it. The orchestrator's lifecycle log entries (pinged,
+  // removed, re-injected) get appended to the prior message in two shapes
+  // depending on how the orchestrator wrote them:
+  //   1. blockquote — `> _<ts> — system: …_`
+  //   2. plain italic paragraph — `_<ts> — system: …_` on its own line,
+  //      which our markdown renderer wraps as `<div><em>…</em></div>`
+  // Without catching both, big runs of removals dominate the transcript.
+  function markSystemBlockquotes(html) {
+    if (!html) return html;
+    let out = html;
+    if (out.indexOf('<blockquote') !== -1) {
+      out = out.replace(/<blockquote\b([^>]*)>([\s\S]*?)<\/blockquote>/g, (full, attrs, inner) => {
+        const flat = inner.replace(/<[^>]+>/g, '').trim();
+        if (!/—\s*system[:\s]/i.test(flat)) return full;
+        const cls = / class="([^"]*)"/.exec(attrs);
+        const newAttrs = cls
+          ? attrs.replace(/ class="([^"]*)"/, ' class="$1 gc-system-note"')
+          : attrs + ' class="gc-system-note"';
+        return `<blockquote${newAttrs}>${inner}</blockquote>`;
+      });
+    }
+    if (out.indexOf('<div>') !== -1) {
+      out = out.replace(/<div>(\s*<em>[\s\S]*?<\/em>\s*)<\/div>/g, (full, inner) => {
+        const flat = inner.replace(/<[^>]+>/g, '').trim();
+        if (!/—\s*system[:\s]/i.test(flat)) return full;
+        return `<div class="gc-system-note">${inner}</div>`;
+      });
+    }
+    return out;
+  }
+
+  function renderGroupChatMarkdown(content) {
+    const text = String(content || '');
+    // Speaker headings come in three flavors: participant hash (8 hex),
+    // "Human", or "system" (lifecycle entries the orchestrator appends).
+    // Capturing all three lets us style system lines without scattering
+    // them through the previous participant's message body.
+    const matches = Array.from(text.matchAll(/^##\s+(.+?—\s+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b|system(?::|\b)).*)$/gm));
+
+    let firstSpeaker = '';
+    let lastSpeaker = '';
+
+    if (!matches.length) {
+      const origEl = document.getElementById('gcOriginalSpeaker');
+      const lastEl = document.getElementById('gcLastSpeaker');
+      const metaWrap = document.getElementById('gcReaderStickyMeta');
+      if (origEl && lastEl && metaWrap) {
+        metaWrap.style.display = 'none';
+      }
+      return '<div class="assistant-text gc-chat-doc">' + renderMarkdown(text) + '</div>';
+    }
+
+    let html = '';
+    const preamble = text.slice(0, matches[0].index).trim();
+    if (preamble) {
+      html += '<div class="gc-chat-preamble">' + renderMarkdown(preamble) + '</div>';
+    }
+
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i];
+      const heading = (match[1] || '').trim();
+      const nextIndex = i + 1 < matches.length ? matches[i + 1].index : text.length;
+      const rawBody = text.slice(match.index + match[0].length, nextIndex);
+      const body = rawBody
+        .replace(/^\s*---\s*$/gm, '')
+        .trim();
+      const parts = heading.split(/\s+—\s+/);
+      const when = parts.length > 1 ? parts.shift() : '';
+      const speaker = parts.length ? parts.join(' — ') : heading;
+      const isSystem = /^\s*system\b/i.test(speaker);
+
+      if (!isSystem) {
+        if (!firstSpeaker) firstSpeaker = speaker;
+        lastSpeaker = speaker;
+      }
+
+      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + '">'
+        + '<div class="gc-message-meta">'
+          + '<span class="gc-message-speaker">' + escapeHtml(speaker) + '</span>'
+          + (when ? '<span class="gc-message-time">' + gcTimeChip(when) + '</span>' : '')
+        + '</div>'
+        + '<div class="gc-message-body assistant-text">'
+          + (body ? markSystemBlockquotes(renderMarkdown(body)) : '<em class="gc-message-empty">(no text)</em>')
+        + '</div>'
+      + '</article>';
+    }
+
+    const origEl = document.getElementById('gcOriginalSpeaker');
+    const viewingEl = document.getElementById('gcViewingSpeaker');
+    const metaWrap = document.getElementById('gcReaderStickyMeta');
+    if (origEl && viewingEl && metaWrap) {
+      if (firstSpeaker && lastSpeaker) {
+        origEl.textContent = firstSpeaker;
+        viewingEl.textContent = lastSpeaker; // Default, will be updated by scroll listener
+        metaWrap.style.display = '';
+      } else {
+        metaWrap.style.display = 'none';
+      }
+    }
+
+    return html;
+  }
+
+  function openGroupChatReader(chatPath, topic, mode, includeHuman, chatId) {
     _gcReaderPath = chatPath;
+    _gcReaderId = chatId || null;
+    _gcReaderTopic = topic || '';
+    _gcReaderMode = mode || 'topic';
     _gcLastMtime = null;
     _gcPollFailCount = 0;
     _gcLastNudgeTime = 0;
+    currentConversation = null;
+    if (typeof ffcUpdateSidebar === 'function') ffcUpdateSidebar(null);
+    if (typeof syncActivePaneChrome === 'function') syncActivePaneChrome(null);
+    if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
+      renderSidebar(filterConversations($convSearch.value));
+    }
 
     const view = document.getElementById('conversationsView');
     if (!view) return;
@@ -4902,10 +7279,27 @@
         + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
         + '<span class="gc-mode-badge">' + modeSafe + '</span>'
       + '</div>'
+      + '<div class="gc-reader-sticky-meta" id="gcReaderStickyMeta" style="display:none;">'
+        + '<div class="csh-col">'
+          + '<div class="label original-label">Original Poster</div>'
+          + '<div class="speaker-name" id="gcOriginalSpeaker">—</div>'
+        + '</div>'
+        + '<div class="csh-col">'
+          + '<div class="label last-label">Viewing Poster</div>'
+          + '<div class="speaker-name" id="gcViewingSpeaker">—</div>'
+        + '</div>'
+      + '</div>'
       + '<div class="gc-reader-body" id="gcReaderBody" tabindex="0">Loading…</div>'
       + (includeHuman
         ? '<div class="gc-reader-input-row" id="gcInputRow">'
             + '<textarea id="gcHumanInput" rows="1" placeholder="Add to chat…" autocomplete="off" spellcheck="false"></textarea>'
+            + '<button class="tts-btn gc-tts-btn" id="gcTtsBtn" type="button" title="Read last message" aria-label="Read last message" aria-pressed="false">'
+              + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                + '<path d="M11 5 6 9H3v6h3l5 4V5Z"></path>'
+                + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path>'
+                + '<path d="M18.5 5.5a9 9 0 0 1 0 13"></path>'
+              + '</svg>'
+            + '</button>'
             + '<button id="gcSendBtn" class="gc-send-btn" type="button" title="Send (Enter)" aria-label="Send to group chat">'
               + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
                 + '<path d="M12 19 L12 5 M6 11 L12 5 L18 11"></path>'
@@ -4923,10 +7317,38 @@
     if (inputCtx) inputCtx.style.display = 'none';
     _gcReaderHiddenInputBar = true;
 
+    const rail = document.getElementById('statusRail');
+    if (rail) {
+      rail.querySelectorAll('.csh-ask-original, .csh-col-activity').forEach(el => el.remove());
+      const filesPanel = rail.querySelector('#filesPanel');
+      if (filesPanel) filesPanel.style.display = 'none';
+      const railActions = rail.querySelector('#railActions');
+      if (railActions) railActions.style.display = 'none';
+
+      let orchPanel = document.getElementById('gcOrchestratorPanel');
+      if (!orchPanel) {
+        orchPanel = document.createElement('div');
+        orchPanel.id = 'gcOrchestratorPanel';
+        orchPanel.className = 'gc-orchestrator-panel';
+        rail.appendChild(orchPanel);
+      }
+      orchPanel.style.display = '';
+      orchPanel.innerHTML = '<div class="gco-section"><div class="gco-title">Orchestrator</div><div class="gco-body">Loading...</div></div>';
+      _gcReaderHiddenRailItems = true;
+    }
+
     if (includeHuman) {
       const gcSendBtn = document.getElementById('gcSendBtn');
       const gcHumanInput = document.getElementById('gcHumanInput');
+      const gcTtsBtn = document.getElementById('gcTtsBtn');
       if (gcSendBtn) gcSendBtn.addEventListener('click', () => sendHumanGcPost());
+      if (gcTtsBtn) {
+        gcTtsBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
+        gcTtsBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          readLastMessageAloud(activePaneId());
+        });
+      }
       if (gcHumanInput) {
         // Mirror the convo input: Enter sends, Shift+Enter inserts a
         // newline. Same convention as Claude Desktop / Slack / Omnara.
@@ -4960,6 +7382,25 @@
     if (_gcReaderInterval) clearInterval(_gcReaderInterval);
     pollGroupChatReader();
     _gcReaderInterval = setInterval(pollGroupChatReader, 3000);
+
+    // Scroll listener for dynamic "Viewing Poster" update
+    const gcBody = document.getElementById('gcReaderBody');
+    if (gcBody) {
+      gcBody.addEventListener('scroll', () => {
+        const viewingEl = document.getElementById('gcViewingSpeaker');
+        if (!viewingEl) return;
+        const messages = gcBody.querySelectorAll('.gc-message');
+        const bodyTop = gcBody.getBoundingClientRect().top;
+        for (let i = 0; i < messages.length; i++) {
+          const rect = messages[i].getBoundingClientRect();
+          if (rect.bottom > bodyTop) {
+            const speakerEl = messages[i].querySelector('.gc-message-speaker');
+            if (speakerEl) viewingEl.textContent = speakerEl.textContent;
+            break;
+          }
+        }
+      });
+    }
 
     // Space → jump to the top of the next message in the gc reader.
     // Each message starts with `## ts — hash: name` which renders as
@@ -5002,6 +7443,41 @@
     // Defer focus a tick so we don't fight with selectConversation flow.
     const gcBodyForFocus = document.getElementById('gcReaderBody');
     if (gcBodyForFocus) setTimeout(() => gcBodyForFocus.focus(), 0);
+
+    // Drop target: dragging an in-progress session row onto the reader
+    // pane itself adds that session as a participant. Mirrors the
+    // sidebar drag-onto-chat-row affordance — useful when the reader
+    // is already open and the user wants to bring more sessions in
+    // without scrolling back to the chat's sidebar row.
+    const gcReaderEl = document.getElementById('gcReader');
+    if (gcReaderEl) {
+      gcReaderEl.addEventListener('dragover', (ev) => {
+        if (!dragSourceId || !_gcReaderPath) return;
+        ev.preventDefault();
+        try { ev.dataTransfer.dropEffect = 'move'; } catch (_) {}
+        gcReaderEl.classList.add('gc-drop-target');
+      });
+      gcReaderEl.addEventListener('dragleave', (ev) => {
+        // Browsers fire dragleave when crossing into child elements;
+        // only clear the highlight when the cursor actually exits the
+        // reader's bounding box.
+        if (ev.relatedTarget && gcReaderEl.contains(ev.relatedTarget)) return;
+        gcReaderEl.classList.remove('gc-drop-target');
+      });
+      gcReaderEl.addEventListener('drop', (ev) => {
+        ev.preventDefault();
+        gcReaderEl.classList.remove('gc-drop-target');
+        if (!_gcReaderPath || !dragSourceId) return;
+        const draggedConv = (conversationsData || []).find(c => c.id === dragSourceId);
+        if (draggedConv && (draggedConv.source === 'backlog' || draggedConv.source === 'github_pr')) {
+          showOpToast?.('Drag a real session row, not a backlog/issue card', 'error');
+          return;
+        }
+        const sid = (draggedConv && (draggedConv.session_id || draggedConv.id)) || dragSourceId;
+        const displayName = draggedConv ? (draggedConv.display_name || '') : '';
+        addSessionToGroupChat(_gcReaderPath, sid, displayName, _gcReaderId);
+      });
+    }
   }
 
   // The /group-chat skill stamps each message with the session's first
@@ -5033,30 +7509,330 @@
     );
   }
 
+  function replaceParticipantMentions(container, nameMap) {
+    if (!nameMap) return;
+    const shortToName = {};
+    for (const [fullSid, name] of Object.entries(nameMap)) {
+      const short = fullSid.substring(0, 8).toLowerCase();
+      shortToName[short] = name;
+    }
+    const shortIds = Object.keys(shortToName);
+    if (!shortIds.length) return;
+
+    const regexStr = '(?:@)?\\b(' + shortIds.join('|') + ')\\b';
+    const regex = new RegExp(regexStr, 'gi');
+
+    const walker = document.createTreeWalker(
+      container,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          let parent = node.parentElement;
+          while (parent && parent !== container) {
+            const tag = parent.tagName.toLowerCase();
+            if (tag === 'pre' || tag === 'code' || tag === 'a') return NodeFilter.FILTER_REJECT;
+            parent = parent.parentElement;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      }
+    );
+
+    const textNodes = [];
+    let currentNode = walker.nextNode();
+    while (currentNode) {
+      textNodes.push(currentNode);
+      currentNode = walker.nextNode();
+    }
+
+    for (const node of textNodes) {
+      const text = node.textContent;
+      if (!regex.test(text)) continue;
+
+      regex.lastIndex = 0;
+      const fragment = document.createDocumentFragment();
+      let lastIndex = 0;
+      let match;
+      while ((match = regex.exec(text)) !== null) {
+        const matchIndex = match.index;
+        const shortId = match[1].toLowerCase();
+        const name = shortToName[shortId];
+
+        if (matchIndex > lastIndex) {
+          fragment.appendChild(document.createTextNode(text.substring(lastIndex, matchIndex)));
+        }
+
+        const span = document.createElement('span');
+        span.className = 'gc-mention';
+        span.textContent = '@' + name;
+        span.title = `Session: ${shortId}`;
+        fragment.appendChild(span);
+
+        lastIndex = regex.lastIndex;
+      }
+
+      if (lastIndex < text.length) {
+        fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
+      }
+
+      node.replaceWith(fragment);
+    }
+  }
+
+  function updateOrchestratorPanel(data, content) {
+    const panel = document.getElementById('gcOrchestratorPanel');
+    if (!panel || panel.style.display === 'none') return;
+
+    const nm = data.name_map || {};
+    const sids = data.session_ids || [];
+    const waiting = data.waiting || {};
+
+    const lastSpoken = {};
+    const lastMentioned = {};
+    
+    const text = String(content || '');
+    const matches = Array.from(text.matchAll(/^##\s+(.+?)—\s+([0-9a-fA-F]{8}(?::[^\n]*)?|Human\b).*$/gm));
+    
+    for (let i = 0; i < matches.length; i++) {
+      const match = matches[i];
+      const when = match[1].trim();
+      let authorHash = match[2];
+      if (authorHash.length > 8 && authorHash !== 'Human') authorHash = authorHash.substring(0, 8);
+      authorHash = authorHash.toLowerCase();
+
+      const nextIndex = i + 1 < matches.length ? matches[i + 1].index : text.length;
+      const bodyText = text.slice(match.index + match[0].length, nextIndex);
+
+      lastSpoken[authorHash] = when;
+
+      for (const [fullSid, name] of Object.entries(nm)) {
+        const short = fullSid.substring(0, 8).toLowerCase();
+        const regex = new RegExp('(?:@)?\\b' + short + '\\b', 'i');
+        const mentionMatch = bodyText.match(regex);
+        if (mentionMatch) {
+          const idx = mentionMatch.index;
+          const start = Math.max(0, idx - 20);
+          const end = Math.min(bodyText.length, idx + short.length + 20);
+          let snippet = bodyText.substring(start, end).replace(/\\s+/g, ' ');
+          if (start > 0) snippet = '…' + snippet;
+          if (end < bodyText.length) snippet += '…';
+          lastMentioned[short] = { when, snippet, by: authorHash };
+        }
+      }
+    }
+
+    // Look up the friendly name for a participant hash. Returns the bare
+    // string (caller is responsible for escaping); use renderNameHtml when
+    // emitting into HTML so the hash gets shown as a secondary chip.
+    const renderName = (hash) => {
+      if (!hash) return 'None';
+      if (hash === true || String(hash).toLowerCase() === 'human') return 'Human';
+      const full = sids.find(s => s.toLowerCase().startsWith(hash)) || hash;
+      return nm[full] || hash;
+    };
+
+    // HTML form: "Name (hash)" with the hash de-emphasized and the full
+    // session id surfaced as a tooltip. Falls back to just the hash when
+    // no name is known. Always returns safe HTML.
+    const renderNameHtml = (hash) => {
+      if (!hash) return 'None';
+      if (hash === true || String(hash).toLowerCase() === 'human') return 'Human';
+      const full = sids.find(s => s.toLowerCase().startsWith(hash)) || hash;
+      const name = nm[full];
+      const short = String(hash).toLowerCase().substring(0, 8);
+      if (name) {
+        return `<span title="${escapeAttr(full)}">${escapeHtml(name)} <span class="gco-part-id">(${escapeHtml(short)})</span></span>`;
+      }
+      return escapeHtml(short);
+    };
+
+    let html = '';
+
+    // Chat identity strip — the chat ID and on-disk path. Surfaces what the
+    // reader is currently pointed at so the user (and any debugging me)
+    // can name the chat when reporting an issue (e.g. "loading is slow on
+    // chat XYZ"). Both fields select-all on click so copy/paste is one
+    // keystroke. _gcReaderId / _gcReaderPath are module-level state set
+    // by openGroupChatReader.
+    const chatId = (typeof _gcReaderId !== 'undefined' && _gcReaderId) ? _gcReaderId : '';
+    const chatPath = (typeof _gcReaderPath !== 'undefined' && _gcReaderPath) ? _gcReaderPath : '';
+    if (chatId || chatPath) {
+      html += '<div class="gco-section"><div class="gco-title">Chat</div>';
+      if (chatId) {
+        html += `<div class="gco-row"><span class="gco-label">ID:</span> <span class="gco-val gco-copy" title="Click to select — Cmd+C to copy">${escapeHtml(chatId)}</span></div>`;
+      }
+      if (chatPath) {
+        const file = chatPath.split('/').pop() || chatPath;
+        html += `<div class="gco-row"><span class="gco-label">File:</span> <span class="gco-val gco-copy" title="${escapeAttr(chatPath)}">${escapeHtml(file)}</span></div>`;
+      }
+      html += '</div>';
+    }
+
+    // ── Active work — exactly what is consuming CPU/tokens for this chat, with
+    // a one-click kill switch. The orchestration loop wakes live participant
+    // sessions on a timer; that's the cost the user wants visibility into.
+    const _gcPaused = data.status === 'paused' || !!data.paused;
+    const _gcActiveNow = data.status === 'active';
+    const _gcLive = data.participant_live_count || 0;
+    const _gcParts = data.participant_count || sids.length;
+    const _gcPoll = data.orchestrator_poll_interval || 30;
+    const _gcNudge = data.orchestrator_nudge_interval || 60;
+    html += '<div class="gco-section gco-active-section"><div class="gco-title">Active work</div>';
+    if (_gcPaused) {
+      html += '<div class="gco-active-status is-paused">⏸ Disabled — no nudges, no token use.</div>';
+      html += `<button type="button" class="gco-power-btn gco-enable" data-gc-enable data-gc-path="${escapeAttr(chatPath)}" data-gc-id="${escapeAttr(chatId)}">▶ Enable orchestration</button>`;
+    } else if (_gcActiveNow) {
+      html += '<div class="gco-active-status is-active"><span class="gco-active-dot"></span> Running — waking participants on a timer.</div>';
+      html += `<div class="gco-row"><span class="gco-label">Auto-nudge:</span> <span class="gco-val">checks every ${_gcPoll}s, nudges ≤ every ${_gcNudge}s</span></div>`;
+      const _gcLastNudge = data.orchestrator_last_nudge_at ? timeAgo(data.orchestrator_last_nudge_at * 1000) : 'not yet';
+      html += `<div class="gco-row"><span class="gco-label">Last nudge:</span> <span class="gco-val">${escapeHtml(_gcLastNudge)}</span></div>`;
+      const _gcTargets = (data.orchestrator_last_reminder_targets || []).map(renderNameHtml);
+      if (_gcTargets.length) {
+        html += `<div class="gco-row"><span class="gco-label">Last targets:</span> <span class="gco-val">${_gcTargets.join(', ')}</span></div>`;
+      }
+      html += `<div class="gco-row"><span class="gco-label">Live sessions:</span> <span class="gco-val">${_gcLive} of ${_gcParts} — these run on each nudge</span></div>`;
+      html += `<button type="button" class="gco-power-btn gco-stop" data-gc-stop data-gc-path="${escapeAttr(chatPath)}" data-gc-id="${escapeAttr(chatId)}">■ Stop orchestration</button>`;
+    } else {
+      html += '<div class="gco-active-status is-idle">Idle — no active orchestration.</div>';
+    }
+    html += '</div>';
+
+    html += '<div class="gco-section"><div class="gco-title">Orchestrator</div>';
+
+    html += `<div class="gco-row"><span class="gco-label">Timer Active:</span> <span class="gco-val">${data.orchestrator_timer_active ? 'Yes' : 'No'}</span></div>`;
+
+    const waitingOnHtml = (waiting.waiting_on_hashes || []).map(renderNameHtml);
+    html += `<div class="gco-row"><span class="gco-label">Waiting on:</span> <span class="gco-val">${waitingOnHtml.length ? waitingOnHtml.join(', ') : 'None'}</span></div>`;
+
+    const lastSpokenHtml = waiting.last_author_is_human ? 'Human' : renderNameHtml(waiting.last_author_hash);
+    html += `<div class="gco-row"><span class="gco-label">Last spoken:</span> <span class="gco-val">${lastSpokenHtml}</span></div>`;
+    
+    html += '</div>';
+
+    html += '<div class="gco-section"><div class="gco-title">Participants</div>';
+    for (const sid of sids) {
+      const short = sid.substring(0, 8).toLowerCase();
+      const name = nm[sid] || short;
+
+      html += `<div class="gco-part-card">`;
+      html += `<div class="gco-part-name">${escapeHtml(name)} <span class="gco-part-id">(${short})</span></div>`;
+
+      const spoken = lastSpoken[short];
+      html += `<div class="gco-part-stat"><span class="gco-label">Spoken:</span> <span class="gco-val">${spoken ? gcTimeChip(spoken) : 'Never'}</span></div>`;
+
+      const mention = lastMentioned[short];
+      if (mention) {
+        html += `<div class="gco-part-stat"><span class="gco-label">Last mentioned:</span> <span class="gco-val">${gcTimeChip(mention.when)} by ${renderNameHtml(mention.by)}</span></div>`;
+        html += `<div class="gco-part-snippet">"${escapeHtml(mention.snippet)}"</div>`;
+      } else {
+        html += `<div class="gco-part-stat"><span class="gco-label">Last mentioned:</span> <span class="gco-val">Never</span></div>`;
+      }
+
+      html += `</div>`;
+    }
+    html += '</div>';
+
+    panel.innerHTML = html;
+
+    const stopBtn = panel.querySelector('[data-gc-stop]');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', () => {
+        setGroupChatPaused(stopBtn.dataset.gcPath || '', stopBtn.dataset.gcId || '', true);
+      });
+    }
+    const enableBtn = panel.querySelector('[data-gc-enable]');
+    if (enableBtn) {
+      enableBtn.addEventListener('click', () => {
+        setGroupChatPaused(enableBtn.dataset.gcPath || '', enableBtn.dataset.gcId || '', false);
+      });
+    }
+  }
+
+  // Parses the timestamp formats CCC writes into chat files
+  // (e.g. "2026-05-27 20:43:30 PDT", "2026-05-27 Tuesday 20:43:30 PDT")
+  // into a Date. Returns null if it can't make sense of the input —
+  // callers should fall back to the raw text in that case.
+  function gcParseChatTimestamp(s) {
+    if (!s) return null;
+    const cleaned = String(s).trim().replace(/\s+(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s+/i, ' ');
+    const m = cleaned.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\s+([A-Z]{2,5}))?$/);
+    if (!m) {
+      const d = new Date(cleaned);
+      return isNaN(d.getTime()) ? null : d;
+    }
+    // Treat the parsed pieces as local-clock and let the browser apply
+    // the host TZ. The trailing PDT/UTC token is informational — we don't
+    // try to reapply it because the wall time was already written for that
+    // zone (whoever wrote the file), and the difference is usually <1 day.
+    const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function gcRelativeTime(s) {
+    const d = gcParseChatTimestamp(s);
+    if (!d) return String(s || '');
+    const delta = Date.now() - d.getTime();
+    const abs = Math.abs(delta);
+    const sec = Math.round(abs / 1000);
+    if (sec < 45) return 'just now';
+    const min = Math.round(sec / 60);
+    if (min < 60) return min + 'm ago';
+    const hr = Math.round(min / 60);
+    if (hr < 24) return hr + 'h ago';
+    const day = Math.round(hr / 24);
+    if (day < 14) return day + 'd ago';
+    const wk = Math.round(day / 7);
+    if (wk < 8) return wk + 'w ago';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+
+  function gcTimeChip(s) {
+    const rel = gcRelativeTime(s);
+    if (rel === String(s || '')) return escapeHtml(rel);
+    return `<span class="gco-time" title="${escapeAttr(String(s))}">${escapeHtml(rel)}</span>`;
+  }
+
   async function pollGroupChatReader() {
-    if (!_gcReaderPath) return;
+    if (!_gcReaderPath && !_gcReaderId) return;
     const body = document.getElementById('gcReaderBody');
     if (!body) return;
     try {
-      const res = await fetch('/api/group-chat/read?path=' + encodeURIComponent(_gcReaderPath));
+      const params = new URLSearchParams();
+      if (_gcReaderPath) params.set('path', _gcReaderPath);
+      if (_gcReaderId) params.set('id', _gcReaderId);
+      const res = await fetch('/api/group-chat/read?' + params.toString());
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       _gcPollFailCount = 0;
       const errBanner = body.querySelector('.gc-poll-error');
       if (errBanner) errBanner.remove();
-      if (!data.ok) { body.innerHTML = renderMarkdown(data.error || 'File not found.'); return; }
+      if (!data.ok) { body.innerHTML = '<div class="assistant-text gc-chat-doc">' + renderMarkdown(data.error || 'File not found.') + '</div>'; return; }
       if (data.mtime !== _gcLastMtime) {
         const isFirstLoad = _gcLastMtime === null;
         _gcLastMtime = data.mtime;
         const atBottom = body.scrollHeight - body.scrollTop <= body.clientHeight + 40;
-        body.innerHTML = renderMarkdown(_gcExpandHashIds(data.content));
+        
+        body.innerHTML = renderGroupChatMarkdown(_gcExpandHashIds(data.content));
+        if (data.name_map) {
+          replaceParticipantMentions(body, data.name_map);
+        }
+        updateOrchestratorPanel(data, data.content);
+
         if (atBottom) body.scrollTop = body.scrollHeight;
+        
+        // Trigger scroll listener to update Viewing Poster immediately
+        body.dispatchEvent(new CustomEvent('scroll'));
+
         // Nudge all participants when content changes (but not on first load, and debounced to 15s).
         if (!isFirstLoad) {
           const now = Date.now();
           if (now - _gcLastNudgeTime > 15000) {
             _gcLastNudgeTime = now;
-            ccPostJson('/api/group-chat/nudge', { path: _gcReaderPath }).catch(() => {});
+            markActiveGroupChatTrigger(_gcReaderPath, _gcReaderId, _gcReaderTopic, _gcReaderMode);
+            ccPostJson('/api/group-chat/nudge', {
+              path: _gcReaderPath,
+              id: _gcReaderId,
+            }).catch(() => {});
           }
         }
       }
@@ -5075,12 +7851,12 @@
   }
 
   async function sendHumanGcPost() {
-    if (!_gcReaderPath) return;
+    if (!_gcReaderPath && !_gcReaderId) return;
     const input = document.getElementById('gcHumanInput');
     const text = input ? input.value.trim() : '';
     if (!text) return;
     try {
-      await ccPostJson('/api/group-chat/post', { path: _gcReaderPath, text });
+      await ccPostJson('/api/group-chat/post', { path: _gcReaderPath, id: _gcReaderId, text });
       if (input) input.value = '';
       await pollGroupChatReader();
     } catch (err) {
@@ -5089,20 +7865,10 @@
   }
 
   function closeGroupChatReader() {
-    if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
-    _gcReaderPath = null;
-    _gcLastMtime = null;
-    _gcPollFailCount = 0;
     // Restore the standard input bar (mirror what the selectConversation
     // teardown does). Caller is expected to either selectConversation
     // afterwards or live with an empty conversations view.
-    if (_gcReaderHiddenInputBar) {
-      const inputBar = document.getElementById('convInputBar');
-      const inputCtx = document.getElementById('convInputContext');
-      if (inputBar) inputBar.style.display = '';
-      if (inputCtx) inputCtx.style.display = '';
-      _gcReaderHiddenInputBar = false;
-    }
+    stopGroupChatReader();
     if (typeof currentConversation === 'string' && currentConversation) {
       try { selectConversation(currentConversation); } catch (_) {}
     }
@@ -5433,8 +8199,9 @@
   }
 
   function renderKanbanBoard(convs, targetEl, isSplit) {
+    convs = filterGhIssues(convs);
     if (!targetEl) targetEl = $kanbanBoard;
-    const defaultColumns = [
+    let defaultColumns = [
       { key: 'backlog',         label: 'GH Issues',       defaultExpanded: true,
         hint: 'Open GitHub issues and TODO.md / PARKING_LOT items with no session yet.' },
       { key: 'needs-attention', label: 'Needs attention', defaultExpanded: true,
@@ -5454,6 +8221,9 @@
       { key: 'archived',        label: 'Archived',        defaultExpanded: false,
         hint: 'Dismissed / not planned — kept for context, not actionable.' },
     ];
+    if (getViewGhPref() === 'hide') {
+      defaultColumns = defaultColumns.filter(c => c.key !== 'backlog');
+    }
     // Apply user-defined column order from localStorage.
     let savedOrder = [];
     try { savedOrder = JSON.parse(localStorage.getItem('ccc-column-order') || '[]'); } catch (_) {}
@@ -5539,7 +8309,8 @@
             lastOrg = o;
           }
         }
-        // Prefer first_message for the title unless the user explicitly renamed it.
+        // Prefer first_message for the title unless the user explicitly renamed it
+        // or CCC launched Claude with a stable --name.
         // Auto-generated display_names (from claude /rename) tend to be awkwardly truncated.
         // For backlog cards, `first_message` is the issue body (which often
         // starts with a markdown heading like "## Feature request"), so using
@@ -5548,11 +8319,11 @@
         const rawFirst = (!isBacklog && c.first_message)
           ? firstSentenceOf(cleanIssuePrompt(c.first_message), 90)
           : '';
-        let rawTitle = c.name_overridden
+        let rawTitle = (c.name_overridden || c.spawn_named) && c.display_name
           ? c.display_name
           : (isBacklog
               ? (c.display_name || rawFirst || '(untitled)')
-              : (rawFirst || c.display_name || '(untitled)'));
+              : (c.ai_title || rawFirst || c.display_name || '(untitled)'));
         if (c.backlog_type === 'github' || c.issue_number || c.linked_issue) {
           rawTitle = stripGhIssueProjectTag(rawTitle);
         }
@@ -5642,7 +8413,7 @@
             dateInfo = '<span style="font-size:10px;color:var(--text-muted);">' +
                        escapeHtml(abs) + ' &middot; ' + escapeHtml(relativeTime(c.modified)) + '</span>';
           }
-          html += '<div class="kanban-card backlog-card" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="backlog">';
+          html += '<div class="kanban-card backlog-card' + (c.backlog_type === 'github' ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="backlog">';
           // Unified badges row — matches session-card layout: GH chip, state, labels, source.
           const badgeRow = backlogIssueBadge + stateBadge + labels + sourceTag;
           if (badgeRow) html += '<div class="kanban-card-badges">' + badgeRow + '</div>';
@@ -5701,15 +8472,18 @@
         const midTurn = c.last_event_type === 'assistant';
         const _isKanbanCodex = c.source === 'codex' || c.engine === 'codex';
         const _isKanbanGemini = c.source === 'gemini' || c.engine === 'gemini';
+        const _isKanbanAntigravity = c.source === 'antigravity' || c.engine === 'antigravity';
         const _kanbanActivityAge = c.sidecar_ts ? (Date.now() / 1000 - c.sidecar_ts) : (c.last_interacted ? (Date.now() / 1000 - c.last_interacted) : 9999);
-        const _codexKanbanWip = _isKanbanCodex && !c.sidecar_status && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60));
-        const _geminiKanbanWip = _isKanbanGemini && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
-        const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip ? ' truly-active' : '';
+        const _codexKanbanWip = _isKanbanCodex && c.is_live && !c.sidecar_status && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60));
+        const _geminiKanbanWip = _isKanbanGemini && c.is_live && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
+        const _antigravityKanbanWip = _isKanbanAntigravity && c.is_live && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
+        const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip || _antigravityKanbanWip ? ' truly-active' : '';
         const pendingSpawn = c.pending_spawn ? ' pending-spawn' : '';
         const recentlyBorn = isRecentlyBorn(c.session_id) ? ' recently-born' : '';
         const noEditsAttr = hasNoEdits(c) ? ' no-edits' : '';
         const readOnlyAttr = hasReadOnlyWork(c) ? ' read-only' : '';
-        html += '<div class="kanban-card' + active + trulyActive + pendingSpawn + recentlyBorn + noEditsAttr + readOnlyAttr + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="' + colKey + '">';
+        const isGithubColIssue = c.backlog_type === 'github' || c.issue_number || c.linked_issue;
+        html += '<div class="kanban-card' + active + trulyActive + pendingSpawn + recentlyBorn + noEditsAttr + readOnlyAttr + (isGithubColIssue ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-col="' + colKey + '">';
         // Create-issue button only when no issue is linked. The "view issue" link
         // was removed — tapping the #NNN badge in the title opens the issue.
         const linkedIssue = c.linked_issue || c.issue_number || '';
@@ -5931,6 +8705,12 @@
       hdr.addEventListener('dragend', () => hdr.classList.remove('dragging-header'));
     });
     targetEl.querySelectorAll('.kanban-card').forEach(card => {
+      card.addEventListener('mouseenter', () => {
+        _convPrefetchSchedule(card.dataset.id);
+      });
+      card.addEventListener('mouseleave', () => {
+        _convPrefetchCancel(card.dataset.id);
+      });
       card.addEventListener('click', (ev) => {
         if (ev.target.closest('[data-action]')) return;
         // Ctrl/Cmd/Shift click: toggle multi-select instead of opening
@@ -5972,6 +8752,10 @@
       if (selectedCardIds.has(card.dataset.id)) card.classList.add('selected');
       // Drag-and-drop between columns
       card.addEventListener('dragstart', (ev) => {
+        if (dragStartsFromTextEditor(ev.target)) {
+          ev.preventDefault();
+          return;
+        }
         // If this card is part of a multi-select, include all selected IDs
         const ids = selectedCardIds.has(card.dataset.id)
           ? Array.from(selectedCardIds)
@@ -6098,6 +8882,8 @@
         input.rows = 2;
         input.style.cssText = 'width:100%;font-size:14px;font-weight:600;padding:6px 8px;border-radius:4px;border:1px solid var(--accent);background:var(--bg);color:var(--text);font-family:inherit;outline:none;resize:vertical;min-height:40px;line-height:1.4;white-space:pre-wrap;word-wrap:break-word;';
         titleEl.replaceWith(input);
+        const previousDraggable = card.getAttribute('draggable');
+        card.draggable = false;
         // Auto-size to content
         input.style.height = 'auto';
         input.style.height = Math.max(40, input.scrollHeight) + 'px';
@@ -6109,6 +8895,8 @@
         let done = false;
         async function commit(save) {
           if (done) return; done = true;
+          if (previousDraggable === null) card.removeAttribute('draggable');
+          else card.setAttribute('draggable', previousDraggable);
           if (save) {
             const newName = input.value.trim();
             // Only call rename API if the name actually changed
@@ -6464,7 +9252,16 @@
         const body = issueNum
           ? 'Fix issue #' + issueNum + ' — ' + cleanTitle + '\n\nRun `gh issue view ' + issueNum + '` for the full body (title may be truncated).'
           : cleanTitle;
-        openNewSessionModal(body, rowRepoPath(conv));
+        if (typeof enterNewSessionMode === 'function') enterNewSessionMode();
+        const $convInput = document.getElementById('convInput');
+        if ($convInput) {
+          $convInput.value = body;
+          setTimeout(() => {
+            $convInput.focus();
+            $convInput.style.height = 'auto';
+            $convInput.style.height = ($convInput.scrollHeight) + 'px';
+          }, 30);
+        }
       });
     });
     // ── Per-card AI-summarize a GH backlog card ──
@@ -6649,10 +9446,50 @@
     }
   }
 
+  // Structural signature of the last committed conversation-list render, with
+  // volatile time labels blanked (see _VOLATILE_TIME_RE). Used to skip a
+  // wholesale innerHTML rebuild when the only thing that changed since the last
+  // render is the ticking clocks. Cleared (null) by every path that wipes
+  // $convList to an empty/error state, so a later render after a wipe commits.
+  let _convListRenderSig = null;
+
+  // Per-tick volatile time labels in the sidebar rows: the relative "last
+  // activity" stamp (.conv-rel) and the group-chat "when" labels. These tick
+  // every few seconds and, baked into row markup, were the sole driver of the
+  // periodic full-list rebuild flicker. The capture groups are (open-tag,
+  // inner-text, close-tag) so a `$1$3` replace blanks just the text for the
+  // structural signature, and exec() can lift the fresh text for in-place
+  // patching. Leaf spans (no nested tags), so [^<]* for the inner text is safe.
+  const _VOLATILE_TIME_RE = /(<span class="[^"]*\b(?:conv-rel|conv-ingroupchat-row-when|conv-ingroupchat-participant-when)\b[^"]*"[^>]*>)([^<]*)(<\/span>)/g;
+
+  // Update only the volatile time labels in place from freshly-built markup,
+  // leaving the rest of the live DOM (and its attached handlers) untouched.
+  // Called when the structural signature is unchanged, i.e. only clocks moved.
+  function _patchVolatileTimes(newHtml) {
+    const $convList = document.getElementById('convList');
+    if (!$convList) return;
+    const texts = [];
+    let m;
+    _VOLATILE_TIME_RE.lastIndex = 0;
+    while ((m = _VOLATILE_TIME_RE.exec(newHtml)) !== null) texts.push(m[2]);
+    const spans = $convList.querySelectorAll(
+      'span.conv-rel, span.conv-ingroupchat-row-when, span.conv-ingroupchat-participant-when');
+    // querySelectorAll yields document order, which matches source/regex order.
+    // If counts ever drift, bail rather than mis-assign — the next structural
+    // render corrects it.
+    if (spans.length !== texts.length) return;
+    for (let i = 0; i < spans.length; i++) {
+      if (spans[i].innerHTML !== texts[i]) spans[i].innerHTML = texts[i];
+    }
+  }
+
   function renderConversationList(convs) {
+    convs = filterGhIssues(convs);
     convs = (Array.isArray(convs) ? convs : []).filter(c => !_isOptimisticallyStartedIssueRow(c));
+    convs = _prioritizeSessionIdMatches(convs, document.getElementById('convSearch')?.value || '');
     _applyOptimisticTouches(convs);
     if (!convs.length) {
+      _convListRenderSig = null;
       $convList.innerHTML =
         '<div class="empty-state first-run" style="height:auto;padding:28px 20px;font-size:13px;flex-direction:column;gap:10px;align-items:flex-start;color:var(--text-muted);">'
         + '<div style="font-size:14px;color:var(--text);font-weight:600;">No sessions yet</div>'
@@ -6703,8 +9540,15 @@
     const _ghIssueConvs = [];
     const _readyToMergeConvs = [];
     const _archivedConvs = [];
+    const _idSearchConvs = [];
     const _inGroupChatIds = new Set(_gcActiveChats.flatMap(c => c.session_ids || []));
     for (const c of convs) {
+      // A UUID/prefix/substring search is a direct lookup; keep it above
+      // pipeline sections and history-index matches.
+      if (Number.isFinite(c && c._idSearchRank)) {
+        _idSearchConvs.push(c);
+        continue;
+      }
       const col = classifyKanbanColumn(c);
       if (col === 'archived') { _archivedConvs.push(c); continue; }
       if (col === 'backlog') { _ghIssueConvs.push(c); continue; }
@@ -6713,11 +9557,14 @@
       // rows are excluded (they don't open PRs the same way).
       // pr_state ("OPEN" / "MERGED" / "CLOSED") comes from a TTL-cached
       // `gh pr view` lookup on the server. Drop merged/closed so this
-      // bucket isn't a graveyard of completed work; treat null/'OPEN'
-      // as still ready (gh failures shouldn't hide real PRs).
+      // bucket isn't a graveyard of completed work. Archive rows get a
+      // fast first pass before GitHub state has been queried; keep those
+      // pending rows out of Ready to merge so merged PRs don't flash here
+      // for a few seconds on load.
       const _prState = (c.pr_state || '').toUpperCase();
       const _prDone = _prState === 'MERGED' || _prState === 'CLOSED';
-      if (c.source !== 'pkood' && c.tail_pr_number && !_prDone) {
+      const _prStatePending = c._pr_state_pending === true;
+      if (c.source !== 'pkood' && c.tail_pr_number && !_prStatePending && !_prDone) {
         _readyToMergeConvs.push(c);
         continue;
       }
@@ -6733,21 +9580,52 @@
       const isBacklogRow = c.source === 'backlog';
       const isGithubPrRow = c.source === 'github_pr';
       const cleanFirst = c.first_message ? cleanIssuePrompt(c.first_message) : '';
-      let rawTitle = c.display_name || (cleanFirst ? firstSentenceOf(cleanFirst, 60) : '(untitled)');
+      // Title priority: user rename or CCC spawn name (display_name) >
+      // Claude Code's ai_title > raw first user prompt > "(untitled)".
+      // The ai_title slot rescues
+      // sessions opened with a slash command — those have no first_message
+      // CCC can show because the slash bookkeeping and meta body are filtered.
+      // Prefix glyphs let the user tell at-a-glance which slot won:
+      //   ✏️  = user-chosen (rename), ✨ = Claude's ai-title, none = raw first
+      //   message, italic "(untitled)" = nothing on file.
+      let titleSource = '';
+      let rawTitle;
+      if ((c.name_overridden || c.spawn_named) && c.display_name) {
+        rawTitle = c.display_name;
+        titleSource = c.name_overridden ? 'user' : 'spawn';
+      } else if (c.ai_title) {
+        rawTitle = c.ai_title;
+        titleSource = 'ai';
+      } else if (c.display_name) {
+        // Non-rename server-side display_name (e.g. /api/sessions chains in
+        // custom_title / agent_name before falling through). No glyph —
+        // these aren't "user chose this" the way a rename is.
+        rawTitle = c.display_name;
+      } else if (cleanFirst) {
+        rawTitle = firstSentenceOf(cleanFirst, 60);
+      } else {
+        rawTitle = '(untitled)';
+      }
       if (c.backlog_type === 'github' || c.issue_number || c.linked_issue) {
         rawTitle = stripGhIssueProjectTag(rawTitle);
       }
-      const title = rawTitle.replace(/-/g, ' ');
+      let title = rawTitle.replace(/-/g, ' ');
+      // ✨ = AI-generated (Claude/Codex/Antigravity). User renames get NO
+      // glyph; the .user-renamed CSS class gives them a quiet dotted underline
+      // instead so the row doesn't shout.
+      if (titleSource === 'ai') title = '✨ ' + title;
       let titleClass = '';
       if (c.name_overridden) titleClass = 'user-renamed';
-      else if (!c.display_name && !c.first_message) titleClass = 'untitled';
+      else if (!c.display_name && !c.ai_title && !c.first_message) titleClass = 'untitled';
       // Prefer the last assistant "outcome" (summary) over the original ask —
       // mirrors the kanban card behavior so list view shows what the session did.
       let askHtml = '';
       if (c.last_assistant_text) {
         const raw = String(c.last_assistant_text).trim().slice(0, 140);
-        askHtml = '<div class="conv-last">' + escapeHtml(raw) + '</div>';
-      } else if (c.display_name && cleanFirst) {
+        if (!previewRepeatsTitle(rawTitle, raw)) {
+          askHtml = '<div class="conv-last">' + escapeHtml(raw) + '</div>';
+        }
+      } else if (c.display_name && cleanFirst && !previewRepeatsTitle(rawTitle, cleanFirst)) {
         askHtml = '<div class="conv-last">' + escapeHtml(cleanFirst.slice(0, 100)) + '</div>';
       }
       // _hideAskHtml is set by the archive renderer (#6) — subtitle is
@@ -6932,14 +9810,31 @@
       const _hasLivePendingTool = c.is_live && !!c.pending_tool;
       const _codexHasOpenTool = isCodexRow && !c.sidecar_status && !!c.pending_tool;
       const _codexOpenTurn = isCodexRow
+        && c.is_live
         && !c.sidecar_status
         && (_codexHasOpenTool
+          || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
+            && _rowActivityAge < (30 * 60)));
+      const _geminiHasOpenTool = isGeminiRow && !c.sidecar_status && !!c.pending_tool;
+      const _geminiOpenTurn = isGeminiRow
+        && c.is_live
+        && !c.sidecar_status
+        && (_geminiHasOpenTool
+          || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
+            && _rowActivityAge < (30 * 60)));
+      const _antigravityHasOpenTool = isAntigravityRow && !c.sidecar_status && !!c.pending_tool;
+      const _antigravityOpenTurn = isAntigravityRow
+        && c.is_live
+        && !c.sidecar_status
+        && (_antigravityHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
             && _rowActivityAge < (30 * 60)));
       const _isWip = !!c.gh_in_progress || !!c.pending_spawn
         || _hasLivePendingTool
         || _isWaitingForUser
         || _codexOpenTurn
+        || _geminiOpenTurn
+        || _antigravityOpenTurn
         || (_isActiveSidecar && (_activityAge < 300 || _midTurn || !c.sidecar_ts));
       if (_isWip && !liveToolHtml) {
         const wipTitle = _knownActivityTool
@@ -6951,7 +9846,7 @@
               : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : (isAntigravityRow ? 'Antigravity is working' : 'Agent is working')))));
         const wipLabel = _isQuestionWaiting
           ? 'QUESTION'
-          : ((_codexOpenTurn || _isWaitingForUser) ? 'WIP' : (_knownActivityTool || 'WIP'));
+          : ((_codexOpenTurn || _geminiOpenTurn || _antigravityOpenTurn || _isWaitingForUser) ? 'WIP' : (_knownActivityTool || 'WIP'));
         signals += '<span class="conv-signal activity-working" title="' + escapeHtml(wipTitle) + '">' + escapeHtml(wipLabel) + '</span>';
       }
       if (c.source === 'pkood') {
@@ -6960,6 +9855,8 @@
         else if (ps === 'IDLE') signals += '<span class="conv-signal pkood-idle">idle</span>';
         else if (ps === 'BLOCKED') signals += '<span class="conv-signal pkood-blocked">blocked</span>';
         if (c.pkood_is_stuck) signals += '<span class="conv-signal pkood-stuck">stuck</span>';
+      } else if (c.spawn_failed) {
+        signals += '<span class="conv-signal spawn-failed" title="' + escapeHtml(c.spawn_error || 'Spawn process exited before a session was created') + '">failed</span>';
       } else if (isWorktree && c.worktree_dirty) {
         signals += '<span class="conv-signal uncommitted" title="git status: this worktree has uncommitted changes">uncommitted</span>';
       } else if (c.tail_pr_number) {
@@ -7015,9 +9912,11 @@
 
       let startBtn = '';
       let archiveBtn;
+      const pinTitle = c.pinned ? 'Unpin conversation' : 'Pin conversation';
+      const pinBtn = '<button class="conv-pin-btn' + (c.pinned ? ' is-unpin' : '') + '" data-role="pin" title="' + pinTitle + '" aria-label="' + pinTitle + '"><span class="conv-pin-glyph">&#128204;</span></button>';
       if (isBacklogRow) {
         const _issueAttr = escapeAttr(c.issue_number || '');
-        const _titleAttr = escapeAttr(c.display_name || c.first_message || '');
+        const _titleAttr = escapeAttr(c.display_name || c.ai_title || c.first_message || '');
         // Issue rows carry their concrete repo so the spawn handler can target
         // the right folder without relying on server state.
         const _spawnCwdAttr = escapeAttr(c.spawn_cwd || c.folder_path || '');
@@ -7060,8 +9959,6 @@
         ? '<span class="conv-wt-badge" title="Worktree: wt-' + escapeAttr(c.worktree_label) + '">wt-' + escapeHtml(c.worktree_label) + '</span>'
         : '';
 
-
-
       // Pin indicator — shown when the row's repo bucket has been
       // overridden by the user. Click unpins via /api/repo/pin.
       const pinnedHtml = c.pinned_repo
@@ -7075,7 +9972,9 @@
       // so the rename flow that reads the title's textContent doesn't
       // scoop the badge text into the edit box; the snippet previews why
       // the row matched.
-      // Differentiate lexical hits: "history" (blue) for lexical-only.
+      // Differentiate semantic vs lexical hits: "semantic history" badge
+      // (purple) appears when this row matched via the vector path (vec or
+      // fused). "history" (blue) for lexical-only.
       const _historyIsSemantic = c._historySource === 'vec' || c._historySource === 'fused';
       const historyBadgeHtml = c._historyMatch
         ? '<span class="conv-history-badge' + (_historyIsSemantic ? ' is-semantic' : '') + '" title="Matched in conversation history' + (_historyIsSemantic ? ' (semantic)' : '') + '">' + (_historyIsSemantic ? 'semantic history' : 'history') + '</span>'
@@ -7086,7 +9985,7 @@
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
-      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
+      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned ? ' is-pinned' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + ((c.backlog_type === 'github' || isGithubPrRow) ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
@@ -7105,7 +10004,7 @@
             // states (CSS uses `position: absolute` for one of them).
             + '<span class="conv-row-end">'
             +   '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
-            +   '<span class="conv-row-actions">' + mergeBtn + startBtn + archiveBtn + '</span>'
+            +   '<span class="conv-row-actions">' + mergeBtn + startBtn + pinBtn + archiveBtn + '</span>'
             + '</span>'
           + '</div>'
         + '</div>'
@@ -7131,17 +10030,21 @@
       if (!_hasFolderChips) return 'all';
       try {
         const value = localStorage.getItem('ccc-inprogress-window');
-        return (value === '1d' || value === '7d' || value === 'all') ? value : '1d';
-      } catch (_) {
-        return '1d';
-      }
+        if (value === '1d' || value === '7d' || value === 'all') return value;
+      } catch (_) {}
+      // Fallback on first load (no user preference saved):
+      // Check if any sessions exist within the last 7 days.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const cutoff7d = nowSec - (7 * 24 * 3600);
+      const has7dConvs = _sessionConvs.some(c => (c.modified || 0) >= cutoff7d);
+      return has7dConvs ? '7d' : 'all';
     })();
     const _ipWindowDays = _ipWindow === '7d' ? 7 : (_ipWindow === '1d' ? 1 : null);
     const _ipWindowCutoff = _ipWindowDays
       ? Math.floor(Date.now() / 1000) - (_ipWindowDays * 24 * 3600)
       : null;
     const _visibleSessionConvs = _hasFolderChips
-      ? (_ipWindowCutoff ? _sessionConvs.filter(c => (c.modified || 0) >= _ipWindowCutoff) : _sessionConvs)
+      ? (_ipWindowCutoff ? _sessionConvs.filter(c => c.pinned || (c.modified || 0) >= _ipWindowCutoff) : _sessionConvs)
       : _sessionConvs;
     // User-controlled grouping preference for the In Progress section.
     // 'project' (default): group by folder. 'time': flat chrono
@@ -7154,6 +10057,13 @@
       catch (_) { return 'project'; }
     })();
     const _shouldGroupByFolder = _hasFolderChips && _ipGrouping === 'project';
+    const _pinRankValue = (c) => {
+      const rank = Number(c && c.pin_rank);
+      return Number.isFinite(rank) ? rank : 0;
+    };
+    const _minPinnedRank = (cards) => (cards || []).reduce((best, c) => (
+      c && c.pinned ? Math.min(best, _pinRankValue(c)) : best
+    ), Infinity);
     const _flatRowsWithSeparators = (cards, opts = {}) => {
       // Only render the FIRST gap separator. The list naturally fans out
       // from "things from the last few hours" → "older" — that one
@@ -7176,6 +10086,42 @@
           }
         }
         return separator + _renderRow(c, opts);
+      }).join('');
+    };
+    // Same gap-separator behavior as _flatRowsWithSeparators, but the
+    // input is a mixed list of session cards and pre-built group-chat
+    // items. Each item carries (mtime, html, pinRank) so the sort
+    // stays pure on mtime regardless of item type.
+    const _flatItemsWithSeparators = (sessionCards, gcItems, opts = {}) => {
+      const items = [];
+      for (const c of sessionCards) {
+        items.push({
+          pinRank: c.pinned ? _pinRankValue(c) : Infinity,
+          mtime: c.modified || 0,
+          html: _renderRow(c, opts),
+        });
+      }
+      for (const gc of (gcItems || [])) items.push(gc);
+      items.sort((a, b) => {
+        if (a.pinRank !== b.pinRank) return a.pinRank - b.pinRank;
+        return (b.mtime || 0) - (a.mtime || 0);
+      });
+      let _gapShown = false;
+      return items.map((it, i, arr) => {
+        let separator = '';
+        if (i > 0 && !_gapShown) {
+          const newer = (arr[i - 1] && arr[i - 1].mtime) || 0;
+          const older = it.mtime || 0;
+          if (newer && older && (newer - older) >= GAP_SEPARATOR_S) {
+            separator = '<div class="conv-gap-separator">'
+              + '<span class="conv-gap-line"></span>'
+              + '<span class="conv-gap-label">' + escapeHtml(_gapLabel(newer, older)) + '</span>'
+              + '<span class="conv-gap-line"></span>'
+              + '</div>';
+            _gapShown = true;
+          }
+        }
+        return separator + it.html;
       }).join('');
     };
     const _folderGroupStorageKey = (section, key) =>
@@ -7221,7 +10167,183 @@
       return visibleCards.map(c => _renderRow(c, opts)).join('')
         + _ghIssueShowMoreHtml(key, hiddenCount, expanded);
     };
+    const _idSearchRowsHtml = _idSearchConvs.length
+      ? _idSearchConvs.map(c => _renderRow(c)).join('')
+      : '';
 
+    // Group-chat ITEMS — each chat becomes one sortable item with its
+    // own mtime, so the In Progress list can interleave chats with
+    // session rows (or folder groups) by recency instead of always
+    // pinning chats to the top.
+    //
+    // Active rows render normally; closed rows are ghosted with a
+    // "closed" pill and stay visible until the user hits the per-row
+    // Archive button. Each row carries data-role="ingroupchat-row"
+    // (+ child data-roles) so the click / drag / archive handlers
+    // wired further down still find them regardless of where the rows
+    // ended up in the DOM.
+    const _gcItems = (_gcActiveChats || []).map(chat => {
+        const isClosed = chat.status === 'closed';
+        const isPaused = chat.status === 'paused' || !!chat.paused;
+        const chatId = chat.uuid || chat.id || '';
+        const topicLabel = chat.topic ? escapeHtml(chat.topic.slice(0, 80)) : '(untitled)';
+        const partSids = chat.session_ids || [];
+        const nameMap = chat.name_map || {};
+        const partCount = partSids.length;
+        const partLabel = partCount
+          ? '<span class="conv-ingroupchat-partcount" title="' + partCount + ' participant' + (partCount === 1 ? '' : 's') + '">'
+              + partCount + '</span>'
+          : '';
+        const closedPill = isClosed
+          ? '<span class="conv-ingroupchat-status-pill" title="Coordination ended">closed</span>'
+          : '';
+        const pausedPill = isPaused
+          ? '<span class="conv-ingroupchat-status-pill is-paused" title="Orchestration disabled — no nudges, no token use">disabled</span>'
+          : '';
+        // Indented participant list under the chat row. Click to jump
+        // to that session in the conv pane (selectConversation handles
+        // the GC-reader teardown so it works whether the reader is open
+        // or not). The short 8-char hash is shown alongside each name so
+        // the user can map the "— 25ea49ae 👋" markers in the chat
+        // messages back to a participant in this list.
+        const partMeta = chat.participant_meta || {};
+        // Hashes (8-char) we'd be waiting on if a nudge fired right
+        // now — used to flag the participants whose response is most
+        // expected.
+        const waitingSet = new Set((chat.waiting_on_hashes || []).map(h => String(h).toLowerCase()));
+        const partListHtml = partSids.map(sid => {
+          const display = nameMap[sid] || sid;
+          const trimmed = display.length > 60 ? display.slice(0, 57) + '…' : display;
+          const shortHash = String(sid).slice(0, 8);
+          const m = partMeta[sid] || {};
+          // "Last activity" chip — uses session transcript mtime so
+          // it tracks what the main conversation list shows.
+          // last_activity from the API is unix SECONDS (file mtime),
+          // but timeAgo expects MILLISECONDS — multiply.
+          const lastActChip = m.last_activity
+            ? '<span class="conv-ingroupchat-participant-when" title="Last activity in this session">'
+                + escapeHtml(timeAgo(m.last_activity * 1000))
+              + '</span>'
+            : '';
+          // WIP chip — same yellow look as the main list. The label
+          // prefers the active tool name, falls back to "WIP".
+          const wipChip = m.wip
+            ? '<span class="conv-signal activity-working" title="' + escapeHtml(m.pending_tool || 'Agent is working') + '">'
+                + escapeHtml(m.pending_tool || 'WIP')
+              + '</span>'
+            : '';
+          // "Waiting" chip — flags the participant the watcher would
+          // ping next. Suppressed for closed chats (no nudge happens).
+          const waitingChip = (!isClosed && waitingSet.has(shortHash.toLowerCase()))
+            ? '<span class="conv-ingroupchat-waiting-chip" title="The next nudge would target this participant">waiting</span>'
+            : '';
+          return '<div class="conv-ingroupchat-participant" data-role="ingroupchat-participant"'
+            + ' data-session-id="' + escapeHtml(sid) + '"'
+            + ' title="' + escapeHtml(display) + ' — click to open this session">'
+            +   '<span class="conv-ingroupchat-participant-bullet">↳</span>'
+            +   '<span class="conv-ingroupchat-participant-name">' + escapeHtml(trimmed) + '</span>'
+            +   wipChip
+            +   waitingChip
+            +   lastActChip
+            +   '<span class="conv-ingroupchat-participant-hash" title="Session ID prefix used in chat message headers">' + escapeHtml(shortHash) + '</span>'
+            +   '<button type="button" class="conv-ingroupchat-participant-remove"'
+            +     ' data-role="ingroupchat-participant-remove"'
+            +     ' data-gc-id="' + escapeHtml(chatId) + '"'
+            +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+            +     ' data-session-id="' + escapeHtml(sid) + '"'
+            +     ' title="Remove this session from the chat">×</button>'
+            + '</div>';
+        }).join('');
+        // Chat-row meta line: file mtime + who-wrote-last + waiting-on
+        // hint. Lets the user see at a glance whether the chat is
+        // moving and whose turn the orchestrator considers it.
+        // last_mtime from the API is unix SECONDS — convert to ms.
+        const chatAge = chat.last_mtime
+          ? '<span class="conv-ingroupchat-row-when" title="Last update to chat file">'
+              + escapeHtml(timeAgo(chat.last_mtime * 1000))
+            + '</span>'
+          : '';
+        let chatWaitingHint = '';
+        if (!isClosed) {
+          const waitingShortHashes = (chat.waiting_on_hashes || [])
+            .map(h => String(h).slice(0, 8).toLowerCase());
+          if (waitingShortHashes.length) {
+            const waitingNames = waitingShortHashes
+              .map(h => {
+                const fullSid = partSids.find(s => s.toLowerCase().startsWith(h));
+                return fullSid ? (nameMap[fullSid] || h) : h;
+              })
+              .map(n => n.length > 24 ? n.slice(0, 23) + '…' : n);
+            const lastAuthor = chat.last_author_hash;
+            const lastAuthorIsHuman = chat.last_author_is_human;
+            let summary;
+            if (lastAuthorIsHuman) {
+              summary = `Human → waiting on ${waitingNames.join(', ')}`;
+            } else if (lastAuthor) {
+              const lastFullSid = partSids.find(s => s.toLowerCase().startsWith(lastAuthor));
+              const lastName = lastFullSid ? (nameMap[lastFullSid] || lastAuthor) : lastAuthor;
+              const lastTrim = lastName.length > 18 ? lastName.slice(0, 17) + '…' : lastName;
+              summary = `${lastTrim} → waiting on ${waitingNames.join(', ')}`;
+            }
+            if (summary) {
+              chatWaitingHint = '<div class="conv-ingroupchat-row-waiting" title="Last writer → who the orchestrator will nudge next">'
+                + escapeHtml(summary)
+                + '</div>';
+            }
+          }
+        }
+        const isActiveChat = _gcReaderPath && (_gcReaderPath === chat.path || _gcReaderPath === chat.path_tilde);
+        const isActiveChatById = _gcReaderId && chatId && _gcReaderId === chatId;
+        const _chatHtml = '<div class="conv-ingroupchat-chat' + (isClosed ? ' conv-ingroupchat-chat-closed' : '') + '">'
+          + '<div class="conv-ingroupchat-row' + (isClosed ? ' conv-ingroupchat-row-closed' : '') + (isPaused ? ' conv-ingroupchat-row-paused' : '') + (isActiveChat || isActiveChatById ? ' active' : '') + '"'
+          +   ' data-role="ingroupchat-row"'
+          +   ' data-gc-id="' + escapeHtml(chatId) + '"'
+          +   ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+          +   ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
+          +   ' data-gc-mode="' + escapeHtml(chat.mode || 'topic') + '"'
+          +   ' title="Click to open group chat reader">'
+          +   '<span class="conv-ingroupchat-row-icon">💬</span>'
+          +   '<span class="conv-ingroupchat-row-topic">' + topicLabel + '</span>'
+          +   closedPill
+          +   pausedPill
+          +   partLabel
+          +   chatAge
+          +   '<button type="button" class="conv-ingroupchat-pause-btn' + (isPaused ? ' is-paused' : '') + '"'
+          +     ' data-role="ingroupchat-pause"'
+          +     ' data-gc-id="' + escapeHtml(chatId) + '"'
+          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+          +     ' data-gc-paused="' + (isPaused ? '1' : '0') + '"'
+          +     ' title="' + (isPaused
+                  ? 'Enable orchestration — resume nudging participants'
+                  : 'Disable orchestration — stop nudges and token use for this chat') + '">'
+          +     (isPaused ? '▶' : '⏸') + '</button>'
+          +   '<button type="button" class="conv-ingroupchat-rename-btn"'
+          +     ' data-role="ingroupchat-rename"'
+          +     ' data-gc-id="' + escapeHtml(chatId) + '"'
+          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+          +     ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
+          +     ' title="Rename this group chat">✏️</button>'
+          +   '<button type="button" class="conv-ingroupchat-clear-btn"'
+          +     ' data-role="ingroupchat-clear"'
+          +     ' data-gc-id="' + escapeHtml(chatId) + '"'
+          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+          +     ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
+          +     ' title="Clear chat content (header + participants kept; participants re-engaged)">🧹</button>'
+          +   '<button type="button" class="conv-ingroupchat-archive-btn"'
+          +     ' data-role="ingroupchat-archive"'
+          +     ' data-gc-id="' + escapeHtml(chatId) + '"'
+          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+          +     ' title="Archive this group chat">&#128229;</button>'
+          + '</div>'
+          + chatWaitingHint
+          + (partListHtml ? '<div class="conv-ingroupchat-participants">' + partListHtml + '</div>' : '')
+          + '</div>';
+        return {
+          mtime: chat.last_mtime || 0,
+          pinRank: Infinity,  // group chats aren't pinnable today
+          html: _chatHtml,
+        };
+      });
     let _activeRowsHtml;
     if (_shouldGroupByFolder) {
       // Group cards by folder; preserve folder order by the most
@@ -7242,6 +10364,9 @@
         _prevFolderOrder = JSON.parse(localStorage.getItem(_FOLDER_ORDER_KEY) || '{}');
       } catch (_) { /* corrupt or missing — start fresh */ }
       const _folderEntries = Array.from(_byFolder.entries()).sort((a, b) => {
+        const aPinned = _minPinnedRank(a[1]);
+        const bPinned = _minPinnedRank(b[1]);
+        if (aPinned !== bPinned) return aPinned - bPinned;
         const aMax = a[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
         const bMax = b[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
         if (Math.abs(aMax - bMax) < _FOLDER_ORDER_HYSTERESIS_S) {
@@ -7262,9 +10387,6 @@
         localStorage.setItem(_FOLDER_ORDER_KEY, JSON.stringify(_newOrder));
       } catch (_) { /* localStorage quota / disabled — degrade silently */ }
       const _renderFolderEntry = ([folder, cards]) => {
-        if (cards.length === 1) {
-          return _renderRow(cards[0], { folderChipBeforeTitle: true });
-        }
         const hue = (cards[0].folder_chip_hue | 0);
         const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
         const dropPath = cards[0].folder_path || '';
@@ -7277,28 +10399,47 @@
           + cards.map(c => _renderRow(c, { suppressFolderChip: true })).join('')
           + '</div>';
       };
-      // Named groups (2+ sessions) first, single-session orphans below.
-      const _namedGroups = _folderEntries.filter(([, cards]) => cards.length > 1);
-      const _orphanEntries = _folderEntries.filter(([, cards]) => cards.length === 1);
-      const _groupHtml = _namedGroups.map(_renderFolderEntry).join('')
-        + (_orphanEntries.length ? _orphanEntries.map(_renderFolderEntry).join('') : '');
+      // Each folder group becomes one mtime-stamped item; group chats
+      // become their own items at the same level. Sorted together so a
+      // recent chat can outrank a stale folder, and a recent folder can
+      // outrank a stale chat. Pinned items still float to the top.
+      const _folderItems = _folderEntries.map(([folder, cards]) => ({
+        pinRank: _minPinnedRank(cards),
+        mtime: cards.reduce((m, c) => Math.max(m, c.modified || 0), 0),
+        html: _renderFolderEntry([folder, cards]),
+      }));
+      const _mixed = _folderItems.concat(_gcItems);
+      _mixed.sort((a, b) => {
+        if (a.pinRank !== b.pinRank) return a.pinRank - b.pinRank;
+        return (b.mtime || 0) - (a.mtime || 0);
+      });
       _activeRowsHtml = _isSpecificFolderFilter
-        ? _flatRowsWithSeparators(_visibleSessionConvs, { suppressFolderChip: true })
-        : _groupHtml;
+        ? _flatItemsWithSeparators(_visibleSessionConvs, _gcItems, { suppressFolderChip: true })
+        : _mixed.map(it => it.html).join('');
     } else {
-      _activeRowsHtml = _flatRowsWithSeparators(_visibleSessionConvs, { suppressFolderChip: _isSpecificFolderFilter });
+      _activeRowsHtml = _flatItemsWithSeparators(_visibleSessionConvs, _gcItems, { suppressFolderChip: _isSpecificFolderFilter });
     }
     if (!_visibleSessionConvs.length) {
-      const _emptyWindowLabel = _ipWindow === 'all' ? '' : (' in the last ' + (_ipWindow === '7d' ? '7 days' : 'day'));
-      _activeRowsHtml = '<div class="archive-empty-state">No in-progress sessions' + _emptyWindowLabel + '.</div>';
+      // Group chats are already in _activeRowsHtml (interleaved by
+      // _flatItemsWithSeparators / the by-folder merge), so when chats
+      // exist we leave the HTML alone. Only when both sessions AND
+      // chats are empty do we render the explicit empty state.
+      const _hasGroupChatRows = (_gcItems || []).length > 0;
+      if (!_hasGroupChatRows) {
+        const _emptyWindowLabel = _ipWindow === 'all' ? '' : (' in the last ' + (_ipWindow === '7d' ? '7 days' : 'day'));
+        _activeRowsHtml = '<div class="archive-empty-state">No in-progress sessions' + _emptyWindowLabel + '.</div>';
+      }
     }
     // In progress section: every row that's not a backlog card or archived.
     // Mirrors the kanban "In progress" column (key: 'working' under the
     // hood — relabel only) so the two surfaces use the same vocabulary.
-    // Hidden entirely when there are no active sessions; collapse state
-    // persists in localStorage.
+    // Hidden entirely when there are no active sessions AND no active
+    // group chats; collapse state persists in localStorage. Group chats
+    // interleave with session rows (or folder groups) by mtime — see
+    // the _gcItems build and the _activeRowsHtml merge above.
     let _inProgressHtml = '';
-    if (_sessionConvs.length > 0) {
+    const _gcCountForSection = (_gcActiveChats || []).length;
+    if (_sessionConvs.length > 0 || _gcCountForSection > 0) {
       const _ipCollapsed = localStorage.getItem('ccc-inprogress-collapsed') === '1';
       const _ipArrow = _ipCollapsed ? '▸' : '▾';
       // 1d / 7d / All and by-project / by-time toggles, only when there are
@@ -7324,12 +10465,17 @@
       const _ipTools = (_ipWindowToggle || _ipGroupingToggle)
         ? '<span class="conv-inprogress-tools">' + _ipWindowToggle + _ipGroupingToggle + '</span>'
         : '';
+      // Count display: sessions in window + active group chats. Title
+      // attribute spells both out so a hover explains the headline number.
+      const _ipCountTitle = _sessionConvs.length + ' total in-progress sessions'
+        + (_gcCountForSection ? ' · ' + _gcCountForSection + ' group chat' + (_gcCountForSection === 1 ? '' : 's') : '');
+      const _ipCountValue = _visibleSessionConvs.length + (_gcCountForSection || 0);
       _inProgressHtml =
         '<div class="conv-inprogress-section' + (_ipCollapsed ? ' collapsed' : '') + '" data-role="inprogress-section">'
         + '<button type="button" class="conv-inprogress-header" data-role="inprogress-toggle" aria-expanded="' + (!_ipCollapsed) + '">'
         +   '<span class="conv-inprogress-arrow">' + _ipArrow + '</span>'
         +   '<span class="conv-inprogress-label">In progress</span>'
-        +   '<span class="conv-inprogress-count" title="' + _sessionConvs.length + ' total in-progress sessions">' + _visibleSessionConvs.length + '</span>'
+        +   '<span class="conv-inprogress-count" title="' + _ipCountTitle + '">' + _ipCountValue + '</span>'
         +   _ipTools
         + '</button>'
         + '<div class="conv-inprogress-list">' + _activeRowsHtml + '</div>'
@@ -7385,6 +10531,9 @@
           _prevGhOrder = JSON.parse(localStorage.getItem(_GH_ORDER_KEY) || '{}');
         } catch (_) { /* corrupt — start fresh */ }
         const _folderEntries = Array.from(_byFolder.entries()).sort((a, b) => {
+          const aPinned = _minPinnedRank(a[1]);
+          const bPinned = _minPinnedRank(b[1]);
+          if (aPinned !== bPinned) return aPinned - bPinned;
           const aMax = a[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
           const bMax = b[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
           if (Math.abs(aMax - bMax) < _FOLDER_ORDER_HYSTERESIS_S) {
@@ -7432,11 +10581,12 @@
         : '';
       const _ghRefresh = '<span class="conv-ghissues-refresh' + (ghIssuesRefreshing ? ' is-spinning' : '') + '" data-role="ghissues-refresh" role="button" tabindex="0" title="Refresh GitHub issues" aria-label="Refresh GitHub issues">&#8635;</span>';
       const _ghTools = '<span class="conv-ghissues-tools">' + _ghRefresh + _ghGroupingToggle + '</span>';
+      const sectionTitle = getViewGhPref() === 'hide' ? 'Backlog' : 'GH Issues';
       _ghIssuesHtml =
         '<div class="conv-ghissues-section' + (_ghCollapsed ? ' collapsed' : '') + '" data-role="ghissues-section">'
         + '<button type="button" class="conv-ghissues-header" data-role="ghissues-toggle" aria-expanded="' + (!_ghCollapsed) + '">'
         +   '<span class="conv-ghissues-arrow">' + _ghArrow + '</span>'
-        +   '<span class="conv-ghissues-label">GH Issues</span>'
+        +   '<span class="conv-ghissues-label">' + sectionTitle + '</span>'
         +   _ghTools
         +   '<span class="conv-ghissues-count">' + _ghIssueConvs.length + '</span>'
         + '</button>'
@@ -7451,226 +10601,236 @@
     // Archived group chats are interleaved into this section, sorted by
     // mtime alongside session rows. They render as a slim custom row with
     // a 💬 prefix so users can tell them apart from session rows.
+    //
+    // Grouping: a by-project / by-time toggle in the header mirrors the
+    // In Progress and GH Issues sections. When by-project is active (only
+    // possible when there are folder chips and we're not already filtered
+    // to a single repo), session rows are bucketed under collapsible
+    // folder headers and group-chat rows fall through to a flat tail
+    // below. A small "expand/collapse all" control lets the user blast
+    // through everything at once — useful because archived can get long.
     let _archivedHtml = '';
-    // Build a merged list of (mtime, html) tuples so session rows and
-    // archived group-chat rows appear together in chronological order.
-    const _archivedItems = [];
-    for (const c of _archivedConvs) {
-      _archivedItems.push({
-        mtime: c.modified || c.last_interacted || 0,
-        html: _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter }),
-      });
-    }
-    if (Array.isArray(_archivedGroupChats) && _archivedGroupChats.length) {
-      for (const gc of _archivedGroupChats) {
-        const topic = gc.topic ? escapeHtml(gc.topic.slice(0, 80)) : '(untitled)';
-        const ago = (gc.archived_at || gc.closed_at || gc.last_mtime) || 0;
-        const partCount = (gc.session_ids || []).length;
-        const partLabel = partCount
-          ? '<span class="archive-row-gc-partcount">' + partCount + '</span>'
-          : '';
-        const html =
-          '<div class="conv-item conv-item-archived-gc" data-role="archived-gc-row"'
-          + ' data-gc-path="' + escapeHtml(gc.path_tilde) + '"'
-          + ' data-gc-topic="' + escapeHtml(gc.topic || '') + '"'
-          + ' data-gc-mode="' + escapeHtml(gc.mode || 'topic') + '"'
-          + ' title="Archived group chat — click to open reader">'
-          +   '<span class="archive-row-gc-icon" title="Group chat">💬</span>'
-          +   '<span class="archive-row-gc-topic">' + topic + '</span>'
-          +   partLabel
-          + '</div>';
-        _archivedItems.push({ mtime: ago, html });
+    const _arcHasFolderChips = _archivedConvs.some(c => c.folder_label_chip);
+    const _arcGrouping = (() => {
+      try { return localStorage.getItem('ccc-archived-grouping') || 'time'; }
+      catch (_) { return 'time'; }
+    })();
+    const _arcShouldGroupByFolder = _arcHasFolderChips
+      && _arcGrouping === 'project'
+      && !_isSpecificFolderFilter;
+
+    const _renderArchivedGcRow = (gc) => {
+      const gcId = gc.uuid || gc.id || '';
+      const topic = gc.topic ? escapeHtml(gc.topic.slice(0, 80)) : '(untitled)';
+      const partCount = (gc.session_ids || []).length;
+      const partLabel = partCount
+        ? '<span class="archive-row-gc-partcount">' + partCount + '</span>'
+        : '';
+      return '<div class="conv-item conv-item-archived-gc" data-role="archived-gc-row"'
+        + ' data-gc-id="' + escapeHtml(gcId) + '"'
+        + ' data-gc-path="' + escapeHtml(gc.path_tilde) + '"'
+        + ' data-gc-topic="' + escapeHtml(gc.topic || '') + '"'
+        + ' data-gc-mode="' + escapeHtml(gc.mode || 'topic') + '"'
+        + ' title="Archived group chat — click to open reader">'
+        +   '<span class="archive-row-gc-icon" title="Group chat">💬</span>'
+        +   '<span class="archive-row-gc-topic">' + topic + '</span>'
+        +   partLabel
+        + '</div>';
+    };
+
+    let _arcRows = '';
+    let _arcCount = 0;
+    let _arcFolderCollapseKeys = [];
+
+    if (_arcShouldGroupByFolder) {
+      // Bucket session rows by folder; chats stay flat below the folder
+      // groups (they're not project-scoped). Sort folders by their
+      // most-recent archived-row mtime, descending.
+      const _byFolder = new Map();
+      for (const c of _archivedConvs) {
+        const key = c.folder_label_chip || c.folder_path || '(unknown)';
+        if (!_byFolder.has(key)) _byFolder.set(key, []);
+        _byFolder.get(key).push(c);
       }
+      const _folderEntries = Array.from(_byFolder.entries()).sort((a, b) => {
+        const aMax = a[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        const bMax = b[1].reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        return bMax - aMax;
+      });
+      const _folderRowsHtml = _folderEntries.map(([folder, cards]) => {
+        const hue = (cards[0].folder_chip_hue | 0);
+        const orphan = cards[0].folder_chip_orphan ? ' is-orphan' : '';
+        const collapseKey = cards[0].folder_path || folder;
+        _arcFolderCollapseKeys.push(_folderGroupStorageKey('archived', collapseKey));
+        const collapsed = _isFolderGroupCollapsed('archived', collapseKey);
+        return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
+          + _folderGroupHeaderHtml('archived', folder, cards.length, hue, orphan, collapseKey)
+          + cards.map(c => _renderRow(c, { suppressFolderChip: true })).join('')
+          + '</div>';
+      }).join('');
+      const _gcRowsFlat = (Array.isArray(_archivedGroupChats) && _archivedGroupChats.length)
+        ? _archivedGroupChats
+            .slice()
+            .sort((a, b) => ((b.archived_at || b.closed_at || b.last_mtime || 0) - (a.archived_at || a.closed_at || a.last_mtime || 0)))
+            .map(_renderArchivedGcRow)
+            .join('')
+        : '';
+      _arcRows = _folderRowsHtml + _gcRowsFlat;
+      _arcCount = _archivedConvs.length + (Array.isArray(_archivedGroupChats) ? _archivedGroupChats.length : 0);
+    } else {
+      // Flat chronological list — original behavior.
+      const _archivedItems = [];
+      for (const c of _archivedConvs) {
+        _archivedItems.push({
+          pinRank: c.pinned ? _pinRankValue(c) : Infinity,
+          mtime: c.modified || c.last_interacted || 0,
+          html: _renderRow(c, { suppressFolderChip: _isSpecificFolderFilter }),
+        });
+      }
+      if (Array.isArray(_archivedGroupChats) && _archivedGroupChats.length) {
+        for (const gc of _archivedGroupChats) {
+          const ago = (gc.archived_at || gc.closed_at || gc.last_mtime) || 0;
+          _archivedItems.push({ pinRank: Infinity, mtime: ago, html: _renderArchivedGcRow(gc) });
+        }
+      }
+      _archivedItems.sort((a, b) => {
+        if (a.pinRank !== b.pinRank) return a.pinRank - b.pinRank;
+        return (b.mtime || 0) - (a.mtime || 0);
+      });
+      _arcRows = _archivedItems.map(it => it.html).join('');
+      _arcCount = _archivedItems.length;
     }
-    if (_archivedItems.length > 0) {
-      _archivedItems.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+
+    if (_arcCount > 0) {
       const _arcCollapsed = localStorage.getItem('ccc-archived-collapsed') !== '0';
       const _arcArrow = _arcCollapsed ? '▸' : '▾';
-      const _arcRows = _archivedItems.map(it => it.html).join('');
+      const _arcGroupingToggle = _arcHasFolderChips && !_isSpecificFolderFilter
+        ? '<span class="conv-grouping-toggle" data-role="archived-grouping-toggle">'
+            + '<span class="grouping-opt' + (_arcGrouping !== 'time' ? ' is-active' : '') + '" data-grouping="project">by project</span>'
+            + '<span class="grouping-opt' + (_arcGrouping === 'time' ? ' is-active' : '') + '" data-grouping="time">by time</span>'
+          + '</span>'
+        : '';
+      // Expand / collapse all only meaningful when by-project rendered
+      // multiple folder groups. Visible state ("Expand all" vs "Collapse
+      // all") tracks the majority — if any group is collapsed, show
+      // "Expand all"; otherwise "Collapse all".
+      const _arcExpandAllToggle = (_arcShouldGroupByFolder && _arcFolderCollapseKeys.length > 1)
+        ? (() => {
+            let anyCollapsed = false;
+            try {
+              for (const k of _arcFolderCollapseKeys) {
+                if (localStorage.getItem(k) === '1') { anyCollapsed = true; break; }
+              }
+            } catch (_) {}
+            const verb = anyCollapsed ? 'Expand all' : 'Collapse all';
+            const dir = anyCollapsed ? 'expand' : 'collapse';
+            return '<span class="conv-archived-expandall" data-role="archived-expand-all" data-dir="' + dir + '" role="button" tabindex="0" title="' + verb + ' project groups">' + verb + '</span>';
+          })()
+        : '';
+      const _arcTools = (_arcGroupingToggle || _arcExpandAllToggle)
+        ? '<span class="conv-archived-tools">' + _arcGroupingToggle + _arcExpandAllToggle + '</span>'
+        : '';
       _archivedHtml =
         '<div class="conv-archived-section' + (_arcCollapsed ? ' collapsed' : '') + '" data-role="archived-section">'
         + '<button type="button" class="conv-archived-header" data-role="archived-toggle" aria-expanded="' + (!_arcCollapsed) + '">'
         +   '<span class="conv-archived-arrow">' + _arcArrow + '</span>'
         +   '<span class="conv-archived-label">Archived</span>'
-        +   '<span class="conv-archived-count">' + _archivedItems.length + '</span>'
+        +   '<span class="conv-archived-count">' + _arcCount + '</span>'
+        +   _arcTools
         + '</button>'
         + '<div class="conv-archived-list">' + _arcRows + '</div>'
         + '</div>';
     }
-    // In Group Chat section: shown whenever any coordination is active or
-    // recently closed (unarchived). Active rows render normally; closed
-    // rows are ghosted with a "closed" pill and stay visible until the
-    // user hits the per-row Archive button. Rows are per-chat (one per
-    // group chat) — clicking a row opens the reader for that chat. Each
-    // row also gets an Archive button that POSTs to /api/group-chats/archive.
-    // Always render the section header — even when there are no chats —
-    // so the user has a persistent affordance for creating a new empty
-    // chat (the "+" button on the header). The rows only render when
-    // there's at least one chat to show.
-    let _inGroupChatHtml = '';
-    {
-      const _gcRows = (_gcActiveChats || []).map(chat => {
-        const isClosed = chat.status === 'closed';
-        const topicLabel = chat.topic ? escapeHtml(chat.topic.slice(0, 80)) : '(untitled)';
-        const partSids = chat.session_ids || [];
-        const nameMap = chat.name_map || {};
-        const partCount = partSids.length;
-        const partLabel = partCount
-          ? '<span class="conv-ingroupchat-partcount" title="' + partCount + ' participant' + (partCount === 1 ? '' : 's') + '">'
-              + partCount + '</span>'
-          : '';
-        const closedPill = isClosed
-          ? '<span class="conv-ingroupchat-status-pill" title="Coordination ended">closed</span>'
-          : '';
-        // Indented participant list under the chat row. Click to jump
-        // to that session in the conv pane (selectConversation handles
-        // the GC-reader teardown so it works whether the reader is open
-        // or not). The short 8-char hash is shown alongside each name so
-        // the user can map the "— 25ea49ae 👋" markers in the chat
-        // messages back to a participant in this list.
-        const partMeta = chat.participant_meta || {};
-        // Hashes (8-char) we'd be waiting on if a nudge fired right
-        // now — used to flag the participants whose response is most
-        // expected.
-        const waitingSet = new Set((chat.waiting_on_hashes || []).map(h => String(h).toLowerCase()));
-        const partListHtml = partSids.map(sid => {
-          const display = nameMap[sid] || sid;
-          const trimmed = display.length > 60 ? display.slice(0, 57) + '…' : display;
-          const shortHash = String(sid).slice(0, 8);
-          const m = partMeta[sid] || {};
-          // "Last activity" chip — uses session transcript mtime so
-          // it tracks what the main conversation list shows.
-          // last_activity from the API is unix SECONDS (file mtime),
-          // but timeAgo expects MILLISECONDS — multiply.
-          const lastActChip = m.last_activity
-            ? '<span class="conv-ingroupchat-participant-when" title="Last activity in this session">'
-                + escapeHtml(timeAgo(m.last_activity * 1000))
-              + '</span>'
-            : '';
-          // WIP chip — same yellow look as the main list. The label
-          // prefers the active tool name, falls back to "WIP".
-          const wipChip = m.wip
-            ? '<span class="conv-signal activity-working" title="' + escapeHtml(m.pending_tool || 'Agent is working') + '">'
-                + escapeHtml(m.pending_tool || 'WIP')
-              + '</span>'
-            : '';
-          // "Waiting" chip — flags the participant the watcher would
-          // ping next. Suppressed for closed chats (no nudge happens).
-          const waitingChip = (!isClosed && waitingSet.has(shortHash.toLowerCase()))
-            ? '<span class="conv-ingroupchat-waiting-chip" title="The next nudge would target this participant">waiting</span>'
-            : '';
-          return '<div class="conv-ingroupchat-participant" data-role="ingroupchat-participant"'
-            + ' data-session-id="' + escapeHtml(sid) + '"'
-            + ' title="' + escapeHtml(display) + ' — click to open this session">'
-            +   '<span class="conv-ingroupchat-participant-bullet">↳</span>'
-            +   '<span class="conv-ingroupchat-participant-name">' + escapeHtml(trimmed) + '</span>'
-            +   wipChip
-            +   waitingChip
-            +   lastActChip
-            +   '<span class="conv-ingroupchat-participant-hash" title="Session ID prefix used in chat message headers">' + escapeHtml(shortHash) + '</span>'
-            +   '<button type="button" class="conv-ingroupchat-participant-remove"'
-            +     ' data-role="ingroupchat-participant-remove"'
-            +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
-            +     ' data-session-id="' + escapeHtml(sid) + '"'
-            +     ' title="Remove this session from the chat">×</button>'
-            + '</div>';
-        }).join('');
-        // Chat-row meta line: file mtime + who-wrote-last + waiting-on
-        // hint. Lets the user see at a glance whether the chat is
-        // moving and whose turn the orchestrator considers it.
-        // last_mtime from the API is unix SECONDS — convert to ms.
-        const chatAge = chat.last_mtime
-          ? '<span class="conv-ingroupchat-row-when" title="Last update to chat file">'
-              + escapeHtml(timeAgo(chat.last_mtime * 1000))
-            + '</span>'
-          : '';
-        let chatWaitingHint = '';
-        if (!isClosed) {
-          const waitingShortHashes = (chat.waiting_on_hashes || [])
-            .map(h => String(h).slice(0, 8).toLowerCase());
-          if (waitingShortHashes.length) {
-            const waitingNames = waitingShortHashes
-              .map(h => {
-                const fullSid = partSids.find(s => s.toLowerCase().startsWith(h));
-                return fullSid ? (nameMap[fullSid] || h) : h;
-              })
-              .map(n => n.length > 24 ? n.slice(0, 23) + '…' : n);
-            const lastAuthor = chat.last_author_hash;
-            const lastAuthorIsHuman = chat.last_author_is_human;
-            let summary;
-            if (lastAuthorIsHuman) {
-              summary = `Human → waiting on ${waitingNames.join(', ')}`;
-            } else if (lastAuthor) {
-              const lastFullSid = partSids.find(s => s.toLowerCase().startsWith(lastAuthor));
-              const lastName = lastFullSid ? (nameMap[lastFullSid] || lastAuthor) : lastAuthor;
-              const lastTrim = lastName.length > 18 ? lastName.slice(0, 17) + '…' : lastName;
-              summary = `${lastTrim} → waiting on ${waitingNames.join(', ')}`;
-            }
-            if (summary) {
-              chatWaitingHint = '<div class="conv-ingroupchat-row-waiting" title="Last writer → who the orchestrator will nudge next">'
-                + escapeHtml(summary)
-                + '</div>';
-            }
-          }
-        }
-        return '<div class="conv-ingroupchat-chat' + (isClosed ? ' conv-ingroupchat-chat-closed' : '') + '">'
-          + '<div class="conv-ingroupchat-row' + (isClosed ? ' conv-ingroupchat-row-closed' : '') + '"'
-          +   ' data-role="ingroupchat-row"'
-          +   ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
-          +   ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
-          +   ' data-gc-mode="' + escapeHtml(chat.mode || 'topic') + '"'
-          +   ' title="Click to open group chat reader">'
-          +   '<span class="conv-ingroupchat-row-icon">💬</span>'
-          +   '<span class="conv-ingroupchat-row-topic">' + topicLabel + '</span>'
-          +   closedPill
-          +   partLabel
-          +   chatAge
-          +   '<button type="button" class="conv-ingroupchat-rename-btn"'
-          +     ' data-role="ingroupchat-rename"'
-          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
-          +     ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
-          +     ' title="Rename this group chat">✏️</button>'
-          +   '<button type="button" class="conv-ingroupchat-clear-btn"'
-          +     ' data-role="ingroupchat-clear"'
-          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
-          +     ' data-gc-topic="' + escapeHtml(chat.topic || '') + '"'
-          +     ' title="Clear chat content (header + participants kept; participants re-engaged)">🧹</button>'
-          +   '<button type="button" class="conv-ingroupchat-archive-btn"'
-          +     ' data-role="ingroupchat-archive"'
-          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
-          +     ' title="Archive this group chat">📦</button>'
-          + '</div>'
-          + chatWaitingHint
-          + (partListHtml ? '<div class="conv-ingroupchat-participants">' + partListHtml + '</div>' : '')
-          + '</div>';
-      }).join('');
-      const _gcCount = (_gcActiveChats || []).length;
-      // Collapsed by default — most sessions don't have an active group
-      // chat, so the section just adds noise above the GH issues / Ready to
-      // merge / In progress sections that the user actually scans for.
-      // Persisted under `ccc-ingroupchat-collapsed`, mirroring the Archived
-      // section pattern. Default '1' (collapsed) when the key is absent.
-      const _igcCollapsed = localStorage.getItem('ccc-ingroupchat-collapsed') !== '0';
-      const _igcArrow = _igcCollapsed ? '▸' : '▾';
-      _inGroupChatHtml =
-        '<div class="conv-ingroupchat-section' + (_gcCount === 0 ? ' is-empty' : '') + (_igcCollapsed ? ' collapsed' : '') + '" data-role="ingroupchat-section">'
-        + '<div class="conv-ingroupchat-header" data-role="ingroupchat-toggle" aria-expanded="' + (!_igcCollapsed) + '">'
-        +   '<span class="conv-ingroupchat-arrow">' + _igcArrow + '</span>'
-        +   '<span class="conv-ingroupchat-icon">💬</span>'
-        +   '<span class="conv-ingroupchat-label">In Group Chat</span>'
-        +   (_gcCount ? '<span class="conv-ingroupchat-count">' + _gcCount + '</span>' : '')
-        +   '<button type="button" class="conv-ingroupchat-new-btn" data-role="ingroupchat-new" title="Create a new empty group chat — drag sessions in afterwards" aria-label="New group chat">+</button>'
-        + '</div>'
-        + (_gcCount ? '<div class="conv-ingroupchat-list">' + _gcRows + '</div>' : '')
-        + '</div>';
+    // Order: GH Issues (to start) → Ready to merge (action) → In
+    // progress (which now also contains the group-chat rows at the
+    // top) → Archived.
+    const _convListHtml = _idSearchRowsHtml + _ghIssuesHtml + _readyToMergeHtml + _inProgressHtml + _archivedHtml;
+    // Flicker guard. The 10s bulk-sessions poll and the 5s live-status tick both
+    // re-run this render constantly. The wholesale innerHTML reset below tears
+    // down and rebuilds every row, which the user sees as the whole list
+    // flickering (and it silently drops :hover, focus, in-flight CSS animations,
+    // and any already-painted lazy content). Between otherwise-identical renders
+    // the only thing that moves is the volatile time labels (relative stamp +
+    // group-chat "when" labels) ticking every few seconds — and because they're
+    // baked into row markup, each tick changed the full string and forced a
+    // rebuild. Compare a STRUCTURAL signature with those labels blanked: if it's
+    // unchanged, only the clocks moved, so patch just those spans in place (no
+    // teardown, no flicker) and bail. Any real change alters the structural sig
+    // and falls through to a normal rebuild.
+    const _structSig = _convListHtml.replace(_VOLATILE_TIME_RE, '$1$3');
+    if (_convListRenderSig === _structSig && $convList.childElementCount > 0) {
+      _patchVolatileTimes(_convListHtml);
+      return;
     }
-    // Order: In Group Chat (live) → GH Issues (to start) → Ready to merge
-    // (action) → In progress → Archived.
-    $convList.innerHTML = _inGroupChatHtml + _ghIssuesHtml + _readyToMergeHtml + _inProgressHtml + _archivedHtml;
+    _convListRenderSig = _structSig;
+    //
+    // FLIP-style reorder animation: capture each existing row's top
+    // BEFORE the innerHTML reset, then on the new DOM, translate
+    // each row from its old top to its new top with a CSS transition.
+    // Rows that didn't exist in the prior render just appear. Used
+    // to make a row moving to the top of its section after a fresh
+    // mtime feel like a deliberate hand-off instead of a flicker.
+    //
+    // Skip the snapshot entirely while the user is typing in an input
+    // or textarea — each getBoundingClientRect call forces a layout
+    // flush, and over hundreds of rows that visibly stalls keystrokes
+    // every refresh tick. The user is looking at the input, not the
+    // list, so missing the animation is the right trade.
+    const _flipBefore = new Map();
+    const _activeEl = document.activeElement;
+    const _userIsTyping = !!(_activeEl && (_activeEl.tagName === 'TEXTAREA'
+      || (_activeEl.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_activeEl.type || 'text'))));
+    if ($convList && !document.hidden && !_userIsTyping) {
+      for (const row of $convList.querySelectorAll('[data-id]')) {
+        const id = row.getAttribute('data-id');
+        if (id) _flipBefore.set(id, row.getBoundingClientRect().top);
+      }
+    }
+    $convList.innerHTML = _convListHtml;
+    if (_flipBefore.size > 0 && !document.hidden) {
+      const _flipNewRows = $convList.querySelectorAll('[data-id]');
+      const _flipMoves = [];
+      for (const row of _flipNewRows) {
+        const id = row.getAttribute('data-id');
+        if (!id) continue;
+        const oldTop = _flipBefore.get(id);
+        if (oldTop === undefined) continue;
+        const newTop = row.getBoundingClientRect().top;
+        const delta = oldTop - newTop;
+        if (Math.abs(delta) < 1) continue;
+        _flipMoves.push({ row, delta });
+      }
+      if (_flipMoves.length > 0) {
+        for (const m of _flipMoves) {
+          m.row.style.transition = 'none';
+          m.row.style.transform = `translateY(${m.delta}px)`;
+        }
+        // Force a single style flush so the browser commits the
+        // translate before we replace it with the animated 0.
+        // eslint-disable-next-line no-unused-expressions
+        $convList.offsetHeight;
+        requestAnimationFrame(() => {
+          for (const m of _flipMoves) {
+            m.row.style.transition = 'transform 280ms cubic-bezier(0.2, 0.7, 0.3, 1)';
+            m.row.style.transform = '';
+            const _cleanup = (ev) => {
+              if (ev.propertyName !== 'transform') return;
+              m.row.style.transition = '';
+              m.row.removeEventListener('transitionend', _cleanup);
+            };
+            m.row.addEventListener('transitionend', _cleanup);
+          }
+        });
+      }
+    }
     // Toggle handler for the Archived section header.
     const $archivedToggle = $convList.querySelector('[data-role="archived-toggle"]');
     if ($archivedToggle) {
       $archivedToggle.addEventListener('click', (ev) => {
+        // Inner tools (grouping toggle, expand-all) live INSIDE the header
+        // button — bail before the collapse toggle so clicking them does
+        // not also fold the whole section.
+        if (ev.target.closest('[data-role="archived-grouping-toggle"], [data-role="archived-expand-all"]')) return;
         ev.stopPropagation();
         const section = $archivedToggle.closest('[data-role="archived-section"]');
         if (!section) return;
@@ -7681,33 +10841,57 @@
         $archivedToggle.setAttribute('aria-expanded', String(!wasCollapsed));
       });
     }
-
-    // Toggle handler for the "In Group Chat" section header. Mirrors the
-    // Archived pattern. The "+" new-chat button is a sibling element inside
-    // the header; clicks on it must NOT trigger collapse, so we early-out
-    // when the target sits under [data-role="ingroupchat-new"].
-    const $igcToggle = $convList.querySelector('[data-role="ingroupchat-toggle"]');
-    if ($igcToggle) {
-      $igcToggle.addEventListener('click', (ev) => {
-        if (ev.target.closest('[data-role="ingroupchat-new"]')) return;
+    const $archivedGroupingToggle = $convList.querySelector('[data-role="archived-grouping-toggle"]');
+    if ($archivedGroupingToggle) {
+      $archivedGroupingToggle.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        const section = $igcToggle.closest('[data-role="ingroupchat-section"]');
-        if (!section) return;
-        const wasCollapsed = section.classList.toggle('collapsed');
-        localStorage.setItem('ccc-ingroupchat-collapsed', wasCollapsed ? '1' : '0');
-        const arrowEl = $igcToggle.querySelector('.conv-ingroupchat-arrow');
-        if (arrowEl) arrowEl.textContent = wasCollapsed ? '▸' : '▾';
-        $igcToggle.setAttribute('aria-expanded', String(!wasCollapsed));
+        const opt = ev.target.closest('[data-grouping]');
+        if (!opt) return;
+        const value = opt.getAttribute('data-grouping') === 'time' ? 'time' : 'project';
+        try { localStorage.setItem('ccc-archived-grouping', value); } catch (_) {}
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
+    const $archivedExpandAll = $convList.querySelector('[data-role="archived-expand-all"]');
+    if ($archivedExpandAll) {
+      const apply = () => {
+        const dir = $archivedExpandAll.getAttribute('data-dir') || 'collapse';
+        const groups = $convList.querySelectorAll('[data-role="archived-section"] .conv-folder-group');
+        groups.forEach(group => {
+          const header = group.querySelector('[data-role="folder-group-toggle"]');
+          const key = header && header.getAttribute('data-collapse-key');
+          if (!key) return;
+          try {
+            if (dir === 'expand') localStorage.removeItem(key);
+            else localStorage.setItem(key, '1');
+          } catch (_) {}
+        });
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
+      };
+      $archivedExpandAll.addEventListener('click', (ev) => { ev.stopPropagation(); apply(); });
+      $archivedExpandAll.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); apply(); }
+      });
+    }
+
+    // Note: the standalone "In Group Chat" section (and its own header
+    // toggle / inline "+" button) is gone — group chats now render
+    // inline at the top of the In Progress list. The sidebar's
+    // "+ New Group chat" button is the persistent affordance for
+    // creating an empty chat. Per-row handlers (click, archive,
+    // rename, clear, drag-drop) live below and key off
+    // data-role="ingroupchat-..." so they still match the rows.
     // Click handler for archived group chat rows — open the reader.
     $convList.querySelectorAll('[data-role="archived-gc-row"]').forEach(row => {
       row.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopImmediatePropagation();
         ev.stopPropagation();
         const path = row.dataset.gcPath;
+        const chatId = row.dataset.gcId || null;
         const topic = row.dataset.gcTopic || '';
         const mode = row.dataset.gcMode || 'topic';
-        if (path) openGroupChatReader(path, topic, mode, true);
+        if (path || chatId) openGroupChatReader(path, topic, mode, true, chatId);
       });
     });
     // Click handlers for In Group Chat rows. Row click → open the reader
@@ -7718,10 +10902,12 @@
         if (ev.target.closest('[data-role="ingroupchat-archive"]')) return;
         if (ev.target.closest('[data-role="ingroupchat-rename"]')) return;
         if (ev.target.closest('[data-role="ingroupchat-clear"]')) return;
+        if (ev.target.closest('[data-role="ingroupchat-pause"]')) return;
         const path = row.dataset.gcPath;
+        const chatId = row.dataset.gcId || null;
         const topic = row.dataset.gcTopic || '';
         const mode = row.dataset.gcMode || 'topic';
-        if (path) openGroupChatReader(path, topic, mode, true);
+        if (path || chatId) openGroupChatReader(path, topic, mode, true, chatId);
       });
     });
     $convList.querySelectorAll('[data-role="ingroupchat-archive"]').forEach(btn => {
@@ -7729,7 +10915,18 @@
         ev.stopPropagation();
         ev.preventDefault();
         const path = btn.dataset.gcPath;
-        if (path) archiveGroupChat(path);
+        const chatId = btn.dataset.gcId || null;
+        if (path || chatId) archiveGroupChat(path, chatId);
+      });
+    });
+    $convList.querySelectorAll('[data-role="ingroupchat-pause"]').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const path = btn.dataset.gcPath;
+        const chatId = btn.dataset.gcId || null;
+        const pause = btn.dataset.gcPaused !== '1'; // currently enabled → pause it
+        if (path || chatId) setGroupChatPaused(path, chatId, pause);
       });
     });
     $convList.querySelectorAll('[data-role="ingroupchat-rename"]').forEach(btn => {
@@ -7737,8 +10934,9 @@
         ev.stopPropagation();
         ev.preventDefault();
         const path = btn.dataset.gcPath;
+        const chatId = btn.dataset.gcId || null;
         const currentTopic = btn.dataset.gcTopic || '';
-        if (path) renameGroupChat(path, currentTopic);
+        if (path || chatId) renameGroupChat(path, currentTopic, chatId);
       });
     });
     $convList.querySelectorAll('[data-role="ingroupchat-clear"]').forEach(btn => {
@@ -7746,8 +10944,9 @@
         ev.stopPropagation();
         ev.preventDefault();
         const path = btn.dataset.gcPath;
+        const chatId = btn.dataset.gcId || null;
         const topic = btn.dataset.gcTopic || '';
-        if (path) clearGroupChat(path, topic);
+        if (path || chatId) clearGroupChat(path, topic, chatId);
       });
     });
     // Drop target: drag a conv-list row onto a chat row to add the
@@ -7770,7 +10969,8 @@
         ev.preventDefault();
         row.classList.remove('gc-drop-target');
         const path = row.dataset.gcPath;
-        if (!path || !dragSourceId) return;
+        const chatId = row.dataset.gcId || null;
+        if ((!path && !chatId) || !dragSourceId) return;
         const draggedConv = (conversationsData || []).find(c => c.id === dragSourceId);
         // Backlog rows are draggable for kanban purposes but they don't
         // represent real Claude sessions — adding their fake session_id
@@ -7781,20 +10981,12 @@
         }
         const sid = (draggedConv && (draggedConv.session_id || draggedConv.id)) || dragSourceId;
         const displayName = draggedConv ? (draggedConv.display_name || '') : '';
-        addSessionToGroupChat(path, sid, displayName);
+        addSessionToGroupChat(path, sid, displayName, chatId);
       });
     });
-    // "+" button on the section header — opens an empty chat. Defined
-    // alongside the other ingroupchat handlers so we don't fan out
-    // listener wiring across functions.
-    const $newChatBtn = $convList.querySelector('[data-role="ingroupchat-new"]');
-    if ($newChatBtn) {
-      $newChatBtn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        ev.preventDefault();
-        createEmptyGroupChat();
-      });
-    }
+    // (Old "+ new chat" button on the section header is gone — its
+    // role moved to the sidebar's "+ New Group chat" button, defined
+    // far below near the "+ New session" handler.)
     // Click an indented participant entry → jump to that session.
     $convList.querySelectorAll('[data-role="ingroupchat-participant"]').forEach(el => {
       el.addEventListener('click', (ev) => {
@@ -7825,8 +11017,9 @@
         ev.stopPropagation();
         ev.preventDefault();
         const path = btn.dataset.gcPath;
+        const chatId = btn.dataset.gcId || null;
         const sid = btn.dataset.sessionId;
-        if (path && sid) removeSessionFromGroupChat(path, sid);
+        if ((path || chatId) && sid) removeSessionFromGroupChat(path, sid, chatId);
       });
     });
     // Toggle handler for the GH Issues section header.
@@ -7961,11 +11154,18 @@
       });
     });
     $convList.querySelectorAll('.conv-item').forEach(el => {
+      if (el.dataset.role === 'archived-gc-row' || !el.dataset.id) return;
+      el.addEventListener('mouseenter', () => {
+        _convPrefetchSchedule(el.dataset.id);
+      });
+      el.addEventListener('mouseleave', () => {
+        _convPrefetchCancel(el.dataset.id);
+      });
       el.addEventListener('click', (ev) => {
         // Ignore clicks that started the inline editor, archive button,
         // or that landed on the title (which now triggers rename instead
         // of opening the conversation — the pencil's job moved here).
-        if (ev.target.closest('[data-role="edit"]') || ev.target.closest('[data-role="archive"]') || ev.target.closest('[data-role="merge"]') || ev.target.closest('[data-role="start"]') || ev.target.closest('[data-role="unpin-repo"]') || ev.target.closest('.conv-title-input') || ev.target.closest('[data-role="title"]')) return;
+        if (ev.target.closest('[data-role="edit"]') || ev.target.closest('[data-role="pin"]') || ev.target.closest('[data-role="archive"]') || ev.target.closest('[data-role="merge"]') || ev.target.closest('[data-role="start"]') || ev.target.closest('[data-role="unpin-repo"]') || ev.target.closest('.conv-title-input') || ev.target.closest('[data-role="title"]')) return;
         if (ev.metaKey || ev.ctrlKey || ev.shiftKey) {
           ev.preventDefault();
           if (selectedListIds.has(el.dataset.id)) {
@@ -8060,6 +11260,50 @@
           return;
         }
         startInlineRename(item);
+      });
+    });
+    $convList.querySelectorAll('.conv-pin-btn').forEach(btn => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const item = btn.closest('.conv-item');
+        const convId = item && item.dataset.id;
+        const sessionId = item && item.dataset.sessionId;
+        if (!convId || !sessionId) return;
+        const c = conversationsData.find(x => x.id === convId || x.session_id === sessionId);
+        const nextPinned = !(c && c.pinned);
+        const patchRows = (rows, pinned, rank) => {
+          if (!Array.isArray(rows)) return;
+          for (const row of rows) {
+            if (!row) continue;
+            const rowSid = row.session_id || row.id;
+            if (rowSid === sessionId || row.id === convId) {
+              row.pinned = pinned;
+              row.pin_rank = pinned ? rank : null;
+            } else if (pinned && row.pinned) {
+              const oldRank = Number(row.pin_rank);
+              row.pin_rank = Number.isFinite(oldRank) ? oldRank + 1 : 1;
+            }
+          }
+        };
+        try {
+          const data = await ccPostJson('/api/conversations/' + encodeURIComponent(convId) + '/pin', {
+            session_id: sessionId,
+            pinned: nextPinned,
+          });
+          if (!data.ok) throw new Error(data.error || 'pin failed');
+          const rank = Number.isFinite(Number(data.pin_rank)) ? Number(data.pin_rank) : null;
+          patchRows(conversationsData, !!data.pinned, rank);
+          patchRows(archiveData, !!data.pinned, rank);
+          patchRows(currentRepoBacklogData, !!data.pinned, rank);
+          setOptimisticOverride(sessionId, { pinned: !!data.pinned, pin_rank: rank });
+          const pinScrollTop = $convList ? $convList.scrollTop : null;
+          renderSidebar(filterConversations($convSearch.value));
+          _restoreConversationListScrollTop($convList, pinScrollTop);
+          showOpToast(data.pinned ? 'Pinned to top' : 'Unpinned');
+        } catch (err) {
+          showOpToast('Pin failed (' + err.message + ')', 'error');
+        }
       });
     });
     $convList.querySelectorAll('.conv-archive-btn').forEach(btn => {
@@ -8339,7 +11583,16 @@
     if (!convId) return false;
     const row = rowForConversationId(convId);
     if (row && row.source === 'github_pr') {
-      if (row.tail_pr_url) window.open(row.tail_pr_url, '_blank', 'noopener');
+      if (row.tail_pr_url) {
+        const popup = window.open(row.tail_pr_url, '_blank', 'noopener');
+        if (!popup) {
+          fetch('/api/open-browser', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: row.tail_pr_url })
+          });
+        }
+      }
       return true;
     }
     const url = conversationPopoutUrl(convId, repoPathForConversationPopout(convId, repoPath));
@@ -8355,7 +11608,16 @@
       showOpToast('Conversation opened in a pop-up');
       return true;
     }
-    showOpToast('Pop-up blocked. Allow pop-ups for CCC and try again.', 'error');
+    fetch('/api/open-browser', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url })
+    }).then(r => r.json()).then(data => {
+      if (data.ok) showOpToast('Conversation opened in external browser');
+      else showOpToast('Pop-up blocked. Allow pop-ups for CCC.', 'error');
+    }).catch(err => {
+      showOpToast('Pop-up blocked. Allow pop-ups for CCC.', 'error');
+    });
     return false;
   }
 
@@ -8415,6 +11677,10 @@
 
   function attachDragHandlers(el) {
     el.addEventListener('dragstart', (ev) => {
+      if (dragStartsFromTextEditor(ev.target)) {
+        ev.preventDefault();
+        return;
+      }
       dragSourceId = el.dataset.id;
       el.classList.add('dragging');
       startExternalConversationDrag(el.dataset.id, el.dataset.repoPath || '');
@@ -8505,25 +11771,37 @@
   let convSortMode = 'recent';  // always latest-first
   // Alphabetical override — when on, sorts by title and ignores convSortMode.
   let convAlphaSort = localStorage.getItem('ccc-conv-alpha-sort') === '1';
-  // Recency filter: '' (off) | '10h' | '7d'.
-  // Backwards-compat: old '1' value (binary toggle) maps to '10h'.
+  function normalizeRecencyFilter(value) {
+    if (value === '1' || value === '10h') return '1d';
+    if (value === '1d' || value === '7d') return value;
+    return '';
+  }
+  // Recency filter: '' (all) | '1d' | '7d'.
+  // Backwards-compat: old '1' and '10h' values map to '1d'.
   let recencyFilter = (function () {
     const raw = localStorage.getItem('ccc-show-recent') || '';
-    if (raw === '1') return '10h';
-    if (raw === '10h' || raw === '7d') return raw;
-    return '';
+    return normalizeRecencyFilter(raw);
   })();
   // Helpers — derived from recencyFilter so the rest of the code can stay
   // boolean-ish where it doesn't care about the actual window.
-  const RECENCY_WINDOWS = { '10h': 10 * 3600, '7d': 7 * 24 * 3600 };
+  const RECENCY_WINDOWS = { '1d': 24 * 3600, '7d': 7 * 24 * 3600 };
   function recencyCutoffSec() {
     const w = RECENCY_WINDOWS[recencyFilter];
     return w ? (Date.now() / 1000 - w) : 0;
   }
   let showRecentOnly = !!recencyFilter;  // legacy alias used by other branches
-  const RECENT_HOURS = 10;  // legacy const, no longer the source of truth
   const $convSortBtn = document.getElementById('convSortBtn');
   const $convAlphaSortBtn = document.getElementById('convAlphaSortBtn');
+
+  function setRecencyFilter(value, opts) {
+    recencyFilter = normalizeRecencyFilter(value);
+    showRecentOnly = !!recencyFilter;
+    try { localStorage.setItem('ccc-show-recent', recencyFilter || '0'); } catch (_) {}
+    updateRecentBtn();
+    if (!(opts && opts.skipRender)) {
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+    }
+  }
 
   function _convTitleForSort(c) {
     const raw = c.display_name
@@ -8532,9 +11810,73 @@
     return raw.replace(/-/g, ' ').trim().toLowerCase();
   }
 
-  function applyConvSort(data) {
+  function _pinSortKey(c) {
+    if (!c || !c.pinned) return [1, 0];
+    const rank = Number(c.pin_rank);
+    return [0, Number.isFinite(rank) ? rank : 0];
+  }
+
+  function _uuidSearchNeedle(q) {
+    const raw = String(q || '').trim().toLowerCase();
+    if (raw.length < 4) return null;
+    const compact = raw.replace(/-/g, '');
+    if (compact.length < 4 || !/^[0-9a-f]+$/.test(compact)) return null;
+    return { raw, compact };
+  }
+
+  function _sessionIdSearchRank(c, needle) {
+    if (!c || !needle) return Infinity;
+    let best = Infinity;
+    for (const rawId of [c.session_id, c.id]) {
+      if (!rawId) continue;
+      const id = String(rawId).toLowerCase();
+      const compact = id.replace(/-/g, '');
+      if (id === needle.raw || compact === needle.compact) best = Math.min(best, 0);
+      else if (id.startsWith(needle.raw) || compact.startsWith(needle.compact)) best = Math.min(best, 1);
+      else if (id.includes(needle.raw) || compact.includes(needle.compact)) best = Math.min(best, 2);
+    }
+    return best;
+  }
+
+  function _prioritizeSessionIdMatches(data, qLower) {
+    const rows = Array.isArray(data) ? data : [];
+    const needle = _uuidSearchNeedle(qLower);
+    const ranked = rows.map((row, idx) => {
+      const rank = _sessionIdSearchRank(row, needle);
+      if (row) {
+        if (Number.isFinite(rank)) row._idSearchRank = rank;
+        else if (row._idSearchRank !== undefined) delete row._idSearchRank;
+      }
+      return { row, idx, rank };
+    });
+    if (!needle || !ranked.some(item => Number.isFinite(item.rank))) return rows;
+    ranked.sort((a, b) => {
+      const ar = Number.isFinite(a.rank) ? a.rank : Infinity;
+      const br = Number.isFinite(b.rank) ? b.rank : Infinity;
+      if (ar !== br) return ar - br;
+      return a.idx - b.idx;
+    });
+    return ranked.map(item => item.row);
+  }
+
+  // Row-order hysteresis. Mirrors the folder-group hysteresis
+  // (_FOLDER_ORDER_HYSTERESIS_S) one layer down: rows whose recency scores are
+  // within this window keep their previous relative order instead of
+  // reshuffling. Without it, any background-active session (e.g. a group-chat
+  // participant getting nudged) keeps bumping its last_interacted/modified and
+  // leapfrogs to the top of its group every poll — the list visibly jumps under
+  // a user who's just watching. A genuine recency gap (> window) still promotes
+  // the fresher row, so "freshest first" holds at the minute scale.
+  const _ROW_ORDER_HYSTERESIS_S = 5 * 60;
+  const _ROW_ORDER_KEY = 'ccc-row-stable-order';
+
+  function applyConvSort(data, opts) {
     if (convAlphaSort) {
       return [...data].sort((a, b) => {
+        const pa = _pinSortKey(a);
+        const pb = _pinSortKey(b);
+        if (pa[0] !== pb[0]) return pa[0] - pb[0];
+        if (pa[1] !== pb[1]) return pa[1] - pb[1];
         const ta = _convTitleForSort(a);
         const tb = _convTitleForSort(b);
         if (!ta && tb) return 1;
@@ -8545,9 +11887,39 @@
     if (convSortMode === 'recent') {
       // Sort by whichever is later: the user's last UI interaction or the
       // session's last meaningful event. Keeps the just-typed card on top
-      // even before Claude responds.
+      // even before Claude responds. Near-tie scores fall back to the prior
+      // render's order (hysteresis) so the list doesn't jitter — see
+      // _ROW_ORDER_HYSTERESIS_S.
       const score = (c) => c.last_interacted || c.modified || 0;
-      return [...data].sort((a, b) => score(b) - score(a));
+      const idOf = (c) => c.session_id || c.id || '';
+      let prevOrder = {};
+      try { prevOrder = JSON.parse(localStorage.getItem(_ROW_ORDER_KEY) || '{}'); } catch (_) { /* corrupt/missing */ }
+      const sorted = [...data].sort((a, b) => {
+        const pa = _pinSortKey(a);
+        const pb = _pinSortKey(b);
+        if (pa[0] !== pb[0]) return pa[0] - pb[0];
+        if (pa[1] !== pb[1]) return pa[1] - pb[1];
+        const sa = score(a), sb = score(b);
+        if (Math.abs(sa - sb) < _ROW_ORDER_HYSTERESIS_S) {
+          // Both rows were in the prior render and held a definite order →
+          // keep it. A brand-new row (no prev index) still sorts by score so
+          // it enters at its natural spot.
+          const ia = prevOrder[idOf(a)];
+          const ib = prevOrder[idOf(b)];
+          if (ia !== undefined && ib !== undefined && ia !== ib) return ia - ib;
+        }
+        return sb - sa;
+      });
+      // Persist the committed order only on the real render pass — the search
+      // filter sorts a subset and must not clobber the full-list memory.
+      if (opts && opts.persist) {
+        try {
+          const next = {};
+          sorted.forEach((c, i) => { const k = idOf(c); if (k) next[k] = i; });
+          localStorage.setItem(_ROW_ORDER_KEY, JSON.stringify(next));
+        } catch (_) { /* quota/disabled — degrade to no hysteresis */ }
+      }
+      return sorted;
     }
     return data; // custom/default order from server
   }
@@ -8594,7 +11966,7 @@
     });
   }
 
-  // ── Kanban toggle ──
+  // ── Session view toggle ──
   function activateSplitMode(active) {
     if (active) {
       document.body.classList.add('kanban-split');
@@ -8608,7 +11980,15 @@
     document.body.classList.remove('mobile-show-main');
   }
   function updateKanbanToggle() {
-    if ($convKanbanToggle) $convKanbanToggle.classList.toggle('active', kanbanView);
+    if ($convKanbanToggle) {
+      const labels = { list: 'List', flow: 'Flow' };
+      const next = sidebarViewMode === 'list' ? 'flow' : 'list';
+      $convKanbanToggle.classList.toggle('active', sidebarViewMode !== 'list');
+      $convKanbanToggle.classList.toggle('is-flow', sidebarViewMode === 'flow');
+      $convKanbanToggle.innerHTML = '<span aria-hidden="true">&#9783;</span><span class="sh-action-label">' + labels[sidebarViewMode] + '</span>';
+      $convKanbanToggle.title = 'Switch to ' + labels[next] + ' view';
+      $convKanbanToggle.setAttribute('aria-label', 'Switch to ' + labels[next] + ' view');
+    }
     // The split-pane kanban layout was retired in favour of swapping the
     // sidebar's list↔kanban-board view inline (so .main stays visible in
     // both modes). Always passing `false` here also clears any leftover
@@ -8616,15 +11996,16 @@
     activateSplitMode(false);
   }
   updateKanbanToggle();
-  // Apply initial state if kanban was persisted on
-  if (kanbanView) {
-    $convList.style.display = 'none';
-    $kanbanBoard.style.display = '';
+  // Apply initial state if a non-list view was persisted on.
+  if (kanbanView || isFlowView()) {
+    if ($convList) $convList.style.display = 'none';
+    if ($kanbanBoard) $kanbanBoard.style.display = kanbanView ? '' : 'none';
+    if ($flowBoard) $flowBoard.style.display = isFlowView() ? '' : 'none';
   }
   if ($convKanbanToggle) {
     $convKanbanToggle.addEventListener('click', () => {
-      kanbanView = !kanbanView;
-      localStorage.setItem('ccc-kanban-view', kanbanView ? 'true' : 'false');
+      const next = sidebarViewMode === 'list' ? 'flow' : 'list';
+      setSidebarViewMode(next);
       updateKanbanToggle();
       renderSidebar(filterConversations($convSearch.value));
     });
@@ -8650,8 +12031,7 @@
   const $kptListViewBtn = document.getElementById('kptListViewBtn');
   if ($kptListViewBtn) {
     $kptListViewBtn.addEventListener('click', () => {
-      kanbanView = false;
-      localStorage.setItem('ccc-kanban-view', 'false');
+      setSidebarViewMode('list');
       updateKanbanToggle();
       renderSidebar(filterConversations($convSearch.value));
     });
@@ -8659,9 +12039,10 @@
 
   async function refreshConversationList() {
     if (isInlineRenameInProgress()) return;
+    if (deferSidebarRenderIfDragging()) return;
     if ($convRefreshBtn) $convRefreshBtn.classList.add('spinning');
     conversationsLoaded = false;
-    await refreshArchiveData();
+    await refreshArchiveData({ force: true });
     renderArchiveList($convSearch ? $convSearch.value : '');
     if (selectedRepoPath()) await loadConversationList();
     setTimeout(() => {
@@ -8693,6 +12074,8 @@
     input.value = currentText.startsWith('(') && currentText.endsWith(')') ? '' : currentText;
     input.placeholder = 'Session name…';
     titleEl.replaceWith(input);
+    const previousDraggable = item.getAttribute('draggable');
+    item.draggable = false;
     // hide edit button while editing
     const editBtn = item.querySelector('.conv-edit-btn');
     if (editBtn) editBtn.style.display = 'none';
@@ -8705,6 +12088,8 @@
       if (finished) return;
       finished = true;
       _renameInProgress = false;  // clear before our own re-render below
+      if (previousDraggable === null) item.removeAttribute('draggable');
+      else item.setAttribute('draggable', previousDraggable);
       if (save) {
         const newName = input.value.trim();
         try {
@@ -8789,6 +12174,7 @@
     const source = (row && row.source) || '';
     if (source === 'codex') return 'codex';
     if (source === 'gemini') return 'gemini';
+    if (source === 'antigravity') return 'antigravity';
     if (source === 'pkood') return 'pkood';
     if (source === 'backlog') return row && row.issue_number ? 'issue' : 'backlog';
     if (source === 'github_pr') return 'pull request';
@@ -8996,7 +12382,7 @@
     // Wire the cloned input bar to send into this specific pane.
     const sendBtn = clone.querySelector('.send-btn');
     const ttsBtn = clone.querySelector('.tts-btn');
-    const input = clone.querySelector('textarea, input[type="text"]');
+    const input = clone.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]');
     if (sendBtn) {
       sendBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
@@ -9120,6 +12506,7 @@
       restoreConversationBottomAnchors(bottomAnchors);
       bottomAnchors = [];
       try { divider.releasePointerCapture(ev.pointerId); } catch (e) {}
+      saveSplitState();
     });
   }
 
@@ -9302,6 +12689,7 @@
     splitState.activeIndex = 0; // survivor is now the only pane
     renderSplitLayout();
     syncActivePaneChrome();
+    saveSplitState();
   }
 
   // Show a 2-second floating message anchored to the bottom-center of the viewport.
@@ -9358,6 +12746,7 @@
       splitState.activeIndex = 0;
       renderSplitLayout();
     }
+    saveSplitState();
   }
   window.addEventListener('resize', handleViewportResize);
   window.addEventListener('resize', () => {
@@ -9689,6 +13078,8 @@
     paneId = paneId || activePaneId();
     const pane = paneByPaneId(paneId);
     if (!pane) return;
+    if (typeof ffcUpdateSidebar === 'function') ffcUpdateSidebar(null);
+    if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
     const selectedConv = (conversationsData || []).find(x => x.id === id) || {};
     const source = sessionSourceByConv[id] || selectedConv.source || 'interactive';
     rememberComposerDraftForPane(paneId);
@@ -9704,19 +13095,7 @@
     // rendered INTO #conversationsView so the surrounding pane structure
     // is intact — selectConversation will repopulate the view normally.
     if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
-      try {
-        if (_gcReaderInterval) { clearInterval(_gcReaderInterval); _gcReaderInterval = null; }
-        _gcReaderPath = null;
-        _gcLastMtime = null;
-        _gcPollFailCount = 0;
-        if (_gcReaderHiddenInputBar) {
-          const inputBar = document.getElementById('convInputBar');
-          const inputCtx = document.getElementById('convInputContext');
-          if (inputBar) inputBar.style.display = '';
-          if (inputCtx) inputCtx.style.display = '';
-          _gcReaderHiddenInputBar = false;
-        }
-      } catch (_) {}
+      try { stopGroupChatReader({ rerenderSidebar: true }); } catch (_) {}
     }
     mobileShowForCurrentMode();
     currentConversation = id;
@@ -9724,7 +13103,14 @@
     // Remember which card was last opened so we can re-open it on the
     // next page load. Reads happen in loadConversationList once the list
     // is populated; misses (id no longer present) just fall through.
-    try { if (id && !CONV_POPOUT_MODE) localStorage.setItem('ccc-last-conv', id); } catch (_) {}
+    try {
+      if (id && !CONV_POPOUT_MODE) {
+        localStorage.setItem(getLastConvKey(), id);
+        localStorage.setItem('ccc-last-conv', id);
+      }
+    } catch (_) {}
+    pane.restored = true;
+    saveSplitState();
     convLastLine = 0;
     _firstUserMsgRendered = false;
     _dynamicAskState = null;  // sticky-header scroll tracker — repopulated when the new sticky is built
@@ -9767,6 +13153,7 @@
     if (paneEl) {
       paneEl.classList.toggle('is-codex-session', source === 'codex');
       paneEl.classList.toggle('is-gemini-session', source === 'gemini');
+      paneEl.classList.toggle('is-antigravity-session', source === 'antigravity');
     }
     const isPendingSpawn = !!(selectedConv && selectedConv.pending_spawn);
     if (source === 'backlog') {
@@ -9830,7 +13217,7 @@
         // backend finds a CCC-spawned headless process for this session.
         // No-op for externally launched, IDE-launched, or pkood sessions.
         const sid = sessionIdByConv[id] || '';
-        if (sid && source !== 'codex' && source !== 'backlog') startSpawnStream(sid, paneId);
+        if (sid && source !== 'codex' && source !== 'antigravity' && source !== 'backlog') startSpawnStream(sid, paneId);
       }
     } finally {
       finishConversationPaneLoad();
@@ -9847,20 +13234,29 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isAntigravity = currentSession.source === 'antigravity';
+    const antigravityCanSendNow = antigravityCanSend(currentSession);
     const live = liveStatus.live && liveStatus.tty;
     const hasSession = !!currentSession.id;
     if (hasSession && kanbanView) {
       $convPanelInput.classList.add('visible');
-      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (liveStatus.tty || (live ? '' : 'offline'))));
+      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (isAntigravity ? (liveStatus.tty || 'antigravity') : (liveStatus.tty || (live ? '' : 'offline')))));
       if ($cpInput) {
         if (isPkood) $cpInput.placeholder = 'Send to pkood agent...';
         else if (isCodex) $cpInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
         else if (isGemini) $cpInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
+        else if (isAntigravity) $cpInput.placeholder = antigravityInputPlaceholder(currentSession);
         else if (live) $cpInput.placeholder = 'Send to terminal...';
         else $cpInput.placeholder = 'Send to terminal (offline)...';
+        $cpInput.readOnly = isAntigravity && !antigravityCanSendNow;
+        $cpInput.classList.toggle('is-readonly', isAntigravity && !antigravityCanSendNow);
       }
     } else {
       $convPanelInput.classList.remove('visible');
+      if ($cpInput) {
+        $cpInput.readOnly = false;
+        $cpInput.classList.remove('is-readonly');
+      }
     }
     // Enable/disable the send button based on new session state.
     if ($cpInput && $cpInput.__cpRefresh) $cpInput.__cpRefresh();
@@ -9952,6 +13348,15 @@
             // shifts it.
             splitState.activeIndex = savedIdx;
           }
+          // Refresh the context / cost pills as new events stream in. The
+          // poll fallback (loadConvAfter) already does this; without the
+          // same call here the pills only update on reselect or refresh
+          // whenever the SSE path is the one delivering events. Usage
+          // rollups land sporadically across a turn, so we re-fetch on
+          // every event batch — fetchSessionUsage already bails out if the
+          // active session id has shifted.
+          const sid = (conversationsData.find(x => x.id === streamConvId) || {}).session_id || streamConvId;
+          fetchSessionUsage(sid);
         }
       } catch (err) {}
     };
@@ -10079,6 +13484,226 @@
     if (currentConversation !== cur) return;
     const sticky = document.querySelector('.conversations-view .conv-sticky-header');
     ffcEnsurePill(sticky, data);
+    ffcUpdateSidebar(data);
+  }
+
+  function ffcUpdateSidebar(data) {
+    const $panel = document.getElementById('filesPanel');
+    const $count = document.getElementById('filesCount');
+    const $list = document.getElementById('sidebarFilesList');
+    if (!$panel || !$count || !$list) return;
+
+    if (!data || !data.count) {
+      $panel.style.display = 'none';
+      $list.innerHTML = '';
+      $count.textContent = '';
+      return;
+    }
+
+    $panel.style.display = '';
+    $count.textContent = data.count;
+    $list.innerHTML = '';
+
+    // Flatten all categories
+    const allFiles = [];
+    for (const cat of FFC_CATEGORY_ORDER) {
+      const rows = (data.groups || {})[cat.key];
+      if (rows && rows.length) {
+        for (const row of rows) {
+          allFiles.push(Object.assign({}, row, { category: cat.key, categoryIcon: cat.icon }));
+        }
+      }
+    }
+
+    // Sort reverse chronologically (by first_line descending)
+    allFiles.sort((a, b) => (b.first_line || 0) - (a.first_line || 0));
+
+    // Render each file
+    for (const row of allFiles) {
+      $list.appendChild(renderSidebarFileRow(row));
+    }
+    
+    // Apply any active search filter
+    const $searchInput = document.getElementById('filesSearchInput');
+    if ($searchInput && $searchInput.value) {
+      $searchInput.dispatchEvent(new Event('input'));
+    }
+  }
+
+  function closeStatusRailFileViewer() {
+    const rail = document.getElementById('statusRail');
+    if (rail) {
+      rail.classList.remove('file-viewer-active');
+    }
+    const bodyEl = document.getElementById('fileViewerBody');
+    if (bodyEl) {
+      bodyEl.innerHTML = '';
+    }
+    const filenameEl = document.getElementById('fileViewerFilename');
+    if (filenameEl) {
+      filenameEl.textContent = '';
+    }
+  }
+
+  function renderSidebarFileRow(row) {
+    const rowEl = document.createElement('div');
+    rowEl.className = 'sidebar-file-row';
+    rowEl.title = 'Click to open';
+
+    // Thumbnail / Icon placeholder
+    if (row.category === 'images') {
+      const img = document.createElement('img');
+      img.className = 'sidebar-file-thumb';
+      img.alt = row.label;
+      img.loading = 'lazy';
+      const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
+      img.src = '/api/pasted-image?path=' + encodeURIComponent(row.target) + (sid ? '&session_id=' + encodeURIComponent(sid) : '');
+      img.onerror = () => {
+        const placeholder = document.createElement('div');
+        placeholder.className = 'sidebar-file-icon-placeholder';
+        placeholder.textContent = row.categoryIcon || '📷';
+        if (img.parentNode) {
+          img.parentNode.replaceChild(placeholder, img);
+        }
+      };
+      rowEl.appendChild(img);
+    } else {
+      const placeholder = document.createElement('div');
+      placeholder.className = 'sidebar-file-icon-placeholder';
+      placeholder.textContent = row.categoryIcon || '📄';
+      rowEl.appendChild(placeholder);
+    }
+
+    // Info containing filename and path
+    const info = document.createElement('div');
+    info.className = 'sidebar-file-info';
+
+    const name = document.createElement('div');
+    name.className = 'sidebar-file-name';
+    name.textContent = row.label;
+    info.appendChild(name);
+
+    const pathEl = document.createElement('div');
+    pathEl.className = 'sidebar-file-path';
+    pathEl.textContent = row.target;
+    pathEl.title = 'Click to copy path';
+    pathEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigator.clipboard.writeText(row.target).then(() => {
+        const orig = pathEl.textContent;
+        pathEl.textContent = 'copied';
+        const origColor = pathEl.style.color;
+        pathEl.style.color = 'var(--accent, #58a6ff)';
+        setTimeout(() => {
+          pathEl.textContent = orig;
+          pathEl.style.color = origColor;
+        }, 900);
+      }).catch(() => {});
+    });
+    info.appendChild(pathEl);
+
+    rowEl.appendChild(info);
+
+    // Row click handles reveal-file or URL redirect
+    if (row.kind === 'url') {
+      rowEl.addEventListener('click', (e) => {
+        if (e.target.closest('.sidebar-file-path')) return;
+        window.open(row.target, '_blank', 'noopener,noreferrer');
+      });
+    } else {
+      rowEl.addEventListener('click', async (e) => {
+        if (e.target.closest('.sidebar-file-path')) return;
+
+        const isMarkdown = row.category === 'markdown' || (typeof _isMarkdownPath === 'function' && _isMarkdownPath(row.target));
+        if (isMarkdown) {
+          try {
+            const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
+            const r = await fetch('/api/read-file', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({path: row.target, session_id: sid}),
+            });
+            if (r.ok) {
+              const res = await r.json();
+              if (res.ok) {
+                const rail = document.getElementById('statusRail');
+                const bodyEl = document.getElementById('fileViewerBody');
+                const filenameEl = document.getElementById('fileViewerFilename');
+                const viewer = document.getElementById('statusRailFileViewer');
+                if (bodyEl) {
+                  bodyEl.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(res.content) : res.content;
+                  // Rewrite <img src=…> to route through /api/local-image
+                  // so relative paths (./screenshot.png), bare names, and
+                  // absolute filesystem paths all resolve against the
+                  // markdown file's directory instead of the CCC origin.
+                  const _mdDir = row.target.replace(/\/[^/]*$/, '');
+                  bodyEl.querySelectorAll('img').forEach((img) => {
+                    const raw = img.getAttribute('src') || '';
+                    if (!raw) return;
+                    if (/^(https?:|data:|blob:|file:|\/api\/)/i.test(raw)) return;
+                    let abs;
+                    if (raw.startsWith('/')) abs = raw;
+                    else if (raw.startsWith('~/')) abs = raw;
+                    else abs = _mdDir + '/' + raw;
+                    img.src = '/api/local-image?path=' + encodeURIComponent(abs);
+                  });
+                }
+                if (filenameEl) {
+                  filenameEl.textContent = row.label;
+                }
+                if (viewer) {
+                  viewer.setAttribute('data-current-path', row.target);
+                }
+                if (rail) {
+                  rail.classList.add('file-viewer-active');
+                }
+                return;
+              } else {
+                sidebarShowFileToast(rowEl, res.error || 'load failed');
+              }
+            } else {
+              const j = await r.json().catch(() => ({error: 'load failed'}));
+              sidebarShowFileToast(rowEl, j.error || ('HTTP ' + r.status));
+            }
+          } catch (err) {
+            sidebarShowFileToast(rowEl, 'network error');
+          }
+          return;
+        }
+
+        try {
+          const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
+          const r = await fetch('/api/reveal-file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({path: row.target, session_id: sid}),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({error: 'open failed'}));
+            sidebarShowFileToast(rowEl, j.error || ('HTTP ' + r.status));
+          }
+        } catch (err) {
+          sidebarShowFileToast(rowEl, 'network error');
+        }
+      });
+    }
+
+    return rowEl;
+  }
+
+  function sidebarShowFileToast(rowEl, msg) {
+    let info = rowEl.querySelector('.sidebar-file-info');
+    if (!info) return;
+    let toast = info.querySelector('.sidebar-file-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.className = 'sidebar-file-toast';
+      info.appendChild(toast);
+    }
+    toast.textContent = msg;
+    setTimeout(() => {
+      if (toast.parentNode === info) info.removeChild(toast);
+    }, 3000);
   }
 
   const FFC_CATEGORY_ORDER = [
@@ -10460,6 +14085,24 @@
     }
   }
 
+  function markFireAndWatchSpawnFailed(card, data) {
+    const exitCode = Number(data && data.exit_code);
+    if (!card || !card.pending_spawn || !Number.isFinite(exitCode) || exitCode === 0) return;
+    card.pending_spawn = false;
+    card.is_live = false;
+    card.spawn_failed = true;
+    card.sidecar_status = '';
+    card.pending_tool = null;
+    card.last_event_type = 'result';
+    card.spawn_error = 'Process exited with code ' + exitCode + ' before a session was created.';
+    for (const [key, value] of Array.from(pendingSpawns.entries())) {
+      if (value === card || (value && value.id === card.id)) pendingSpawns.delete(key);
+    }
+    delete columnOverrides[card.id];
+    try { localStorage.setItem('ccc-column-overrides', JSON.stringify(columnOverrides)); } catch (_) {}
+    renderSidebar(filterConversations($convSearch.value));
+  }
+
   // Render a codex spawn log into the right pane while the durable Codex
   // thread row is still materializing. Once /api/sessions returns a real
   // codex card, normal conversation rendering takes over.
@@ -10468,13 +14111,13 @@
       // Pre-swap (toolbar Run): spawn_pid is still 'tmp-...'. Show a
       // placeholder until the spawn POST returns and re-selects this card.
       const $view = getConvView();
-      const engine = card && card.source === 'gemini' ? 'gemini' : 'codex';
+      const engine = card && card.source === 'gemini' ? 'gemini' : (card && card.source === 'antigravity' ? 'antigravity' : 'codex');
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Spawning ' + engine + ' run…</div>';
       updateConversationEndAffordance($view);
       return;
     }
     const $view = getConvView();
-    const engine = card.source === 'gemini' ? 'gemini' : 'codex';
+    const engine = card.source === 'gemini' ? 'gemini' : (card.source === 'antigravity' ? 'antigravity' : 'codex');
     try {
       const res = await fetch('/api/sessions/spawned/' + encodeURIComponent(card.spawn_pid) + '/log?_=' + Date.now());
       const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
@@ -10485,9 +14128,12 @@
         return;
       }
       const atBottom = isConversationAtBottom($view);
-      $view.innerHTML = (data.engine === 'gemini' || engine === 'gemini')
-        ? renderGeminiLogHtml(data)
-        : renderCodexLogHtml(data);
+      if (!data.running) markFireAndWatchSpawnFailed(card, data);
+      $view.innerHTML = (data.engine === 'antigravity' || engine === 'antigravity')
+        ? renderAntigravityLogHtml(data)
+        : ((data.engine === 'gemini' || engine === 'gemini')
+          ? renderGeminiLogHtml(data)
+          : renderCodexLogHtml(data));
       if (atBottom) scrollConversationToEnd($view);
       else updateConversationEndAffordance($view);
       // Process exited — stop polling. Final render already in place.
@@ -10627,6 +14273,72 @@
     return '<div class="codex-log gemini-log" style="padding:16px 20px;">' + headerHtml + msgsHtml + usageHtml + stderrHtml + '</div>';
   }
 
+  function renderAntigravityLogHtml(data) {
+    const text = (data.text || '').trim();
+    const debugText = (data.debug_text || '').trim();
+    const status = data.running
+      ? '<span class="codex-status running" style="color:var(--green);">running</span>'
+      : ('<span class="codex-status finished" style="color:var(--text-muted);">finished' + (data.exit_code != null ? ' (exit ' + data.exit_code + ')' : '') + '</span>');
+    const diagnosticLine = debugText
+      ? ((debugText.split('\n').reverse().find(line => /(RESOURCE_EXHAUSTED|quota|rate limit|auth|error|exception)/i.test(line)) || '').trim())
+      : '';
+    const debugHtml = debugText
+      ? ('<details ' + (text ? '' : 'open ') + 'style="margin-top:14px;font-size:12px;color:var(--text-muted);">'
+        + '<summary style="cursor:pointer;">AGY diagnostic log' + (data.debug_text_truncated ? ' (tail)' : '') + '</summary>'
+        + '<pre style="margin:8px 0 0;padding:8px;background:rgba(139,148,158,0.08);border-radius:4px;white-space:pre-wrap;font-family:var(--font-mono,monospace);max-height:360px;overflow:auto;">' + escapeHtml(debugText) + '</pre>'
+        + '</details>')
+      : '';
+    let bodyHtml = '';
+    if (text) {
+      bodyHtml = '<div class="codex-msg assistant" style="margin-bottom:14px;padding:10px 12px;background:rgba(242,204,96,0.07);border-left:2px solid #f2cc60;border-radius:4px;white-space:pre-wrap;line-height:1.55;">' + escapeHtml(text) + '</div>' + debugHtml;
+    } else if (debugText) {
+      bodyHtml = '<div class="codex-msg system" style="margin-bottom:14px;padding:10px 12px;background:rgba(242,204,96,0.06);border-left:2px solid #f2cc60;border-radius:4px;white-space:pre-wrap;line-height:1.55;">'
+        + escapeHtml(diagnosticLine || 'Antigravity finished without stdout. AGY diagnostics are below.')
+        + '</div>' + debugHtml;
+    } else {
+      bodyHtml = '<div class="empty-state" style="height:auto;padding:24px;color:var(--text-muted);">antigravity is thinking...</div>';
+    }
+    const headerHtml = '<div class="codex-header" style="display:flex;align-items:center;gap:10px;padding-bottom:10px;margin-bottom:14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted);">'
+      + '<span class="source-badge antigravity" style="display:inline-flex;align-items:center;gap:4px;background:rgba(242,204,96,0.14);color:#f2cc60;padding:2px 8px;border-radius:10px;font-weight:600;"><span style="width:12px;height:12px;display:flex;">' + getEngineSvg('antigravity') + '</span>antigravity</span>'
+      + status
+      + '<span style="margin-left:auto;font-family:var(--font-mono,monospace);">pid ' + escapeHtml(String(data.pid)) + '</span>'
+      + '</div>';
+    return '<div class="codex-log antigravity-log" style="padding:16px 20px;">' + headerHtml + bodyHtml + '</div>';
+  }
+
+  // Hover-prefetch: when the user's mouse lands on a card, fire a background
+  // fetch for that conversation's events. The server caches the parsed +
+  // serialized response in memory (~1 ms hit afterwards), so by the time
+  // the user clicks the cold parse (~300 ms for a 700 KB JSONL) is already
+  // done. Debounced so a mouse-pass over six cards doesn't fire six parses;
+  // deduped per-sid within a session because conv JSONLs append slowly and
+  // the server's mtime-keyed cache invalidates correctly when they do.
+  const _convPrefetched = new Set();
+  const _convPrefetchTimers = new Map();
+  function _convPrefetchSchedule(id) {
+    if (!id || _convPrefetched.has(id)) return;
+    if (id.startsWith('backlog-') || id.startsWith('spawning-')) return;
+    if (id.startsWith('pkood-') || id.startsWith('issue-')) return;
+    if (_convPrefetchTimers.has(id)) return;
+    const t = setTimeout(() => {
+      _convPrefetchTimers.delete(id);
+      _convPrefetched.add(id);
+      // Fire-and-forget. The browser may discard the response body, but
+      // the server-side response cache is now warm for the eventual click.
+      fetch('/api/conversations/' + encodeURIComponent(id) + '?after=0', {
+        cache: 'no-store',
+      }).catch(() => {});
+    }, 120);
+    _convPrefetchTimers.set(id, t);
+  }
+  function _convPrefetchCancel(id) {
+    const t = _convPrefetchTimers.get(id);
+    if (t) {
+      clearTimeout(t);
+      _convPrefetchTimers.delete(id);
+    }
+  }
+
   async function fetchConversationEvents(paneId) {
     if (paneId) {
       const idx = paneIndexByPaneId(paneId);
@@ -10655,7 +14367,7 @@
     if (id.startsWith('spawning-')) {
       const c = (conversationsData || []).find(x => x.id === id);
       if (!c) return;
-      if (c && (c.source === 'codex' || c.source === 'gemini') && typeof c.spawn_pid === 'number') {
+      if (c && (c.source === 'codex' || c.source === 'gemini' || c.source === 'antigravity') && typeof c.spawn_pid === 'number') {
         await loadCodexLog(c);
         stopCodexLogPoller();
         codexLogPoller = setInterval(() => {
@@ -10818,7 +14530,7 @@
     // so scrollHeight does not change mid-scroll.
     st.currentIdx = idx;
     item.classList.add('is-dynamic-pinned-in-sticky');
-    if (st.earlierFirst) st.earlierFirst.innerHTML = linkifyPastedImages(escapeHtml(text));
+    if (st.earlierFirst) st.earlierFirst.innerHTML = linkifyPastedImages(escapeHtml(cleanIssuePrompt(text)));
     _updateStickyAskSlots();
   }
   // Coordinator: decides where the .csh-ask-earlier block lives based on
@@ -10837,20 +14549,32 @@
   function _updateStickyAskSlots() {
     const sticky = document.querySelector('.conv-sticky-header');
     if (!sticky) return;
+    const rail = document.getElementById('statusRail');
+    const inRightRail = document.body.classList.contains('status-pos-right');
     const askCol = sticky.querySelector('.csh-col-ask');
-    const actCol = sticky.querySelector('.csh-col-activity');
-    const earlier = sticky.querySelector('.csh-ask-earlier');
+    const actCol = sticky.querySelector('.csh-col-activity')
+      || (rail && rail.querySelector(':scope > .csh-col-activity'));
+    const earlier = sticky.querySelector('.csh-ask-earlier')
+      || (actCol && actCol.querySelector('.csh-ask-earlier'));
     if (!askCol || !actCol || !earlier) return;
     const earlierFirst = earlier.querySelector('[data-earlier-first]');
     const earlierHasText = !!(earlierFirst && (earlierFirst.textContent || '').trim());
     const timeline = actCol.querySelector('[data-timeline]');
-    const activityHasContent = !!(timeline && timeline.querySelector('.stl-row'));
+    const activityHasContent = !!(timeline && timeline.querySelector('.stl-row, .stl-empty'));
     earlier.style.display = earlierHasText ? '' : 'none';
     // Tag the sticky so right-rail-mode CSS can hide the whole panel when
     // there's no earlier-ask to show. In right-rail mode the original-ask
     // and activity have been moved into the side rail, so an empty earlier
     // means the sticky has nothing useful left at the top.
     sticky.classList.toggle('is-earlier-empty', !earlierHasText);
+    if (inRightRail) {
+      // In right-rail mode the progress timeline belongs in the rail, while
+      // Earlier ask stays above the conversation pane. Do not promote the
+      // earlier block into the activity column there.
+      if (earlier.parentNode !== askCol) askCol.appendChild(earlier);
+      actCol.style.display = activityHasContent ? '' : 'none';
+      return;
+    }
     if (earlierHasText && !activityHasContent) {
       if (earlier.parentNode !== actCol) actCol.appendChild(earlier);
       actCol.style.display = '';
@@ -10962,6 +14686,19 @@
     // ids like `convInputContext`; scope to pane chrome, not message content.
     return document.querySelector('#convSplit > .conv-pane[data-pane-id="p1"] > .conv-input-context[data-role="input-context"]');
   }
+  function syncInputContextVisibility(slot) {
+    slot = slot || getInputContextSlot();
+    if (!slot) return;
+    const wsSlot = slot.querySelector('[data-workspace]');
+    const uSlot = slot.querySelector('[data-usage]');
+    const hasRenderedContext = !!(
+      (wsSlot && wsSlot.innerHTML.trim())
+      || (uSlot && uSlot.innerHTML.trim())
+    );
+    const shouldShow = slot.classList.contains('is-new-session') || hasRenderedContext;
+    slot.classList.toggle('visible', shouldShow);
+    if (!shouldShow) slot.classList.remove('hide-cotenants');
+  }
   let _inputContextFitRaf = 0;
   function _fitInputContextStrip() {
     _inputContextFitRaf = 0;
@@ -10989,7 +14726,13 @@
     const slot = getInputContextSlot();
     const wsSlot = slot && slot.querySelector('[data-workspace]');
     if (wsSlot) wsSlot.innerHTML = '';
-    if (slot) slot.classList.remove('visible');
+    if (slot) {
+      if (slot.classList.contains('is-new-session')) syncInputContextVisibility(slot);
+      else {
+        slot.classList.remove('visible');
+        slot.classList.remove('hide-cotenants');
+      }
+    }
     if (!sid) return;
     try {
       const res = await fetch('/api/session/' + encodeURIComponent(sid) + '/workspace');
@@ -11010,8 +14753,7 @@
     const w = _workspaceData;
     if (!w.cwd) {
       wsSlot.innerHTML = '';
-      // Don't hide the whole strip — usage pill might still want to show.
-      slot.classList.toggle('visible', !!_usageData);
+      syncInputContextVisibility(slot);
       return;
     }
     // Show ONE pill per session: where Claude's edits are actually
@@ -11091,7 +14833,7 @@
     // single entry point. Per-session repetition was just noise.
 
     wsSlot.innerHTML = parts.join(' ');
-    slot.classList.add('visible');
+    syncInputContextVisibility(slot);
     scheduleInputContextFit();
   }
 
@@ -11465,6 +15207,7 @@
     const slot = getInputContextSlot();
     const uSlot = slot && slot.querySelector('[data-usage]');
     if (uSlot) uSlot.innerHTML = '';
+    syncInputContextVisibility(slot);
     if (!sid) return;
     try {
       // cache-buster: usage rollups land sporadically in the JSONL, so the
@@ -11480,11 +15223,58 @@
     } catch (_) {}
   }
 
+  function scheduleCompactUsageRefresh(sid) {
+    if (!sid) return;
+    [1500, 5000, 15000, 45000, 90000, 150000].forEach((delay) => {
+      setTimeout(() => {
+        if (currentSession && currentSession.id === sid) {
+          fetchSessionUsage(sid);
+        }
+      }, delay);
+    });
+  }
+
   function _formatTokens(n) {
     if (!n) return '0';
     if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
     if (n >= 1_000) return Math.round(n / 1000) + 'k';
     return String(n);
+  }
+
+  function _formatCompactDuration(ms) {
+    ms = Number(ms) || 0;
+    if (!ms) return '';
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 60) return seconds + 's';
+    const minutes = Math.floor(seconds / 60);
+    const rem = seconds % 60;
+    return minutes + 'm' + (rem ? ' ' + rem + 's' : '');
+  }
+
+  // Antigravity's own UI prints token counts as `11.2k`, `2.6k`, `847` —
+  // one decimal place for >=1k, raw integer otherwise. Truncates rather
+  // than rounds so a 999-token turn never silently shows as `1.0k`. The
+  // per-turn token chips and the antigravity bottom-bar totals reuse this
+  // so they read consistent with Antigravity's chat header.
+  function _formatTokensAntigravity(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    // Truncate to one decimal (e.g. 1199 -> 1.1k, not 1.2k).
+    return (Math.floor(n / 100) / 10).toFixed(1) + 'k';
+  }
+
+  // Build "11.2k in | 2.6k out | 1.0k thinking" the way Antigravity does.
+  // Drops the thinking segment when it's effectively zero (non-reasoning
+  // models commonly emit 0 here and the chip looks noisier with it on).
+  function _formatAntigravityTokenChips(tIn, tOut, tThinking) {
+    tIn = Number(tIn) || 0;
+    tOut = Number(tOut) || 0;
+    tThinking = Number(tThinking) || 0;
+    const parts = [];
+    if (tIn) parts.push(_formatTokensAntigravity(tIn) + ' in');
+    if (tOut) parts.push(_formatTokensAntigravity(tOut) + ' out');
+    if (tThinking >= 100) parts.push(_formatTokensAntigravity(tThinking) + ' thinking');
+    return parts.join(' | ');
   }
 
   function _getCtxLimitOverride() {
@@ -11497,7 +15287,7 @@
     const uSlot = slot && slot.querySelector('[data-usage]');
     if (!slot || !uSlot) return;
     const u = _usageData || {};
-    const latest = u.latest_input_tokens || 0;
+    const transcriptLatest = u.latest_input_tokens || 0;
     const peak = u.peak_input_tokens || 0;
     // Model pill — shown when we know the model. Strips the "claude-"
     // prefix so it reads as `opus-4-7` / `sonnet-4-6`. Adds a `1M` suffix
@@ -11514,6 +15304,9 @@
     const ovr = u.override || null;
     const displayModel = ovr ? ovr.model : (u.model || '');
     const engine = u.engine || (ovr && ovr.engine) || 'claude';
+    const liveContextTokens = Number(u.live_context_tokens || 0);
+    const liveContextLimit = Number(u.live_context_limit || 0);
+    const hasLiveContext = engine === 'claude' && liveContextTokens > 0;
     const ovrNorm = ovr ? _normalizeModelId(ovr.model) : '';
     const liveNorm = _normalizeModelId(u.model || '');
     const queued = !!ovr && (ovr.applied === 'queued' || (ovrNorm && ovrNorm !== liveNorm));
@@ -11522,54 +15315,88 @@
       // 200k (only possible on the 1M variant). Non-Claude engines never
       // show the 1M pill.
       const ovrIsOneM = !!(ovr && ovr.context_1m);
-      const isOneM = engine === 'claude' && (ovrIsOneM || peak > 200000 || displayModel.toLowerCase().includes('[1m]'));
+      const serverLimitIsOneM = Number(u.context_limit || 0) >= 1000000;
+      const isOneM = engine === 'claude' && (
+        ovrIsOneM
+        || serverLimitIsOneM
+        || liveContextLimit >= 1000000
+        || Math.max(peak, liveContextTokens) > 200000
+        || displayModel.toLowerCase().includes('[1m]')
+      );
       const shortModel = displayModel.replace(/^claude-/, '').replace(/\[1m\]/i, '').trim();
       const modelTip = displayModel
         + (isOneM ? '\n(1M context window — anthropic-beta: context-1m)' : '')
         + (queued ? '\n(Applied on next ask — change is queued)' : '')
-        + '\n\nClick to change model';
-      modelPill = ' <button type="button" class="wp-model-pill" data-model-picker'
-        + ' data-engine="' + escapeHtml(engine) + '"'
-        + ' data-current="' + escapeHtml(displayModel) + '"'
-        + ' data-1m="' + (isOneM ? '1' : '0') + '"'
-        + ' title="' + escapeHtml(modelTip) + '">'
-        + escapeHtml(shortModel)
+        + (engine === 'antigravity' ? '' : '\n\nClick to change model');
+      const modelInner = escapeHtml(shortModel)
         + (isOneM ? ' <span class="wp-model-1m">1M</span>' : '')
-        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '')
-        + '</button>';
+        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '');
+      if (engine === 'antigravity') {
+        modelPill = ' <span class="wp-model-pill is-static" title="' + escapeHtml(modelTip) + '">'
+          + modelInner
+          + '</span>';
+      } else {
+        modelPill = ' <button type="button" class="wp-model-pill" data-model-picker'
+          + ' data-engine="' + escapeHtml(engine) + '"'
+          + ' data-current="' + escapeHtml(displayModel) + '"'
+          + ' data-1m="' + (isOneM ? '1' : '0') + '"'
+          + ' title="' + escapeHtml(modelTip) + '">'
+          + modelInner
+          + '</button>';
+      }
     }
     // Click-toggle override: if you're on the 1M variant the server's
     // 200k default is wrong; one click flips and persists.
     const canToggleContextLimit = engine === 'claude';
     const override = canToggleContextLimit ? _getCtxLimitOverride() : 0;
-    const limit = override || u.context_limit || 200000;
-    if (!latest && !peak) {
+    const limit = override || (hasLiveContext ? liveContextLimit : 0) || u.context_limit || 200000;
+    const displayTokens = transcriptLatest || (hasLiveContext ? liveContextTokens : 0);
+    if (!displayTokens && !peak) {
       if (!modelPill) {
         uSlot.innerHTML = '';
+        syncInputContextVisibility(slot);
         scheduleInputContextFit();
         return;
       }
       const title = 'No token usage samples were found for this session.\n'
-        + 'Model: ' + u.model;
+        + 'Model: ' + (displayModel || u.model || 'unknown');
       uSlot.innerHTML = '<span class="wp-usage-pill wp-usage-missing" title="' + escapeHtml(title) + '">'
         + 'ctx unavailable'
         + '</span>' + modelPill;
-      slot.classList.add('visible');
+      syncInputContextVisibility(slot);
       scheduleInputContextFit();
       return;
     }
-    const pct = Math.round((latest / limit) * 100);
+    const livePct = Number(u.live_context_percent || 0);
+    const calcPct = Math.round((displayTokens / limit) * 100);
+    const pct = Math.max(calcPct, hasLiveContext && livePct ? livePct : 0);
     let cls = 'wp-usage-pill';
     if (canToggleContextLimit) cls += ' wp-usage-clickable';
     if (pct >= 85) cls += ' wp-usage-hot';
     else if (pct >= 60) cls += ' wp-usage-warm';
-    const peakNote = peak > latest
-      ? ' <span class="wp-usage-peak" title="Peak across the session">peak ' + _formatTokens(peak) + '</span>'
+    const peakNote = peak > displayTokens
+      ? ' <span class="wp-usage-peak" title="Peak since the most recent compact">peak ' + _formatTokens(peak) + '</span>'
       : '';
     const overrideNote = override ? ' (override)' : '';
-    const title = 'Latest assistant turn: ' + latest.toLocaleString() + ' tokens / '
+    const sourceLabel = transcriptLatest ? 'calc' : (hasLiveContext ? '/ctx' : 'ctx');
+    const slashContextText = hasLiveContext && transcriptLatest
+      ? ' · /ctx ' + _formatTokens(liveContextTokens) + ' (' + (livePct || Math.round((liveContextTokens / limit) * 100)) + '%)'
+      : '';
+    const liveWhen = hasLiveContext && u.live_context_timestamp
+      ? '\nRecorded: ' + u.live_context_timestamp
+      : '';
+    const liveNote = hasLiveContext
+      ? '\nLatest /context output: ' + liveContextTokens.toLocaleString() + ' tokens / '
+        + (liveContextLimit || limit).toLocaleString() + ' context limit'
+        + ' (' + (livePct || Math.round((liveContextTokens / limit) * 100)) + '%)'
+      : '\nLatest /context output: none captured';
+    const title = 'Calculated estimate: '
+      + displayTokens.toLocaleString() + ' tokens / '
       + limit.toLocaleString() + ' context limit' + overrideNote
-      + ' (' + (u.model || 'model unknown') + ')'
+      + ' (' + calcPct + '%)'
+      + '\nModel: ' + (u.model || 'model unknown')
+      + liveWhen
+      + liveNote
       + (canToggleContextLimit ? '\n\nClick to toggle between 200k and 1M.' : '');
     // Cost pill — Anthropic API list-price equivalent. Subscription users
     // (Pro/Max) pay flat, but the figure is still the cleanest cross-model
@@ -11588,11 +15415,34 @@
         + 'list-price equivalent if metered against the API directly.';
       costPill = ' <span class="wp-cost-pill" title="' + escapeHtml(costTip) + '">' + fmt(cost) + '</span>';
     }
+    // Antigravity-only: running per-session totals in the exact format
+    // Antigravity prints in its chat header (`11.2k in | 2.6k out | 1.0k
+    // thinking`). Other engines have their own totals story (cost pill +
+    // cached-tokens tooltip) so we don't show this elsewhere.
+    let antigravityTotalsPill = '';
+    if (engine === 'antigravity') {
+      const totalIn = Number(u.total_input_tokens || 0)
+        + Number(u.total_cache_read_tokens || 0)
+        + Number(u.total_cache_creation_tokens || 0);
+      const totalOut = Number(u.total_output_tokens || 0);
+      const totalThinking = Number(u.total_thinking_tokens || 0);
+      const totalsText = _formatAntigravityTokenChips(totalIn, totalOut, totalThinking);
+      if (totalsText) {
+        const totalsTip = 'Antigravity session totals (sums per-turn modelUsage)\n'
+          + '  Input:        ' + totalIn.toLocaleString() + ' tok'
+          + (u.total_cache_read_tokens ? '  (incl. ' + Number(u.total_cache_read_tokens).toLocaleString() + ' cached read)' : '') + '\n'
+          + '  Output:       ' + totalOut.toLocaleString() + ' tok\n'
+          + '  Thinking:     ' + totalThinking.toLocaleString() + ' tok';
+        antigravityTotalsPill = ' <span class="wp-antigravity-tokens" title="'
+          + escapeHtml(totalsTip) + '">' + escapeHtml(totalsText) + '</span>';
+      }
+    }
     uSlot.innerHTML = '<span class="' + cls + '" title="' + escapeHtml(title) + '">'
-      + 'ctx ' + _formatTokens(latest) + ' / ' + _formatTokens(limit)
-      + ' <span class="wp-usage-pct">(' + pct + '%)</span>'
-      + '</span>' + peakNote + costPill + modelPill;
-    slot.classList.add('visible');
+      + sourceLabel + ' ' + _formatTokens(displayTokens) + ' / ' + _formatTokens(limit)
+      + ' <span class="wp-usage-pct">(' + calcPct + '%)</span>'
+      + slashContextText
+      + '</span>' + peakNote + costPill + antigravityTotalsPill + modelPill;
+    syncInputContextVisibility(slot);
     scheduleInputContextFit();
     const pill = uSlot.querySelector('.wp-usage-clickable');
     if (pill && canToggleContextLimit) {
@@ -11634,6 +15484,15 @@
     gemini: [
       { id: 'gemini-2.5-pro',   label: 'gemini-2.5-pro' },
       { id: 'gemini-2.5-flash', label: 'gemini-2.5-flash' },
+    ],
+    antigravity: [
+      { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)' },
+      { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash (Medium)' },
+      { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
+      { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro (Low)' },
+      { id: 'Claude Sonnet 4.6 (Thinking)', label: 'Claude Sonnet 4.6 (Thinking)' },
+      { id: 'Claude Opus 4.6 (Thinking)', label: 'Claude Opus 4.6 (Thinking)' },
+      { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B (Medium)' },
     ],
   };
 
@@ -11828,7 +15687,8 @@
   }
 
   function renderSessionTimelineIntoSticky() {
-    const slot = document.querySelector('.conv-sticky-header [data-timeline]');
+    const slot = document.querySelector('.conv-sticky-header [data-timeline]')
+      || document.querySelector('#statusRail .csh-col-activity [data-timeline]');
     if (!slot || !_timelineData) return;
     const evs = _timelineData.events || [];
     const total = _timelineData.total_turns || 0;
@@ -11838,7 +15698,10 @@
     // hidden, so we can't unconditionally hide here.
     const col = slot.closest('.csh-col-activity');
     if (!evs.length) {
-      slot.innerHTML = '';
+      slot.innerHTML =
+        '<div class="stl-header"><span class="stl-title">Session activity</span>'
+        + '<span class="stl-counter">0 events · ' + total + ' turns</span></div>'
+        + '<div class="stl-empty">No commits, pushes, or PRs yet.</div>';
       _updateStickyAskSlots();
       return;
     }
@@ -11901,17 +15764,95 @@
     return (nameEl?.dataset?.toolName || nameEl?.textContent || '').trim();
   }
 
+  const KNOWN_TOOL_SOURCE_BY_NAME = {
+    click: 'Computer Use',
+    click_at: 'Computer Use',
+    double_click: 'Computer Use',
+    drag: 'Computer Use',
+    get_app_state: 'Computer Use',
+    hotkey: 'Computer Use',
+    list_apps: 'Computer Use',
+    move_mouse: 'Computer Use',
+    press_key: 'Computer Use',
+    screenshot: 'Computer Use',
+    scroll: 'Computer Use',
+    type_text: 'Computer Use',
+  };
+
+  function splitMcpToolName(rawName) {
+    const value = String(rawName || '').trim();
+    if (!value.startsWith('mcp__')) return null;
+    const rest = value.slice(5);
+    const idx = rest.indexOf('__');
+    if (idx <= 0) return null;
+    return { namespace: rest.slice(0, idx), name: rest.slice(idx + 2) };
+  }
+
+  function toolDisplayName(rawName) {
+    let value = String(rawName || '').trim();
+    const mcp = splitMcpToolName(value);
+    if (mcp) value = mcp.name;
+    const dot = value.lastIndexOf('.');
+    if (dot >= 0) value = value.slice(dot + 1);
+    return value || 'tool';
+  }
+
+  function toolNamespaceLabel(rawNamespace) {
+    const key = String(rawNamespace || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+    return ({
+      browser: 'Browser',
+      chrome: 'Chrome',
+      computer_use: 'Computer Use',
+      github: 'GitHub',
+      gmail: 'Gmail',
+      google_calendar: 'Google Calendar',
+      google_drive: 'Google Drive',
+      image_gen: 'Image Generation',
+      outlook_calendar: 'Outlook Calendar',
+      outlook_email: 'Outlook Email',
+      slack: 'Slack',
+      teams: 'Teams',
+      tool_search: 'Tool Search',
+      zoom: 'Zoom',
+    })[key] || '';
+  }
+
+  function inferredToolSource(rawName) {
+    const value = String(rawName || '').trim();
+    const mcp = splitMcpToolName(value);
+    if (mcp) return toolNamespaceLabel(mcp.namespace);
+    const dot = value.lastIndexOf('.');
+    if (dot > 0) {
+      const source = toolNamespaceLabel(value.slice(0, dot));
+      if (source) return source;
+    }
+    return KNOWN_TOOL_SOURCE_BY_NAME[toolDisplayName(value)] || '';
+  }
+
+  function toolBlockSource(block) {
+    if (!block || typeof block !== 'object') return '';
+    const explicit = block.tool_source || block.toolSource || block.provider || block.namespace || '';
+    if (explicit) return String(toolNamespaceLabel(explicit) || explicit).trim();
+    return inferredToolSource(block.name).trim();
+  }
+
+  function toolCallSource(toolCall) {
+    if (!toolCall) return '';
+    return (toolCall.dataset.toolSource || inferredToolSource(toolCallName(toolCall))).trim();
+  }
+
   function toolCallDetailText(toolCall) {
     if (!toolCall) return '';
     return (toolCall.dataset.toolDetail || toolCall.querySelector('.tool-detail')?.textContent || '').trim();
   }
 
   function isEditToolName(name) {
-    return name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'NotebookEdit';
+    const base = toolDisplayName(name);
+    return base === 'Edit' || base === 'MultiEdit' || base === 'Write' || base === 'NotebookEdit';
   }
 
   function isFileToolName(name) {
-    return isEditToolName(name) || name === 'Read';
+    return isEditToolName(name) || toolDisplayName(name) === 'Read';
   }
 
   function compactPathDetail(detail) {
@@ -11922,114 +15863,45 @@
     return parts.slice(-2).join('/');
   }
 
-  function joinCompactList(items, maxItems) {
-    const unique = Array.from(new Set((items || []).filter(Boolean)));
-    const max = Math.max(1, Number(maxItems) || 3);
-    const visible = unique.slice(0, max);
-    const extra = unique.length - visible.length;
-    if (!visible.length) return '';
-    let text = '';
-    if (visible.length === 1) text = visible[0];
-    else if (visible.length === 2) text = visible[0] + ' and ' + visible[1];
-    else text = visible.slice(0, -1).join(', ') + ', and ' + visible[visible.length - 1];
-    return extra > 0 ? text + ' and ' + extra + ' more' : text;
-  }
-
-  function normalizedToolKey(name) {
-    return String(name || '').toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '');
-  }
-
-  function toolActionKind(name) {
-    const key = normalizedToolKey(name);
-    if (['read', 'view_file', 'read_file', 'open_file'].includes(key)) return 'file-read';
-    if (['grep', 'grep_search', 'search', 'search_files', 'search_file_content', 'ripgrep', 'find_text'].includes(key)) return 'search';
-    if (['glob', 'glob_search', 'find_files', 'file_search'].includes(key)) return 'glob';
-    if (['list_dir', 'list_directory', 'ls', 'directory_list'].includes(key)) return 'list-dir';
-    if (['webfetch', 'web_fetch', 'fetch_url'].includes(key)) return 'web-fetch';
-    if (['websearch', 'web_search', 'search_web'].includes(key)) return 'web-search';
-    if (['todowrite', 'todo_write', 'update_todo', 'update_todos'].includes(key)) return 'todo';
-    if (['askuserquestion', 'ask_user_question'].includes(key)) return 'question';
-    if (['exitplanmode', 'exit_plan_mode'].includes(key)) return 'plan';
-    return '';
-  }
-
-  function uniqueToolDetails(calls) {
-    return Array.from(new Set((calls || []).map(tc => toolCallDetailText(tc)).filter(Boolean)));
-  }
-
-  function detailLooksLikePath(detail) {
-    return /[\/\\]/.test(String(detail || ''));
-  }
-
-  function detailLabel(detail) {
-    const value = String(detail || '').trim();
-    if (!value) return '';
-    return detailLooksLikePath(value) ? _pathBase(value) : value;
-  }
-
-  function summarizeToolActionCalls(kind, calls) {
-    const count = calls.length;
-    const details = uniqueToolDetails(calls);
-    const namedDetails = details.map(detailLabel).filter(Boolean);
-    const namedList = joinCompactList(namedDetails, 2);
-    if (kind === 'file-read') {
-      if (details.length === 1) return 'viewed ' + detailLabel(details[0]) + (count > 1 ? ' ' + count + ' times' : '');
-      if (details.length > 1) return 'viewed ' + details.length + ' files';
-      return count === 1 ? 'viewed a file' : 'viewed ' + count + ' files';
-    }
-    if (kind === 'search') {
-      if (details.length === 1) return 'searched ' + detailLabel(details[0]) + (count > 1 ? ' ' + count + ' times' : '');
-      return count === 1 ? 'searched code' : 'searched code ' + count + ' times';
-    }
-    if (kind === 'glob') return count === 1 ? 'matched files' : 'matched files ' + count + ' times';
-    if (kind === 'list-dir') {
-      if (namedList) return 'listed ' + namedList;
-      return count === 1 ? 'listed a folder' : 'listed ' + count + ' folders';
-    }
-    if (kind === 'web-fetch') return count === 1 ? 'fetched a URL' : 'fetched ' + count + ' URLs';
-    if (kind === 'web-search') return count === 1 ? 'searched the web' : 'searched the web ' + count + ' times';
-    if (kind === 'todo') return 'updated todos';
-    if (kind === 'question') return count === 1 ? 'asked a question' : 'asked ' + count + ' questions';
-    if (kind === 'plan') return 'updated plan state';
-    return '';
-  }
-
-  function readableToolName(name) {
-    return String(name || 'tool').replace(/_/g, ' ');
-  }
-
-  function summarizeNamedToolCalls(calls) {
-    const counts = {};
-    for (const tc of calls || []) {
-      const name = readableToolName(toolCallName(tc));
-      if (!name) continue;
-      counts[name] = (counts[name] || 0) + 1;
-    }
-    const labels = Object.keys(counts).sort().map(name => {
-      const n = counts[name];
-      return n > 1 ? String(n) + ' ' + name + ' calls' : name;
-    });
-    return labels.length ? 'used ' + joinCompactList(labels, 3) : '';
-  }
-
   function formatToolCallDetail(name, detail) {
+    const baseName = toolDisplayName(name);
     const full = String(detail || '').trim();
     if (!full) return { display: '', full: '', className: '' };
-    if (isCommandActivityTool(name)) {
+    if (isCommandActivityTool(baseName)) {
       return { display: full, full, className: ' tool-command' };
     }
-    if (isFileToolName(name)) {
+    if (isFileToolName(baseName)) {
       return { display: compactPathDetail(full), full, className: ' tool-file' };
     }
     return { display: full, full, className: '' };
+  }
+
+  function renderToolCommandDisclosure(block, detail) {
+    const command = String((block && block.command) || '').trim();
+    if (!command) return '';
+    const visible = String((detail && detail.full) || '').trim();
+    const commandFlat = command.replace(/\s+/g, ' ').trim();
+    const visibleFlat = visible.replace(/\s+/g, ' ').trim();
+    if (commandFlat === visibleFlat && command.length <= 160 && command.indexOf('\n') === -1) {
+      return '';
+    }
+    const kind = String((block && block.command_kind) || '').trim();
+    const label = /script/i.test(kind) ? 'View script' : 'View command';
+    const kindHtml = kind
+      ? '<span class="tool-command-kind">' + escapeHtml(kind) + '</span>'
+      : '';
+    return '<details class="tool-command-disclosure">'
+      + '<summary><span>' + escapeHtml(label) + '</span>' + kindHtml + '</summary>'
+      + '<pre>' + escapeHtml(command) + '</pre>'
+      + '</details>';
   }
 
   function summarizeToolCall(div) {
     const tc = div.querySelector('.tool-call');
     if (!tc) return 'Ran 1 command';
     const name = toolCallName(tc);
+    const displayName = toolDisplayName(name);
+    const source = toolCallSource(tc);
     const detail = toolCallDetailText(tc);
     const basename = (s) => {
       if (!s) return '';
@@ -12038,12 +15910,22 @@
       return parts[parts.length - 1] || cleaned;
     };
     const trunc = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
-    const codeRead = (name === 'Bash' || name === 'exec_command') ? parseCodeReadCommand(detail) : null;
+    const codeRead = (displayName === 'Bash' || displayName === 'exec_command') ? parseCodeReadCommand(detail) : null;
     if (codeRead) {
       const loc = codeRead.start ? ':' + codeRead.start + (codeRead.end && codeRead.end !== codeRead.start ? '-' + codeRead.end : '') : '';
       return 'Viewed ' + _pathBase(codeRead.path) + loc;
     }
-    switch (name) {
+    if (isCommandActivityTool(displayName)) {
+      const compact = compactShellCommandLabel(detail);
+      const verb = tc.classList.contains('tool-call-ok') ? 'Completed ' : 'Ran ';
+      return compact ? verb + compact : verb + 'shell command';
+    }
+    if (source) {
+      return detail
+        ? 'Used ' + source + ': ' + displayName + ' ' + trunc(detail, 40)
+        : 'Used ' + source + ': ' + displayName;
+    }
+    switch (displayName) {
       case 'Read':         return detail ? 'Read ' + basename(detail) : 'Ran Read';
       case 'Edit':         return detail ? 'Edited ' + basename(detail) : 'Ran Edit';
       case 'Write':        return detail ? 'Wrote ' + basename(detail) : 'Ran Write';
@@ -12059,7 +15941,7 @@
       case 'TaskUpdate':   return 'Updated task';
       case 'AskUserQuestion': return detail ? 'Question: ' + trunc(detail, 70) : 'Asked a question';
       case 'ExitPlanMode': return 'Exited plan mode';
-      default:             return detail ? 'Ran ' + name + ': ' + trunc(detail, 40) : 'Ran ' + (name || 'tool');
+      default:             return detail ? 'Ran ' + displayName + ': ' + trunc(detail, 40) : 'Ran ' + (displayName || 'tool');
     }
   }
 
@@ -12098,6 +15980,130 @@
     }
     if (cur) words.push(cur);
     return words;
+  }
+
+  function compactShellCommandLabel(command) {
+    let raw = String(command || '').replace(/\s+/g, ' ').trim();
+    if (!raw) return '';
+    raw = raw.replace(/^Shell command:\s*/i, '').trim();
+    const words = splitShellWords(raw);
+    if (!words.length) return raw.length > 40 ? raw.slice(0, 39) + '…' : raw;
+    const cmd = _pathBase(words[0]);
+    const sub = words[1] && !words[1].startsWith('-') ? words[1] : '';
+    if (cmd === 'git' && sub) return 'git ' + sub;
+    if (cmd === 'gh' && sub) return 'gh ' + sub;
+    if (cmd === 'npx' && sub) {
+      const third = words[2] && !words[2].startsWith('-') ? words[2] : '';
+      return third ? 'npx ' + sub + ' ' + third : 'npx ' + sub;
+    }
+    if ((cmd === 'npm' || cmd === 'pnpm' || cmd === 'yarn') && sub) return cmd + ' ' + sub;
+    if ((cmd === 'python' || cmd === 'python3') && sub) return sub === '-m' && words[2] ? cmd + ' -m ' + words[2] : cmd + ' ' + sub;
+    if (cmd) return cmd;
+    return raw.length > 40 ? raw.slice(0, 39) + '…' : raw;
+  }
+
+  function joinCompactList(items, maxItems) {
+    const unique = Array.from(new Set((items || []).filter(Boolean)));
+    const max = Math.max(1, Number(maxItems) || 3);
+    const visible = unique.slice(0, max);
+    const extra = unique.length - visible.length;
+    if (!visible.length) return '';
+    let text = '';
+    if (visible.length === 1) text = visible[0];
+    else if (visible.length === 2) text = visible[0] + ' and ' + visible[1];
+    else text = visible.slice(0, -1).join(', ') + ', and ' + visible[visible.length - 1];
+    return extra > 0 ? text + ' and ' + extra + ' more' : text;
+  }
+
+  function normalizedToolKey(name) {
+    return toolDisplayName(name)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  }
+
+  function toolActionKind(name) {
+    const key = normalizedToolKey(name);
+    if ([
+      'read', 'view_file', 'read_file', 'open_file',
+    ].includes(key)) return 'file-read';
+    if ([
+      'grep', 'grep_search', 'search', 'search_files', 'search_file_content',
+      'ripgrep', 'find_text',
+    ].includes(key)) return 'search';
+    if (['glob', 'glob_search', 'find_files', 'file_search'].includes(key)) return 'glob';
+    if (['list_dir', 'list_directory', 'ls', 'directory_list'].includes(key)) return 'list-dir';
+    if (['webfetch', 'web_fetch', 'fetch_url'].includes(key)) return 'web-fetch';
+    if (['websearch', 'web_search', 'search_web'].includes(key)) return 'web-search';
+    if (['todowrite', 'todo_write', 'update_todo', 'update_todos'].includes(key)) return 'todo';
+    if (['askuserquestion', 'ask_user_question'].includes(key)) return 'question';
+    if (['exitplanmode', 'exit_plan_mode'].includes(key)) return 'plan';
+    return '';
+  }
+
+  function uniqueToolDetails(calls) {
+    return Array.from(new Set((calls || []).map(tc => toolCallDetailText(tc)).filter(Boolean)));
+  }
+
+  function detailLooksLikePath(detail) {
+    return /[\/\\]/.test(String(detail || ''));
+  }
+
+  function detailLabel(detail) {
+    const value = String(detail || '').trim();
+    if (!value) return '';
+    return detailLooksLikePath(value) ? _pathBase(value) : value;
+  }
+
+  function summarizeToolActionCalls(kind, calls) {
+    const count = calls.length;
+    const details = uniqueToolDetails(calls);
+    const namedDetails = details.map(detailLabel).filter(Boolean);
+    const namedList = joinCompactList(namedDetails, 2);
+    if (kind === 'file-read') {
+      if (details.length === 1) return 'viewed ' + detailLabel(details[0]) + (count > 1 ? ' ' + count + ' times' : '');
+      if (details.length > 1) return 'viewed ' + details.length + ' files';
+      return count === 1 ? 'viewed a file' : 'viewed ' + count + ' files';
+    }
+    if (kind === 'search') {
+      if (details.length === 1) return 'searched ' + detailLabel(details[0]) + (count > 1 ? ' ' + count + ' times' : '');
+      return count === 1 ? 'searched code' : 'searched code ' + count + ' times';
+    }
+    if (kind === 'glob') {
+      return count === 1 ? 'matched files' : 'matched files ' + count + ' times';
+    }
+    if (kind === 'list-dir') {
+      if (namedList) return 'listed ' + namedList;
+      return count === 1 ? 'listed a folder' : 'listed ' + count + ' folders';
+    }
+    if (kind === 'web-fetch') {
+      return count === 1 ? 'fetched a URL' : 'fetched ' + count + ' URLs';
+    }
+    if (kind === 'web-search') {
+      return count === 1 ? 'searched the web' : 'searched the web ' + count + ' times';
+    }
+    if (kind === 'todo') return 'updated todos';
+    if (kind === 'question') return count === 1 ? 'asked a question' : 'asked ' + count + ' questions';
+    if (kind === 'plan') return 'updated plan state';
+    return '';
+  }
+
+  function readableToolName(name) {
+    return toolDisplayName(name).replace(/_/g, ' ');
+  }
+
+  function summarizeNamedToolCalls(calls) {
+    const counts = {};
+    for (const tc of calls || []) {
+      const name = readableToolName(toolCallName(tc));
+      if (!name) continue;
+      counts[name] = (counts[name] || 0) + 1;
+    }
+    const labels = Object.keys(counts).sort().map(name => {
+      const n = counts[name];
+      return n > 1 ? String(n) + ' ' + name + ' calls' : name;
+    });
+    return labels.length ? 'used ' + joinCompactList(labels, 3) : '';
   }
 
   function _codeLangForPath(path) {
@@ -12179,7 +16185,7 @@
 
   function toolCallCommandInfo(toolCall) {
     if (!toolCall) return null;
-    const name = toolCallName(toolCall);
+    const name = toolDisplayName(toolCallName(toolCall));
     const detail = toolCallDetailText(toolCall);
     if (name !== 'exec_command' && name !== 'Bash') return null;
     return parseCodeReadCommand(detail);
@@ -12216,15 +16222,36 @@
         }
       }
       if (commands.length) {
-        parts.push(commands.length === 1 ? 'ran shell command' : 'ran ' + commands.length + ' shell commands');
+        const commandList = joinCompactList(commands.map(tc => compactShellCommandLabel(toolCallDetailText(tc))), 3);
+        if (commandList) {
+          const allSucceeded = commands.every(tc => tc.classList.contains('tool-call-ok'));
+          parts.push((allSucceeded ? 'completed ' : 'ran ') + commandList);
+        } else {
+          parts.push(commands.length === 1 ? 'ran shell command' : 'ran ' + commands.length + ' shell commands');
+        }
       }
-      const remaining = calls.filter(tc =>
+      const sourcedTools = calls.filter(tc =>
         !isEditToolName(toolCallName(tc))
         && !isCommandActivityTool(toolCallName(tc))
+        && toolCallSource(tc)
+      );
+      const sourceCounts = {};
+      for (const tc of sourcedTools) {
+        const source = toolCallSource(tc);
+        sourceCounts[source] = (sourceCounts[source] || 0) + 1;
+      }
+      for (const source of Object.keys(sourceCounts).sort()) {
+        const n = sourceCounts[source];
+        parts.push('used ' + n + ' ' + source + ' tool' + (n === 1 ? '' : 's'));
+      }
+      const categorizedTools = calls.filter(tc =>
+        !isEditToolName(toolCallName(tc))
+        && !isCommandActivityTool(toolCallName(tc))
+        && !toolCallSource(tc)
       );
       const kindBuckets = {};
       const namedRemainder = [];
-      for (const tc of remaining) {
+      for (const tc of categorizedTools) {
         const kind = toolActionKind(toolCallName(tc));
         if (kind) {
           if (!kindBuckets[kind]) kindBuckets[kind] = [];
@@ -12239,7 +16266,8 @@
       }
       const namedSummary = summarizeNamedToolCalls(namedRemainder);
       if (namedSummary) parts.push(namedSummary);
-      label.textContent = parts.length ? parts.join('; ') : 'Ran ' + count + ' commands';
+      const text = parts.length ? parts.join('; ') : 'Ran ' + count + ' commands';
+      label.textContent = text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
     } else {
       label.textContent = 'Ran ' + count + ' commands';
     }
@@ -12252,6 +16280,17 @@
     return /has been (?:updated|created) successfully/i.test(t)
       || /file state is current/i.test(t)
       || /no need to Read it back/i.test(t);
+  }
+
+  function isSuccessfulCommandToolResult(toolCall, text) {
+    if (!isCommandActivityTool(toolCallName(toolCall))) return false;
+    const t = String(text || '');
+    if (/exit code:\s*[1-9]\d*/i.test(t) || /Process exited with code\s+[1-9]\d*/i.test(t)) return false;
+    if (/Tool is running as a background task/i.test(t)) return false;
+    return /The command completed successfully/i.test(t)
+      || /finished,\s*exit code:\s*0/i.test(t)
+      || /Process exited with code\s+0/i.test(t)
+      || !!t.trim();
   }
 
   function stampCurrentToolGroup(ts) {
@@ -12495,10 +16534,28 @@
       }
 
       if (ev.type === 'system') {
-        div.innerHTML = '<span class="label">System</span>'
-          + '<span class="line-num">L' + ev.line + '</span>'
-          + tsSpan(ev.ts)
-          + '<span>' + escapeHtml(ev.subtype || '') + (ev.model ? ' &middot; ' + escapeHtml(ev.model) : '') + (ev.session ? ' &middot; ' + escapeHtml(ev.session) : '') + '</span>';
+        if (ev.subtype === 'compact_boundary') {
+          const compact = ev.compact || {};
+          const preTokens = Number(compact.pre_tokens || 0);
+          const postTokens = Number(compact.post_tokens || 0);
+          const duration = _formatCompactDuration(compact.duration_ms);
+          const trigger = compact.trigger ? String(compact.trigger) : 'manual';
+          let compactText = 'Compacted context';
+          if (preTokens || postTokens) {
+            compactText += ': ' + _formatTokens(preTokens) + ' -> ' + _formatTokens(postTokens);
+          }
+          compactText += ' (' + trigger + (duration ? ', ' + duration : '') + ')';
+          div.classList.add('system-compact');
+          div.innerHTML = '<span class="label">System</span>'
+            + '<span class="line-num">L' + ev.line + '</span>'
+            + tsSpan(ev.ts)
+            + '<span class="system-compact-text">' + escapeHtml(compactText) + '</span>';
+        } else {
+          div.innerHTML = '<span class="label">System</span>'
+            + '<span class="line-num">L' + ev.line + '</span>'
+            + tsSpan(ev.ts)
+            + '<span>' + escapeHtml(ev.subtype || '') + (ev.model ? ' &middot; ' + escapeHtml(ev.model) : '') + (ev.session ? ' &middot; ' + escapeHtml(ev.session) : '') + '</span>';
+        }
       } else if (ev.type === 'user_text') {
         // If this matches an outstanding optimistic send, drop the pending stub
         // (the real event lands in its place below).
@@ -12542,13 +16599,58 @@
         let hasNonTool = false;
         for (const b of ev.blocks) {
           if (b.kind === 'tool_use') {
-            const displayName = b.name === 'AskUserQuestion' ? 'Question' : b.name;
-            const toolClass = b.name === 'AskUserQuestion' ? ' ask-user-question' : '';
+            const baseName = toolDisplayName(b.name);
+            const displayName = baseName === 'AskUserQuestion' ? 'Question' : baseName;
+            const source = toolBlockSource(b);
+            const sourceHtml = source
+              ? '<span class="tool-source" title="Tool source">' + escapeHtml(source) + '</span> '
+              : '';
+            const toolClass = baseName === 'AskUserQuestion' ? ' ask-user-question' : '';
             const detail = formatToolCallDetail(b.name, b.detail);
-            html += '<div class="tool-call' + toolClass + detail.className + '" data-tool-detail="' + escapeAttr(detail.full) + '">'
+            // AskUserQuestion may carry up to 4 questions in one tool call.
+            // Accept the new {questions:[...]} shape and the older single-
+            // question shape so older transcripts still render.
+            let askQuestions = null;
+            if (baseName === 'AskUserQuestion' && b.question && typeof b.question === 'object') {
+              if (Array.isArray(b.question.questions) && b.question.questions.length) {
+                askQuestions = b.question.questions;
+              } else if (b.question.header || b.question.question || (Array.isArray(b.question.options) && b.question.options.length)) {
+                askQuestions = [b.question];
+              }
+            }
+            let askBody = '';
+            if (askQuestions) {
+              askBody = askQuestions.map(function (askQ) {
+                const headerHtml = askQ.header
+                  ? '<div class="ask-user-header">' + escapeHtml(askQ.header) + '</div>'
+                  : '';
+                const questionHtml = askQ.question
+                  ? '<div class="ask-user-question-text">' + escapeHtml(askQ.question) + '</div>'
+                  : '';
+                const opts = Array.isArray(askQ.options) ? askQ.options : [];
+                const optsHtml = opts.length
+                  ? '<ul class="ask-user-options">' + opts.map(function (o) {
+                      const lbl = (o && typeof o === 'object') ? (o.label || '') : String(o || '');
+                      const desc = (o && typeof o === 'object') ? (o.description || '') : '';
+                      return '<li>'
+                        + '<span class="ask-user-option-label">' + escapeHtml(lbl) + '</span>'
+                        + (desc ? '<span class="ask-user-option-desc"> — ' + escapeHtml(desc) + '</span>' : '')
+                        + '</li>';
+                    }).join('') + '</ul>'
+                  : '';
+                return '<div class="ask-user-block">' + headerHtml + questionHtml + optsHtml + '</div>';
+              }).join('');
+            }
+            const commandDisclosure = renderToolCommandDisclosure(b, detail);
+            const commandClass = commandDisclosure ? ' has-command-disclosure' : '';
+            html += '<div class="tool-call' + toolClass + detail.className + commandClass + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '">'
               + '<span class="arrow">-></span> '
+              + sourceHtml
               + '<span class="tool-name" data-tool-name="' + escapeAttr(b.name || '') + '">' + escapeHtml(displayName) + '</span>'
-              + (detail.display ? ' <span class="tool-detail" title="' + escapeAttr(detail.full) + '">' + escapeHtml(detail.display) + '</span>' : '')
+              + (askBody
+                  ? askBody
+                  : (detail.display ? ' <span class="tool-detail" title="' + escapeAttr(detail.full) + '">' + escapeHtml(detail.display) + '</span>' : ''))
+              + commandDisclosure
               + '</div>';
           } else if (b.kind === 'text') {
             html += '<div class="assistant-text">' + renderMarkdown(b.text) + '</div>';
@@ -12556,6 +16658,19 @@
           } else if (b.kind === 'thinking') {
             html += '<div class="thinking-block" style="display:none"><span class="thinking-toggle" onclick="this.parentElement.querySelector(\'.t-body\').style.display=this.parentElement.querySelector(\'.t-body\').style.display===\'none\'?\'block\':\'none\'">Thinking</span><div class="t-body">' + escapeHtml(b.text) + '</div></div>';
             hasNonTool = true;
+          }
+        }
+        // Per-turn token chips (currently only set for Antigravity sessions —
+        // the server attaches tokens_in/out/thinking from the trajectory's
+        // modelUsage when the Antigravity app is running). Mirrors the line
+        // Antigravity prints in its own chat header.
+        if ((ev.tokens_in || ev.tokens_out || ev.tokens_thinking)) {
+          const chipText = _formatAntigravityTokenChips(ev.tokens_in, ev.tokens_out, ev.tokens_thinking);
+          if (chipText) {
+            const chipTitle = 'Input:    ' + (Number(ev.tokens_in) || 0).toLocaleString() + ' tokens'
+              + '\nOutput:   ' + (Number(ev.tokens_out) || 0).toLocaleString() + ' tokens'
+              + '\nThinking: ' + (Number(ev.tokens_thinking) || 0).toLocaleString() + ' tokens';
+            html += '<div class="event-token-chips" title="' + escapeAttr(chipTitle) + '">' + escapeHtml(chipText) + '</div>';
           }
         }
         if (!hasNonTool) div.classList.add('tool-only');
@@ -12603,9 +16718,12 @@
             // CSS ::before never renders. Plain outputs bake the prefix into
             // their <pre>; structured code previews rely on the group stamp.
             const _toolTs = eventStamp(ev.ts) || nowStamp();
+            const commandSucceeded = !ev.is_error && isSuccessfulCommandToolResult(last, text);
+            if (commandSucceeded) last.classList.add('tool-call-ok');
             if (!ev.is_error && isRoutineSuccessfulToolResult(last, text)) {
               last.classList.add('tool-call-ok');
               stampCurrentToolGroup(_toolTs);
+              updateToolGroupLabel(_currentToolGroup);
               continue;
             }
             const codePreview = ev.is_error ? null : renderToolCodePreview(last, text);
@@ -12631,6 +16749,7 @@
             // node needs the attribute set, not just the parent group.
             stampCurrentToolGroup(_toolTs);
             last.appendChild(out);
+            if (commandSucceeded) updateToolGroupLabel(_currentToolGroup);
           }
         }
         continue;
@@ -12682,6 +16801,11 @@
     // Re-anchor the inline live-tool indicator at the bottom; new events
     // just appended would otherwise push past it.
     if (typeof updateLiveToolStrip === 'function') updateLiveToolStrip();
+    const compactBoundary = events.find(e => e && e.type === 'system' && e.subtype === 'compact_boundary');
+    if (compactBoundary) {
+      const sid = compactBoundary.session || (currentSession && currentSession.id) || '';
+      if (sid && currentSession && currentSession.id === sid) fetchSessionUsage(sid);
+    }
     // Same story for the spawn-log streaming bubble — keep it pinned to
     // the tail so it doesn't end up sandwiched between older JSONL events
     // and newer ones.
@@ -12728,6 +16852,7 @@
       if (_archivedBacklogIds.has(c.id)) c.archived = true;
     }
     const filtered = conversationsData.filter(c => {
+      if (c.pinned) return true;
       // Recent-only filter (last N hours) — applies to everything, backlog included.
       // Backlog items use issue_created_at (falls back to modified).
       if (showRecentOnly) {
@@ -12755,7 +16880,7 @@
         || (c.session_id || '').toLowerCase().includes(q)
         || (c.id || '').toLowerCase().includes(q);
     });
-    const sorted = applyConvSort(filtered);
+    const sorted = _prioritizeSessionIdMatches(applyConvSort(filtered), q);
     return _decorateWithHistoryMatches(sorted, q);
   }
 
@@ -12843,7 +16968,7 @@
     // History-only rows trail the local matches. Within themselves they
     // keep history-search BM25 order (already sorted by score in the
     // server response, so insertion order suffices).
-    return localSorted.concat(synthetic);
+    return _prioritizeSessionIdMatches(localSorted.concat(synthetic), qLower);
   }
 
   function _fetchHistoryAugment(query) {
@@ -13095,7 +17220,19 @@
           rail.appendChild(liveOrig);
         }
       }
-      if (liveAct) rail.appendChild(liveAct);
+      if (liveAct) {
+        const filesPanel = rail.querySelector('#filesPanel');
+        if (filesPanel) {
+          rail.insertBefore(liveAct, filesPanel);
+        } else {
+          const bgPalette = rail.querySelector('.conv-bg-palette');
+          if (bgPalette) {
+            rail.insertBefore(liveAct, bgPalette);
+          } else {
+            rail.appendChild(liveAct);
+          }
+        }
+      }
     } else if (sticky) {
       const askCol = sticky.querySelector('.csh-col-ask');
       const row = sticky.querySelector('.csh-row');
@@ -13121,6 +17258,38 @@
     }
     if (!CONV_POPOUT_MODE) _hiStartPolling();
 
+    const $fileViewerClose = document.getElementById('fileViewerCloseBtn');
+    if ($fileViewerClose) {
+      $fileViewerClose.addEventListener('click', () => {
+        if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
+      });
+    }
+    const $fileViewerOpenExt = document.getElementById('fileViewerOpenExternalBtn');
+    if ($fileViewerOpenExt) {
+      $fileViewerOpenExt.addEventListener('click', async () => {
+        const viewer = document.getElementById('statusRailFileViewer');
+        const path = viewer && viewer.getAttribute('data-current-path');
+        if (!path) return;
+        const sid = (currentSession && currentSession.id) || '';
+        $fileViewerOpenExt.disabled = true;
+        try {
+          const r = await fetch('/api/reveal-file', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path, session_id: sid }),
+          });
+          if (!r.ok) {
+            const j = await r.json().catch(() => ({ error: 'open failed' }));
+            showOpToast('Open failed: ' + (j.error || ('HTTP ' + r.status)), 'error');
+          }
+        } catch (err) {
+          showOpToast('Open failed: ' + (err && err.message || 'network error'), 'error');
+        } finally {
+          $fileViewerOpenExt.disabled = false;
+        }
+      });
+    }
+
     // Status-position toggle. Two states: top (default) and right (resizable
     // rail beside the conversation pane). Body class is restored before
     // paint by the inline script in index.html; here we only wire the
@@ -13133,7 +17302,11 @@
     const $statusRailRestore = document.getElementById('statusRailRestoreBtn');
     const STATUS_RAIL_DEFAULT_WIDTH = 260;
     const STATUS_RAIL_MIN_WIDTH = 220;
-    const STATUS_RAIL_MAX_WIDTH = 520;
+    // Generous cap so the rail can host the MD file viewer at a
+    // readable width on big screens. The natural ceiling is
+    // (paneWidth - 260) so the conversation never shrinks below
+    // ~260px of legible space.
+    const STATUS_RAIL_MAX_WIDTH = 1600;
     const STATUS_RAIL_COLLAPSE_WIDTH = 130;
     const _syncStatusIcon = () => {
       if (!$statusIcon) return;
@@ -13410,11 +17583,19 @@
       _moveToHome('historyStatusPill', $settingsSlot);
       _moveToHome('kptWorktreesBtn',   $settingsSlot);
       _moveToHome('statsBtn',          $settingsSlot);
-      _moveToHome('bugReportLink',     $settingsSlot);
       if ($toolbar) {
         const fontCtrls = $toolbar.querySelector('.font-size-controls');
         if (fontCtrls) $settingsSlot.appendChild(fontCtrls);
       }
+    }
+    // Report a bug sits at the very left of the sidebar header action
+    // row — closer to where bugs are noticed (the conversation list)
+    // than buried in the settings gear. The static Refresh+Restart
+    // split-button and History button stay to its right.
+    const $sidebarHeaderActions = document.querySelector('.sidebar-header-actions');
+    const $bugLinkEl = document.getElementById('bugReportLink');
+    if ($sidebarHeaderActions && $bugLinkEl && $bugLinkEl.parentElement !== $sidebarHeaderActions) {
+      $sidebarHeaderActions.prepend($bugLinkEl);
     }
 
     // CONDITIONAL set (toggle-aware): rail in right-mode, original toolbar
@@ -14402,7 +18583,23 @@
   }
 
   function setArchiveFolderFilter(value, opts = {}) {
-    archiveFolderFilter = value || ARCHIVE_FOLDER_ALL;
+    const oldRepo = selectedRepoPath();
+    const newValue = value || ARCHIVE_FOLDER_ALL;
+    const newRepo = newValue !== ARCHIVE_FOLDER_ALL ? newValue : '';
+    const repoChanged = oldRepo !== newRepo;
+
+    if (repoChanged) {
+      for (const p of splitState.panes) {
+        if (p.eventSource) {
+          try { p.eventSource.close(); } catch (e) {}
+          p.eventSource = null;
+        }
+      }
+      if (typeof stopSpawnStream === 'function') stopSpawnStream();
+      if (typeof stopCodexLogPoller === 'function') stopCodexLogPoller();
+    }
+
+    archiveFolderFilter = newValue;
     try { localStorage.setItem(ARCHIVE_FOLDER_FILTER_KEY, archiveFolderFilter); } catch (_) {}
     renderArchiveFolderFilter();
     updateRepoPickerVisibility();
@@ -14427,33 +18624,170 @@
     // wireGroupChatPolling() — not here. Calling setInterval inside this
     // handler used to leak a fresh 15s timer on every folder-filter change.
     pollGcActive();
+
+    if (repoChanged) {
+      restoreSplitState();
+      loadConversationList();
+    }
   }
 
   const $gcActiveBtn = document.getElementById('gcActiveBtn');
+  // The bottom-left "Active Group chat" pill lives near the end of <body>,
+  // AFTER this <script> tag, so it is NOT in the DOM yet when this module first
+  // evaluates — a plain getElementById() here returns null and the pill would
+  // stay hidden forever (the orchestration loop runs with no visible warning).
+  // Resolve it lazily on first use instead so it's found once the body parses.
+  let _activeGroupChatPillEl = null;
+  function getActiveGroupChatPillEl() {
+    if (!_activeGroupChatPillEl) {
+      _activeGroupChatPillEl = document.getElementById('activeGroupChatPill');
+    }
+    return _activeGroupChatPillEl;
+  }
+  const GC_ACTIVE_TRIGGER_RECENT_MS = 60 * 1000;
   // _gcActiveChats now contains active + closed (unarchived) chats. The
   // topbar badge uses the .status field to count active-only; the sidebar
   // section renders both, ghosting the closed ones.
   let _gcActiveChats = [];
-  // Compute a stable key that captures BOTH the chat set and each chat's
-  // status — so a transition from active → closed for the same path
-  // triggers a re-render even though the path set didn't change.
+  let _gcLastLocalTrigger = null;
+
+  function gcEpochMs(value) {
+    if (value === null || value === undefined || value === '') return 0;
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n > 100000000000 ? n : n * 1000;
+    const parsed = Date.parse(String(value));
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function gcTriggerMs(chat) {
+    if (!chat) return 0;
+    return Math.max(
+      gcEpochMs(chat.orchestrator_last_trigger_at),
+      gcEpochMs(chat.orchestrator_last_nudge_at),
+      gcEpochMs(chat.last_reminder_at)
+    );
+  }
+
+  function gcSortMs(chat) {
+    if (!chat) return 0;
+    return Math.max(
+      gcTriggerMs(chat),
+      gcEpochMs(chat.last_activity),
+      gcEpochMs(chat.last_mtime),
+      gcEpochMs(chat.started_at)
+    );
+  }
+
+  function gcShouldShowActivePill(chat, now) {
+    if (!chat) return false;
+    if (chat.status === 'active' || chat.orchestrator_timer_active) return true;
+    const triggerAt = gcTriggerMs(chat);
+    return triggerAt > 0 && (now - triggerAt) <= GC_ACTIVE_TRIGGER_RECENT_MS;
+  }
+
+  function activeGroupChatPillTarget() {
+    const now = Date.now();
+    const matches = (_gcActiveChats || [])
+      .filter(chat => gcShouldShowActivePill(chat, now))
+      .sort((a, b) => gcSortMs(b) - gcSortMs(a));
+    if (matches.length) return matches[0];
+    if (_gcLastLocalTrigger && (now - _gcLastLocalTrigger.at) <= GC_ACTIVE_TRIGGER_RECENT_MS) {
+      return _gcLastLocalTrigger.chat;
+    }
+    return null;
+  }
+
+  function updateActiveGroupChatPill() {
+    const $activeGroupChatPill = getActiveGroupChatPillEl();
+    if (!$activeGroupChatPill) return;
+    const chat = activeGroupChatPillTarget();
+    if (!chat) {
+      $activeGroupChatPill.hidden = true;
+      $activeGroupChatPill.removeAttribute('data-chat-id');
+      return;
+    }
+    const chatId = chat.uuid || chat.id || '';
+    const topic = chat.topic || 'Group chat';
+    // Count every active orchestration, not just the one we link to, so the
+    // pill makes the token-burn surface obvious: N loops are running right now.
+    const now = Date.now();
+    const activeCount = (_gcActiveChats || []).filter(c => gcShouldShowActivePill(c, now)).length;
+    const label = $activeGroupChatPill.querySelector('.active-group-chat-label');
+    if (label) {
+      label.textContent = activeCount > 1
+        ? activeCount + ' Active Group chats'
+        : 'Active Group chat';
+    }
+    $activeGroupChatPill.hidden = false;
+    if (chatId) $activeGroupChatPill.dataset.chatId = chatId;
+    $activeGroupChatPill.title = (activeCount > 1
+      ? activeCount + ' active group-chat orchestrations are looping (tokens in use). Latest: ' + topic
+      : 'Active group-chat orchestration: ' + topic)
+      + '. Click to open the latest active chat.';
+  }
+
+  function markActiveGroupChatTrigger(chatPath, chatId, topic, mode) {
+    _gcLastLocalTrigger = {
+      at: Date.now(),
+      chat: {
+        id: chatId || '',
+        uuid: chatId || '',
+        path: chatPath || '',
+        path_tilde: chatPath || '',
+        topic: topic || 'Group chat',
+        mode: mode || 'topic',
+        orchestrator_timer_active: true,
+        orchestrator_last_trigger_at: Date.now() / 1000,
+      },
+    };
+    updateActiveGroupChatPill();
+  }
+
+  function openActiveGroupChatPillTarget() {
+    const chat = activeGroupChatPillTarget();
+    if (!chat) return;
+    const chatId = chat.uuid || chat.id || null;
+    const chatPath = chat.path_tilde || chat.path || '';
+    const sameId = chatId && _gcReaderId && chatId === _gcReaderId;
+    const samePath = chatPath && _gcReaderPath && (chatPath === _gcReaderPath || chat.path === _gcReaderPath);
+    if (sameId || samePath) {
+      const body = document.getElementById('gcReaderBody');
+      if (body) body.focus();
+      return;
+    }
+    openGroupChatReader(chatPath, chat.topic || 'Group chat', chat.mode || 'topic', true, chatId);
+  }
+
+  // Compute a stable key for row identity plus visible metadata. Topic,
+  // participants, mtime, and waiting-on changes need to redraw the row
+  // even when the chat count and status stay unchanged.
   function _gcChatsKey(chats) {
     return (chats || [])
-      .map(c => (c.path || c.path_tilde || '') + ':' + (c.status || ''))
+      .map(c => JSON.stringify([
+        c.uuid || c.id || c.path || c.path_tilde || '',
+        c.status || '',
+        c.topic || '',
+        c.last_mtime || 0,
+        c.orchestrator_timer_active ? 1 : 0,
+        c.orchestrator_last_trigger_at || 0,
+        c.last_reminder_at || 0,
+        c.message_count || 0,
+        (c.session_ids || []).join(','),
+        (c.waiting_on_hashes || []).join(','),
+      ]))
       .sort()
       .join('|');
   }
   async function pollGcActive() {
     try {
       const data = await fetch('/api/group-chats/active').then(r => r.json());
-      // Compare by path+status set, not just length — a brand-new chat
-      // with the same count as before (rare, but possible if one ended in
-      // the same tick) and a status flip on the same path both need to
-      // trigger a re-render.
+      // Compare a metadata key, not just length, so renames, participant
+      // changes, and activity updates redraw the group-chat rows.
       const prevKey = _gcChatsKey(_gcActiveChats);
       _gcActiveChats = (data.chats || []);
       const nextKey = _gcChatsKey(_gcActiveChats);
       const activeCount = _gcActiveChats.filter(c => c.status === 'active').length;
+      updateActiveGroupChatPill();
       if ($gcActiveBtn) {
         if (activeCount === 0) {
           $gcActiveBtn.style.display = 'none';
@@ -14471,30 +18805,69 @@
         const $s = document.getElementById('convSearch');
         renderArchiveList($s ? $s.value : '');
       }
-    } catch (_) {}
+    } catch (_) {
+      updateActiveGroupChatPill();
+    }
   }
   if ($gcActiveBtn) {
     $gcActiveBtn.addEventListener('click', () => {
       // Topbar button: only meaningful while at least one chat is active.
       const activeChats = _gcActiveChats.filter(c => c.status === 'active');
       if (!activeChats.length) return;
-      if (_gcReaderPath) {
+      if (_gcReaderPath || _gcReaderId) {
         closeGroupChatReader();
       } else {
         const c = activeChats[0];
-        openGroupChatReader(c.path_tilde, c.topic, c.mode, true);
+        openGroupChatReader(c.path_tilde, c.topic, c.mode, true, c.uuid || c.id || null);
       }
     });
   }
+  // Delegated so it works regardless of when #activeGroupChatPill is parsed
+  // (the element follows this script in the document — see getActiveGroupChatPillEl).
+  document.addEventListener('click', (ev) => {
+    const pill = ev.target && ev.target.closest && ev.target.closest('#activeGroupChatPill');
+    if (!pill) return;
+    ev.preventDefault();
+    openActiveGroupChatPillTarget();
+  });
+
+  // Enable/disable orchestration for a group chat. paused=true halts the
+  // server's nudge loop (token use) for the chat; false re-arms it. Used by the
+  // per-row knob and the orchestrator panel's Stop/Enable button.
+  async function setGroupChatPaused(chatPath, chatId, paused) {
+    if (!chatPath && !chatId) return;
+    try {
+      const res = await fetch('/api/group-chats/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: chatPath || '', id: chatId || '', paused: !!paused }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!data || !data.ok) {
+        showOpToast?.('Could not ' + (paused ? 'disable' : 'enable') + ' group chat: ' + ((data && data.error) || 'unknown'), 'error');
+        return;
+      }
+      try { await pollGcActive(); } catch (_) {}
+      const $s = document.getElementById('convSearch');
+      renderArchiveList($s ? $s.value : '');
+      // If this chat's reader is open, refresh its orchestrator panel.
+      if ((_gcReaderPath && (_gcReaderPath === chatPath)) || (_gcReaderId && chatId && _gcReaderId === chatId)) {
+        try { pollGroupChatReader(); } catch (_) {}
+      }
+      showOpToast?.(paused ? 'Orchestration disabled — no more nudges' : 'Orchestration enabled');
+    } catch (err) {
+      showOpToast?.('Could not update group chat: ' + ((err && err.message) || 'network error'), 'error');
+    }
+  }
 
   // Archive-the-current-group-chat handler. Used by per-row Archive button.
-  async function archiveGroupChat(chatPath) {
-    if (!chatPath) return;
+  async function archiveGroupChat(chatPath, chatId) {
+    if (!chatPath && !chatId) return;
     try {
       const res = await fetch('/api/group-chats/archive', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: chatPath }),
+        body: JSON.stringify({ path: chatPath || '', id: chatId || '' }),
       });
       const data = await res.json().catch(() => ({}));
       if (!data || !data.ok) {
@@ -14513,13 +18886,13 @@
     }
   }
 
-  async function removeSessionFromGroupChat(chatPath, sessionId) {
-    if (!chatPath || !sessionId) return;
+  async function removeSessionFromGroupChat(chatPath, sessionId, chatId) {
+    if ((!chatPath && !chatId) || !sessionId) return;
     try {
       const res = await fetch('/api/group-chats/remove-participant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: chatPath, session_id: sessionId }),
+        body: JSON.stringify({ path: chatPath || '', id: chatId || '', session_id: sessionId }),
       });
       const data = await res.json().catch(() => ({}));
       if (!data || !data.ok) {
@@ -14533,14 +18906,14 @@
     }
   }
 
-  async function addSessionToGroupChat(chatPath, sessionId, displayName) {
-    if (!chatPath || !sessionId) return;
+  async function addSessionToGroupChat(chatPath, sessionId, displayName, chatId) {
+    if ((!chatPath && !chatId) || !sessionId) return;
     try {
       const res = await fetch('/api/group-chats/add-participant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          path: chatPath, session_id: sessionId, display_name: displayName || '',
+          path: chatPath || '', id: chatId || '', session_id: sessionId, display_name: displayName || '',
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -14582,22 +18955,22 @@
       try { await pollGcActive(); } catch (_) {}
       showOpToast?.('Empty chat created — click ✏️ to rename, drag sessions in to add them');
       if (data.chat_path) {
-        try { openGroupChatReader(data.chat_path, topic, 'topic', true); } catch (_) {}
+        try { openGroupChatReader(data.chat_path, topic, 'topic', true, data.uuid || data.id || null); } catch (_) {}
       }
     } catch (err) {
       showOpToast?.('Could not create chat: ' + ((err && err.message) || 'network error'), 'error');
     }
   }
 
-  async function clearGroupChat(chatPath, topic) {
-    if (!chatPath) return;
+  async function clearGroupChat(chatPath, topic, chatId) {
+    if (!chatPath && !chatId) return;
     const label = topic ? `"${topic}"` : 'this chat';
     if (!confirm(`Clear all messages from ${label}?\n\nThe header and participants will be kept; everyone will be re-pinged with a fresh whiteboard. This is not undoable.`)) return;
     try {
       const res = await fetch('/api/group-chats/clear', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: chatPath }),
+        body: JSON.stringify({ path: chatPath || '', id: chatId || '' }),
       });
       const data = await res.json().catch(() => ({}));
       if (!data || !data.ok) {
@@ -14612,8 +18985,8 @@
     }
   }
 
-  async function renameGroupChat(chatPath, currentTopic) {
-    if (!chatPath) return;
+  async function renameGroupChat(chatPath, currentTopic, chatId) {
+    if (!chatPath && !chatId) return;
     let topic = '';
     try { topic = (window.prompt('New topic for this chat:', currentTopic || '') || '').trim(); } catch (_) {}
     if (!topic || topic === currentTopic) return;
@@ -14621,7 +18994,7 @@
       const res = await fetch('/api/group-chats/rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: chatPath, topic }),
+        body: JSON.stringify({ path: chatPath || '', id: chatId || '', topic }),
       });
       const data = await res.json().catch(() => ({}));
       if (!data || !data.ok) {
@@ -14807,12 +19180,21 @@
 
   function _captureArchiveListScroll(q, $list) {
     if (!$list || _lastArchiveRenderFilter !== q) return null;
-    const state = { filter: q, top: $list.scrollTop, anchorId: '', anchorOffset: 0 };
+    const state = { filter: q, top: $list.scrollTop, anchorAttr: '', anchorValue: '', anchorOffset: 0 };
     const listRect = $list.getBoundingClientRect();
-    for (const row of $list.querySelectorAll('.conv-item[data-id]')) {
+    for (const row of $list.querySelectorAll('[data-id], [data-gc-id], [data-collapse-key]')) {
       const rect = row.getBoundingClientRect();
       if (rect.bottom >= listRect.top && rect.top <= listRect.bottom) {
-        state.anchorId = row.dataset.id || '';
+        if (row.dataset.id) {
+          state.anchorAttr = 'data-id';
+          state.anchorValue = row.dataset.id;
+        } else if (row.dataset.gcId) {
+          state.anchorAttr = 'data-gc-id';
+          state.anchorValue = row.dataset.gcId;
+        } else if (row.dataset.collapseKey) {
+          state.anchorAttr = 'data-collapse-key';
+          state.anchorValue = row.dataset.collapseKey;
+        }
         state.anchorOffset = rect.top - listRect.top;
         break;
       }
@@ -14824,40 +19206,95 @@
     return Math.max(0, Math.min(top, Math.max(0, $list.scrollHeight - $list.clientHeight)));
   }
 
-  function _restoreArchiveListScroll(state, $list) {
-    if (!state || !$list) return;
+  function _restoreConversationListScrollTop($list, top) {
+    const scrollTop = Number(top);
+    if (!$list || !Number.isFinite(scrollTop)) return;
     requestAnimationFrame(() => {
-      if (state.filter !== _lastArchiveRenderFilter) return;
-      if (state.anchorId && window.CSS && CSS.escape) {
-        const row = $list.querySelector('.conv-item[data-id="' + CSS.escape(state.anchorId) + '"]');
-        if (row) {
-          const listRect = $list.getBoundingClientRect();
-          const rowRect = row.getBoundingClientRect();
-          const nextTop = $list.scrollTop + ((rowRect.top - listRect.top) - state.anchorOffset);
-          $list.scrollTop = _archiveScrollTopWithinBounds($list, nextTop);
-          return;
-        }
-      }
-      $list.scrollTop = _archiveScrollTopWithinBounds($list, state.top);
+      $list.scrollTop = _archiveScrollTopWithinBounds($list, scrollTop);
     });
   }
 
-  async function loadArchiveAll(opts = {}) {
-    try {
-      const params = new URLSearchParams();
-      if (opts.includePrs) {
-        params.set('include_prs', '1');
-        params.set('resolve_prs', '1');
-        params.set('resolve_effective', '1');
-        params.set('resolve_worktrees', '1');
-        params.set('background', '1');
+  function _findArchiveListScrollAnchor($list, state) {
+    if (!$list || !state || !state.anchorAttr || !state.anchorValue) return null;
+    const attr = state.anchorAttr;
+    const value = state.anchorValue;
+    if (window.CSS && CSS.escape) {
+      return $list.querySelector('[' + attr + '="' + CSS.escape(value) + '"]');
+    }
+    return Array.from($list.querySelectorAll('[' + attr + ']'))
+      .find(row => row.getAttribute(attr) === value) || null;
+  }
+
+  function _findConversationRowElement(convId) {
+    if (!convId) return null;
+    const list = document.getElementById('convList');
+    if (!list) return null;
+    if (window.CSS && CSS.escape) {
+      return list.querySelector('.conv-item[data-id="' + CSS.escape(convId) + '"]');
+    }
+    return Array.from(list.querySelectorAll('.conv-item[data-id]'))
+      .find(row => row.dataset.id === convId) || null;
+  }
+
+  function scrollConversationRowIntoView(convId, block = 'nearest') {
+    requestAnimationFrame(() => {
+      const row = _findConversationRowElement(convId);
+      if (row) row.scrollIntoView({ block, inline: 'nearest' });
+    });
+  }
+
+  function _restoreArchiveListScroll(state, $list) {
+    if (!state || !$list) return;
+    const restore = () => {
+      if (state.filter !== _lastArchiveRenderFilter) return;
+      const row = _findArchiveListScrollAnchor($list, state);
+      if (row) {
+        const listRect = $list.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        const nextTop = $list.scrollTop + ((rowRect.top - listRect.top) - state.anchorOffset);
+        $list.scrollTop = _archiveScrollTopWithinBounds($list, nextTop);
+        return;
       }
-      const url = '/api/conversations/all' + (params.toString() ? '?' + params.toString() : '');
-      const r = await fetch(url);
-      if (!r.ok) return [];
-      const d = await r.json();
-      return Array.isArray(d.conversations) ? d.conversations : [];
-    } catch (_) { return []; }
+      $list.scrollTop = _archiveScrollTopWithinBounds($list, state.top);
+    };
+    restore();
+    requestAnimationFrame(restore);
+  }
+
+  // Dedupe concurrent /api/conversations/all fetches keyed by URL. Recovery,
+  // PR-hydration, and refresh paths all call loadArchiveAll independently;
+  // without this they fire 3+ parallel ~500KB requests for the same payload.
+  const _archiveAllInflight = new Map();
+
+  async function loadArchiveAll(opts = {}) {
+    const params = new URLSearchParams();
+    if (opts.staleOk !== false) {
+      params.set('stale_ok', '1');
+    }
+    if (opts.includePrs) {
+      params.set('include_prs', '1');
+      params.set('resolve_prs', '1');
+      params.set('resolve_effective', '1');
+      params.set('resolve_worktrees', '1');
+      params.set('background', '1');
+    }
+    const url = '/api/conversations/all' + (params.toString() ? '?' + params.toString() : '');
+    const pending = _archiveAllInflight.get(url);
+    if (pending) return pending;
+    const p = (async () => {
+      try {
+        const r = await fetch(url);
+        if (!r.ok) return [];
+        const d = await r.json();
+        if (d && d.cached && d.stale && d.refreshing) {
+          _scheduleArchiveStaleRetry();
+        }
+        return Array.isArray(d.conversations) ? d.conversations : [];
+      } catch (_) { return []; }
+    })();
+    _archiveAllInflight.set(url, p);
+    p.finally(() => _archiveAllInflight.delete(url));
+    return p;
   }
 
   // Cross-repo open GH issues — populates the archive view's GH Issues
@@ -14924,6 +19361,7 @@
   let _archiveProgressPollId = null;
   let _archiveSideDataPromise = null;
   let _archivePrHydratePromise = null;
+  let _archiveStaleRetryId = null;
   let _archiveSideDataHydratedAt = 0;
   let _archivePrHydratedAt = 0;
   const ARCHIVE_HYDRATE_TTL_MS = 5 * 60 * 1000;
@@ -14934,6 +19372,39 @@
     if (!archiveLoaded) return;
     renderArchiveFolderFilter();
     renderArchiveList(_archiveQuery());
+  }
+  let _archiveStuckRenderRecoveryPromise = null;
+  function _archiveListStillShowsLoader() {
+    const $list = document.getElementById('convList');
+    return !!($list && $list.querySelector('.archive-loading-placeholder, .archive-loading-stages'));
+  }
+  function _recoverArchiveRenderIfStuck() {
+    if (!_archiveListStillShowsLoader()) return Promise.resolve();
+    if (archiveLoaded && Array.isArray(archiveData) && archiveData.length) {
+      renderArchiveFolderFilter();
+      renderArchiveList(_archiveQuery());
+      return Promise.resolve();
+    }
+    if (_archiveStuckRenderRecoveryPromise) return _archiveStuckRenderRecoveryPromise;
+    _archiveStuckRenderRecoveryPromise = loadArchiveAll({ staleOk: true }).then(convs => {
+      if (!Array.isArray(convs) || !convs.length || !_archiveListStillShowsLoader()) return;
+      archiveData = _mergeArchivePrSnapshot(convs, archiveData);
+      archiveLoaded = true;
+      renderArchiveFolderFilter();
+      renderArchiveList(_archiveQuery());
+    }).finally(() => {
+      _archiveStuckRenderRecoveryPromise = null;
+    });
+    return _archiveStuckRenderRecoveryPromise;
+  }
+  function _scheduleArchiveStaleRetry() {
+    if (_archiveStaleRetryId) return;
+    _archiveStaleRetryId = setTimeout(() => {
+      _archiveStaleRetryId = null;
+      refreshArchiveData({ staleOk: true })
+        .then(() => renderArchiveList(_archiveQuery()))
+        .catch(() => {});
+    }, 2500);
   }
   function _hydrateArchiveSideData(force = false) {
     if (_archiveSideDataPromise) return _archiveSideDataPromise;
@@ -14977,7 +19448,10 @@
         if (!r.ok) return;
         const snap = await r.json();
         _renderArchiveLoadingStages(snap);
-        if (!snap.active) _stopArchiveProgressPoll();
+        if (!snap.active) {
+          _stopArchiveProgressPoll();
+          _recoverArchiveRenderIfStuck();
+        }
       } catch (_) { /* polling is best-effort; ignore */ }
     };
     tick();  // immediate first paint
@@ -14991,12 +19465,12 @@
   }
 
   let _archiveRefreshPromise = null;
-  async function refreshArchiveData() {
+  async function refreshArchiveData(opts = {}) {
     if (_archiveRefreshPromise) return _archiveRefreshPromise;
     _startArchiveProgressPoll();
     _archiveRefreshPromise = (async () => {
       try {
-        const convs = await loadArchiveAll();
+        const convs = await loadArchiveAll({ staleOk: opts.staleOk !== false && !opts.force });
         archiveData = _mergeArchivePrSnapshot(convs, archiveData);
         archiveLoaded = true;
         renderArchiveFolderFilter();
@@ -15048,6 +19522,7 @@
     const $list = document.getElementById('convList');
     if (!$list) return;
     if (_renameInProgress) return;
+    if (deferSidebarRenderIfDragging()) return;
     const q = (filter || '').trim().toLowerCase();
     const scrollState = _captureArchiveListScroll(q, $list);
     const _finishArchiveRender = () => {
@@ -15058,7 +19533,11 @@
       if (kanbanView) {
         conversationsData = [];
         renderKanbanSidebar([]);
+      } else if (isFlowView()) {
+        conversationsData = [];
+        renderFlowSidebar([]);
       } else {
+        _convListRenderSig = null;
         $list.innerHTML = html;
       }
       _finishArchiveRender();
@@ -15069,6 +19548,7 @@
     // worktree sessions and "by time" cross-repo views.
     const byFolder = archiveRows;
     let rows = q ? byFolder.filter(c =>
+      c.pinned ||
       // session_id + id let users paste a session UUID into the search box
       // and find the conversation directly — useful when CCC tooling, logs
       // or external scripts surface a UUID without a title.
@@ -15093,19 +19573,20 @@
       if (extra.length) rows = rows.concat(extra);
     }
 
-    if (!archiveLoaded && !archiveRows.length) {
+    const hasGc = _gcActiveChats && _gcActiveChats.length > 0;
+    if (!archiveLoaded && !archiveRows.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state archive-loading-placeholder">Loading archive&hellip;</div>');
       return;
     }
-    if (!archiveRows.length) {
+    if (!archiveRows.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state">No conversations on disk.</div>');
       return;
     }
-    if (!byFolder.length) {
+    if (!byFolder.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state">No conversations in this folder.</div>');
       return;
     }
-    if (!rows.length) {
+    if (!rows.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state">No conversations match your filter.</div>');
       return;
     }
@@ -15125,6 +19606,7 @@
           session_id: c.session_id || c.id,
           first_message: c.first_message || '',
           display_name: c.display_name || '',
+          ai_title: c.ai_title || null,
           name_overridden: !!c.name_overridden,
           last_assistant_text: '',
           modified: c.modified || c.mtime || 0,
@@ -15139,6 +19621,7 @@
           tail_pr_number: c.tail_pr_number || null,
           tail_pr_url: c.tail_pr_url || null,
           pr_state: c.pr_state || null,
+          _pr_state_pending: !!(c.tail_pr_number && !c.pr_state && !_archivePrHydratedAt),
           pr_notes: Array.isArray(c.pr_notes) ? c.pr_notes : [],
           sidecar_status: c.sidecar_status || null,
           sidecar_tool: c.sidecar_tool || null,
@@ -15154,6 +19637,8 @@
           question_preamble: c.question_preamble || '',
           question_options: Array.isArray(c.question_options) ? c.question_options : [],
           question_option_details: Array.isArray(c.question_option_details) ? c.question_option_details : [],
+          can_headless_resume: c.can_headless_resume === true,
+          can_app_resume: c.can_app_resume === true,
           session_cwd: c.session_cwd || c.folder_path,
           session_cwd_exists: !!c.folder_path,
           session_cwd_is_worktree: !!c.session_cwd_is_worktree,
@@ -15166,6 +19651,8 @@
           folder_path: c.folder_path,
           worktree_label: c.worktree_label || null,
           pinned_repo: !!c.pinned_repo,
+          pinned: !!c.pinned,
+          pin_rank: Number.isFinite(Number(c.pin_rank)) ? Number(c.pin_rank) : null,
         });
       }
       const folderOrphan = (c.folder_path === c.slug);
@@ -15176,6 +19663,7 @@
         // #1 rename overrides + #9 archived set come from server-side
         // global state files (session-names.json / archived-conversations.json).
         display_name: c.display_name || '',
+        ai_title: c.ai_title || null,
         name_overridden: !!c.name_overridden,
         last_assistant_text: '',
         modified: c.mtime,
@@ -15194,6 +19682,7 @@
         tail_pr_number: c.tail_pr_number || null,
         tail_pr_url: c.tail_pr_url || null,
         pr_state: c.pr_state || null,
+        _pr_state_pending: !!(c.tail_pr_number && !c.pr_state && !_archivePrHydratedAt),
         pr_notes: Array.isArray(c.pr_notes) ? c.pr_notes : [],
         // Sidecar overlay (Round 3) — only meaningful for live rows.
         // The renderer reads these directly to draw the live tool pill
@@ -15216,6 +19705,8 @@
         question_options: Array.isArray(c.question_options) ? c.question_options : [],
         question_option_details: Array.isArray(c.question_option_details) ? c.question_option_details : [],
         source: c.source || 'interactive',
+        can_headless_resume: c.can_headless_resume === true,
+        can_app_resume: c.can_app_resume === true,
         session_cwd: c.session_cwd || c.folder_path,
         session_cwd_exists: !folderOrphan,
         // #4 worktree leaf — the renderer reads session_cwd_is_worktree.
@@ -15244,6 +19735,8 @@
         // Pinned-to-this-repo flag — server overrides the row's folder
         // bucket. Renderer adds a 📌 indicator + click-to-unpin handler.
         pinned_repo: !!c.pinned_repo,
+        pinned: !!c.pinned,
+        pin_rank: Number.isFinite(Number(c.pin_rank)) ? Number(c.pin_rank) : null,
       };
     });
 
@@ -15278,6 +19771,7 @@
         .toLowerCase().includes(q);
     });
     const rowsForRender = pendingRows.concat(shaped);
+    applyOptimisticOverrides(rowsForRender);
 
     // The click-to-currentSession bridge uses sessionIdByConv et al., which
     // are normally populated inside loadConversationList() — a path archive
@@ -15295,17 +19789,24 @@
     // Also keep conversationsData in sync so downstream code (selection
     // restore, etc.) sees a non-empty list while in archive mode. This
     // gets reset on toggle-off via loadConversationList().
-    conversationsData = applyConvSort(_applyOptimisticTouches(rowsForRender));
+    conversationsData = _prioritizeSessionIdMatches(applyConvSort(_applyOptimisticTouches(rowsForRender), { persist: true }), q);
 
     // Make sure the active sidebar mode stays active. Archive refreshes run on
     // search and on the 10s poll; if the board is open, refresh its cards
     // instead of snapping the user back to the row list.
     const $kanban = document.getElementById('kanbanBoard');
+    const $flow = document.getElementById('flowBoard');
     if (kanbanView) {
       if ($list) $list.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       renderKanbanSidebar(filterConversations(''));
+    } else if (isFlowView()) {
+      if ($list) $list.style.display = 'none';
+      if ($kanban) $kanban.style.display = 'none';
+      renderFlowSidebar(filterConversations(''));
     } else {
       if ($kanban) $kanban.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       $list.style.display = '';
       renderConversationList(conversationsData);
     }
@@ -15314,6 +19815,8 @@
     }
     if (CONV_POPOUT_MODE) {
       maybeSelectPopoutConversation({ allowMissing: archiveLoaded });
+    } else {
+      restoreLastConversation();
     }
     _finishArchiveRender();
   }
@@ -15323,14 +19826,24 @@
     updateRepoPickerVisibility();
     const $list = document.getElementById('convList');
     const $kanban = document.getElementById('kanbanBoard');
+    const $flow = document.getElementById('flowBoard');
     if (kanbanView) {
       if ($list) $list.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       if ($kanban) {
         $kanban.style.display = '';
         $kanban.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading board&hellip;</div>';
       }
+    } else if (isFlowView()) {
+      if ($list) $list.style.display = 'none';
+      if ($kanban) $kanban.style.display = 'none';
+      if ($flow) {
+        $flow.style.display = '';
+        $flow.innerHTML = '<div class="flow-empty-state">Loading flow&hellip;</div>';
+      }
     } else if ($list) {
       if ($kanban) $kanban.style.display = 'none';
+      if ($flow) $flow.style.display = 'none';
       $list.style.display = '';
       $list.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading archive…</div>';
     }
@@ -15364,14 +19877,24 @@
       // during the wait — the actual fetch fires after sessions land.
       const $list = document.getElementById('convList');
       const $kanban = document.getElementById('kanbanBoard');
+      const $flow = document.getElementById('flowBoard');
       if (kanbanView) {
         if ($list) $list.style.display = 'none';
+        if ($flow) $flow.style.display = 'none';
         if ($kanban) {
           $kanban.style.display = '';
           $kanban.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading board&hellip;</div>';
         }
+      } else if (isFlowView()) {
+        if ($list) $list.style.display = 'none';
+        if ($kanban) $kanban.style.display = 'none';
+        if ($flow) {
+          $flow.style.display = '';
+          $flow.innerHTML = '<div class="flow-empty-state">Loading flow&hellip;</div>';
+        }
       } else if ($list) {
         if ($kanban) $kanban.style.display = 'none';
+        if ($flow) $flow.style.display = 'none';
         $list.style.display = '';
         $list.innerHTML = '<div class="archive-empty-state archive-loading-placeholder">Loading archive&hellip;</div>';
       }
@@ -15713,48 +20236,136 @@
   const $kptSearch = document.getElementById('kptSearch');
   const $kptRefreshBtn = document.getElementById('kptRefreshBtn');
   const $kptRecentBtn = document.getElementById('kptRecentBtn');
-  // Spawn-engine state. Source of truth = localStorage. Three DOM nodes
+  let _defaultModelsByEngine = { claude: 'opus' };
+  // The "new session modal" was removed from index.html, but several call
+  // sites below (openNewSessionModal, template-apply, engine-change handler,
+  // boot-time initCustomEngineSelect) still reference these handles. Every
+  // usage already guards with `if ($nsm…)`, so resolving them to null is
+  // enough — what wasn't enough was leaving them *undeclared*, which
+  // throws ReferenceError on boot and breaks the whole app.
+
+  // Spawn-engine state. Source of truth = localStorage. Two DOM nodes
   // mirror it: the inline bottom-bar selector (new-session mode only),
-  // the Kanban toolbar selector, and the new-session modal selector.
-  // setSpawnEngine() persists + propagates to all three; getSpawnEngine()
+  // and the Kanban toolbar selector.
+  // setSpawnEngine() persists + propagates to both; getSpawnEngine()
   // is the canonical read used by every spawn handler.
   const $convInputEngineSelect = document.getElementById('convInputEngineSelect');
+  const $convInputModelSelect = document.getElementById('convInputModelSelect');
   const $kptToolbarEngineSelect = document.getElementById('kptToolbarEngineSelect');
   function getSpawnEngine() {
     try {
       const v = localStorage.getItem('ccc.spawnEngine');
-      if (v === 'claude' || v === 'codex' || v === 'gemini') return v;
+      if (v === 'claude' || v === 'codex' || v === 'gemini' || v === 'antigravity') return v;
     } catch (_) {}
     return 'claude';
   }
+  function spawnEngineLabel(engine) {
+    if (engine === 'codex') return 'Codex';
+    if (engine === 'gemini') return 'Gemini';
+    if (engine === 'antigravity') return 'Antigravity';
+    if (engine === 'pkood') return 'pkood';
+    return 'Claude';
+  }
+  function spawnSourceForEngine(engine) {
+    if (engine === 'codex') return 'codex';
+    if (engine === 'gemini') return 'gemini';
+    if (engine === 'antigravity') return 'antigravity';
+    if (engine === 'pkood') return 'pkood';
+    return 'interactive';
+  }
+  function spawnEndpointForEngine(engine) {
+    if (engine === 'pkood') return '/api/pkood/spawn';
+    if (engine === 'codex') return '/api/sessions/spawn-codex';
+    if (engine === 'gemini') return '/api/sessions/spawn-gemini';
+    if (engine === 'antigravity') return '/api/sessions/spawn-antigravity';
+    return '/api/sessions/spawn';
+  }
+  function spawnSupportsWorktree(engine) {
+    return engine === 'claude' || engine === 'gemini';
+  }
+  function spawnUsesLogPlaceholder(engine) {
+    return engine === 'codex' || engine === 'gemini' || engine === 'antigravity';
+  }
+  function syncSpawnEngineDependentUi() {
+    const engine = getSpawnEngine();
+    const worktreeSupported = spawnSupportsWorktree(engine);
+    ['inlineWorktreeToggle', 'nsmWorktree', 'kptWorktreeToggle'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.disabled = !worktreeSupported;
+      const label = el.closest('label');
+      if (label) {
+        label.style.opacity = worktreeSupported ? '' : '0.55';
+        label.title = worktreeSupported
+          ? 'Spawn the session in a fresh git worktree (`feat/<slug>` branch) so it cannot accidentally commit to main.'
+          : spawnEngineLabel(engine) + ' sessions do not support CCC-managed worktrees.';
+      }
+    });
+
+    if (typeof $convInputModelSelect !== 'undefined' && $convInputModelSelect) {
+      const options = MODEL_OPTIONS_BY_ENGINE[engine] || [];
+      const defaultModel = _defaultModelsByEngine[engine] || '';
+      
+      $convInputModelSelect.innerHTML = '';
+      const isNewSession = (typeof currentConversation !== 'undefined' && currentConversation === '__new__');
+      if (!isNewSession || (options.length === 0 && !defaultModel)) {
+        $convInputModelSelect.style.display = 'none';
+      } else {
+        $convInputModelSelect.style.display = '';
+        const allModels = [...options];
+        if (defaultModel && !allModels.some(o => o.id === defaultModel)) {
+          allModels.unshift({ id: defaultModel, label: defaultModel + ' (default)' });
+        }
+        allModels.forEach(opt => {
+          const el = document.createElement('option');
+          el.value = opt.id;
+          el.textContent = opt.label || opt.id;
+          $convInputModelSelect.appendChild(el);
+        });
+        if (defaultModel) {
+          $convInputModelSelect.value = defaultModel;
+        } else if (allModels.length > 0) {
+          $convInputModelSelect.value = allModels[0].id;
+        }
+      }
+    }
+  }
   function setSpawnEngine(v) {
-    if (v !== 'claude' && v !== 'codex' && v !== 'gemini') return;
+    if (v !== 'claude' && v !== 'codex' && v !== 'gemini' && v !== 'antigravity') return;
     try { localStorage.setItem('ccc.spawnEngine', v); } catch (_) {}
-    // $nsmEngineSelect is declared further down in this script; by the
-    // time any user interaction calls setSpawnEngine() it will exist.
-    [$convInputEngineSelect, $kptToolbarEngineSelect,
-     (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)]
+    // setSpawnEngine() persists + propagates to both; getSpawnEngine()
+    // is the canonical read used by every spawn handler.
+    [$convInputEngineSelect, $kptToolbarEngineSelect]
       .forEach(s => { if (s && s.value !== v) s.value = v; });
+    syncSpawnEngineDependentUi();
+    if (typeof updateInputBar === 'function') updateInputBar();
+    if (currentConversation === '__new__' && typeof enterNewSessionMode === 'function') {
+      enterNewSessionMode();
+    }
   }
   [$convInputEngineSelect, $kptToolbarEngineSelect].forEach(sel => {
     if (!sel) return;
     sel.value = getSpawnEngine();
     sel.addEventListener('change', () => setSpawnEngine(sel.value));
   });
+  syncSpawnEngineDependentUi();
   { const $ia = document.getElementById('convInputIssueAction');
     if ($ia) $ia.addEventListener('change', () => updateInputBar()); }
   // Probe alternate-engine availability so a user with no CLI install sees the
   // option greyed out instead of getting a 503 mid-spawn. Polled on
   // window focus too — handles "I just installed it; refresh the UI"
   // without a hard reload.
+
   async function refreshEngineAvailability() {
     async function probe(engine, endpoint, label) {
       try {
         const r = await fetch(endpoint);
         const d = await r.json();
+        if (d.model) {
+          _defaultModelsByEngine[engine] = d.model;
+        }
         const reason = d.available ? '' : (d.reason || (label + ' CLI not found'));
-        const selectors = [$convInputEngineSelect, $kptToolbarEngineSelect,
-          (typeof $nsmEngineSelect !== 'undefined' ? $nsmEngineSelect : null)];
+        const selectors = [$convInputEngineSelect, $kptToolbarEngineSelect];
         selectors.forEach(sel => {
           const opt = sel && sel.querySelector('option[value="' + engine + '"]');
           if (!opt) return;
@@ -15768,7 +20379,9 @@
     await Promise.all([
       probe('codex', '/api/sessions/spawn-codex/availability', 'Codex'),
       probe('gemini', '/api/sessions/spawn-gemini/availability', 'Gemini'),
+      probe('antigravity', '/api/sessions/spawn-antigravity/availability', 'Antigravity'),
     ]);
+    syncSpawnEngineDependentUi();
   }
   async function refreshCodexAvailability() {
     try {
@@ -15819,26 +20432,22 @@
       renderSidebar(filterConversations($kptSearch.value));
     });
   }
-  // Recency cycle: Off → Last 10h → Last 7d → Off.
+  // Recency cycle: All → Last 1d → Last 7d → All.
   // One button, three states. Label and active-style update each cycle.
-  const RECENCY_LABELS = { '': 'Recency: off', '10h': 'Last 10h', '7d': 'Last 7d' };
-  const RECENCY_NEXT = { '': '10h', '10h': '7d', '7d': '' };
+  const RECENCY_LABELS = { '': 'All', '1d': 'Last 1d', '7d': 'Last 7d' };
+  const RECENCY_NEXT = { '': '1d', '1d': '7d', '7d': '' };
   function updateRecentBtn() {
     if (!$kptRecentBtn) return;
-    $kptRecentBtn.textContent = RECENCY_LABELS[recencyFilter];
+    $kptRecentBtn.textContent = RECENCY_LABELS[recencyFilter] || RECENCY_LABELS[''];
     $kptRecentBtn.classList.toggle('active', !!recencyFilter);
     $kptRecentBtn.title = recencyFilter
-      ? 'Showing only sessions/issues from the last ' + (recencyFilter === '10h' ? '10 hours' : '7 days') + '. Click to cycle.'
-      : 'Click to limit to last 10h, then 7d, then off.';
+      ? 'Showing only sessions/issues from the last ' + (recencyFilter === '1d' ? '1 day' : '7 days') + '. Click to cycle.'
+      : 'Showing all sessions/issues. Click to limit to last 1d, then 7d.';
   }
   updateRecentBtn();
   if ($kptRecentBtn) {
     $kptRecentBtn.addEventListener('click', () => {
-      recencyFilter = RECENCY_NEXT[recencyFilter];
-      showRecentOnly = !!recencyFilter;
-      localStorage.setItem('ccc-show-recent', recencyFilter || '0');
-      updateRecentBtn();
-      renderSidebar(filterConversations($convSearch.value));
+      setRecencyFilter(RECENCY_NEXT[recencyFilter] || '');
     });
   }
   // Refresh
@@ -15987,20 +20596,14 @@
       // Source for the optimistic card: alternate engines render their chip;
       // 'pkood' keeps the orange pkood chip; 'claude' uses
       // 'interactive' (no chip).
-      const cardSource = engine === 'codex' ? 'codex'
-                       : engine === 'gemini' ? 'gemini'
-                       : engine === 'pkood' ? 'pkood'
-                       : 'interactive';
+      const cardSource = spawnSourceForEngine(engine);
       insertPendingSpawnCard(tempPid, subject, cardSource);
       $kptRunBtn.disabled = true;
-      $kptRunBtn.textContent = 'Spawning...';
+      $kptRunBtn.textContent = engine === 'antigravity' ? 'Starting...' : 'Spawning...';
       try {
-        const endpoint = engine === 'pkood' ? '/api/pkood/spawn'
-                       : engine === 'codex' ? '/api/sessions/spawn-codex'
-                       : engine === 'gemini' ? '/api/sessions/spawn-gemini'
-                       : '/api/sessions/spawn';
-        // pkood and codex don't support the worktree flag — drop it for those.
-        const body = (engine === 'claude' || engine === 'gemini')
+        const endpoint = spawnEndpointForEngine(engine);
+        // pkood, codex, and antigravity don't support CCC-managed worktrees.
+        const body = spawnSupportsWorktree(engine)
           ? { prompt, repo_path: repoPath, worktree: useWorktree }
           : { prompt, repo_path: repoPath };
         const res = await fetch(endpoint, {
@@ -16011,7 +20614,7 @@
         const data = await res.json();
         if (data.ok) {
           $kptNewSession.value = '';
-          $kptRunBtn.textContent = 'Spawned!';
+          $kptRunBtn.textContent = engine === 'antigravity' ? 'Started!' : 'Spawned!';
           // Swap the temp-pid key for the real pid so the next /api/sessions
           // poll can match by spawn_pid and replace the placeholder with the
           // real card. Without this the placeholder sits on the board until
@@ -16022,7 +20625,7 @@
               placeholder.spawn_pid = data.pid;
               // Fire-and-watch engines stash the log path so the
               // right-pane renderer can fetch /api/sessions/spawned/<pid>/log.
-              if ((engine === 'codex' || engine === 'gemini') && data.log) placeholder.agent_log_path = data.log;
+              if (spawnUsesLogPlaceholder(engine) && data.log) placeholder.agent_log_path = data.log;
               pendingSpawns.delete(tempPid);
               pendingSpawns.set(data.pid, placeholder);
             }
@@ -16035,9 +20638,10 @@
           // If the user picked a fire-and-watch engine, refocus the right pane on the
           // placeholder so log rendering kicks in for the new pid
           // (the auto-select fired when tempPid was still in play).
-          if ((engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+          if (spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
             selectConversation('spawning-' + tempPid);
           }
+          if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         } else {
           $kptRunBtn.textContent = data.error ? 'Failed' : 'Failed';
           // Spawn failed — drop the optimistic placeholder so the board doesn't
@@ -16062,390 +20666,12 @@
   // sentence at submit time. Subject was redundant — users almost never typed
   // something different from the body's lead, and the ✨ Titles button + the
   // post-spawn rename flow cover the "I want a cleaner title" case.
-  const $nsm = document.getElementById('newSessionModal');
-  const $nsmBody = document.getElementById('nsmBody');
-  const $nsmSubmit = document.getElementById('nsmSubmit');
-  const $nsmCancel = document.getElementById('nsmCancel');
-  const $nsmBackdrop = document.getElementById('nsmBackdrop');
-  const $nsmEngineSelect = document.getElementById('nsmEngineSelect');
-  const $nsmGallery = document.getElementById('nsmGallery');
+
 
   // Lazy-loaded template cache. Loaded on first modal open and reused after
   // — keep it in module scope so reopening the modal doesn't refetch. If the
   // fetch fails (missing file, malformed JSON) we stash an empty array so we
   // don't retry on every reopen; the gallery just stays hidden.
-  let _nsmTemplatesCache = null;
-  async function _loadNsmTemplates() {
-    if (_nsmTemplatesCache !== null) return _nsmTemplatesCache;
-    try {
-      const res = await fetch('/static/templates.json', { cache: 'no-store' });
-      if (!res.ok) { _nsmTemplatesCache = []; return _nsmTemplatesCache; }
-      const data = await res.json();
-      const list = Array.isArray(data && data.templates) ? data.templates : [];
-      _nsmTemplatesCache = list.filter(t => t && typeof t.id === 'string' && typeof t.prompt === 'string');
-    } catch (err) {
-      console.warn('[New session] template gallery load failed', err);
-      _nsmTemplatesCache = [];
-    }
-    return _nsmTemplatesCache;
-  }
-
-  function _applyNsmTemplate(tpl) {
-    if (!tpl) return;
-    $nsmBody.value = tpl.prompt || '';
-    if (tpl.engine && $nsmEngineSelect) {
-      const valid = Array.from($nsmEngineSelect.options).some(o => o.value === tpl.engine);
-      if (valid) {
-        $nsmEngineSelect.value = tpl.engine;
-        // setSpawnEngine syncs the other engine selectors (inline, kanban
-        // toolbar) so the picker that opens next stays consistent.
-        if (typeof setSpawnEngine === 'function') setSpawnEngine(tpl.engine);
-      }
-    }
-    const $nsmWorktree = document.getElementById('nsmWorktree');
-    if ($nsmWorktree && typeof tpl.worktree === 'boolean') {
-      $nsmWorktree.checked = tpl.worktree;
-    }
-    // Mark the picked card so the user has a visual anchor for what they
-    // applied. Re-renderable on each open without leaking state — the class
-    // is reset every time the gallery is rebuilt.
-    if ($nsmGallery) {
-      const prev = $nsmGallery.querySelector('.nsm-gallery-card.is-selected');
-      if (prev) prev.classList.remove('is-selected');
-      const next = $nsmGallery.querySelector('[data-template-id="' + cssEscapeAttr(tpl.id) + '"]');
-      if (next) next.classList.add('is-selected');
-    }
-    // Drop focus into the body so the user can immediately edit the
-    // prefilled prompt. Caret at end so they can append context.
-    if ($nsmBody) {
-      $nsmBody.focus();
-      const len = $nsmBody.value.length;
-      try { $nsmBody.setSelectionRange(len, len); } catch (e) { /* old Safari */ }
-    }
-  }
-
-  // Lightweight CSS.escape fallback for the attribute selectors above —
-  // template ids are restricted but a stray quote shouldn't blow up the DOM.
-  function cssEscapeAttr(s) {
-    return String(s).replace(/["\\]/g, '\\$&');
-  }
-
-  async function _renderNsmGallery() {
-    if (!$nsmGallery) return;
-    const templates = await _loadNsmTemplates();
-    if (!templates.length) {
-      $nsmGallery.style.display = 'none';
-      $nsmGallery.innerHTML = '';
-      return;
-    }
-    $nsmGallery.innerHTML = templates.map(t => {
-      const id = escapeAttr(t.id);
-      const name = escapeHtml(t.name || t.id);
-      const desc = escapeHtml(t.description || '');
-      const engine = escapeHtml(t.engine || 'claude');
-      const wt = t.worktree ? '<span class="nsm-gallery-chip is-wt">🌿 worktree</span>' : '';
-      return ''
-        + '<button type="button" class="nsm-gallery-card" data-template-id="' + id + '">'
-        + '<div class="nsm-gallery-card-title">' + name + '</div>'
-        + '<div class="nsm-gallery-card-desc">' + desc + '</div>'
-        + '<div class="nsm-gallery-card-meta">'
-        +   '<span class="nsm-gallery-chip">' + engine + '</span>' + wt
-        + '</div>'
-        + '</button>';
-    }).join('');
-    $nsmGallery.style.display = '';
-    $nsmGallery.querySelectorAll('.nsm-gallery-card').forEach(el => {
-      el.addEventListener('click', () => {
-        const tplId = el.getAttribute('data-template-id');
-        const tpl = (_nsmTemplatesCache || []).find(t => t.id === tplId);
-        _applyNsmTemplate(tpl);
-      });
-    });
-  }
-  // Modal selector participates in the same shared-state sync as the
-  // inline ones — change it here and the inline selectors update too.
-  if ($nsmEngineSelect) {
-    $nsmEngineSelect.addEventListener('change', () => setSpawnEngine($nsmEngineSelect.value));
-  }
-
-  function getEngineSvg(engine) {
-    if (engine === 'codex') {
-      return '<svg class="engine-svg-icon" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
-          + '<path d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z" />'
-          + '</svg>';
-    } else if (engine === 'gemini') {
-      return '<svg class="engine-svg-icon" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
-          + '<path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" />'
-          + '</svg>';
-    } else if (engine === 'antigravity') {
-      return '<svg class="engine-svg-icon" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
-          + '<path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" />'
-          + '</svg>';
-    } else {
-      return '<svg class="engine-svg-icon" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
-          + '<path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" />'
-          + '</svg>';
-    }
-  }
-
-  function initCustomEngineSelect(selectEl) {
-    if (!selectEl) return;
-    if (selectEl.dataset.customInitialized) return;
-    selectEl.dataset.customInitialized = "true";
-
-    const initialDisplay = selectEl.style.display;
-
-    // Hide original select
-    selectEl.style.display = 'none';
-
-    const container = document.createElement('div');
-    container.className = 'custom-select-container';
-    if (selectEl.id) {
-      container.id = selectEl.id + 'Custom';
-    }
-
-    const trigger = document.createElement('button');
-    trigger.type = 'button';
-    trigger.className = 'custom-select-trigger';
-    if (selectEl.title) trigger.title = selectEl.title;
-
-    const triggerContent = document.createElement('span');
-    triggerContent.className = 'custom-select-trigger-content';
-    trigger.appendChild(triggerContent);
-
-    const arrow = document.createElement('span');
-    arrow.className = 'custom-select-arrow';
-    arrow.innerHTML = '▾';
-    trigger.appendChild(arrow);
-
-    container.appendChild(trigger);
-
-    const menu = document.createElement('div');
-    menu.className = 'custom-select-menu';
-    container.appendChild(menu);
-
-    selectEl.parentNode.insertBefore(container, selectEl.nextSibling);
-
-    function renderOptions() {
-      menu.innerHTML = '';
-      Array.from(selectEl.options).forEach(opt => {
-        const item = document.createElement('div');
-        item.className = 'custom-select-option';
-        if (opt.value === selectEl.value) {
-          item.classList.add('selected');
-        }
-        if (opt.disabled) {
-          item.classList.add('disabled');
-        }
-        if (opt.title) {
-          item.title = opt.title;
-        }
-
-        const iconSpan = document.createElement('span');
-        iconSpan.className = 'custom-select-option-icon ' + opt.value;
-        iconSpan.innerHTML = getEngineSvg(opt.value);
-        item.appendChild(iconSpan);
-
-        const textSpan = document.createElement('span');
-        textSpan.className = 'custom-select-option-label';
-        textSpan.textContent = opt.textContent;
-        item.appendChild(textSpan);
-
-        if (opt.value === selectEl.value) {
-          const checkSpan = document.createElement('span');
-          checkSpan.className = 'custom-select-option-check';
-          checkSpan.textContent = '✓';
-          item.appendChild(checkSpan);
-        }
-
-        if (!opt.disabled) {
-          item.addEventListener('click', (e) => {
-            e.stopPropagation();
-            selectEl.value = opt.value;
-            selectEl.dispatchEvent(new Event('change'));
-            closeMenu();
-          });
-        }
-        menu.appendChild(item);
-      });
-    }
-
-    function updateTrigger() {
-      const selectedOpt = selectEl.options[selectEl.selectedIndex] || selectEl.options[0];
-      if (selectedOpt) {
-        const val = selectedOpt.value;
-        triggerContent.innerHTML = '<span class="custom-select-trigger-icon ' + val + '">' + getEngineSvg(val) + '</span>'
-          + '<span class="custom-select-trigger-label">' + selectedOpt.textContent + '</span>';
-      }
-    }
-
-    function openMenu() {
-      renderOptions();
-      container.classList.add('open');
-      document.addEventListener('click', outsideClickListener);
-    }
-
-    function closeMenu() {
-      container.classList.remove('open');
-      document.removeEventListener('click', outsideClickListener);
-    }
-
-    function outsideClickListener(e) {
-      if (!container.contains(e.target)) {
-        closeMenu();
-      }
-    }
-
-    trigger.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (container.classList.contains('open')) {
-        closeMenu();
-      } else {
-        document.querySelectorAll('.custom-select-container.open').forEach(c => {
-          if (c !== container) c.classList.remove('open');
-        });
-        openMenu();
-      }
-    });
-
-    selectEl.addEventListener('change', () => {
-      updateTrigger();
-    });
-
-    const observer = new MutationObserver(() => {
-      const currentDisplay = selectEl.style.display;
-      if (currentDisplay === 'none') {
-        container.style.display = 'none';
-      } else {
-        container.style.display = currentDisplay;
-        observer.disconnect();
-        selectEl.style.display = 'none';
-        observer.observe(selectEl, { attributes: true });
-      }
-      updateTrigger();
-    });
-    observer.observe(selectEl, { attributes: true });
-
-    updateTrigger();
-    if (initialDisplay === 'none') {
-      container.style.display = 'none';
-    } else {
-      container.style.display = initialDisplay;
-    }
-  }
-
-  initCustomEngineSelect($convInputEngineSelect);
-  initCustomEngineSelect($kptToolbarEngineSelect);
-  initCustomEngineSelect($nsmEngineSelect);
-
-  function openNewSessionModal(body = '', repoPath = '') {
-    if (!$nsm) return;
-    const targetRepoPath = repoPath || selectedRepoPath() || requireSelectedRepo('New session');
-    if (!targetRepoPath) return;
-    _clearNsmError();
-    $nsmBody.value = body || '';
-    $nsm.dataset.repoPath = targetRepoPath;
-    // Sync from shared state so the modal opens on the same engine the
-    // user just picked from any other selector.
-    if ($nsmEngineSelect) $nsmEngineSelect.value = getSpawnEngine();
-    const $nsmWorktree = document.getElementById('nsmWorktree');
-    const $kptWorktreeToggle = document.getElementById('kptWorktreeToggle');
-    if ($nsmWorktree && $kptWorktreeToggle) $nsmWorktree.checked = $kptWorktreeToggle.checked;
-    $nsm.style.display = 'flex';
-    // Render the template gallery (cards above the textarea). Fire-and-forget:
-    // the modal is usable immediately; cards appear once templates.json
-    // resolves. Failure leaves the gallery hidden — see _loadNsmTemplates.
-    // We only show the gallery when the body is empty so a pre-filled
-    // "edit prompt before launch" flow isn't visually crowded by cards.
-    if ($nsmGallery) {
-      if (!body) _renderNsmGallery();
-      else { $nsmGallery.style.display = 'none'; }
-    }
-    setTimeout(() => { $nsmBody.focus(); }, 30);
-  }
-  function closeNewSessionModal() {
-    if ($nsm) $nsm.style.display = 'none';
-    if ($kptNewSession) $kptNewSession.value = '';
-  }
-  async function submitNewSessionModal() {
-    const body = ($nsmBody.value || '').trim();
-    if (!body) return;
-    // Card title = first sentence (or line) of the prompt, capped at 120 chars.
-    function firstSentence(text) {
-      const chunks = text.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
-      const first = chunks[0] || text.trim();
-      return first.length > 120 ? first.slice(0, 120).trim() + '...' : first;
-    }
-    const effectiveSubject = firstSentence(body);
-    const prompt = body;
-    const engine = ($nsmEngineSelect && $nsmEngineSelect.value) || 'claude';
-    const repoPath = ($nsm && $nsm.dataset.repoPath) || requireSelectedRepo('New session');
-    if (!repoPath) return;
-    const $nsmWorktree = document.getElementById('nsmWorktree');
-    const useWorktree = !!($nsmWorktree && $nsmWorktree.checked);
-    $nsmSubmit.disabled = true;
-    $nsmSubmit.textContent = 'Launching...';
-    const cardSource = engine === 'codex' ? 'codex'
-                     : engine === 'gemini' ? 'gemini'
-                     : 'interactive';
-    const tempPid = 'tmp-' + Date.now();
-    closeNewSessionModal();
-    insertPendingSpawnCard(tempPid, effectiveSubject, cardSource, null, {
-      first_message: body,
-      repo_path: repoPath,
-      folder_path: repoPath,
-      spawn_cwd: repoPath,
-      cwd: repoPath,
-      session_cwd: repoPath,
-      session_cwd_exists: true,
-    });
-    try {
-      const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
-                     : engine === 'gemini' ? '/api/sessions/spawn-gemini'
-                     : '/api/sessions/spawn';
-      const body = engine === 'codex'
-        ? { prompt, name: effectiveSubject, repo_path: repoPath }
-        : { prompt, name: effectiveSubject, repo_path: repoPath, worktree: useWorktree };
-      const res = await fetch(endpoint, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body),
-      });
-      const data = await res.json().catch(() => ({ ok: false, error: 'invalid JSON response' }));
-      if (data.ok) {
-        const placeholder = adoptPendingSpawnPid(tempPid, data.pid, data.log);
-        if (placeholder && (engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
-          selectConversation(placeholder.id);
-        }
-        // Tight poll schedule so the real card replaces the placeholder fast.
-        setTimeout(refreshConversationList, 600);
-        setTimeout(refreshConversationList, 1500);
-        setTimeout(refreshConversationList, 3000);
-      } else {
-        _removePendingSpawnCard(tempPid);
-        if ($nsm) $nsm.style.display = 'flex';
-        $nsmBody.value = body;
-        if ($nsm) $nsm.dataset.repoPath = repoPath;
-        _showNsmError('Spawn failed — status ' + res.status + '\n' + JSON.stringify(data, null, 2));
-        console.error('[New session] spawn failed', data);
-      }
-    } catch (err) {
-      _removePendingSpawnCard(tempPid);
-      if ($nsm) $nsm.style.display = 'flex';
-      $nsmBody.value = body;
-      if ($nsm) $nsm.dataset.repoPath = repoPath;
-      _showNsmError('Request error: ' + (err && err.message || 'network') + '\n' + (err && err.stack || ''));
-      console.error('[New session] submit error', err);
-    }
-    // Reset button label but keep any visible error until the user dismisses it.
-    setTimeout(() => { $nsmSubmit.disabled = false; $nsmSubmit.textContent = 'Launch'; }, 1500);
-  }
-  // Show/hide a persistent copyable error box inside the new-session modal.
-  function _showNsmError(text) {
-    const el = document.getElementById('nsmError');
-    if (!el) return;
-    el.textContent = text;
-    el.style.display = '';
-  }
   function _clearNsmError() {
     const el = document.getElementById('nsmError');
     if (el) { el.textContent = ''; el.style.display = 'none'; }
@@ -16509,23 +20735,28 @@
    document.getElementById('convInput')].forEach(attachImagePaste);
 
   if ($kptNewSession) {
-    // Open modal the moment the user starts typing (or focuses)
-    $kptNewSession.addEventListener('focus', () => openNewSessionModal($kptNewSession.value));
-    $kptNewSession.addEventListener('input', () => {
-      if (!$nsm || $nsm.style.display === 'none') openNewSessionModal($kptNewSession.value);
-    });
+    // Open new session mode the moment the user starts typing (or focuses)
+    function routeToNewSession() {
+      if (typeof enterNewSessionMode === 'function') enterNewSessionMode();
+      const $convInput = document.getElementById('convInput');
+      if ($convInput) {
+        if ($kptNewSession.value) {
+          $convInput.value = $kptNewSession.value;
+          $kptNewSession.value = '';
+        }
+        setTimeout(() => {
+          $convInput.focus();
+          $convInput.style.height = 'auto';
+          $convInput.style.height = ($convInput.scrollHeight) + 'px';
+        }, 30);
+      }
+    }
+    $kptNewSession.addEventListener('focus', routeToNewSession);
+    $kptNewSession.addEventListener('input', routeToNewSession);
     $kptNewSession.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); openNewSessionModal($kptNewSession.value); }
+      if (e.key === 'Enter') { e.preventDefault(); routeToNewSession(); }
     });
   }
-  if ($nsmCancel) $nsmCancel.addEventListener('click', closeNewSessionModal);
-  if ($nsmBackdrop) $nsmBackdrop.addEventListener('click', closeNewSessionModal);
-  if ($nsmSubmit) $nsmSubmit.addEventListener('click', submitNewSessionModal);
-  document.addEventListener('keydown', (e) => {
-    if (!$nsm || $nsm.style.display === 'none') return;
-    if (e.key === 'Escape') { e.preventDefault(); closeNewSessionModal(); }
-    else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitNewSessionModal(); }
-  });
 
   // ── Split panel input bar send handler ──
   if ($cpSendBtn && $cpInput) {
@@ -16533,6 +20764,10 @@
       const text = ($cpInput.value || '').trim();
       const sid = currentSession.id;
       if (!text || !sid) return;
+      if (currentSession.source === 'antigravity' && !antigravityCanSend(currentSession)) {
+        $cpInput.blur();
+        return;
+      }
       hideSlashCommandMenu();
       $cpSendBtn.disabled = true;
       const flashRed = () => {
@@ -16554,7 +20789,12 @@
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ agent_id: agentId, message: text }),
           });
-        } else if (currentSession.spawnPid && currentSession.source !== 'codex' && currentSession.source !== 'gemini') {
+        } else if (
+          currentSession.spawnPid
+          && currentSession.source !== 'codex'
+          && currentSession.source !== 'gemini'
+          && currentSession.source !== 'antigravity'
+        ) {
           // Headless session we spawned — push via stdin pipe
           res = await fetch('/api/sessions/spawned/' + currentSession.spawnPid + '/inject', {
             method: 'POST',
@@ -16576,6 +20816,14 @@
         } else if (res.ok && data.ok) {
           if (data.queued) {
             showOpToast('Queued until the terminal session is idle.');
+          } else if (data.via === 'antigravity-resume') {
+            showOpToast('Antigravity headless follow-up started.');
+            setTimeout(refreshConversationList, 1500);
+            setTimeout(refreshConversationList, 3500);
+          } else if (data.via === 'antigravity-app') {
+            showOpToast('Sent to Antigravity app.');
+            setTimeout(refreshConversationList, 1500);
+            setTimeout(refreshConversationList, 3500);
           }
         } else {
           removePendingSendEcho(pendingSend);
@@ -16603,7 +20851,9 @@
     // Exposed on the element so sendToSplitTerminal can re-run it after clearing value.
     $cpInput.__cpRefresh = function () {
       const hasText = ($cpInput.value || '').trim().length > 0;
-      $cpSendBtn.disabled = !hasText || !currentSession.id;
+      const canSend = !(currentSession.source === 'antigravity' && !antigravityCanSend(currentSession));
+      $cpSendBtn.disabled = !hasText || !currentSession.id || !canSend;
+      $cpSendBtn.title = canSend ? 'Send' : 'Open Antigravity to continue this app session';
     };
     $cpSendBtn.addEventListener('click', sendToSplitTerminal);
     $cpInput.addEventListener('input', () => {
@@ -16655,12 +20905,22 @@
 	  setInterval(async () => {
 		    if (activeTab !== 'sessions') return;
 		    if (isInlineRenameInProgress()) return;
+        if (deferSidebarRenderIfDragging()) return;
 		    if (conversationPaneLoading) return;
+    // Skip the rerender if the user is actively typing into the
+    // composer — innerHTML on the full conv list pauses the main
+    // thread long enough to swallow keystrokes. The next 10s tick
+    // catches up as soon as the input loses focus or the user pauses.
+    const _ae = document.activeElement;
+    const _typing = !!(_ae && (_ae.tagName === 'TEXTAREA'
+      || (_ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_ae.type || 'text'))));
+    if (_typing) return;
     // Refresh /api/conversations/all and re-render — cheap because
     // _extract_tail_meta is mtime-cached server-side; only changed
     // JSONLs get re-scanned.
     try {
       await refreshArchiveData();
+      if (deferSidebarRenderIfDragging()) return;
       const $search = document.getElementById('convSearch');
       renderArchiveList($search ? $search.value : '');
 	    } catch (_) { /* best-effort */ }
@@ -16742,7 +21002,7 @@
       $overlay.classList.remove('fade-out', 'gone');
       if ($label) {
         $label.innerHTML =
-          '<strong>Updating Claude Command Center&hellip;</strong>' +
+          '<strong>Updating Command Center&hellip;</strong>' +
           '<div class="ccc-loading-detail">Pulling latest from GitHub and restarting the server.</div>';
       }
     }
@@ -16824,6 +21084,223 @@
     })();
   }
 
+  // ── Sidebar header version + last-updated line ───────────────────
+  // Populates #cccVersionLabel ("V4.3") and #cccLastUpdated
+  // ("21/05/26-07:38PM") from /api/version. The "check for updates"
+  // link forces a fresh /api/version/check (bypassing the 6h server
+  // cache) and either opens the existing update modal or toasts that
+  // the install is current.
+  const $cccVersionLabel = document.getElementById('cccVersionLabel');
+  const $cccLastUpdated = document.getElementById('cccLastUpdated');
+  const $cccCheckUpdatesLink = document.getElementById('cccCheckUpdatesLink');
+
+  function formatCccUpdatedAt(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    const day = pad(d.getDate());
+    const mon = pad(d.getMonth() + 1);
+    const yr = pad(d.getFullYear() % 100);
+    let h = d.getHours();
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12; if (h === 0) h = 12;
+    const min = pad(d.getMinutes());
+    return `${mon}/${day}/${yr}-${pad(h)}:${min}${ampm}`;
+  }
+
+  (async () => {
+    if (!$cccVersionLabel && !$cccLastUpdated) return;
+    try {
+      const r = await fetch('/api/version', { cache: 'no-store' });
+      const d = await r.json();
+      if ($cccVersionLabel && d && d.version) {
+        $cccVersionLabel.textContent = 'V' + String(d.version);
+        $cccVersionLabel.title = 'Installed version: v' + d.version;
+      }
+      if ($cccLastUpdated) {
+        const formatted = formatCccUpdatedAt(d && d.last_updated);
+        $cccLastUpdated.textContent = formatted || '—';
+      }
+    } catch (_) {
+      if ($cccLastUpdated) $cccLastUpdated.textContent = '—';
+    }
+  })();
+
+  if ($cccCheckUpdatesLink) {
+    $cccCheckUpdatesLink.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      if ($cccCheckUpdatesLink.classList.contains('checking')) return;
+      $cccCheckUpdatesLink.classList.add('checking');
+      $cccCheckUpdatesLink.textContent = 'checking…';
+      try {
+        const r = await fetch('/api/version/check?force=1', { cache: 'no-store' });
+        const d = await r.json();
+        if (d && d.ok && d.behind) {
+          updCheckData = d;
+          if ($updPillText) {
+            $updPillText.textContent = 'Update → v' + String(d.latest).replace(/[<>&]/g, '');
+          }
+          if ($updPill) $updPill.classList.add('visible');
+          updOpenModal();
+        } else if (d && d.ok) {
+          showOpToast('Up to date — v' + (d.current || '?'));
+        } else {
+          showOpToast('Update check failed: ' + ((d && d.error) || 'unknown'), 'error');
+        }
+      } catch (e) {
+        showOpToast('Update check failed: ' + (e.message || 'network error'), 'error');
+      } finally {
+        $cccCheckUpdatesLink.classList.remove('checking');
+        $cccCheckUpdatesLink.textContent = 'check for updates';
+      }
+    });
+  }
+
+  // ── What's New Feature Showcasing ──────────────────────────────
+  const $whatsNewModal = document.getElementById('whatsNewModal');
+  const $whatsNewBackdrop = document.getElementById('whatsNewBackdrop');
+  const $whatsNewCloseX = document.getElementById('whatsNewCloseX');
+  const $whatsNewExploreBtn = document.getElementById('whatsNewExploreBtn');
+  const $whatsNewMenu = document.getElementById('whatsNewMenu');
+  const $whatsNewContent = document.getElementById('whatsNewContent');
+  const $whatsNewDontShowAgain = document.getElementById('whatsNewDontShowAgain');
+  const $cccWhatsNewLink = document.getElementById('cccWhatsNewLink');
+
+  const WHATS_NEW_FEATURES = [
+    {
+      id: 'antigravity-engine',
+      title: 'Antigravity Engine',
+      date: 'May 21, 2026',
+      tag: 'Engine',
+      desc: '<p>CCC now fully integrates Google\'s <strong>Antigravity (AGY) SDK</strong> as a first-class citizen alongside Claude Code and Codex.</p><p>This integration lets you run, monitor, and coordinate both standard AGY CLI sessions and macOS-native app sessions using a unified dashboard, enabling token tracking, status indicators, and follow-ups over local RPC.</p>',
+      mockup: '<div class="mockup-agy-container"><div class="mockup-agy-header"><span class="mockup-agy-badge"><span class="mockup-agy-logo"></span><span>antigravity-app-session</span></span><span class="mockup-agy-status"><span class="mockup-agy-pulse"></span><span>Active</span></span></div><div class="mockup-agy-code">// AGY cascade execution\nresult = await agy.cascade_rpc(\n    session_id="strategy-session",\n    prompt="execute sub-task A"\n)</div></div>'
+    },
+    {
+      id: 'flow-view',
+      title: 'Panoramic Flow Map',
+      date: 'May 25, 2026',
+      tag: 'Visualization',
+      desc: '<p>Visualize your concurrent agent sessions as an interactive flow map. Easily track the hierarchy and lineage of spawned sub-sessions.</p><p>Includes support for <strong>pinch zoom/pan</strong>, drag-to-select multiple nodes, quick session actions, and spawning new child nodes directly from parents.</p>',
+      mockup: '<div class="mockup-flow-canvas"><svg class="mockup-flow-svg" style="position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;"><path d="M 90 60 C 130 60, 130 25, 175 25" stroke="var(--border)" stroke-width="1.5" fill="none"></path><path d="M 90 60 C 130 60, 130 90, 175 90" stroke="var(--border)" stroke-width="1.5" fill="none"></path></svg><div class="mockup-flow-node root"><span class="node-title">Strategy (main)</span><span class="node-meta">AGY · active</span></div><div class="mockup-flow-node child-a"><span class="node-title">Parser tests</span><span class="node-meta">Claude · active</span></div><div class="mockup-flow-node child-b"><span class="node-title">DOM picking</span><span class="node-meta">Codex · idle</span></div></div>'
+    },
+    {
+      id: 'annotations',
+      title: 'Page & Screen Annotations',
+      date: 'May 26, 2026',
+      tag: 'Context',
+      desc: '<p>Provide rich context to your agents by attaching screenshots or specific DOM nodes to a session.</p><p>Use the new <strong>Annotation Bookmarklet</strong> to select and pick target DOM elements from any external website, instantly delivering them as clean payloads directly to your active sessions.</p>',
+      mockup: '<div class="mockup-browser"><div class="mockup-browser-bar"><div class="mockup-browser-dots"><span class="mockup-browser-dot"></span><span class="mockup-browser-dot"></span><span class="mockup-browser-dot"></span></div><span class="mockup-browser-address">https://ccc.amirfish.ai</span></div><div class="mockup-browser-viewport"><div class="mockup-browser-element"><span class="mockup-browser-element-label">div#whats-new</span><span>Click element to pick & annotate</span></div><svg class="mockup-browser-cursor" viewBox="0 0 24 24" fill="none" style="position: absolute; width: 14px; height: 14px; left: 60%; top: 50%; pointer-events: none;"><path d="M4.5 3V17L9 13.5L14 21L17.5 19L12.5 11.5L18.5 11.5L4.5 3Z" fill="#fff" stroke="#000" stroke-width="1.5"></path></svg></div></div>'
+    },
+    {
+      id: 'group-chats',
+      title: 'Multi-Agent Room Chats',
+      date: 'May 26, 2026',
+      tag: 'Orchestration',
+      desc: '<p>Drag different agent sessions into shared room headers to let them <strong>collaborate and coordinate</strong> on complex tasks.</p><p>Watch them discuss strategies, share files, and divide execution automatically with real-time wake/sleep indicators and interleave settings.</p>',
+      mockup: '<div class="mockup-chat-room"><div class="mockup-chat-header"><span class="mockup-chat-room-title">Feature Handoff Room</span><div class="mockup-chat-participants"><span class="mockup-chat-avatar cl" title="Claude">C</span><span class="mockup-chat-avatar cx" title="Codex">X</span><span class="mockup-chat-avatar ag" title="Antigravity">A</span></div></div><div class="mockup-chat-message-list"><div class="mockup-chat-message"><span class="msg-sender" style="color:#6366f1;">Claude</span><span class="msg-text">I\'ve implemented the API endpoint in server.py.</span></div><div class="mockup-chat-message"><span class="msg-sender" style="color:#f59e0b;">AGY</span><span class="msg-text">Understood. I will verify it with the swift test suite.</span></div></div><span class="mockup-chat-typing">AGY is running tests...</span></div>'
+    },
+    {
+      id: 'pinning',
+      title: 'Row Pinning & UI Polish',
+      date: 'May 22, 2026',
+      tag: 'Layout',
+      desc: '<p>Pin critical strategy sessions to the top of your sidebar list to keep them visible while execution sub-sessions scroll below.</p><p>Includes a clean <strong>SF Pro / Outfit typography upgrade</strong>, real-time token tracking in footer pills, and smooth transition animations.</p>',
+      mockup: '<div class="mockup-pinning-sidebar"><div class="mockup-pinning-header"><span>📌 PINNED SESSIONS</span></div><div class="mockup-pinning-row"><span class="mockup-pinning-name">🎯 architecture-planning</span><span class="mockup-pinning-icon">★ Pinned</span></div><div class="mockup-pinning-row"><span class="mockup-pinning-name">📝 release-notes-v4</span><span class="mockup-pinning-icon">★ Pinned</span></div></div>'
+    }
+  ];
+
+  let whatsNewActiveId = WHATS_NEW_FEATURES[0].id;
+  let whatsNewVersion = '';
+
+  function whatsNewRenderMenu() {
+    if (!$whatsNewMenu) return;
+    $whatsNewMenu.innerHTML = WHATS_NEW_FEATURES.map(f => {
+      const activeClass = f.id === whatsNewActiveId ? ' active' : '';
+      return '<button class="whats-new-menu-item' + activeClass + '" data-id="' + f.id + '" type="button" role="tab" aria-selected="' + (f.id === whatsNewActiveId) + '">' +
+        '<span class="menu-item-title">' + f.title + '</span>' +
+        '<span class="menu-item-date">' + f.date + '</span>' +
+        '</button>';
+    }).join('');
+
+    // Add click listeners to menu items
+    const items = $whatsNewMenu.querySelectorAll('.whats-new-menu-item');
+    items.forEach(el => {
+      el.addEventListener('click', () => {
+        whatsNewActiveId = el.getAttribute('data-id');
+        whatsNewRenderMenu();
+        whatsNewRenderFeature(whatsNewActiveId);
+      });
+    });
+  }
+
+  function whatsNewRenderFeature(id) {
+    if (!$whatsNewContent) return;
+    const f = WHATS_NEW_FEATURES.find(item => item.id === id);
+    if (!f) return;
+
+    $whatsNewContent.innerHTML = 
+      '<div class="whats-new-header-row">' +
+        '<span class="whats-new-pill">' + f.tag + '</span>' +
+        '<span class="whats-new-feature-date">' + f.date + '</span>' +
+      '</div>' +
+      '<h2 class="whats-new-feature-title" id="whatsNewTitle">' + f.title + '</h2>' +
+      '<div class="whats-new-feature-desc">' + f.desc + '</div>' +
+      '<div class="whats-new-preview-box">' + f.mockup + '</div>';
+  }
+
+  function whatsNewOpenModal() {
+    if (!$whatsNewModal) return;
+    whatsNewActiveId = WHATS_NEW_FEATURES[0].id;
+    whatsNewRenderMenu();
+    whatsNewRenderFeature(whatsNewActiveId);
+    if ($whatsNewDontShowAgain) $whatsNewDontShowAgain.checked = false;
+    $whatsNewModal.classList.add('open');
+  }
+
+  function whatsNewCloseModal() {
+    if (!$whatsNewModal) return;
+    $whatsNewModal.classList.remove('open');
+    if (whatsNewVersion) {
+      localStorage.setItem('ccc-last-seen-version', whatsNewVersion);
+      if ($whatsNewDontShowAgain && $whatsNewDontShowAgain.checked) {
+        localStorage.setItem('ccc-whats-new-dismissed-version', whatsNewVersion);
+      }
+    }
+  }
+
+  if ($whatsNewCloseX) $whatsNewCloseX.addEventListener('click', whatsNewCloseModal);
+  if ($whatsNewExploreBtn) $whatsNewExploreBtn.addEventListener('click', whatsNewCloseModal);
+  if ($whatsNewBackdrop) $whatsNewBackdrop.addEventListener('click', whatsNewCloseModal);
+  if ($cccWhatsNewLink) {
+    $cccWhatsNewLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      whatsNewOpenModal();
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $whatsNewModal && $whatsNewModal.classList.contains('open')) {
+      whatsNewCloseModal();
+    }
+  });
+
+  // Fetch version and optionally show popup
+  (async () => {
+    try {
+      const r = await fetch('/api/version', { cache: 'no-store' });
+      const d = await r.json();
+      if (d && d.version) {
+        whatsNewVersion = String(d.version);
+        const lastSeen = localStorage.getItem('ccc-last-seen-version');
+        const dismissedVer = localStorage.getItem('ccc-whats-new-dismissed-version');
+        if (lastSeen !== whatsNewVersion && dismissedVer !== whatsNewVersion && !CONV_POPOUT_MODE) {
+          whatsNewOpenModal();
+        }
+      }
+    } catch (_) {}
+  })();
+
   // ── Manual server restart ─────────────────────────────────────
   // Settings menu → POST /api/restart → wait for the same port to answer.
   const $restartServerBtn = document.getElementById('restartServerBtn');
@@ -16838,8 +21315,8 @@
     }
     if ($restartServerBtn) {
       $restartServerBtn.title = clean
-        ? 'Restart the Claude Command Center server on :' + clean
-        : 'Restart the Claude Command Center server';
+        ? 'Restart the Command Center server on :' + clean
+        : 'Restart the Command Center server';
     }
   }
 
@@ -16919,6 +21396,821 @@
     $restartServerBtn.addEventListener('click', restartServerRun);
   }
 
+  // ── Sidebar refresh split-button ──────────────────────────────
+  // Primary action: hard reload (cache-bust via ?_r=<ts>). The caret
+  // opens a small menu whose only entry today is "Restart server",
+  // which delegates to the same restartServerRun() the settings menu
+  // uses.
+  const $sidebarRefreshWrap = document.querySelector('.sh-refresh-wrap');
+  const $sidebarRefreshBtn = document.getElementById('sidebarRefreshBtn');
+  const $sidebarRefreshCaret = document.getElementById('sidebarRefreshCaret');
+  const $sidebarRefreshMenu = document.getElementById('sidebarRefreshMenu');
+  const $sidebarRestartServerItem = document.getElementById('sidebarRestartServerItem');
+
+  function hideSidebarRefreshMenu() {
+    if (!$sidebarRefreshMenu) return;
+    $sidebarRefreshMenu.style.display = 'none';
+    if ($sidebarRefreshCaret) $sidebarRefreshCaret.setAttribute('aria-expanded', 'false');
+  }
+  function toggleSidebarRefreshMenu() {
+    if (!$sidebarRefreshMenu) return;
+    const open = $sidebarRefreshMenu.style.display !== 'none';
+    if (open) {
+      hideSidebarRefreshMenu();
+    } else {
+      $sidebarRefreshMenu.style.display = 'block';
+      if ($sidebarRefreshCaret) $sidebarRefreshCaret.setAttribute('aria-expanded', 'true');
+    }
+  }
+  if ($sidebarRefreshBtn) {
+    $sidebarRefreshBtn.addEventListener('click', () => {
+      if ($sidebarRefreshWrap) {
+        $sidebarRefreshWrap.classList.add('spinning');
+        setTimeout(() => $sidebarRefreshWrap.classList.remove('spinning'), 600);
+      }
+      const url = new URL(window.location.href);
+      url.searchParams.set('_r', String(Date.now()));
+      window.location.replace(url.toString());
+    });
+  }
+  if ($sidebarRefreshCaret) {
+    $sidebarRefreshCaret.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleSidebarRefreshMenu();
+    });
+  }
+  if ($sidebarRestartServerItem) {
+    $sidebarRestartServerItem.addEventListener('click', () => {
+      hideSidebarRefreshMenu();
+      if (typeof restartServerRun === 'function') {
+        restartServerRun();
+      }
+    });
+  }
+  document.addEventListener('click', (ev) => {
+    if (!$sidebarRefreshMenu) return;
+    if ($sidebarRefreshMenu.style.display === 'none') return;
+    if ($sidebarRefreshWrap && $sidebarRefreshWrap.contains(ev.target)) return;
+    hideSidebarRefreshMenu();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && $sidebarRefreshMenu && $sidebarRefreshMenu.style.display !== 'none') {
+      hideSidebarRefreshMenu();
+    }
+  });
+
+  // ── Page annotations ───────────────────────────────────────────
+  // Browser-page MVP: mark a region or element, write a local note, and
+  // persist URL/selector/rect/text anchors for agent handoff.
+  const $annotationStartBtn = document.getElementById('annotationStartBtn');
+  const $annotationScreenBtn = document.getElementById('annotationScreenBtn');
+  const $annotationNotesBtn = document.getElementById('annotationNotesBtn');
+  let annotationState = null;
+
+  function annCssEscape(value) {
+    const s = String(value == null ? '' : value);
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(s);
+    return s.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  }
+
+  function annText(value, maxLen) {
+    const s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    if (!maxLen || s.length <= maxLen) return s;
+    return s.slice(0, maxLen).trim() + '…';
+  }
+
+  function annSelectorFor(el) {
+    if (!el || !el.tagName) return '';
+    if (el.id) return '#' + annCssEscape(el.id);
+    const parts = [];
+    let cur = el;
+    while (cur && cur.nodeType === 1 && cur !== document.body && cur !== document.documentElement && parts.length < 7) {
+      let part = cur.tagName.toLowerCase();
+      if (cur.classList && cur.classList.length) {
+        part += '.' + Array.from(cur.classList).slice(0, 2).map(annCssEscape).join('.');
+      }
+      const parent = cur.parentElement;
+      if (parent) {
+        const sameTag = Array.from(parent.children).filter(ch => ch.tagName === cur.tagName);
+        if (sameTag.length > 1) part += ':nth-of-type(' + (sameTag.indexOf(cur) + 1) + ')';
+      }
+      parts.unshift(part);
+      cur = parent;
+    }
+    return parts.join(' > ') || el.tagName.toLowerCase();
+  }
+
+  function annElementText(el) {
+    if (!el) return '';
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') {
+      return annText(el.value || el.getAttribute('placeholder') || '', 2000);
+    }
+    if (tag === 'select') {
+      return annText(el.options && el.selectedIndex >= 0 ? el.options[el.selectedIndex].text : '', 2000);
+    }
+    return annText(el.innerText || el.textContent || '', 2000);
+  }
+
+  function annRectObject(rect) {
+    return {
+      x: Math.round(rect.left * 100) / 100,
+      y: Math.round(rect.top * 100) / 100,
+      width: Math.round(rect.width * 100) / 100,
+      height: Math.round(rect.height * 100) / 100,
+    };
+  }
+
+  function annElementSummary(el) {
+    if (!el || !el.tagName) return {};
+    return {
+      tag: el.tagName.toLowerCase(),
+      id: el.id || '',
+      role: el.getAttribute('role') || '',
+      selector: annSelectorFor(el),
+      href: el.getAttribute('href') || '',
+      text: annText(annElementText(el), 200),
+    };
+  }
+
+  function annNormalizeRect(a, b) {
+    const left = Math.max(0, Math.min(a.x, b.x));
+    const top = Math.max(0, Math.min(a.y, b.y));
+    const right = Math.min(window.innerWidth, Math.max(a.x, b.x));
+    const bottom = Math.min(window.innerHeight, Math.max(a.y, b.y));
+    return { x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
+  function annSelectionRectForElement(el, x, y) {
+    if (!el || !el.getBoundingClientRect || el === document.body || el === document.documentElement) {
+      return {
+        x: Math.max(0, x - 40),
+        y: Math.max(0, y - 24),
+        width: Math.min(80, window.innerWidth),
+        height: Math.min(48, window.innerHeight),
+      };
+    }
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) {
+      return { x: Math.max(0, x - 40), y: Math.max(0, y - 24), width: 80, height: 48 };
+    }
+    return {
+      x: Math.max(0, r.left),
+      y: Math.max(0, r.top),
+      width: Math.min(r.width, window.innerWidth - Math.max(0, r.left)),
+      height: Math.min(r.height, window.innerHeight - Math.max(0, r.top)),
+    };
+  }
+
+  function annElementAtPoint(x, y) {
+    if (!annotationState || !annotationState.overlay) return document.elementFromPoint(x, y);
+    const overlay = annotationState.overlay;
+    const prev = overlay.style.pointerEvents;
+    overlay.style.pointerEvents = 'none';
+    let el = null;
+    try { el = document.elementFromPoint(x, y); } finally { overlay.style.pointerEvents = prev; }
+    return el;
+  }
+
+  function annUpdateSelection(rect) {
+    if (!annotationState || !annotationState.selectionEl) return;
+    const el = annotationState.selectionEl;
+    el.style.left = rect.x + 'px';
+    el.style.top = rect.y + 'px';
+    el.style.width = rect.width + 'px';
+    el.style.height = rect.height + 'px';
+    el.hidden = false;
+  }
+
+  function annUpdateHoverLabel(rect, target) {
+    if (!annotationState || !annotationState.hoverLabelEl) return;
+    const labelEl = annotationState.hoverLabelEl;
+    if (!target || !target.tagName || annotationState.dragging || annotationState.editor) {
+      labelEl.hidden = true;
+      return;
+    }
+    const summary = annElementSummary(target);
+    const label = summary.selector || summary.tag || 'selected area';
+    labelEl.textContent = label.length > 90 ? label.slice(0, 89) + '…' : label;
+    const margin = 8;
+    let left = rect.x;
+    let top = rect.y - 28;
+    if (top < margin) top = rect.y + rect.height + margin;
+    const maxLeft = window.innerWidth - 280 - margin;
+    if (left > maxLeft) left = maxLeft;
+    if (left < margin) left = margin;
+    labelEl.style.left = left + 'px';
+    labelEl.style.top = top + 'px';
+    labelEl.hidden = false;
+  }
+
+  function annPreviewAtPoint(x, y) {
+    if (!annotationState || annotationState.dragging || annotationState.editor) return;
+    const target = annElementAtPoint(x, y);
+    const rect = annSelectionRectForElement(target, x, y);
+    annotationState.hoverElement = target;
+    annotationState.hoverRect = rect;
+    annUpdateSelection(rect);
+    annUpdateHoverLabel(rect, target);
+  }
+
+  function annEstimateScreenRect(rect) {
+    const outerW = window.outerWidth || window.innerWidth;
+    const outerH = window.outerHeight || window.innerHeight;
+    const borderX = Math.max(0, (outerW - window.innerWidth) / 2);
+    const chromeY = Math.max(0, (outerH - window.innerHeight) - borderX);
+    const sx = typeof window.screenX === 'number' ? window.screenX : (window.screenLeft || 0);
+    const sy = typeof window.screenY === 'number' ? window.screenY : (window.screenTop || 0);
+    return {
+      x: Math.round(sx + borderX + rect.x),
+      y: Math.round(sy + chromeY + rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      estimated: true,
+      window_screen_x: sx,
+      window_screen_y: sy,
+      outer_width: outerW,
+      outer_height: outerH,
+    };
+  }
+
+  // Walk up the DOM until we find an ancestor at least ~1.8x the area of
+  // the annotated element (or +4000px²) so the screenshot includes enough
+  // context to recognize where the element sits — a tight 14×14 swatch on
+  // its own is meaningless. Cap at 4 levels and clamp to the viewport with
+  // a small visual padding so the parent's border is visible.
+  function annContextRect(element, rect) {
+    if (!element || !rect) return rect;
+    const elArea = Math.max(1, rect.width * rect.height);
+    let node = element.parentElement;
+    let chosen = null;
+    let depth = 0;
+    while (node && node !== document.body && depth < 4) {
+      const pr = node.getBoundingClientRect();
+      const prArea = pr.width * pr.height;
+      if (prArea >= Math.max(elArea * 1.8, elArea + 4000)) {
+        chosen = pr;
+        break;
+      }
+      node = node.parentElement;
+      depth++;
+    }
+    if (!chosen && element.parentElement) chosen = element.parentElement.getBoundingClientRect();
+    if (!chosen) return rect;
+    const pad = 8;
+    const x = Math.max(0, Math.floor(chosen.left - pad));
+    const y = Math.max(0, Math.floor(chosen.top - pad));
+    const width = Math.max(rect.width, Math.min(window.innerWidth - x, Math.ceil(chosen.width + pad * 2)));
+    const height = Math.max(rect.height, Math.min(window.innerHeight - y, Math.ceil(chosen.height + pad * 2)));
+    return { x, y, width, height };
+  }
+
+  function annBuildPayload(note) {
+    const rect = annotationState.rect;
+    const element = annotationState.element;
+    // Use the element's tight rect for selector / positioning data, but
+    // capture the screenshot over a wider context rect so the reader can
+    // see where the element lives in the page.
+    const contextRect = annContextRect(element, rect);
+    return {
+      note,
+      url: window.location.href,
+      title: document.title || '',
+      session_id: (typeof currentSession !== 'undefined' && currentSession && currentSession.id) || '',
+      repo_path: (typeof selectedRepoPath === 'function' && selectedRepoPath()) || '',
+      rect,
+      screen: annEstimateScreenRect(contextRect),
+      element: annElementSummary(element),
+      capture_screen: true,
+    };
+  }
+
+  function annNextPaint() {
+    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  function annStop() {
+    if (!annotationState) return;
+    if (annotationState.overlay) annotationState.overlay.remove();
+    document.removeEventListener('keydown', annHandleKeydown, true);
+    if ($annotationStartBtn) $annotationStartBtn.classList.remove('active');
+    annotationState = null;
+  }
+
+  function annPositionEditor(editor, rect) {
+    const margin = 12;
+    const w = Math.min(340, window.innerWidth - margin * 2);
+    editor.style.width = w + 'px';
+    let left = rect.x + rect.width + margin;
+    if (left + w > window.innerWidth - margin) left = Math.min(window.innerWidth - w - margin, rect.x);
+    if (left < margin) left = margin;
+    let top = rect.y + rect.height + margin;
+    const h = editor.offsetHeight || 220;
+    if (top + h > window.innerHeight - margin) top = Math.max(margin, rect.y - h - margin);
+    editor.style.left = left + 'px';
+    editor.style.top = top + 'px';
+  }
+
+  function annOpenNewSessionWithContext(ann, closeFn, errEl) {
+    if (!ann) return;
+    const text = annContextForClipboard(ann);
+    if (!text) return;
+    try {
+      if (typeof enterNewSessionMode !== 'function') throw new Error('new session mode is unavailable');
+      enterNewSessionMode(text);
+      if (typeof closeFn === 'function') closeFn();
+      showOpToast('Annotation loaded into new session', 'success');
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = 'Open new session failed: ' + ((err && err.message) || 'unknown');
+        errEl.hidden = false;
+      }
+    }
+  }
+
+  function annUxFixesQueuePrompt(ann) {
+    return 'Fix the following UX issue based on this annotation:\n\n' + annContextForClipboard(ann);
+  }
+
+  async function annOpenUxFixesQueue(ann, closeFn, errEl) {
+    if (!ann) return;
+    try {
+      const res = await fetch('/api/annotations/ux-fixes-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          annotation_id: ann.id || '',
+          text: annUxFixesQueuePrompt(ann),
+          engine: getSpawnEngine(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+      if (typeof closeFn === 'function') closeFn();
+      showOpToast(data.action === 'spawned' ? 'UX fixes queue session created' : 'Annotation sent to UX fixes queue', 'success');
+      try {
+        if (typeof refreshArchiveData === 'function') {
+          await refreshArchiveData({ force: true });
+          const $search = document.getElementById('convSearch');
+          if (typeof renderArchiveList === 'function') renderArchiveList($search ? $search.value : '');
+        }
+      } catch (_) {}
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = 'UX fixes queue failed: ' + ((err && err.message) || 'unknown');
+        errEl.hidden = false;
+      } else {
+        showOpToast('UX fixes queue failed: ' + ((err && err.message) || 'unknown'), 'error');
+      }
+    }
+  }
+
+  function annShowEditor() {
+    if (!annotationState || !annotationState.overlay) return;
+    if (annotationState.editor) annotationState.editor.remove();
+    const summary = annElementSummary(annotationState.element);
+    const editor = document.createElement('div');
+    editor.className = 'ann-editor';
+    editor.innerHTML =
+      '<div class="ann-editor-title">Annotation</div>' +
+      '<textarea class="ann-editor-note" rows="4" placeholder="Write a note for Claude…"></textarea>' +
+      '<div class="ann-editor-meta">' + escapeHtml(summary.selector || summary.tag || 'selected area') + '</div>' +
+      '<div class="ann-editor-error" hidden></div>' +
+      '<div class="ann-editor-actions">' +
+        '<button type="button" class="ann-btn" data-ann-cancel>Cancel</button>' +
+        '<button type="button" class="ann-btn" data-ann-open-session>Open new session</button>' +
+        '<button type="button" class="ann-btn ann-queue-btn" data-ann-ux-queue>Add to UX fixes queue</button>' +
+        '<button type="button" class="ann-btn ann-primary" data-ann-save>Save</button>' +
+      '</div>';
+    annotationState.overlay.appendChild(editor);
+    annotationState.editor = editor;
+    annPositionEditor(editor, annotationState.rect);
+    const noteEl = editor.querySelector('.ann-editor-note');
+    const errEl = editor.querySelector('.ann-editor-error');
+    const saveBtn = editor.querySelector('[data-ann-save]');
+    const cancelBtn = editor.querySelector('[data-ann-cancel]');
+    const openSessionBtn = editor.querySelector('[data-ann-open-session]');
+    const uxQueueBtn = editor.querySelector('[data-ann-ux-queue]');
+    let savedAnnotation = null;
+    const copySaved = async () => {
+      if (!savedAnnotation) return;
+      try {
+        await navigator.clipboard.writeText(annContextForClipboard(savedAnnotation));
+        annStop();
+      } catch (_) {
+        errEl.textContent = 'Copy failed.';
+        errEl.hidden = false;
+      }
+    };
+    const persistAnnotation = async (busyLabel) => {
+      if (savedAnnotation) return savedAnnotation;
+      const note = noteEl.value.trim();
+      if (!note) {
+        errEl.textContent = 'Note is required.';
+        errEl.hidden = false;
+        noteEl.focus();
+        return null;
+      }
+      errEl.hidden = true;
+      saveBtn.disabled = true;
+      if (openSessionBtn) openSessionBtn.disabled = true;
+      if (uxQueueBtn) uxQueueBtn.disabled = true;
+      saveBtn.textContent = busyLabel || 'Saving…';
+      if (annotationState && annotationState.overlay) {
+        annotationState.overlay.classList.add('ann-capturing');
+        await annNextPaint();
+      }
+      try {
+        const res = await fetch('/api/annotations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(annBuildPayload(note)),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+        savedAnnotation = data.annotation;
+        noteEl.disabled = true;
+        if (cancelBtn) cancelBtn.hidden = true;
+        if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Copy';
+        showOpToast('Annotation saved', 'success');
+        return savedAnnotation;
+      } catch (err) {
+        errEl.textContent = 'Save failed: ' + ((err && err.message) || 'unknown');
+        errEl.hidden = false;
+        saveBtn.disabled = false;
+        if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+        return null;
+      } finally {
+        if (annotationState && annotationState.overlay) {
+          annotationState.overlay.classList.remove('ann-capturing');
+        }
+      }
+    };
+    const save = async () => {
+      if (savedAnnotation) {
+        await copySaved();
+        return;
+      }
+      await persistAnnotation('Saving…');
+    };
+    if (cancelBtn) cancelBtn.addEventListener('click', annStop);
+    if (openSessionBtn) {
+      openSessionBtn.addEventListener('click', async () => {
+        const ann = await persistAnnotation('Saving…');
+        if (ann) annOpenNewSessionWithContext(ann, annStop, errEl);
+      });
+    }
+    if (uxQueueBtn) {
+      uxQueueBtn.addEventListener('click', async () => {
+        const ann = await persistAnnotation('Saving…');
+        if (ann) annOpenUxFixesQueue(ann, annStop, errEl);
+      });
+    }
+    saveBtn.addEventListener('click', save);
+    noteEl.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save();
+      e.stopPropagation();
+    });
+    setTimeout(() => noteEl.focus(), 0);
+  }
+
+  function annPointerDown(e) {
+    if (!annotationState || e.target.closest('.ann-editor') || e.target.closest('.ann-hud')) return;
+    e.preventDefault();
+    annotationState.dragging = true;
+    annotationState.start = { x: e.clientX, y: e.clientY };
+    annotationState.rect = { x: e.clientX, y: e.clientY, width: 1, height: 1 };
+    if (annotationState.hoverLabelEl) annotationState.hoverLabelEl.hidden = true;
+    if (annotationState.editor) { annotationState.editor.remove(); annotationState.editor = null; }
+    annUpdateSelection(annotationState.rect);
+    try { annotationState.overlay.setPointerCapture(e.pointerId); } catch (_) {}
+  }
+
+  function annPointerMove(e) {
+    if (!annotationState) return;
+    if (!annotationState.dragging) {
+      if (e.target.closest('.ann-editor') || e.target.closest('.ann-hud')) return;
+      annPreviewAtPoint(e.clientX, e.clientY);
+      return;
+    }
+    e.preventDefault();
+    const rect = annNormalizeRect(annotationState.start, { x: e.clientX, y: e.clientY });
+    annotationState.rect = rect;
+    annUpdateSelection(rect);
+  }
+
+  function annPointerUp(e) {
+    if (!annotationState || !annotationState.dragging) return;
+    e.preventDefault();
+    annotationState.dragging = false;
+    const raw = annNormalizeRect(annotationState.start, { x: e.clientX, y: e.clientY });
+    const clicked = raw.width < 8 && raw.height < 8;
+    const target = annElementAtPoint(e.clientX, e.clientY);
+    annotationState.element = target;
+    annotationState.rect = clicked ? annSelectionRectForElement(target, e.clientX, e.clientY) : raw;
+    annUpdateSelection(annotationState.rect);
+    if (annotationState.hoverLabelEl) annotationState.hoverLabelEl.hidden = true;
+    annShowEditor();
+  }
+
+  function annHandleKeydown(e) {
+    if (e.key === 'Escape' && annotationState) {
+      e.preventDefault();
+      annStop();
+    }
+  }
+
+  function annStart() {
+    if (annotationState) { annStop(); return; }
+    const overlay = document.createElement('div');
+    overlay.className = 'ann-overlay';
+    overlay.innerHTML =
+      '<div class="ann-hud"><span>Mark area</span><button type="button" class="ann-hud-close" aria-label="Close annotation mode">&times;</button></div>' +
+      '<div class="ann-selection" hidden></div>' +
+      '<div class="ann-hover-label" hidden></div>';
+    document.body.appendChild(overlay);
+    annotationState = {
+      overlay,
+      selectionEl: overlay.querySelector('.ann-selection'),
+      hoverLabelEl: overlay.querySelector('.ann-hover-label'),
+      editor: null,
+      dragging: false,
+      start: null,
+      rect: null,
+      element: null,
+      hoverElement: null,
+      hoverRect: null,
+    };
+    overlay.addEventListener('pointerdown', annPointerDown);
+    overlay.addEventListener('pointermove', annPointerMove);
+    overlay.addEventListener('pointerup', annPointerUp);
+    overlay.querySelector('.ann-hud-close').addEventListener('click', annStop);
+    document.addEventListener('keydown', annHandleKeydown, true);
+    if ($annotationStartBtn) $annotationStartBtn.classList.add('active');
+  }
+
+  function annCloseScreenModal() {
+    const modal = document.getElementById('annotationScreenModal');
+    if (modal) modal.remove();
+  }
+
+  function annOpenScreenNote(capture) {
+    annCloseScreenModal();
+    const modal = document.createElement('div');
+    modal.id = 'annotationScreenModal';
+    modal.className = 'upd-overlay ann-screen-modal open';
+    const imgSrc = 'data:' + (capture.mime || 'image/png') + ';base64,' + capture.image_b64;
+    modal.innerHTML =
+      '<div class="upd-backdrop" data-ann-screen-close></div>' +
+      '<div class="upd-dialog ann-screen-dialog">' +
+        '<div class="ann-notes-header">' +
+          '<div class="upd-title">Screen Annotation</div>' +
+          '<button type="button" class="ann-icon-btn" data-ann-screen-close aria-label="Close screen annotation">&times;</button>' +
+        '</div>' +
+        '<img class="ann-screen-preview" alt="Selected screen region">' +
+        '<textarea class="ann-editor-note" rows="4" placeholder="Write a note for Claude…"></textarea>' +
+        '<div class="ann-editor-error" hidden></div>' +
+        '<div class="ann-editor-actions">' +
+          '<button type="button" class="ann-btn" data-ann-screen-close data-ann-screen-cancel>Cancel</button>' +
+          '<button type="button" class="ann-btn" data-ann-screen-open-session>Open new session</button>' +
+          '<button type="button" class="ann-btn ann-queue-btn" data-ann-screen-ux-queue>Add to UX fixes queue</button>' +
+          '<button type="button" class="ann-btn ann-primary" data-ann-screen-save>Save</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    const previewImg = modal.querySelector('.ann-screen-preview');
+    if (previewImg) previewImg.src = imgSrc;
+    const noteEl = modal.querySelector('.ann-editor-note');
+    const errEl = modal.querySelector('.ann-editor-error');
+    const saveBtn = modal.querySelector('[data-ann-screen-save]');
+    const cancelBtn = modal.querySelector('[data-ann-screen-cancel]');
+    const openSessionBtn = modal.querySelector('[data-ann-screen-open-session]');
+    const uxQueueBtn = modal.querySelector('[data-ann-screen-ux-queue]');
+    const close = annCloseScreenModal;
+    modal.querySelectorAll('[data-ann-screen-close]').forEach(btn => btn.addEventListener('click', close));
+    let savedAnnotation = null;
+    const copySaved = async () => {
+      if (!savedAnnotation) return;
+      try {
+        await navigator.clipboard.writeText(annContextForClipboard(savedAnnotation));
+        close();
+      } catch (_) {
+        errEl.textContent = 'Copy failed.';
+        errEl.hidden = false;
+      }
+    };
+    const persistAnnotation = async (busyLabel) => {
+      if (savedAnnotation) return savedAnnotation;
+      const note = noteEl.value.trim();
+      if (!note) {
+        errEl.textContent = 'Note is required.';
+        errEl.hidden = false;
+        noteEl.focus();
+        return null;
+      }
+      errEl.hidden = true;
+      saveBtn.disabled = true;
+      if (openSessionBtn) openSessionBtn.disabled = true;
+      if (uxQueueBtn) uxQueueBtn.disabled = true;
+      saveBtn.textContent = busyLabel || 'Saving…';
+      const payload = {
+        note,
+        source: 'screen-capture',
+        url: '',
+        title: 'Screen capture',
+        session_id: (typeof currentSession !== 'undefined' && currentSession && currentSession.id) || '',
+        repo_path: (typeof selectedRepoPath === 'function' && selectedRepoPath()) || '',
+        screenshot_b64: capture.image_b64,
+      };
+      try {
+        const res = await fetch('/api/annotations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+        savedAnnotation = data.annotation;
+        noteEl.disabled = true;
+        if (cancelBtn) cancelBtn.hidden = true;
+        if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Copy';
+        showOpToast('Screen annotation saved', 'success');
+        return savedAnnotation;
+      } catch (err) {
+        errEl.textContent = 'Save failed: ' + ((err && err.message) || 'unknown');
+        errEl.hidden = false;
+        saveBtn.disabled = false;
+        if (openSessionBtn) openSessionBtn.disabled = false;
+        if (uxQueueBtn) uxQueueBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+        return null;
+      }
+    };
+    const save = async () => {
+      if (savedAnnotation) {
+        await copySaved();
+        return;
+      }
+      await persistAnnotation('Saving…');
+    };
+    if (openSessionBtn) {
+      openSessionBtn.addEventListener('click', async () => {
+        const ann = await persistAnnotation('Saving…');
+        if (ann) annOpenNewSessionWithContext(ann, close, errEl);
+      });
+    }
+    if (uxQueueBtn) {
+      uxQueueBtn.addEventListener('click', async () => {
+        const ann = await persistAnnotation('Saving…');
+        if (ann) annOpenUxFixesQueue(ann, close, errEl);
+      });
+    }
+    saveBtn.addEventListener('click', save);
+    noteEl.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save();
+      e.stopPropagation();
+    });
+    setTimeout(() => noteEl.focus(), 0);
+  }
+
+  async function annCaptureScreen() {
+    if (!$annotationScreenBtn) return;
+    const oldText = $annotationScreenBtn.textContent;
+    $annotationScreenBtn.disabled = true;
+    $annotationScreenBtn.textContent = 'Drawing…';
+    try {
+      const res = await fetch('/api/annotations/capture-screen', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minimize: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.cancelled) return;
+      if (!res.ok || !data.ok || !data.image_b64) {
+        throw new Error((data && data.error) || 'screen capture failed');
+      }
+      annOpenScreenNote(data);
+    } catch (err) {
+      showOpToast('Screen capture failed: ' + ((err && err.message) || 'unknown'), 'error');
+    } finally {
+      $annotationScreenBtn.disabled = false;
+      $annotationScreenBtn.textContent = oldText;
+    }
+  }
+
+  function annClipText(value, maxLen) {
+    const s = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    if (!s || !maxLen || s.length <= maxLen) return s;
+    return s.slice(0, maxLen).trim() + '…';
+  }
+
+  function annContextForClipboard(ann) {
+    const element = ann.element || {};
+    const lines = ['Annotation: ' + annClipText(ann.note || '', 500)];
+    const anchors = [];
+    if (ann.url) anchors.push('URL: ' + annClipText(ann.url, 240));
+    if (ann.session_id) anchors.push('Session ID: ' + ann.session_id);
+    if (element.selector) anchors.push('Selector: ' + annClipText(element.selector, 200));
+    if (element.text) anchors.push('Element: ' + annClipText(element.text, 160));
+    if (ann.screenshot_path) anchors.push('Screenshot: ' + ann.screenshot_path);
+    if (anchors.length) {
+      lines.push('', 'Anchors:', anchors.map(v => '- ' + v).join('\n'));
+    }
+    return lines.join('\n');
+  }
+
+  async function annOpenNotes() {
+    let modal = document.getElementById('annotationNotesModal');
+    if (modal) modal.remove();
+    modal = document.createElement('div');
+    modal.id = 'annotationNotesModal';
+    modal.className = 'upd-overlay ann-notes-modal open';
+    modal.innerHTML =
+      '<div class="upd-backdrop" data-ann-close></div>' +
+      '<div class="upd-dialog ann-notes-dialog">' +
+        '<div class="ann-notes-header">' +
+          '<div class="upd-title">Annotation Notes</div>' +
+          '<button type="button" class="ann-icon-btn" data-ann-close aria-label="Close annotation notes">&times;</button>' +
+        '</div>' +
+        '<div class="ann-notes-list"><div class="ann-notes-empty">Loading…</div></div>' +
+      '</div>';
+    document.body.appendChild(modal);
+    const list = modal.querySelector('.ann-notes-list');
+    const close = () => modal.remove();
+    modal.querySelectorAll('[data-ann-close]').forEach(btn => btn.addEventListener('click', close));
+    try {
+      const res = await fetch('/api/annotations?limit=100', { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+      const notes = Array.isArray(data.annotations) ? data.annotations : [];
+      if (!notes.length) {
+        list.innerHTML = '<div class="ann-notes-empty">No annotations yet.</div>';
+        return;
+      }
+      list.innerHTML = notes.map((ann) => {
+        const when = ann.created_at ? new Date(ann.created_at).toLocaleString() : '';
+        const selector = ann.element && ann.element.selector ? ann.element.selector : 'selected area';
+        const urlHtml = ann.url ? '<div class="ann-note-url">' + escapeHtml(ann.url || '') + '</div>' : '';
+        const shotUrl = ann.screenshot_path
+          ? '/api/local-image?path=' + encodeURIComponent(ann.screenshot_path)
+          : '';
+        const shot = ann.screenshot_path
+          ? '<div class="ann-note-shot">'
+            + '<img src="' + escapeAttr(shotUrl) + '" alt="Annotation screenshot" loading="lazy">'
+            + '<div class="ann-note-path">' + escapeHtml(ann.screenshot_path) + '</div>'
+            + '</div>'
+          : '';
+        return '<div class="ann-note-row" data-ann-id="' + escapeAttr(ann.id || '') + '">' +
+          '<div class="ann-note-main">' +
+            '<div class="ann-note-text">' + escapeHtml(ann.note || '') + '</div>' +
+            '<div class="ann-note-meta">' + escapeHtml(when) + ' · ' + escapeHtml(selector) + '</div>' +
+            urlHtml +
+            shot +
+          '</div>' +
+          '<div class="ann-note-actions">' +
+            '<button type="button" class="ann-btn" data-ann-copy="' + escapeAttr(ann.id || '') + '">Copy context</button>' +
+            '<button type="button" class="ann-btn" data-ann-ux-queue="' + escapeAttr(ann.id || '') + '">Add to UX fixes queue</button>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+      const byId = new Map(notes.map(ann => [ann.id, ann]));
+      list.querySelectorAll('[data-ann-copy]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const ann = byId.get(btn.getAttribute('data-ann-copy'));
+          if (!ann) return;
+          try {
+            await navigator.clipboard.writeText(annContextForClipboard(ann));
+            btn.textContent = 'Copied';
+            setTimeout(() => { btn.textContent = 'Copy context'; }, 1200);
+          } catch (_) {
+            showOpToast('Copy failed', 'error');
+          }
+        });
+      });
+      list.querySelectorAll('[data-ann-ux-queue]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const ann = byId.get(btn.getAttribute('data-ann-ux-queue'));
+          if (!ann) return;
+          annOpenUxFixesQueue(ann, close);
+        });
+      });
+    } catch (err) {
+      list.innerHTML = '<div class="ann-notes-empty error">Failed to load annotations: ' + escapeHtml((err && err.message) || 'unknown') + '</div>';
+    }
+  }
+
+  if ($annotationStartBtn) $annotationStartBtn.addEventListener('click', annStart);
+  if ($annotationScreenBtn) $annotationScreenBtn.addEventListener('click', annCaptureScreen);
+  if ($annotationNotesBtn) $annotationNotesBtn.addEventListener('click', annOpenNotes);
+
   // ── In-app bug reporting ────────────────────────────────────────
   // Topbar link → modal → POST /api/bug-report → server shells out
   // to `gh issue create`. On gh failure the handler returns the
@@ -16926,7 +22218,6 @@
   const $bugLink = document.getElementById('bugReportLink');
   const $bugModal = document.getElementById('bugReportModal');
   const $bugBackdrop = document.getElementById('bugReportBackdrop');
-  const $bugTitleInput = document.getElementById('bugReportTitleInput');
   const $bugDescInput = document.getElementById('bugReportDescInput');
   const $bugMeta = document.getElementById('bugReportMeta');
   const $bugError = document.getElementById('bugReportError');
@@ -16982,18 +22273,31 @@
     if ($bugShotBtn) $bugShotBtn.disabled = false;
   }
 
-  function bugResetState() {
+  // Reset only the transient UI chrome (error banner, success banner,
+  // fallback markdown, button labels). Leaves user input (the Details
+  // textarea and any attached screenshot) intact — used on each submit
+  // click to wipe stale messages before the new attempt. The previous
+  // version also called bugClearShot() here, which silently dropped
+  // attached screenshots from every submission.
+  function bugResetMessages() {
     if ($bugError) { $bugError.textContent = ''; $bugError.classList.remove('visible'); }
     if ($bugSuccess) { $bugSuccess.innerHTML = ''; $bugSuccess.classList.remove('visible'); }
     if ($bugFallback) { $bugFallback.textContent = ''; $bugFallback.classList.remove('visible'); }
     if ($bugCopyBtn) $bugCopyBtn.style.display = 'none';
     bugFallbackMarkdown = '';
-    bugClearShot();
     if ($bugSubmitBtn) {
       $bugSubmitBtn.disabled = false;
       $bugSubmitBtn.textContent = 'Send report';
     }
     if ($bugCancelBtn) { $bugCancelBtn.disabled = false; $bugCancelBtn.textContent = 'Cancel'; }
+  }
+
+  // Full reset for modal open: messages + any attached screenshot.
+  // The description textarea is cleared separately in bugOpenModal so
+  // bugResetState stays focused on derived UI state.
+  function bugResetState() {
+    bugResetMessages();
+    bugClearShot();
   }
 
   async function bugCaptureScreenshot() {
@@ -17044,11 +22348,10 @@
   function bugOpenModal() {
     if (!$bugModal) return;
     bugResetState();
-    if ($bugTitleInput) $bugTitleInput.value = '';
     if ($bugDescInput) $bugDescInput.value = '';
     bugRenderMeta();
     $bugModal.classList.add('open');
-    setTimeout(() => { if ($bugTitleInput) $bugTitleInput.focus(); }, 0);
+    setTimeout(() => { if ($bugDescInput) $bugDescInput.focus(); }, 0);
   }
   function bugCloseModal() {
     if ($bugModal) $bugModal.classList.remove('open');
@@ -17064,15 +22367,11 @@
   });
 
   async function bugSubmit() {
-    if (!$bugTitleInput || !$bugDescInput) return;
-    const title = $bugTitleInput.value.trim();
+    if (!$bugDescInput) return;
     const desc = $bugDescInput.value.trim();
-    bugResetState();
-    if (!title) {
-      if ($bugError) { $bugError.textContent = 'Please add a title.'; $bugError.classList.add('visible'); }
-      $bugTitleInput.focus();
-      return;
-    }
+    // Wipe stale UI chrome but keep the attached screenshot — the user
+    // explicitly added it and expects it to ride along with this submit.
+    bugResetMessages();
     if (!desc) {
       if ($bugError) { $bugError.textContent = 'Please describe the bug.'; $bugError.classList.add('visible'); }
       $bugDescInput.focus();
@@ -17088,8 +22387,9 @@
     if ($bugCancelBtn) $bugCancelBtn.disabled = true;
     const version = await bugFetchVersion();
     const sid = (typeof currentSession !== 'undefined' && currentSession && currentSession.id) || '';
+    // Server derives the GitHub issue title from the first non-empty line
+    // of `description`, so we only send the unified Details field now.
     const payload = {
-      title,
       description: desc,
       ccc_version: version || '',
       user_agent: (navigator && navigator.userAgent) || '',
@@ -17144,6 +22444,7 @@
       if ($bugSubmitBtn) { $bugSubmitBtn.disabled = true; $bugSubmitBtn.textContent = 'Sent'; }
       if ($bugCancelBtn) { $bugCancelBtn.disabled = false; $bugCancelBtn.textContent = 'Close'; }
       try { showOpToast('Bug report filed', 'success'); } catch (_) {}
+      setTimeout(() => { bugCloseModal(); }, 2000);
       return;
     }
     // Failure path. If the server returned `markdown` we offer a copy-
@@ -17357,7 +22658,24 @@
   // ready to receive a prompt — pressing Enter spawns a fresh agent.
   const $sidebarNewBtn = document.getElementById('sidebarNewBtn');
   if ($sidebarNewBtn) {
-    $sidebarNewBtn.addEventListener('click', () => enterNewSessionMode());
+    $sidebarNewBtn.addEventListener('click', () => {
+      if (isFlowView()) createFlowDraftSession();
+      else enterNewSessionMode();
+    });
+  }
+
+  // ── Sidebar "+ New Group chat" button ──────────────────────────
+  // Creates an empty group chat (the user renames it via ✏️ on the
+  // row and drags sessions in to add participants). Same affordance
+  // as the inline "+" inside the In Progress section's group-chat
+  // header — duplicated up here so it's always visible without
+  // scrolling, mirroring the "+ New session" button.
+  const $sidebarNewGroupChatBtn = document.getElementById('sidebarNewGroupChatBtn');
+  if ($sidebarNewGroupChatBtn) {
+    $sidebarNewGroupChatBtn.addEventListener('click', () => {
+      try { createEmptyGroupChat(); }
+      catch (_) { /* function defined later in same scope; ignore early-click race */ }
+    });
   }
 
   // ── Spawn cwd picker (new-session mode) ──────────────────────────────
@@ -17696,11 +23014,16 @@
   }
 
   function enterNewSessionMode() {
+    const initialPrompt = typeof arguments[0] === 'string' ? arguments[0] : null;
     const paneId = activePaneId();
     rememberComposerDraftForPane(paneId);
+    if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
+      try { stopGroupChatReader({ rerenderSidebar: true }); } catch (_) {}
+    }
     if (typeof stopConvStream === 'function') stopConvStream();
     if (typeof stopSpawnStream === 'function') stopSpawnStream();
     if (typeof stopPkoodTailPoller === 'function') stopPkoodTailPoller();
+    if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
     currentConversation = '__new__';
     refreshConversationBackgroundForPane(paneId);
     syncActivePaneChrome('__new__');
@@ -17713,6 +23036,7 @@
     if ($convList) $convList.querySelectorAll('.conv-item.active').forEach(el => el.classList.remove('active'));
     if ($kanbanBoard) $kanbanBoard.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
     if ($kanbanBoardSplit) $kanbanBoardSplit.querySelectorAll('.kanban-card.active').forEach(el => el.classList.remove('active'));
+    if ($flowBoard) $flowBoard.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
     populateSpawnCwdPicker();
     ensureSpawnCwdOptionsLoaded(paneId);
     const spawnCwd = getSpawnCwd();
@@ -17724,14 +23048,18 @@
     const $view = getConvView();
     if ($view) {
       const spawnEngine = getSpawnEngine();
-      const engineLabel = spawnEngine === 'codex' ? 'Codex' : (spawnEngine === 'gemini' ? 'Gemini' : 'Claude');
+      const engineLabel = spawnEngineLabel(spawnEngine);
       const repoLabel = spawnCwdLabel(spawnCwd) || 'pick a folder below';
+      const newSessionHelp = spawnEngine === 'antigravity'
+        ? 'Type a prompt below and press Enter to spawn a headless Antigravity run with AGY print mode.'
+        : 'Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.';
       $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
         + '<div style="font-size:12px;color:var(--text-muted);">CWD: <span id="newSessionCwdNotice" style="color:var(--text);" title="' + escapeAttr(spawnCwd) + '">' + escapeHtml(repoLabel) + '</span></div>'
-        + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.</div>'
+        + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">' + escapeHtml(newSessionHelp) + '</div>'
         + '</div>';
     }
+    if (typeof syncSpawnEngineDependentUi === 'function') syncSpawnEngineDependentUi();
     updateInputBar();
     // Toggle the context strip into new-session mode so the picker is
     // visible and the workspace pill is hidden (the workspace pill
@@ -17745,9 +23073,15 @@
     setTimeout(() => {
       const input = composerInputForPane(paneId) || $convInput;
       if (input) {
-        restoreInputDraft(input, '__new__');
+        if (initialPrompt !== null) {
+          input.value = initialPrompt;
+          setInputDraftForKey(inputDraftKeyForConversation('__new__'), initialPrompt);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          moveInputCaretToEnd(input);
+        } else {
+          restoreInputDraft(input, '__new__');
+        }
         input.focus();
-        moveInputCaretToEnd(input);
       }
     }, 30);
   }
@@ -17915,9 +23249,7 @@
       $convInput.style.borderColor = 'var(--red)';
       setTimeout(() => { $convInput.style.borderColor = ''; }, 1500);
     };
-    const cardSource = engine === 'codex' ? 'codex'
-      : engine === 'gemini' ? 'gemini'
-      : 'interactive';
+    const cardSource = spawnSourceForEngine(engine);
     const tempPid = 'tmp-' + Date.now();
     insertPendingSpawnCard(tempPid, subject, cardSource, null, {
       first_message: body,
@@ -17941,14 +23273,15 @@
       }, 60);
     };
     try {
-      const endpoint = engine === 'codex' ? '/api/sessions/spawn-codex'
-                     : engine === 'gemini' ? '/api/sessions/spawn-gemini'
-                     : '/api/sessions/spawn';
+      const endpoint = spawnEndpointForEngine(engine);
       const $inlineWorktree = document.getElementById('inlineWorktreeToggle');
       const useWorktree = !!($inlineWorktree && $inlineWorktree.checked);
       const spawnBody = { prompt, name: subject, cwd: launchCwd };
       if (repoPath) spawnBody.repo_path = repoPath;
-      if (engine !== 'codex') spawnBody.worktree = useWorktree;
+      if (typeof $convInputModelSelect !== 'undefined' && $convInputModelSelect && $convInputModelSelect.style.display !== 'none' && $convInputModelSelect.value) {
+        spawnBody.model = $convInputModelSelect.value;
+      }
+      if (spawnSupportsWorktree(engine)) spawnBody.worktree = useWorktree;
       const res = await fetch(endpoint, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(spawnBody),
@@ -17959,9 +23292,10 @@
         // Fire-and-watch engines can stream their spawn log once the real pid
         // is known. Re-select the same placeholder id so fetchConversationEvents
         // starts the log poller without making the user click the sidebar row.
-        if (placeholder && (engine === 'codex' || engine === 'gemini') && typeof selectConversation === 'function') {
+        if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
           selectConversation(placeholder.id);
         }
+        if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
         setTimeout(refreshConversationList, 3000);
@@ -18240,8 +23574,9 @@
     if (ev.key === CONV_BG_STORAGE_KEY) renderAllConversationBackgroundPalettes();
   });
 
-  function getThemePref() { return localStorage.getItem('ccc-theme') || 'system'; }
+  function getThemePref() { return localStorage.getItem('ccc-theme') || 'dark'; }
   function getFontPref() { return localStorage.getItem('ccc-font') || 'system'; }
+  function getViewGhPref() { return localStorage.getItem('ccc-view-gh') || 'show'; }
 
   function applyTheme(pref) {
     let resolved = pref;
@@ -18261,6 +23596,16 @@
       document.documentElement.removeAttribute('data-font');
     }
   }
+  function applyViewGh(pref) {
+    if (pref === 'hide') {
+      document.body.classList.add('hide-gh-issues');
+    } else {
+      document.body.classList.remove('hide-gh-issues');
+    }
+    if (typeof conversationsData !== 'undefined') {
+      if (typeof renderSidebar === 'function') renderSidebar(conversationsData);
+    }
+  }
   function refreshAppearanceChecks() {
     const t = getThemePref();
     const f = getFontPref();
@@ -18270,6 +23615,20 @@
     $appearancePopover.querySelectorAll('[data-check-font]').forEach(el => {
       el.textContent = el.getAttribute('data-check-font') === f ? '✓' : '';
     });
+    const v = getViewGhPref();
+    if ($settingsPopover) {
+      const btnShow = $settingsPopover.querySelector('#btnShowGhIssues');
+      const btnHide = $settingsPopover.querySelector('#btnHideGhIssues');
+      if (btnShow && btnHide) {
+        if (v === 'hide') {
+          btnShow.style.display = '';
+          btnHide.style.display = 'none';
+        } else {
+          btnShow.style.display = 'none';
+          btnHide.style.display = '';
+        }
+      }
+    }
   }
   // Live-update when the user has 'system' selected and OS theme flips.
   _systemThemeMQ.addEventListener && _systemThemeMQ.addEventListener('change', () => {
@@ -18317,6 +23676,17 @@
       }
     });
   }
+  if ($settingsPopover) {
+    $settingsPopover.addEventListener('click', (e) => {
+      const viewGhBtn = e.target.closest('[data-view-gh]');
+      if (viewGhBtn) {
+        const v = viewGhBtn.getAttribute('data-view-gh');
+        localStorage.setItem('ccc-view-gh', v);
+        applyViewGh(v);
+        refreshAppearanceChecks();
+      }
+    });
+  }
   // Click-outside / Esc closes the popovers.
   document.addEventListener('click', (e) => {
     if ($appearancePopover && $appearancePopover.classList.contains('open')
@@ -18336,6 +23706,7 @@
   // and re-apply (no-op) for clarity.
   applyTheme(getThemePref());
   applyFont(getFontPref());
+  applyViewGh(getViewGhPref());
 
   // ── ⌘K / ⌘P session search modal ──────────────────────────────
   const $cmdkModal = document.getElementById('cmdkModal');
@@ -18443,7 +23814,59 @@
       // back to direct setConvPanelOpen for safety.
       if (typeof setConvPanelOpen === 'function') setConvPanelOpen(!convPanelOpen);
     }
+    if (meta && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const modal = document.getElementById('chatFindModal');
+      const input = document.getElementById('chatFindInput');
+      if (modal && input) {
+        modal.style.display = 'flex';
+        input.focus();
+        input.select();
+      }
+      return;
+    }
   });
+
+  const $chatFindInput = document.getElementById('chatFindInput');
+  const $chatFindNext = document.getElementById('chatFindNext');
+  const $chatFindPrev = document.getElementById('chatFindPrev');
+  const $chatFindClose = document.getElementById('chatFindClose');
+  if ($chatFindInput) {
+    function doFind(backward) {
+      const text = $chatFindInput.value;
+      if (!text) return;
+      if (typeof window.find === 'function') {
+        window.find(text, false, backward, true, false, false, false);
+      }
+    }
+    $chatFindInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doFind(e.shiftKey);
+      }
+      if (e.key === 'Escape') {
+        document.getElementById('chatFindModal').style.display = 'none';
+        // Return focus to conversation input if open
+        const cpInput = document.getElementById('cpInput');
+        if (cpInput) cpInput.focus();
+      }
+    });
+    let _lastFind = '';
+    $chatFindInput.addEventListener('input', () => {
+      const text = $chatFindInput.value;
+      if (!text || text === _lastFind) return;
+      if (text.startsWith(_lastFind)) {
+        const sel = window.getSelection();
+        if (sel.rangeCount > 0) sel.collapseToStart();
+      }
+      _lastFind = text;
+      doFind(false);
+    });
+    if ($chatFindNext) $chatFindNext.addEventListener('click', () => doFind(false));
+    if ($chatFindPrev) $chatFindPrev.addEventListener('click', () => doFind(true));
+    if ($chatFindClose) $chatFindClose.addEventListener('click', () => document.getElementById('chatFindModal').style.display = 'none');
+  }
 
   // Settings popover: clicking the ⌘K row also opens the search modal.
   const $settingsCmdkBtn = document.getElementById('settingsCmdkBtn');
@@ -18467,6 +23890,7 @@
       _markFirstSessionsLoaded();
     });
   } else {
+    restoreSplitState();
     loadConversationList();
   }
   attachAllPaneDropZones();

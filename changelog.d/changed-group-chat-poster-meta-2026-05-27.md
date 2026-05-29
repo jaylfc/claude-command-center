@@ -1,0 +1,2 @@
+- Enlarged the font size of the group chat message headers (poster names and timestamps) for improved readability.
+- Added a sticky metadata bar at the top of group chats showing the "Original Poster" and "Last Poster", mirroring the sticky headers of regular agent conversations.

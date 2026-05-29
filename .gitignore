@@ -92,3 +92,4 @@ venv/
 /scripts/ingest_apple_notes.py
 /tests/test_morning.py
 /ingesters/
+.gstack/

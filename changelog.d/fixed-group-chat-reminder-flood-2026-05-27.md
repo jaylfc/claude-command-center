@@ -1,0 +1,1 @@
+- Group chat reminders now send at most one ping for the latest chat turn, so watcher retries do not repeatedly flood the same recipient.

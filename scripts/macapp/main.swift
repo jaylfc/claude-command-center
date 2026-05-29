@@ -71,6 +71,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var loadingLabel: NSTextField!
     var serverProcess: Process?
     var pollTimer: Timer?
+    // Watchdog state — see startWatchdog(). Recovers a dashboard that wedges
+    // with the loading overlay up forever (stalled server thread, or a hung
+    // app.js request so the page's own 30s safety nets never register).
+    var watchdogTimer: Timer?
+    var watchdogStuckSince: Date?
+    var watchdogReloaded = false
+    var watchdogRestarted = false
+    var watchdogRestartCount = 0          // hard cap — never reset, prevents loops
+    let watchdogGrace: TimeInterval = 18  // seconds overlay may stay up before we act
     // Sparkle drives "Check for Updates…" via the appcast at SUFeedURL in
     // Info.plist. Public EdDSA key (SUPublicEDKey) verifies the DMG signature.
     // startingUpdater: true means Sparkle will run its scheduled background
@@ -94,6 +103,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        watchdogTimer?.invalidate()
+        pollTimer?.invalidate()
         // Only kill the server if we started it. If it was already up
         // (launchd service, foreground ./run.sh elsewhere), leave it alone.
         if let proc = serverProcess, proc.isRunning {
@@ -454,6 +465,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func loadDashboard() {
         loadingLabel.isHidden = true
         webView.load(URLRequest(url: CCC_URL))
+        startWatchdog()
+    }
+
+    // MARK: Watchdog — recover a stuck dashboard
+    //
+    // The dashboard can wedge with the loading overlay up forever: a server
+    // handler thread stalls mid-response (we've watched server.py burn CPU and
+    // stop servicing a request), or the app.js request itself hangs so none of
+    // the page's own 30s safety nets ever register. WKWebView's didFinish fires
+    // when the HTML lands, so navigation state alone can't tell us the page is
+    // stuck. Instead we poll the live DOM: if #cccLoadingOverlay is still
+    // visible past watchdogGrace, escalate — reload the webview first (cheap,
+    // clears a client-side wedge and re-fetches app.js), then restart the
+    // server if a reload didn't help (clears a wedged handler thread).
+    func startWatchdog() {
+        watchdogStuckSince = Date()
+        watchdogReloaded = false
+        watchdogRestarted = false
+        watchdogTimer?.invalidate()
+        watchdogTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: true) { [weak self] _ in
+            self?.watchdogTick()
+        }
+    }
+
+    func stopWatchdog() {
+        watchdogTimer?.invalidate()
+        watchdogTimer = nil
+        watchdogStuckSince = nil
+    }
+
+    func watchdogTick() {
+        // 'ready' once the overlay is gone (app.js ran and rendered a response);
+        // 'loading' while it's still up — including when app.js never loaded, in
+        // which case the inline overlay is present and un-'gone'.
+        let js = "(function(){var o=document.getElementById('cccLoadingOverlay');"
+               + "if(!o)return 'ready';"
+               + "if(o.classList.contains('gone'))return 'ready';"
+               + "return 'loading';})()"
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            guard let self = self else { return }
+            let state = (result as? String) ?? "loading"
+            if state == "ready" {
+                self.stopWatchdog()   // dashboard is up; nothing left to guard
+                return
+            }
+            guard let since = self.watchdogStuckSince else { return }
+            let stuck = Date().timeIntervalSince(since)
+            guard stuck >= self.watchdogGrace else { return }
+
+            // Stage 2: reload didn't clear it → the server is wedged. Restart it.
+            if self.watchdogReloaded && !self.watchdogRestarted {
+                guard self.watchdogRestartCount < 2 else {
+                    self.stopWatchdog()
+                    self.loadingLabel.isHidden = false
+                    self.loadingLabel.stringValue =
+                        "Server keeps stalling — check ~/.claude/command-center/logs/app-server.log"
+                    return
+                }
+                self.watchdogRestarted = true
+                self.watchdogRestartCount += 1
+                self.restartServerThenReload()
+                return
+            }
+
+            // Stage 1: stuck past the grace window → reload the webview once.
+            if !self.watchdogReloaded {
+                self.watchdogReloaded = true
+                self.watchdogStuckSince = Date()   // give the reload its own window
+                self.webView.reload()
+            }
+        }
+    }
+
+    // POST /api/restart (server replaces itself via execvp — works regardless of
+    // who launched it), wait for the new process to bind, then reload + re-arm
+    // the watchdog so a still-broken server escalates again up to the cap.
+    func restartServerThenReload() {
+        loadingLabel.isHidden = false
+        loadingLabel.stringValue = "Server stuck — restarting…"
+        guard let url = URL(string: "http://127.0.0.1:\(CCC_PORT)/api/restart") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 10
+        URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
+            // The socket can drop mid-execvp — that's expected, not an error.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                guard let self = self else { return }
+                self.loadingLabel.isHidden = true
+                self.webView.reload()
+                self.startWatchdog()
+            }
+        }.resume()
     }
 
     func showFatal(_ title: String, _ message: String) {
@@ -509,6 +613,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             NSWorkspace.shared.open(url)
         }
         return nil
+    }
+
+    // WKWebView returns null from JS `alert`/`confirm`/`prompt` unless the UI
+    // delegate implements these. Without them, dashboard buttons that go
+    // through window.prompt (e.g. "+ Object" on the flow board) silently
+    // no-op in the native app while still working in a normal browser.
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = prompt
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        input.stringValue = defaultText ?? ""
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        let response = alert.runModal()
+        completionHandler(response == .alertFirstButtonReturn ? input.stringValue : nil)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

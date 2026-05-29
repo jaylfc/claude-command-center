@@ -1,0 +1,1 @@
+- Fixed the merge button (and other row action buttons) being unclickable when overlapping with status or branch badges by adding z-index stacking and background inheritance to the action buttons container.

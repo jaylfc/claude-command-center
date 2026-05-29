@@ -1,0 +1,2 @@
+- Fixed duplicate session rows appearing in the conversation list when spawning new alternative engine runs (Codex, Gemini, Antigravity) by dynamically backfilling their session IDs in the spawn registry.
+- Restructured the input bar layout in the new session screen to place the text input area above the engine and model selections.
