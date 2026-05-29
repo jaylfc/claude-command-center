@@ -55,6 +55,30 @@
     }
   });
 
+  // Reshuffle logger — called from the conv-list FLIP block whenever rows
+  // actually change position. Prints how many moved, the biggest movers, and
+  // (from the call stack) which timer/handler triggered the re-render. Silence
+  // with window.__logReshuffle = false.
+  window.__reshuffleCount = 0;
+  function _logReshuffle(moves) {
+    if (window.__logReshuffle === false) return;
+    try {
+      window.__reshuffleCount++;
+      const top = moves.slice().sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 6).map(m => {
+        const title = (m.row.querySelector('.conv-title, [data-role="title"]')?.textContent || m.row.getAttribute('data-id') || '?').trim().slice(0, 36);
+        const d = Math.round(m.delta);
+        return (d > 0 ? '↓' : '↑') + Math.abs(d) + 'px  ' + title;
+      });
+      const frames = (new Error().stack || '').split('\n').map(s => s.trim()).filter(Boolean);
+      const trigger = (frames.find(s => /refreshLiveStatus|pollGcActive|loadConversationList|issuesPoll|_hiRefresh|loadArchive|refreshArchive|renderSidebar|pollGroupChatReader|\btick\b/.test(s)) || frames[3] || frames[2] || '?').replace(/^at\s+/, '').slice(0, 80);
+      console.groupCollapsed('%c[RESHUFFLE #' + window.__reshuffleCount + ']%c ' + moves.length + ' rows moved — trigger: ' + trigger,
+        'color:#fff;background:#c0392b;padding:1px 5px;border-radius:3px;font-weight:700', 'color:#999');
+      top.forEach(t => console.log('  ' + t));
+      console.log('  stack:\n' + frames.slice(2, 11).join('\n'));
+      console.groupEnd();
+    } catch (_) {}
+  }
+
   // ── Demo mode (GH Pages, issue #49) ─────────────────────────────────────
   // When the demo flag is set, every `fetch('/api/...')` and `new EventSource(
   // '/api/...')` is routed to a static JSON fixture under ./api/<path>.json
@@ -10904,6 +10928,7 @@
         _flipMoves.push({ row, delta });
       }
       if (_flipMoves.length > 0) {
+        _logReshuffle(_flipMoves);
         for (const m of _flipMoves) {
           m.row.style.transition = 'none';
           m.row.style.transform = `translateY(${m.delta}px)`;
