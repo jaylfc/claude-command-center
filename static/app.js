@@ -24298,6 +24298,27 @@
       if (e.key === 'Enter') {
         e.preventDefault();
         doFind(e.shiftKey);
+        // window.find() moves focus to the match, so any subsequent
+        // keystrokes would land outside the input. Snap focus back so
+        // the user can keep typing/cycling without re-clicking the
+        // find bar — this was the "input loses focus after one char"
+        // bug. Same restore on the live-find input handler below.
+        $chatFindInput.focus();
+      }
+      if (e.key === 'ArrowDown') {
+        // Down arrow cycles forward through matches. The browser's
+        // window.find wrapAround flag (4th arg in doFind) already
+        // wraps; explicitly bind ArrowUp to backward so the up arrow
+        // is symmetrical — previously only forward had a key binding,
+        // which is why up "wasn't cyclical".
+        e.preventDefault();
+        doFind(false);
+        $chatFindInput.focus();
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        doFind(true);
+        $chatFindInput.focus();
       }
       if (e.key === 'Escape') {
         document.getElementById('chatFindModal').style.display = 'none';
@@ -24316,6 +24337,10 @@
       }
       _lastFind = text;
       doFind(false);
+      // window.find moves browser focus to the matched element, which
+      // is the root cause of the "type one char and the input loses
+      // focus" bug. Restore focus so live-find feels live.
+      $chatFindInput.focus();
     });
     if ($chatFindNext) $chatFindNext.addEventListener('click', () => doFind(false));
     if ($chatFindPrev) $chatFindPrev.addEventListener('click', () => doFind(true));
