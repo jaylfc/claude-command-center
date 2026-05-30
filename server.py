@@ -2384,9 +2384,17 @@ def find_all_conversations(
                     pass
 
             spawn_named = _tail_meta_spawn_named(tail_meta)
+            # Pick up any /rename done in the terminal — Claude Code writes
+            # those as `custom-title` events with the new name, same shape
+            # as our spawn-time titles. Old logic only honored custom_title
+            # when it equaled agent_name (spawn_named), so a user /rename
+            # diverged from agent_name and got dropped — matches Claude
+            # Desktop behavior to take any custom_title verbatim.
             display_name = (
                 name_overrides.get(session_id)
-                or (tail_meta.get("custom_title") if spawn_named else None)
+                or tail_meta.get("custom_title")
+                or tail_meta.get("agent_name")
+                or tail_meta.get("ai_title")
                 or None
             )
             has_edit = bool(tail_meta.get("has_edit"))
