@@ -3135,11 +3135,23 @@
   // Textarea autosize: grow up to ~10 rows then scroll. Reset to one row
   // on every input so deletions shrink the box too. Mirrors Omnara's
   // behavior — typing more than one line expands the composer in place.
+  let _autosizeRaf = 0;
   function _autosizeConvInput() {
     if (!$convInput || $convInput.tagName !== 'TEXTAREA') return;
-    $convInput.style.height = 'auto';
-    const max = 240;  // ~10 rows at our current font/line-height
-    $convInput.style.height = Math.min($convInput.scrollHeight, max) + 'px';
+    // Deferred to the next animation frame. The 'auto' write + scrollHeight
+    // read is a forced synchronous reflow; doing it inline on every keystroke
+    // re-lays-out the whole (large) page mid-keystroke — cheap in Blink, but
+    // costly in WebKit (the Mac app), so typed characters paint late. Running
+    // it in rAF takes it off the keystroke's critical path (char paints first,
+    // textarea resizes a frame later — imperceptible) and coalesces bursts to
+    // one reflow per frame.
+    if (_autosizeRaf) return;
+    _autosizeRaf = requestAnimationFrame(() => {
+      _autosizeRaf = 0;
+      $convInput.style.height = 'auto';
+      const max = 240;  // ~10 rows at our current font/line-height
+      $convInput.style.height = Math.min($convInput.scrollHeight, max) + 'px';
+    });
   }
   if ($convInput) {
     $convInput.addEventListener('input', () => {
