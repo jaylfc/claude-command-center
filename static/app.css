@@ -1521,6 +1521,11 @@
     font-size: 12px; color: var(--text-muted);
     background: transparent;
     border-top: 1px solid var(--border);
+    /* Container query host — children query against the strip's own
+       inline-size so the progressive-drop rules below fire based on
+       actual rendered width (split panes, narrow windows). */
+    container-type: inline-size;
+    container-name: conv-ctx;
   }
   .conv-input-context > * {
     flex-shrink: 0;
@@ -1528,10 +1533,30 @@
     text-overflow: ellipsis;
     max-width: 100%;
   }
-  /* The path is the longest item — let it shrink and ellipsis. */
+  /* The path is the longest item — let it shrink and ellipsis.
+     inline-block is required for text-overflow:ellipsis to apply; the
+     parent's white-space:nowrap and overflow:hidden are inherited. */
   .conv-input-context .wp-path {
     flex: 0 1 auto;
     min-width: 0;
+    display: inline-block;
+    vertical-align: middle;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Progressive drop-out as the strip narrows so the model pill
+     (rightmost, most-valued slot) stops getting clipped:
+       <= 700px: hide the "⚠ N other sessions here" warning (low-
+                 priority; still visible on the sidebar row + tooltip
+                 on the kind pill).
+       <= 580px: hide the SHARED CLONE / WORKTREE kind chip (always
+                 nice-to-have, not load-bearing).
+       Below that: path keeps ellipsifying via the wp-path rule above. */
+  @container conv-ctx (max-width: 700px) {
+    .conv-input-context .wp-cotenants { display: none; }
+  }
+  @container conv-ctx (max-width: 580px) {
+    .conv-input-context .wp-kind { display: none; }
   }
   .conv-input-context.visible { display: flex; }
   .conv-input-context .wp-icon { opacity: 0.7; font-size: 11px; }
