@@ -7440,6 +7440,15 @@ body.status-pos-right.status-rail-collapsed .conv-pane > .status-rail {
 body.status-pos-right.status-rail-collapsed .conv-pane > .status-rail-restore {
   display: inline-flex;
 }
+/* When the rail-restore chevron is visible it sits absolutely positioned
+   over the right edge of the pane (26px wide). Without this padding it
+   covers the rightmost item of the input-context strip — usually the
+   model pill — which made the model name "superseded by other stuff"
+   per a user annotation. Reserve enough room (chevron width + breathing
+   room) so the model pill stays clickable. */
+body.status-pos-right.status-rail-collapsed .conv-pane > .conv-input-context {
+  padding-right: 40px;
+}
 
 /* Rail-actions row at the top of the rail — vertical stack of session-
    level buttons. Buttons are re-parented here at boot from `.ccc-topbar`

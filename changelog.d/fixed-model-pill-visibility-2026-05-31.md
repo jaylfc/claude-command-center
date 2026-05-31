@@ -1,0 +1,1 @@
+Model pill in the conv input-context strip no longer gets hidden by the absolute-positioned status-rail restore chevron when the rail is collapsed (added 40px right-padding to reserve the chevron's footprint) and is now rendered first in the right-side cluster so it survives right-edge clipping when the strip overflows in narrow panes.
