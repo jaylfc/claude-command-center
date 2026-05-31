@@ -241,8 +241,21 @@
     const el = document.createElement('div');
     el.id = 'frameHealth';
     el.style.cssText = 'flex:0 0 auto;font:600 10px/1 ui-monospace,Menlo,monospace;' +
-      'color:var(--text-secondary,#9aa);padding:2px 6px;border-radius:5px;white-space:nowrap;cursor:default;';
+      'color:var(--text-secondary,#9aa);padding:2px 6px;border-radius:5px;white-space:nowrap;cursor:pointer;';
     footer.insertBefore(el, footer.lastElementChild);
+    // Click to pause ALL CSS animations — a one-click A/B test for whether the
+    // infinite box-shadow pulses (which WebKit can't GPU-composite) are the
+    // jank source. If the ms drops with animations paused, they're the cause.
+    if (!document.getElementById('__animPauseStyle')) {
+      const st = document.createElement('style');
+      st.id = '__animPauseStyle';
+      st.textContent = 'html.ccc-anim-off *, html.ccc-anim-off *::before, html.ccc-anim-off *::after' +
+        '{ animation-play-state: paused !important; }';
+      document.head.appendChild(st);
+    }
+    el.addEventListener('click', () => {
+      document.documentElement.classList.toggle('ccc-anim-off');
+    });
     const _isTyping = () => {
       const ae = document.activeElement;
       return !!ae && (ae.tagName === 'TEXTAREA' || (ae.tagName === 'INPUT' &&
@@ -264,10 +277,14 @@
     requestAnimationFrame(_frame);
     (function _report() {
       const w = Math.round(worst);
-      el.textContent = '▢ ' + w + 'ms';
+      const paused = document.documentElement.classList.contains('ccc-anim-off');
+      el.textContent = '▢ ' + w + 'ms' + (paused ? ' ⏸' : '');
       el.style.color = w >= 100 ? '#f85149' : (w >= 50 ? '#d29922' : '#3fb950');
       el.title = 'Worst frame over last ~1.5s: ' + w + 'ms' + (worstTyping ? ' (while typing)' : '') +
-        ' · long frames(>50ms): ' + longFrames + '\n~16ms = 60fps. Amber = sluggish, red = jank.';
+        ' · long frames(>50ms): ' + longFrames +
+        '\n~16ms = 60fps. Amber = sluggish, red = jank.' +
+        '\nClick to ' + (paused ? 'resume' : 'PAUSE') + ' all animations (A/B test the jank source).' +
+        (paused ? ' [animations PAUSED]' : '');
       worst = 0; longFrames = 0; worstTyping = false;
       setTimeout(_report, 1500);
     })();
