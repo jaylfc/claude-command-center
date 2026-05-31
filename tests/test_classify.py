@@ -856,6 +856,18 @@ class TestCodexConversationAdapter(unittest.TestCase):
         finally:
             con.close()
 
+    def _set_codex_updated_at(self, session_id, updated_at):
+        db_path = Path(self.tmp_home) / ".codex" / "state_5.sqlite"
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute(
+                "UPDATE threads SET updated_at = ? WHERE id = ?",
+                (updated_at, session_id),
+            )
+            con.commit()
+        finally:
+            con.close()
+
     def _codex_rollout_meta(self):
         with self.rollout.open(encoding="utf-8") as fh:
             for line in fh:
@@ -887,6 +899,8 @@ class TestCodexConversationAdapter(unittest.TestCase):
     def test_codex_visibility_stamp_marks_exec_thread_as_user(self):
         self._set_codex_thread_source(CODEX_SESSION_ID, None)
         self._set_codex_source(CODEX_SESSION_ID, "exec")
+        old_mtime = 1777680005.0
+        os.utime(self.rollout, (old_mtime, old_mtime))
 
         result = self.server._mark_codex_thread_user_visible(CODEX_SESSION_ID)
 
@@ -896,6 +910,7 @@ class TestCodexConversationAdapter(unittest.TestCase):
         meta = self._codex_rollout_meta()
         self.assertEqual(meta.get("thread_source"), "user")
         self.assertEqual(meta.get("source"), "vscode")
+        self.assertEqual(self.rollout.stat().st_mtime, old_mtime)
 
     def test_codex_visibility_stamp_repairs_user_exec_thread(self):
         self._set_codex_thread_source(CODEX_SESSION_ID, "user")
@@ -938,6 +953,7 @@ class TestCodexConversationAdapter(unittest.TestCase):
         self._set_codex_thread_source(CODEX_TRAILER_SESSION_ID, None)
         self._set_codex_source(CODEX_SESSION_ID, "exec")
         self._set_codex_source(CODEX_TRAILER_SESSION_ID, "exec")
+        self._set_codex_updated_at(CODEX_SESSION_ID, 1777680005)
         log_dir = self.fake_repo / ".claude" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "spawn-codex-readme-20260502T000000.log"
@@ -968,6 +984,7 @@ class TestCodexConversationAdapter(unittest.TestCase):
         self.assertEqual(self._codex_source(CODEX_SESSION_ID), "vscode")
         self.assertIsNone(self._codex_thread_source(CODEX_TRAILER_SESSION_ID))
         self.assertEqual(self._codex_source(CODEX_TRAILER_SESSION_ID), "exec")
+        self.assertEqual(self.rollout.stat().st_mtime, 1777680005)
 
     def test_codex_sidebar_backfill_scans_recent_codex_cwds(self):
         self._set_codex_thread_source(CODEX_SESSION_ID, None)

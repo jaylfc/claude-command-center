@@ -11503,6 +11503,10 @@ def _mark_codex_rollout_user_visible(thread_id, rollout_path):
     if not path.is_file():
         return False
     try:
+        original_stat = path.stat()
+    except OSError:
+        return False
+    try:
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     except OSError:
         return False
@@ -11548,9 +11552,41 @@ def _mark_codex_rollout_user_visible(thread_id, rollout_path):
         tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
         tmp.write_text("".join(lines), encoding="utf-8")
         os.replace(tmp, path)
+        os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
     except OSError:
         return False
     return True
+
+
+def _codex_row_updated_epoch(row):
+    if not isinstance(row, dict):
+        return None
+    for key, scale in (("updated_at_ms", 1000.0), ("updated_at", 1.0)):
+        try:
+            raw = row.get(key)
+            if raw is None:
+                continue
+            value = float(raw) / scale
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _restore_codex_rollout_mtime_from_row(row):
+    path = _codex_rollout_path_from_row(row)
+    ts = _codex_row_updated_epoch(row)
+    if not path or ts is None:
+        return False
+    try:
+        p = Path(path).expanduser().resolve()
+        if not p.is_file():
+            return False
+        os.utime(p, (ts, ts))
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _mark_codex_thread_user_visible(thread_id, update_rollout=True):
@@ -12461,6 +12497,7 @@ def backfill_codex_sidebar_visibility(days=None, repo_paths=None, now=None, max_
         before_row = _codex_thread_row(sid) or {}
         ok = _mark_codex_thread_user_visible(sid)
         after_row = _codex_thread_row(sid) or {}
+        _restore_codex_rollout_mtime_from_row(after_row)
         root = _codex_sidebar_project_root_for_thread(after_row)
         if root:
             project_roots.append(root)
