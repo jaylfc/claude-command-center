@@ -7827,6 +7827,64 @@ _desktop_meta_cache = {}
 _desktop_meta_cache_mtime = 0
 
 
+def _claude_desktop_sessions_root():
+    return (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "Claude"
+        / "claude-code-sessions"
+    )
+
+
+def _claude_desktop_metadata_files(root=None):
+    root = root or _claude_desktop_sessions_root()
+    if not root.is_dir():
+        return []
+    try:
+        return [p for p in root.glob("*/*/local_*.json") if p.is_file()]
+    except OSError:
+        return []
+
+
+def _claude_desktop_metadata_cache_key(root=None):
+    root = root or _claude_desktop_sessions_root()
+    if not root.is_dir():
+        return None
+    try:
+        root_mtime = root.stat().st_mtime_ns
+    except OSError:
+        return None
+    count = 0
+    newest = 0
+    total_mtime = 0
+    total_size = 0
+    for path in _claude_desktop_metadata_files(root):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        count += 1
+        newest = max(newest, st.st_mtime_ns)
+        total_mtime += st.st_mtime_ns
+        total_size += st.st_size
+    return (root_mtime, count, newest, total_mtime, total_size)
+
+
+def _bust_claude_desktop_metadata_cache():
+    global _desktop_meta_cache, _desktop_meta_cache_mtime
+    _desktop_meta_cache = {}
+    _desktop_meta_cache_mtime = 0
+
+
+def _read_json_object(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _load_desktop_app_metadata():
     """Read the Claude desktop app's per-session metadata overlay.
 
@@ -7836,41 +7894,471 @@ def _load_desktop_app_metadata():
     human-friendly fields (title, model, cwd) the desktop UI surfaces.
 
     Returns {cliSessionId: {title, model, cwd, is_archived}}.
-    Re-scans only when the root directory mtime changes; cheap enough
-    to call on every request.
+    Re-scans when the metadata file count, mtimes, or sizes change; cheap
+    enough to call on every request.
     """
     global _desktop_meta_cache, _desktop_meta_cache_mtime
-    root = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
-    if not root.is_dir():
+    root = _claude_desktop_sessions_root()
+    cache_key = _claude_desktop_metadata_cache_key(root)
+    if cache_key is None:
+        _desktop_meta_cache = {}
+        _desktop_meta_cache_mtime = 0
         return {}
-    try:
-        mtime = root.stat().st_mtime
-    except OSError:
-        return _desktop_meta_cache
-    if mtime == _desktop_meta_cache_mtime and _desktop_meta_cache:
+    if cache_key == _desktop_meta_cache_mtime and _desktop_meta_cache:
         return _desktop_meta_cache
     out = {}
-    try:
-        for path in root.glob("*/*/local_*.json"):
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            cli_sid = data.get("cliSessionId")
-            if not cli_sid:
-                continue
-            out[cli_sid] = {
-                "title": data.get("title") or None,
-                "model": data.get("model") or None,
-                "cwd": data.get("cwd") or None,
-                "is_archived": bool(data.get("isArchived")),
-                "last_activity_at": data.get("lastActivityAt") or None,
-            }
-    except OSError:
-        pass
+    for path in _claude_desktop_metadata_files(root):
+        data = _read_json_object(path)
+        if not data:
+            continue
+        cli_sid = data.get("cliSessionId")
+        if not cli_sid:
+            continue
+        out[cli_sid] = {
+            "title": data.get("title") or None,
+            "model": data.get("model") or None,
+            "cwd": data.get("cwd") or None,
+            "is_archived": bool(data.get("isArchived")),
+            "last_activity_at": data.get("lastActivityAt") or None,
+        }
     _desktop_meta_cache = out
-    _desktop_meta_cache_mtime = mtime
+    _desktop_meta_cache_mtime = cache_key
     return out
+
+
+def _claude_desktop_workspace_dirs(root=None):
+    root = root or _claude_desktop_sessions_root()
+    if not root.is_dir():
+        return []
+    dirs = []
+    try:
+        org_dirs = [p for p in root.iterdir() if p.is_dir()]
+    except OSError:
+        return []
+    for org_dir in org_dirs:
+        try:
+            workspace_dirs = [p for p in org_dir.iterdir() if p.is_dir()]
+        except OSError:
+            continue
+        for workspace_dir in workspace_dirs:
+            newest = 0.0
+            try:
+                newest = workspace_dir.stat().st_mtime
+            except OSError:
+                pass
+            for meta_path in workspace_dir.glob("local_*.json"):
+                try:
+                    newest = max(newest, meta_path.stat().st_mtime)
+                except OSError:
+                    continue
+            dirs.append((newest, workspace_dir))
+    dirs.sort(key=lambda item: item[0], reverse=True)
+    return [p for _mtime, p in dirs]
+
+
+def _claude_desktop_metadata_path_for_cli_session(session_id):
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    filename = f"local_{sid}.json"
+    fallback = None
+    for path in _claude_desktop_metadata_files():
+        if path.name == filename:
+            fallback = path
+        data = _read_json_object(path)
+        if data and data.get("cliSessionId") == sid:
+            return path
+    return fallback
+
+
+def _claude_desktop_workspace_for_summary(summary, existing_path=None):
+    if existing_path:
+        try:
+            parent = Path(existing_path).expanduser().resolve().parent
+            if parent.is_dir():
+                return parent
+        except (OSError, RuntimeError, ValueError):
+            pass
+
+    dirs = _claude_desktop_workspace_dirs()
+    if not dirs:
+        return None
+
+    cwd = str((summary or {}).get("cwd") or "").strip()
+    if cwd:
+        matches = []
+        for workspace_dir in dirs:
+            for path in workspace_dir.glob("local_*.json"):
+                data = _read_json_object(path)
+                if not data:
+                    continue
+                if cwd not in (data.get("cwd"), data.get("originCwd")):
+                    continue
+                try:
+                    score = float(data.get("lastActivityAt") or 0) / 1000.0
+                except (TypeError, ValueError):
+                    score = 0.0
+                if not score:
+                    try:
+                        score = path.stat().st_mtime
+                    except OSError:
+                        score = 0.0
+                matches.append((score, workspace_dir))
+        if matches:
+            matches.sort(key=lambda item: item[0], reverse=True)
+            return matches[0][1]
+
+    return dirs[0]
+
+
+def _claude_session_jsonl_path(session_id):
+    sid = str(session_id or "").strip()
+    if not sid or not PROJECTS_ROOT.is_dir():
+        return None
+    matches = []
+    try:
+        for path in PROJECTS_ROOT.glob(f"*/{sid}.jsonl"):
+            if path.is_file():
+                try:
+                    matches.append((path.stat().st_mtime, path))
+                except OSError:
+                    matches.append((0.0, path))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not matches:
+        return None
+    matches.sort(key=lambda item: item[0], reverse=True)
+    return matches[0][1]
+
+
+def _claude_desktop_title_from_text(text, max_len=120):
+    text = _strip_ccc_session_state_instruction(str(text or "")).strip()
+    if not text:
+        return ""
+    return _prompt_fragment(text, max_len).strip()
+
+
+def _claude_desktop_epoch_ms(value):
+    if not value:
+        return 0
+    epoch = _iso_to_epoch(value) if isinstance(value, str) else None
+    if epoch is None:
+        try:
+            epoch = float(value)
+        except (TypeError, ValueError):
+            return 0
+        if epoch > 100000000000:
+            return int(epoch)
+    return int(epoch * 1000)
+
+
+def _claude_session_desktop_summary(session_id, spawn_entry=None):
+    sid = str(session_id or "").strip()
+    entry = spawn_entry if isinstance(spawn_entry, dict) else {}
+    now_ms = int(time.time() * 1000)
+    started_epoch = _spawn_registry_entry_epoch(entry)
+    started_ms = int(started_epoch * 1000) if started_epoch else 0
+    summary = {
+        "cwd": entry.get("cwd") or entry.get("repo_path") or "",
+        "originCwd": entry.get("cwd") or entry.get("repo_path") or "",
+        "title": (
+            _claude_desktop_title_from_text(entry.get("prompt"))
+            or _claude_desktop_title_from_text(entry.get("command_summary"))
+            or _claude_desktop_title_from_text((entry.get("name") or "").replace("-", " "))
+        ),
+        "model": entry.get("model") or "",
+        "createdAt": started_ms or now_ms,
+        "lastActivityAt": started_ms or now_ms,
+        "completedTurns": 0,
+        "jsonl_path": "",
+        "has_cli_transcript": False,
+    }
+
+    path = _claude_session_jsonl_path(sid)
+    if not path:
+        if summary["cwd"]:
+            try:
+                summary["cwd"] = _resolve_session_cwd(sid, summary["cwd"])
+                summary["originCwd"] = summary["cwd"]
+            except Exception:
+                pass
+        return summary
+    summary["jsonl_path"] = str(path)
+    summary["has_cli_transcript"] = True
+
+    try:
+        st = path.stat()
+        stat_ms = int(st.st_mtime * 1000)
+    except OSError:
+        st = None
+        stat_ms = now_ms
+
+    first_prompt = ""
+    first_ts_ms = 0
+    last_ts_ms = 0
+    completed_turns = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts_ms = _claude_desktop_epoch_ms(ev.get("timestamp"))
+                if ts_ms:
+                    if not first_ts_ms:
+                        first_ts_ms = ts_ms
+                    last_ts_ms = ts_ms
+                if not summary["cwd"] and ev.get("cwd"):
+                    summary["cwd"] = ev.get("cwd") or ""
+                    summary["originCwd"] = summary["cwd"]
+                if not first_prompt:
+                    first_prompt = _extract_user_prompt_text(ev) or ""
+                if ev.get("type") == "assistant":
+                    completed_turns += 1
+                    msg = ev.get("message")
+                    if isinstance(msg, dict) and msg.get("model"):
+                        summary["model"] = msg.get("model") or summary["model"]
+    except (OSError, UnicodeDecodeError):
+        pass
+
+    try:
+        tail = _extract_tail_meta(path) or {}
+    except Exception:
+        tail = {}
+    title = (
+        tail.get("custom_title")
+        or tail.get("agent_name")
+        or tail.get("ai_title")
+        or _claude_desktop_title_from_text(first_prompt)
+        or summary["title"]
+    )
+    if title:
+        summary["title"] = title
+    if tail.get("model"):
+        summary["model"] = tail.get("model") or summary["model"]
+    if tail.get("last_meaningful_ts"):
+        try:
+            summary["lastActivityAt"] = int(float(tail["last_meaningful_ts"]) * 1000)
+        except (TypeError, ValueError):
+            pass
+    elif last_ts_ms:
+        summary["lastActivityAt"] = last_ts_ms
+    elif stat_ms:
+        summary["lastActivityAt"] = stat_ms
+    if first_ts_ms:
+        summary["createdAt"] = first_ts_ms
+    elif started_ms:
+        summary["createdAt"] = started_ms
+    elif st:
+        summary["createdAt"] = int(min(st.st_ctime, st.st_mtime) * 1000)
+    summary["completedTurns"] = completed_turns
+    if summary["cwd"]:
+        try:
+            summary["cwd"] = _resolve_session_cwd(sid, summary["cwd"])
+            summary["originCwd"] = summary["cwd"]
+        except Exception:
+            pass
+    return summary
+
+
+def _write_claude_desktop_metadata(path, payload, last_activity_ms):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+        tmp.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+        if last_activity_ms:
+            ts = max(0.0, float(last_activity_ms) / 1000.0)
+            os.utime(path, (ts, ts))
+    except (OSError, TypeError, ValueError):
+        return False
+    _bust_claude_desktop_metadata_cache()
+    return True
+
+
+def _ensure_claude_desktop_session_visible(session_id, spawn_entry=None):
+    """Create or refresh Claude Desktop's sidebar metadata for a CLI session."""
+    sid = str(session_id or "").strip()
+    if not sid or not _SESSION_UUID_RE.match(sid):
+        return False
+
+    summary = _claude_session_desktop_summary(sid, spawn_entry=spawn_entry)
+    existing_path = _claude_desktop_metadata_path_for_cli_session(sid)
+    existing = _read_json_object(existing_path) if existing_path else {}
+    existing = existing or {}
+    if not summary.get("has_cli_transcript"):
+        return False
+    if not (summary.get("cwd") or existing.get("cwd")):
+        return False
+    if not (summary.get("title") or existing.get("title")):
+        return False
+    workspace_dir = _claude_desktop_workspace_for_summary(summary, existing_path)
+    if not workspace_dir:
+        return False
+    path = existing_path or (workspace_dir / f"local_{sid}.json")
+    app_session_id = existing.get("sessionId") or path.stem or f"local_{sid}"
+    if path.name.startswith("local_") and not str(app_session_id).startswith("local_"):
+        app_session_id = path.stem
+    user_title = (
+        existing.get("title")
+        if existing.get("titleSource") == "user" and existing.get("title")
+        else None
+    )
+    title = user_title or summary.get("title") or existing.get("title") or ""
+
+    payload = dict(existing)
+    payload.update({
+        "sessionId": app_session_id,
+        "cliSessionId": sid,
+        "cwd": summary.get("cwd") or existing.get("cwd") or "",
+        "originCwd": summary.get("originCwd") or existing.get("originCwd") or summary.get("cwd") or "",
+        "createdAt": int(summary.get("createdAt") or existing.get("createdAt") or time.time() * 1000),
+        "lastActivityAt": int(summary.get("lastActivityAt") or existing.get("lastActivityAt") or time.time() * 1000),
+        "completedTurns": int(summary.get("completedTurns") or existing.get("completedTurns") or 0),
+        "isArchived": bool(existing.get("isArchived", False)),
+        "permissionMode": existing.get("permissionMode") or "default",
+        "chromePermissionMode": existing.get("chromePermissionMode") or "skip_all_permission_checks",
+        "alwaysAllowedReasons": existing.get("alwaysAllowedReasons") if isinstance(existing.get("alwaysAllowedReasons"), list) else [],
+        "enabledMcpTools": existing.get("enabledMcpTools") if isinstance(existing.get("enabledMcpTools"), dict) else {},
+        "remoteMcpServersConfig": existing.get("remoteMcpServersConfig") if isinstance(existing.get("remoteMcpServersConfig"), list) else [],
+    })
+    model = summary.get("model") or existing.get("model")
+    if model:
+        payload["model"] = model
+    if title:
+        payload["title"] = title
+        payload["titleSource"] = existing.get("titleSource") or ("user" if user_title else "auto")
+    elif "title" in payload and not payload["title"]:
+        payload.pop("title", None)
+        payload.pop("titleSource", None)
+
+    if existing == payload and path.is_file():
+        try:
+            desired_ts = float(payload.get("lastActivityAt") or 0) / 1000.0
+            if desired_ts and abs(path.stat().st_mtime - desired_ts) > 1.0:
+                os.utime(path, (desired_ts, desired_ts))
+                _bust_claude_desktop_metadata_cache()
+        except (OSError, TypeError, ValueError):
+            pass
+        return True
+
+    return _write_claude_desktop_metadata(path, payload, payload.get("lastActivityAt"))
+
+
+_claude_desktop_visibility_retry_sids = set()
+_claude_desktop_visibility_retry_lock = threading.Lock()
+
+
+def _schedule_claude_desktop_visibility_retry(session_id, spawn_entry=None, attempts=60, delay=1.0):
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    with _claude_desktop_visibility_retry_lock:
+        if sid in _claude_desktop_visibility_retry_sids:
+            return False
+        _claude_desktop_visibility_retry_sids.add(sid)
+
+    entry = dict(spawn_entry or {})
+
+    def worker():
+        try:
+            for _idx in range(max(1, int(attempts or 1))):
+                if _ensure_claude_desktop_session_visible(sid, spawn_entry=entry):
+                    return
+                time.sleep(max(0.05, float(delay or 0.5)))
+        except Exception:
+            pass
+        finally:
+            with _claude_desktop_visibility_retry_lock:
+                _claude_desktop_visibility_retry_sids.discard(sid)
+
+    threading.Thread(
+        target=worker,
+        daemon=True,
+        name=f"ccc-claude-desktop-visible-{sid[:8]}",
+    ).start()
+    return True
+
+
+def _is_synthetic_claude_desktop_metadata(path, data):
+    if not isinstance(data, dict):
+        return False
+    sid = str(data.get("cliSessionId") or "").strip()
+    if not sid:
+        return False
+    if path.name != f"local_{sid}.json":
+        return False
+    if data.get("sessionId") not in (sid, f"local_{sid}"):
+        return False
+    if data.get("enabledMcpTools") not in ({}, None):
+        return False
+    if data.get("remoteMcpServersConfig") not in ([], None):
+        return False
+    if data.get("alwaysAllowedReasons") not in ([], None):
+        return False
+    return data.get("permissionMode") in (None, "default")
+
+
+def _is_claude_desktop_transcript_unavailable_placeholder(path, data):
+    if not isinstance(data, dict) or data.get("transcriptUnavailable") is not True:
+        return False
+    sid = str(data.get("sessionId") or "").strip()
+    if not sid or path.name != f"{sid}.json":
+        return False
+    if data.get("enabledMcpTools") not in ({}, None):
+        return False
+    if data.get("remoteMcpServersConfig") not in ([], None):
+        return False
+    return data.get("permissionMode") in (None, "default")
+
+
+def prune_unresumable_claude_desktop_metadata(dry_run=False):
+    """Remove CCC-synthetic Desktop rows whose CLI transcript is unavailable."""
+    pruned = []
+    for path in _claude_desktop_metadata_files():
+        data = _read_json_object(path)
+        if not _is_synthetic_claude_desktop_metadata(path, data):
+            continue
+        sid = data.get("cliSessionId")
+        if _claude_session_jsonl_path(sid):
+            continue
+        pruned.append(str(path))
+        if dry_run:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    root = _claude_desktop_sessions_root()
+    if root.is_dir():
+        try:
+            placeholder_paths = [
+                p for p in root.glob("*/*/*.json")
+                if p.is_file() and not p.name.startswith("local_")
+            ]
+        except OSError:
+            placeholder_paths = []
+        for path in placeholder_paths:
+            data = _read_json_object(path)
+            if not _is_claude_desktop_transcript_unavailable_placeholder(path, data):
+                continue
+            pruned.append(str(path))
+            if dry_run:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    if pruned and not dry_run:
+        _bust_claude_desktop_metadata_cache()
+    return {"ok": True, "dry_run": bool(dry_run), "pruned": len(pruned), "paths": pruned}
 
 
 def _fetch_issue_states(repo_path):
@@ -12157,7 +12645,7 @@ def _codex_sidebar_backfill_window_days():
     return days if days > 0 else 7.0
 
 
-def _codex_registry_entry_epoch(entry):
+def _spawn_registry_entry_epoch(entry):
     raw = (entry or {}).get("spawned_at") or (entry or {}).get("started")
     if not raw:
         return 0.0
@@ -12170,6 +12658,10 @@ def _codex_registry_entry_epoch(entry):
         return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
+
+
+def _codex_registry_entry_epoch(entry):
+    return _spawn_registry_entry_epoch(entry)
 
 
 def _recent_codex_thread_repo_paths(days=None, now=None, limit=1000):
@@ -12541,6 +13033,214 @@ def _codex_sidebar_visibility_backfill_once():
         print(
             "  [codex-sidebar] registered "
             f"{result['projects_added']} recent CCC Codex project(s) with Codex Desktop"
+        )
+
+
+def _claude_desktop_backfill_window_days():
+    raw = os.environ.get("CCC_CLAUDE_DESKTOP_BACKFILL_DAYS", "7")
+    try:
+        days = float(raw)
+    except (TypeError, ValueError):
+        days = 7.0
+    return days if days > 0 else 7.0
+
+
+def _is_probable_claude_spawn_log(path):
+    name = Path(path).name
+    blocked_prefixes = (
+        "spawn-codex-",
+        "resume-codex-",
+        "spawn-gemini-",
+        "resume-gemini-",
+        "spawn-antigravity-",
+        "resume-antigravity-",
+    )
+    if name.startswith(blocked_prefixes):
+        return False
+    return (
+        (name.startswith("spawn-") or name.startswith("resume-"))
+        and name.endswith(".log")
+        and not name.endswith(".agy.log")
+    )
+
+
+def _recent_claude_ccc_log_paths(repo_paths=None, days=None, now=None, max_logs=2000):
+    """Recent CCC Claude spawn/resume logs, bounded to known repos."""
+    if days is None:
+        days = _claude_desktop_backfill_window_days()
+    try:
+        max_logs = max(1, int(max_logs or 2000))
+    except (TypeError, ValueError):
+        max_logs = 2000
+    try:
+        now = float(now if now is not None else time.time())
+    except (TypeError, ValueError):
+        now = time.time()
+    cutoff = now - (float(days) * 86400.0)
+    raw_paths = []
+    registry_entries = []
+    try:
+        registry_entries = _load_spawn_registry()
+    except Exception:
+        registry_entries = []
+    for entry in registry_entries:
+        engine = entry.get("engine") or "claude"
+        if engine == "claude" and entry.get("log"):
+            raw_paths.append(entry.get("log"))
+
+    if repo_paths is None:
+        candidates = []
+        try:
+            candidates.extend(_known_repo_paths())
+        except Exception:
+            pass
+        try:
+            candidates.extend(_discover_repo_paths_from_projects())
+        except Exception:
+            pass
+        for entry in registry_entries:
+            engine = entry.get("engine") or "claude"
+            if engine != "claude":
+                continue
+            for key in ("repo_path", "cwd"):
+                if entry.get(key):
+                    candidates.append(entry.get(key))
+        repo_paths = candidates
+
+    seen_repos = set()
+    for repo_path in repo_paths or []:
+        try:
+            repo = str(Path(repo_path).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError, TypeError):
+            continue
+        if repo in seen_repos:
+            continue
+        seen_repos.add(repo)
+        try:
+            log_dir = repo_log_dir(repo)
+        except Exception:
+            continue
+        if not log_dir.is_dir():
+            continue
+        for pattern in ("spawn-*.log", "resume-*.log"):
+            try:
+                raw_paths.extend(log_dir.glob(pattern))
+            except OSError:
+                continue
+
+    seen = set()
+    recent = []
+    for raw in raw_paths:
+        try:
+            p = Path(raw).expanduser().resolve()
+            key = str(p)
+            if key in seen or not _is_probable_claude_spawn_log(p):
+                continue
+            seen.add(key)
+            st = p.stat()
+        except (OSError, ValueError, RuntimeError, TypeError):
+            continue
+        if st.st_mtime < cutoff:
+            continue
+        recent.append((st.st_mtime, p))
+    recent.sort(key=lambda item: item[0], reverse=True)
+    return [p for _mtime, p in recent[:max_logs]]
+
+
+def backfill_claude_desktop_visibility(days=None, repo_paths=None, now=None, max_logs=2000):
+    """Create Claude Desktop sidebar metadata for recent CCC-spawned sessions."""
+    if days is None:
+        days = _claude_desktop_backfill_window_days()
+    try:
+        now = float(now if now is not None else time.time())
+    except (TypeError, ValueError):
+        now = time.time()
+    cutoff = now - (float(days) * 86400.0)
+    pruned = prune_unresumable_claude_desktop_metadata().get("pruned", 0)
+    ids = []
+    seen_ids = set()
+    entries_by_sid = {}
+
+    def add_sid(sid, entry=None):
+        sid = str(sid or "").strip()
+        if not sid or not _SESSION_UUID_RE.match(sid):
+            return
+        if entry and sid not in entries_by_sid:
+            entries_by_sid[sid] = entry
+        if sid not in seen_ids:
+            seen_ids.add(sid)
+            ids.append(sid)
+
+    log_paths = _recent_claude_ccc_log_paths(
+        repo_paths=repo_paths,
+        days=days,
+        now=now,
+        max_logs=max_logs,
+    )
+    for path in log_paths:
+        add_sid(extract_session_id(path))
+
+    try:
+        registry_entries = _load_spawn_registry()
+    except Exception:
+        registry_entries = []
+    for entry in registry_entries:
+        engine = entry.get("engine") or "claude"
+        if engine != "claude":
+            continue
+        entry_epoch = _spawn_registry_entry_epoch(entry)
+        if entry_epoch and entry_epoch < cutoff:
+            continue
+        log_path = entry.get("log")
+        if log_path and not entry_epoch:
+            try:
+                if Path(log_path).expanduser().stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+        if not entry_epoch and not log_path:
+            continue
+        add_sid(entry.get("session_id") or entry.get("resumed_sid"), entry)
+        if log_path:
+            add_sid(extract_session_id(log_path), entry)
+
+    updated = 0
+    already_visible = 0
+    skipped = 0
+    for sid in ids:
+        before_path = _claude_desktop_metadata_path_for_cli_session(sid)
+        ok = _ensure_claude_desktop_session_visible(sid, spawn_entry=entries_by_sid.get(sid))
+        after_path = _claude_desktop_metadata_path_for_cli_session(sid)
+        if ok and after_path:
+            if before_path:
+                already_visible += 1
+            else:
+                updated += 1
+        else:
+            skipped += 1
+
+    return {
+        "ok": True,
+        "days": days,
+        "scanned_logs": len(log_paths),
+        "found": len(ids),
+        "updated": updated,
+        "already_visible": already_visible,
+        "skipped": skipped,
+        "pruned": pruned,
+    }
+
+
+def _claude_desktop_visibility_backfill_once():
+    try:
+        result = backfill_claude_desktop_visibility()
+    except Exception as e:
+        print(f"  [claude-desktop] backfill skipped ({e})")
+        return
+    if result.get("updated"):
+        print(
+            "  [claude-desktop] added "
+            f"{result['updated']} recent CCC Claude session(s) to the Desktop sidebar"
         )
 
 
@@ -17326,14 +18026,17 @@ def _spawn_session_id_from_entry(entry):
     """Best-effort native session id resolver for a CCC-owned spawn entry."""
     if not isinstance(entry, dict):
         return None
+    engine = entry.get("engine") or "claude"
     sid = entry.get("session_id") or entry.get("resumed_sid")
     if sid:
-        if entry.get("engine") == "codex":
+        if engine == "claude":
+            if not _ensure_claude_desktop_session_visible(sid, spawn_entry=entry):
+                _schedule_claude_desktop_visibility_retry(sid, spawn_entry=entry)
+        elif engine == "codex":
             _mark_codex_thread_user_visible(sid, update_rollout=False)
             _register_codex_sidebar_project_for_spawn_entry(entry, sid)
         return sid
     log = entry.get("log")
-    engine = entry.get("engine") or "claude"
     if engine == "codex":
         sid = _extract_codex_thread_id_from_log(log)
     elif engine == "gemini":
@@ -17350,7 +18053,10 @@ def _spawn_session_id_from_entry(entry):
     if sid:
         entry["session_id"] = sid
         _update_spawn_session_id_in_registry(entry.get("pid"), sid)
-        if engine == "codex":
+        if engine == "claude":
+            if not _ensure_claude_desktop_session_visible(sid, spawn_entry=entry):
+                _schedule_claude_desktop_visibility_retry(sid, spawn_entry=entry)
+        elif engine == "codex":
             _mark_codex_thread_user_visible(sid, update_rollout=False)
             _register_codex_sidebar_project_for_spawn_entry(entry, sid)
     return sid
@@ -30408,6 +31114,11 @@ def main():
     ensure_hooks_installed()
     install_orchestration_skill()
     _reattach_spawned_orphans()
+    threading.Thread(
+        target=_claude_desktop_visibility_backfill_once,
+        daemon=True,
+        name="ccc-claude-desktop-backfill",
+    ).start()
     threading.Thread(
         target=_codex_sidebar_visibility_backfill_once,
         daemon=True,

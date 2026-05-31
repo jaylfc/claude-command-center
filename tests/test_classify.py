@@ -31,6 +31,9 @@ from unittest import mock
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = Path(PROJECT_ROOT) / "tests" / "fixtures" / "mock_session.jsonl"
 MOCK_SESSION_ID = "00000000-mock-4000-8000-000000000001"
+CLAUDE_DESKTOP_SESSION_ID = "33333333-3333-4333-8333-333333333333"
+CLAUDE_DESKTOP_APP_SESSION_ID = "44444444-4444-4444-8444-444444444444"
+CLAUDE_DESKTOP_MISSING_SESSION_ID = "55555555-5555-4555-8555-555555555555"
 CODEX_SESSION_ID = "11111111-1111-4111-8111-111111111111"
 CODEX_TRAILER_SESSION_ID = "22222222-2222-4222-8222-222222222222"
 
@@ -547,6 +550,248 @@ class TestFindConversationsOnMockFixture(unittest.TestCase):
         self.assertEqual(card["last_event_type"], "result")
         self.assertIsNone(card["pending_tool"])
         self.assertIsNone(card["pending_file"])
+
+
+class TestClaudeDesktopVisibility(unittest.TestCase):
+    def setUp(self):
+        self.tmp_home = tempfile.mkdtemp(prefix="ccc-claude-desktop-home-")
+        self._prev_home = os.environ.get("HOME")
+        self.resolved_home = Path(self.tmp_home).resolve()
+        os.environ["HOME"] = str(self.resolved_home)
+        self.server = _fresh_server()
+        self.fake_repo = (self.resolved_home / "fake-repo").resolve()
+        self.fake_repo.mkdir(parents=True)
+        (self.fake_repo / ".git").mkdir()
+        self.projects_dir = self.server._canonical_conversation_path(
+            str(self.fake_repo),
+            CLAUDE_DESKTOP_SESSION_ID,
+        ).parent
+        self.projects_dir.mkdir(parents=True)
+        self.desktop_workspace = (
+            self.resolved_home
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude-code-sessions"
+            / "org-1"
+            / "workspace-1"
+        )
+        self.desktop_workspace.mkdir(parents=True)
+
+    def tearDown(self):
+        if self._prev_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._prev_home
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        shutil.rmtree(self.tmp_home, ignore_errors=True)
+
+    def _write_claude_session(self, sid=CLAUDE_DESKTOP_SESSION_ID):
+        path = self.projects_dir / f"{sid}.jsonl"
+        _write_jsonl_events(path, [
+            {
+                "type": "user",
+                "sessionId": sid,
+                "timestamp": "2026-05-02T00:00:00.000Z",
+                "cwd": str(self.fake_repo),
+                "gitBranch": "main",
+                "message": {
+                    "role": "user",
+                    "content": "Make the Desktop sidebar show CCC sessions",
+                },
+            },
+            {
+                "type": "assistant",
+                "sessionId": sid,
+                "timestamp": "2026-05-02T00:00:05.000Z",
+                "cwd": str(self.fake_repo),
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-test",
+                    "content": [{"type": "text", "text": "Done"}],
+                },
+            },
+        ])
+        return path
+
+    def test_claude_desktop_visibility_writes_metadata_for_cli_session(self):
+        self._write_claude_session()
+
+        ok = self.server._ensure_claude_desktop_session_visible(
+            CLAUDE_DESKTOP_SESSION_ID,
+            spawn_entry={"cwd": str(self.fake_repo), "name": "desktop-sidebar"},
+        )
+
+        meta_path = self.desktop_workspace / f"local_{CLAUDE_DESKTOP_SESSION_ID}.json"
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertTrue(ok)
+        self.assertEqual(data["sessionId"], f"local_{CLAUDE_DESKTOP_SESSION_ID}")
+        self.assertEqual(data["cliSessionId"], CLAUDE_DESKTOP_SESSION_ID)
+        self.assertEqual(data["cwd"], str(self.fake_repo))
+        self.assertEqual(data["title"], "Make the Desktop sidebar show CCC sessions")
+        self.assertEqual(data["model"], "claude-opus-4-test")
+        self.assertEqual(data["createdAt"], 1777680000000)
+        self.assertEqual(data["lastActivityAt"], 1777680005000)
+        self.assertEqual(data["completedTurns"], 1)
+        self.assertEqual(int(meta_path.stat().st_mtime), 1777680005)
+
+    def test_claude_desktop_visibility_preserves_existing_user_title(self):
+        self._write_claude_session()
+        existing = self.desktop_workspace / f"local_{CLAUDE_DESKTOP_APP_SESSION_ID}.json"
+        existing.write_text(json.dumps({
+            "sessionId": f"local_{CLAUDE_DESKTOP_APP_SESSION_ID}",
+            "cliSessionId": CLAUDE_DESKTOP_SESSION_ID,
+            "cwd": "/tmp/old",
+            "originCwd": "/tmp/old",
+            "title": "Keep my Desktop title",
+            "titleSource": "user",
+            "createdAt": 1,
+            "lastActivityAt": 2,
+            "isArchived": False,
+        }), encoding="utf-8")
+
+        ok = self.server._ensure_claude_desktop_session_visible(
+            CLAUDE_DESKTOP_SESSION_ID,
+            spawn_entry={"cwd": str(self.fake_repo)},
+        )
+
+        data = json.loads(existing.read_text(encoding="utf-8"))
+        self.assertTrue(ok)
+        self.assertEqual(data["sessionId"], f"local_{CLAUDE_DESKTOP_APP_SESSION_ID}")
+        self.assertEqual(data["cliSessionId"], CLAUDE_DESKTOP_SESSION_ID)
+        self.assertEqual(data["title"], "Keep my Desktop title")
+        self.assertEqual(data["titleSource"], "user")
+        self.assertEqual(data["cwd"], str(self.fake_repo))
+        self.assertEqual(data["lastActivityAt"], 1777680005000)
+
+    def test_claude_desktop_visibility_requires_cli_transcript(self):
+        ok = self.server._ensure_claude_desktop_session_visible(
+            CLAUDE_DESKTOP_MISSING_SESSION_ID,
+            spawn_entry={
+                "cwd": str(self.fake_repo),
+                "prompt": "This session never wrote a Claude Code transcript",
+            },
+        )
+
+        meta_path = self.desktop_workspace / f"local_{CLAUDE_DESKTOP_MISSING_SESSION_ID}.json"
+        self.assertFalse(ok)
+        self.assertFalse(meta_path.exists())
+
+    def test_claude_desktop_prune_removes_synthetic_unresumable_rows(self):
+        bad = self.desktop_workspace / f"local_{CLAUDE_DESKTOP_MISSING_SESSION_ID}.json"
+        bad.write_text(json.dumps({
+            "sessionId": CLAUDE_DESKTOP_MISSING_SESSION_ID,
+            "cliSessionId": CLAUDE_DESKTOP_MISSING_SESSION_ID,
+            "cwd": "",
+            "originCwd": "",
+            "createdAt": 1777680000000,
+            "lastActivityAt": 1777680000000,
+            "completedTurns": 0,
+            "permissionMode": "default",
+            "chromePermissionMode": "skip_all_permission_checks",
+            "alwaysAllowedReasons": [],
+            "enabledMcpTools": {},
+            "remoteMcpServersConfig": [],
+            "isArchived": False,
+        }), encoding="utf-8")
+        real_shape = self.desktop_workspace / f"local_{CLAUDE_DESKTOP_APP_SESSION_ID}.json"
+        real_shape.write_text(json.dumps({
+            "sessionId": CLAUDE_DESKTOP_APP_SESSION_ID,
+            "cliSessionId": CLAUDE_DESKTOP_MISSING_SESSION_ID,
+            "cwd": str(self.fake_repo),
+            "originCwd": str(self.fake_repo),
+            "createdAt": 1777680000000,
+            "lastActivityAt": 1777680000000,
+            "completedTurns": 0,
+            "permissionMode": "default",
+            "enabledMcpTools": {"fake-tool": True},
+            "remoteMcpServersConfig": [],
+            "alwaysAllowedReasons": [],
+            "isArchived": False,
+        }), encoding="utf-8")
+
+        result = self.server.prune_unresumable_claude_desktop_metadata()
+
+        self.assertEqual(result["pruned"], 1)
+        self.assertFalse(bad.exists())
+        self.assertTrue(real_shape.exists())
+
+    def test_claude_desktop_prune_removes_transcript_unavailable_placeholders(self):
+        placeholder = self.desktop_workspace / f"{CLAUDE_DESKTOP_MISSING_SESSION_ID}.json"
+        placeholder.write_text(json.dumps({
+            "sessionId": CLAUDE_DESKTOP_MISSING_SESSION_ID,
+            "cwd": "",
+            "originCwd": "",
+            "createdAt": 1777680000000,
+            "lastActivityAt": 1777680000000,
+            "completedTurns": 0,
+            "permissionMode": "default",
+            "chromePermissionMode": "skip_all_permission_checks",
+            "alwaysAllowedReasons": [],
+            "enabledMcpTools": {},
+            "remoteMcpServersConfig": [],
+            "isArchived": False,
+            "transcriptUnavailable": True,
+            "sessionPermissionUpdates": [],
+        }), encoding="utf-8")
+
+        result = self.server.prune_unresumable_claude_desktop_metadata()
+
+        self.assertEqual(result["pruned"], 1)
+        self.assertFalse(placeholder.exists())
+
+    def test_claude_spawn_id_resolution_marks_desktop_visible(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "session_id": CLAUDE_DESKTOP_SESSION_ID,
+            }) + "\n")
+            fh.flush()
+            entry = {
+                "engine": "claude",
+                "pid": 8181,
+                "log": fh.name,
+                "cwd": str(self.fake_repo),
+            }
+            with mock.patch.object(
+                self.server,
+                "_ensure_claude_desktop_session_visible",
+                return_value=True,
+            ) as ensure_visible, mock.patch.object(
+                self.server,
+                "_update_spawn_session_id_in_registry",
+            ) as update_registry:
+                sid = self.server._spawn_session_id_from_entry(entry)
+
+        self.assertEqual(sid, CLAUDE_DESKTOP_SESSION_ID)
+        self.assertEqual(entry["session_id"], CLAUDE_DESKTOP_SESSION_ID)
+        ensure_visible.assert_called_once_with(
+            CLAUDE_DESKTOP_SESSION_ID,
+            spawn_entry=entry,
+        )
+        update_registry.assert_called_once_with(8181, CLAUDE_DESKTOP_SESSION_ID)
+
+    def test_claude_desktop_backfill_scans_recent_ccc_logs(self):
+        self._write_claude_session()
+        log_dir = self.fake_repo / ".claude" / "logs"
+        log_dir.mkdir(parents=True)
+        log_path = log_dir / "spawn-desktop-sidebar-20260502T000000.log"
+        log_path.write_text(json.dumps({
+            "session_id": CLAUDE_DESKTOP_SESSION_ID,
+        }) + "\n", encoding="utf-8")
+        now = 1777680100
+        os.utime(log_path, (now, now))
+
+        result = self.server.backfill_claude_desktop_visibility(
+            days=7,
+            repo_paths=[str(self.fake_repo)],
+            now=now,
+        )
+
+        meta_path = self.desktop_workspace / f"local_{CLAUDE_DESKTOP_SESSION_ID}.json"
+        self.assertEqual(result["found"], 1)
+        self.assertEqual(result["updated"], 1)
+        self.assertTrue(meta_path.is_file())
 
 
 class TestCodexConversationAdapter(unittest.TestCase):
