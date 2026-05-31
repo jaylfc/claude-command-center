@@ -331,7 +331,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        webView.setValue(false, forKey: "drawsBackground")
+        // Keep the web view OPAQUE. A transparent WKWebView (drawsBackground=false)
+        // can't use WebKit's fast opaque rendering path — it blends the whole page
+        // against the window every frame, which made the app sluggish (idle/scroll/
+        // typing jank) while the identical page is fast in Safari and Chrome. The
+        // dashboard paints its own solid background, so opaque is visually identical.
+        webView.setValue(true, forKey: "drawsBackground")
         window.contentView!.addSubview(webView)
 
         // Loading overlay
