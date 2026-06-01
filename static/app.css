@@ -4209,22 +4209,6 @@
   body.kanban-split .sidebar { display: none !important; }
   body.kanban-split #sidebarResizer { display: none !important; }
   body.kanban-split .main { display: none !important; }
-  /* Single-click jump from flow → chat tucks the conv-list/flow
-     sidebar so the chat takes the viewport. Restore via the
-     floating button anchored to the top-left. */
-  body.sidebar-tucked .sidebar { display: none !important; }
-  body.sidebar-tucked #sidebarResizer { display: none !important; }
-  body.sidebar-tucked #sidebarRestoreBtn { display: inline-flex !important; }
-  #sidebarRestoreBtn {
-    display: none;
-    position: fixed; top: 8px; left: 8px; z-index: 9991;
-    align-items: center; gap: 6px;
-    padding: 6px 10px; font-size: 12px;
-    border: 1px solid var(--border); border-radius: 6px;
-    background: var(--surface); color: var(--text); cursor: pointer;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.35);
-  }
-  #sidebarRestoreBtn:hover { background: var(--surface-2); }
 
   .kanban-panel {
     flex: 3; display: flex; flex-direction: column;

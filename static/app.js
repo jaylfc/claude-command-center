@@ -7890,16 +7890,14 @@
           if (node.dataset.flowKind === 'session' && node.dataset.id) {
             targetEl.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
             node.classList.add('active');
-            // Single-click navigation: exit flow full-screen + hide the
-            // LEFT conv-list/flow sidebar so the chat takes the viewport.
-            // `setConvPanelOpen` targets the kanban-split chat panel (wrong
-            // element); the actual left sidebar is the `.sidebar` div +
-            // its `#sidebarResizer`. Body class `sidebar-tucked` lets CSS
-            // hide both atomically and the floating "show sidebar" button
-            // (also gated by the class) gives the user a way back.
+            // Single-click navigation: exit flow full-screen AND collapse
+            // the RIGHT status rail (original ask / session activity /
+            // files panel) so the chat takes the viewport. The status
+            // rail's open/closed state lives on body.status-rail-collapsed
+            // and is read at init from localStorage['ccc-status-rail-collapsed'].
             if (flowExpanded) setFlowExpanded(false);
-            document.body.classList.add('sidebar-tucked');
-            try { localStorage.setItem('ccc-sidebar-tucked', '1'); } catch (_) {}
+            document.body.classList.add('status-rail-collapsed');
+            try { localStorage.setItem('ccc-status-rail-collapsed', '1'); } catch (_) {}
             selectConversation(node.dataset.id);
           }
         };
@@ -20175,28 +20173,6 @@
     });
 
   }
-
-  // ── Sidebar tucked state (set when user single-clicks a session
-  // from the flow board to jump to the chat). Restored from
-  // localStorage so the layout survives reloads.
-  try {
-    if (localStorage.getItem('ccc-sidebar-tucked') === '1') {
-      document.body.classList.add('sidebar-tucked');
-    }
-  } catch (_) {}
-  const $sidebarRestoreBtn = document.getElementById('sidebarRestoreBtn');
-  if ($sidebarRestoreBtn) {
-    $sidebarRestoreBtn.addEventListener('click', () => {
-      document.body.classList.remove('sidebar-tucked');
-      try { localStorage.removeItem('ccc-sidebar-tucked'); } catch (_) {}
-    });
-  }
-  document.addEventListener('keydown', ev => {
-    if (ev.key === 'Escape' && document.body.classList.contains('sidebar-tucked')) {
-      document.body.classList.remove('sidebar-tucked');
-      try { localStorage.removeItem('ccc-sidebar-tucked'); } catch (_) {}
-    }
-  });
 
   // ── Sidebar resizer ──
   const $sidebar = document.querySelector('.sidebar');
