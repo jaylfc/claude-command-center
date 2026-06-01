@@ -2782,10 +2782,22 @@
         removePendingSendEcho(pendingSend);
         showOpToast(data.warning || 'Text typed into Terminal but was not submitted. Press Enter in that terminal tab.', 'error');
       } else if (res.ok && data.ok) {
-        if (data.queued) {
+        if (data.via === 'codex-app-queued') {
+          showOpToast('Queued for Codex.');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
+        } else if (data.queued) {
           showOpToast(compactCommand
             ? 'Queued /compact until the terminal session is idle.'
             : 'Queued until the terminal session is idle.');
+        } else if (data.via === 'codex-steer') {
+          showOpToast('Sent to running Codex turn.');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
+        } else if (data.via === 'codex-app-turn') {
+          showOpToast('Codex follow-up started.');
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
         } else if (data.via === 'antigravity-resume') {
           showOpToast('Antigravity headless follow-up started.');
           setTimeout(refreshConversationList, 1500);
@@ -3123,6 +3135,16 @@
   function formatInjectFailure(data, status) {
     if (data && (data.code === 'macos_keystroke_permission' || data.code === 'macos_automation_permission')) {
       return data.error || 'macOS blocked CCC from sending input to the terminal.';
+    }
+    if (data && data.code === 'invalid_cwd') {
+      // Surface this loudly — the session's launch directory no longer
+      // exists on disk (moved / renamed / deleted), so every send will
+      // silently fail until the user knows. Include the missing path
+      // so they can recognize it. Caller upgrades the toast to a longer
+      // duration via the `_persist` hint on the returned reason object.
+      const missing = data.path || '(unknown path)';
+      return '⚠ Session cwd is gone: ' + missing
+        + ' — every send will fail until this directory is restored or the session is replaced.';
     }
     if (data && (data.error || data.message)) return data.error || data.message;
     return 'HTTP ' + status;
@@ -8419,7 +8441,13 @@
     toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--border);padding:8px 14px;border-radius:6px;font-size:12px;color:var(--text);z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.4);max-width:520px;';
     toast.innerHTML = '<span style="color:' + color + '">' + mark + '</span> ' + msg;
     document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), kind === 'error' ? 5000 : 3000);
+    // Stick longer for messages that signal a permanent fault the user
+    // needs to actually read (cwd gone, automation blocked) instead of
+    // a transient hiccup. 12s gives enough time to notice + comprehend
+    // without being annoyingly modal.
+    const isPersistent = kind === 'error'
+      && (/cwd is gone/i.test(msg) || /macOS blocked/i.test(msg));
+    setTimeout(() => toast.remove(), isPersistent ? 12000 : (kind === 'error' ? 5000 : 3000));
   }
 
   async function moveCardToColumn(cardId, targetCol) {
@@ -21737,8 +21765,20 @@
           removePendingSendEcho(pendingSend);
           showOpToast(data.warning || 'Text typed into Terminal but was not submitted. Press Enter in that terminal tab.', 'error');
         } else if (res.ok && data.ok) {
-          if (data.queued) {
+          if (data.via === 'codex-app-queued') {
+            showOpToast('Queued for Codex.');
+            setTimeout(refreshConversationList, 1500);
+            setTimeout(refreshConversationList, 3500);
+          } else if (data.queued) {
             showOpToast('Queued until the terminal session is idle.');
+          } else if (data.via === 'codex-steer') {
+            showOpToast('Sent to running Codex turn.');
+            setTimeout(refreshConversationList, 1500);
+            setTimeout(refreshConversationList, 3500);
+          } else if (data.via === 'codex-app-turn') {
+            showOpToast('Codex follow-up started.');
+            setTimeout(refreshConversationList, 1500);
+            setTimeout(refreshConversationList, 3500);
           } else if (data.via === 'antigravity-resume') {
             showOpToast('Antigravity headless follow-up started.');
             setTimeout(refreshConversationList, 1500);
