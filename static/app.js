@@ -16759,7 +16759,8 @@
       { id: 'o3-mini',      label: 'o3-mini' },
     ],
     cursor: [
-      { id: 'composer-2.5-fast',             label: 'composer-2.5-fast (default)' },
+      { id: 'auto',                          label: 'Auto (default)' },
+      { id: 'composer-2.5-fast',             label: 'composer-2.5-fast' },
       { id: 'gpt-5.3-codex',                 label: 'gpt-5.3-codex' },
       { id: 'gpt-5.3-codex-high',            label: 'gpt-5.3-codex-high' },
       { id: 'claude-opus-4-8-thinking-high', label: 'claude-opus-4-8-thinking-high' },
@@ -21637,7 +21638,7 @@
     try { return normalizeSpawnDefaultEngine(localStorage.getItem('ccc.spawnEngine')); }
     catch (_) { return 'claude'; }
   }
-  let _defaultModelsByEngine = { claude: 'opus', codex: 'gpt-5.5', cursor: 'composer-2.5-fast', antigravity: '' };
+  let _defaultModelsByEngine = { claude: 'opus', codex: 'gpt-5.5', cursor: 'auto', antigravity: '' };
   let _spawnDefaultsLoaded = false;
   let _spawnDefaultsSaveTimer = null;
   let _spawnDefaultsSaving = false;
@@ -21773,7 +21774,7 @@
     let value = String(model == null ? '' : model).trim();
     if (engine === 'claude' && !value) value = 'opus';
     if (engine === 'codex' && !value) value = 'gpt-5.5';
-    if (engine === 'cursor' && !value) value = 'composer-2.5-fast';
+    if (engine === 'cursor' && !value) value = 'auto';
     spawnDefaultsState.models[engine] = value;
     _defaultModelsByEngine[engine] = value;
     syncSpawnEngineDependentUi();
@@ -24103,7 +24104,7 @@
     }
     if (engine === 'claude' && !model) model = 'opus';
     if (engine === 'codex' && !model) model = 'gpt-5.5';
-    if (engine === 'cursor' && !model) model = 'composer-2.5-fast';
+    if (engine === 'cursor' && !model) model = 'auto';
     spawnDefaultsDraft.models[engine] = model;
   }
   async function saveSpawnDefaultsDraft() {

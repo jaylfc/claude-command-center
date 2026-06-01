@@ -1748,7 +1748,7 @@ def _spawn_fallback_model_for_engine(engine):
     if engine == "codex":
         return os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
     if engine == "cursor":
-        return os.environ.get("CCC_CURSOR_MODEL", "composer-2.5-fast")
+        return os.environ.get("CCC_CURSOR_MODEL", "auto")
     if engine == "antigravity":
         return os.environ.get("CCC_ANTIGRAVITY_MODEL") or _antigravity_cli_configured_model()
     return ""
@@ -1760,7 +1760,7 @@ def _load_spawn_defaults():
     These defaults are intentionally server-side rather than localStorage so
     ccc-orchestration and other scripted callers see the same values as the UI.
     Missing file means the historical behavior: Claude + opus, Codex env/gpt,
-    Cursor env/composer, and Antigravity's configured CLI model when one exists.
+    Cursor env/auto, and Antigravity's configured CLI model when one exists.
     """
     defaults = {
         "engine": "claude",

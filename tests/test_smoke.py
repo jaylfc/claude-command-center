@@ -334,6 +334,7 @@ class TestServerImports(unittest.TestCase):
         self.assertIn('<option value="cursor">Cursor</option>', index_html)
         self.assertIn("'cursor', 'antigravity'", app_js)
         self.assertIn("/api/sessions/spawn-cursor", app_js)
+        self.assertIn("Auto (default)", app_js)
         self.assertIn("composer-2.5-fast", app_js)
         self.assertIn("renderCursorLogHtml", app_js)
         self.assertIn(".source-badge.cursor", app_css)
