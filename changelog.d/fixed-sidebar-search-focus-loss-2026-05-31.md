@@ -1,0 +1,1 @@
+Sidebar search input no longer loses focus after every keystroke in the native (WKWebView) app — capture focus + caret position before each debounced sidebar re-render and restore them right after if the search box was the active element. Only restores when the search box owned focus going in, so clicking away to a conversation between keystrokes doesn't yank focus back.

@@ -18438,7 +18438,26 @@
     if (_convSearchRenderTimer) clearTimeout(_convSearchRenderTimer);
     _convSearchRenderTimer = setTimeout(() => {
       _convSearchRenderTimer = null;
+      // Capture the search box's focus + caret state before the render.
+      // In the WKWebView native app something during renderSidebar steals
+      // focus (likely an auto-focus side effect of a re-rendered child
+      // or a WKWebView quirk on innerHTML thrash). User-visible symptom:
+      // typing in the sidebar search needs a manual re-click after every
+      // character. Restore focus right after the render if the search
+      // box held it going in — avoids yanking focus when the user has
+      // intentionally moved elsewhere between keystrokes.
+      const wasFocused = (document.activeElement === $convSearch);
+      const caretStart = wasFocused ? $convSearch.selectionStart : null;
+      const caretEnd = wasFocused ? $convSearch.selectionEnd : null;
       renderSidebar(filterConversations($convSearch.value));
+      if (wasFocused && document.activeElement !== $convSearch) {
+        try {
+          $convSearch.focus({ preventScroll: true });
+          if (caretStart != null && caretEnd != null) {
+            $convSearch.setSelectionRange(caretStart, caretEnd);
+          }
+        } catch (_) { /* defensive — focus rarely throws but unsafe to swallow */ }
+      }
     }, 70);
   }
   $convSearch.addEventListener('input', () => {
@@ -18459,7 +18478,20 @@
         // Only re-render if the input still holds this query — user may
         // have already typed more, in which case a newer fetch is queued.
         if ($convSearch.value === q) {
+          // Same focus-restore dance as the debounced render above — the
+          // history-augmented render also blurs the search box in WKWebView.
+          const wasFocused = (document.activeElement === $convSearch);
+          const caretStart = wasFocused ? $convSearch.selectionStart : null;
+          const caretEnd = wasFocused ? $convSearch.selectionEnd : null;
           renderSidebar(filterConversations($convSearch.value));
+          if (wasFocused && document.activeElement !== $convSearch) {
+            try {
+              $convSearch.focus({ preventScroll: true });
+              if (caretStart != null && caretEnd != null) {
+                $convSearch.setSelectionRange(caretStart, caretEnd);
+              }
+            } catch (_) {}
+          }
         }
       });
     }, 180);
