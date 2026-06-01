@@ -2348,6 +2348,7 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
     const antigravityCanSendNow = antigravityCanSend(currentSession);
     const live = liveStatus.live && liveStatus.tty;
@@ -6399,15 +6400,13 @@
     const vpL = Math.max(0, (board.scrollLeft - canvas.offsetLeft)) / zoom;
     const vpT = Math.max(0, (board.scrollTop - canvas.offsetTop)) / zoom;
     const vpR = vpL + (board.clientWidth || window.innerWidth || 1200) / zoom;
-    const vpB = vpT + (board.clientHeight || window.innerHeight || 800) / zoom;
-    const rectsOverlap = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-    const PARENT_PAD = 16;
-    const PARENT_STEP_X = 320;
-    const PARENT_STEP_Y = 140;
-    const SESSION_GAP_BELOW_PARENT = 16;
-    const CHILD_GAP_X = 16;
-    const CHILD_GAP_Y = 12;
+    const PARENT_PAD = 20;
+    const CLUSTER_MARGIN = 20;
+    const SESSION_GAP_BELOW_PARENT = 14;
+    const CHILD_GAP_X = 14;
+    const CHILD_GAP_Y = 10;
     const MAX_COLS = 4;
+    const MIN_ROW_WIDTH = 720;
 
     const parentNodes = [];
     const childrenByParent = new Map();
@@ -6427,133 +6426,93 @@
       return;
     }
 
-    // Pre-pass: snap out-of-frame parents to tentative slots inside the
-    // viewport. Their final positions are settled in the collision pass.
-    let oofIndex = 0;
-    parentNodes.forEach(node => {
-      const left = node.offsetLeft;
-      const top = node.offsetTop;
-      const right = left + node.offsetWidth;
-      const bottom = top + node.offsetHeight;
-      const inFrame = left < vpR && right > vpL && top < vpB && bottom > vpT;
-      if (inFrame) return;
-      const vpWidth = Math.max(PARENT_STEP_X, vpR - vpL - PARENT_PAD * 2);
-      const cols = Math.max(1, Math.floor(vpWidth / PARENT_STEP_X));
-      const col = oofIndex % cols;
-      const row = Math.floor(oofIndex / cols);
-      node.style.left = Math.round(Math.max(0, vpL + PARENT_PAD + col * PARENT_STEP_X)) + 'px';
-      node.style.top = Math.round(Math.max(0, vpT + PARENT_PAD + row * PARENT_STEP_Y)) + 'px';
-      oofIndex++;
-    });
-
-    // Process parents in current top-to-bottom, left-to-right order so the
-    // result preserves the user's spatial intuition wherever possible.
+    // Stable processing order: by (parent's current Y, X). Keeps the
+    // post-Organize layout close to the user's spatial intent and — given
+    // the deterministic bin-pack below — produces identical output on
+    // repeated runs (idempotent).
     parentNodes.sort((a, b) => {
       const dy = a.offsetTop - b.offsetTop;
       if (dy !== 0) return dy;
       return a.offsetLeft - b.offsetLeft;
     });
 
-    // Each completed cluster (parent + all its descendants) contributes one
-    // bounding rectangle to `clusterRects`. Subsequent parents and sessions
-    // must never land inside any of those rectangles — that's the "cluster
-    // exclusion zone" constraint.
-    const clusterRects = [];
-    const CLUSTER_PAD = 12;
-    parentNodes.forEach(parent => {
+    // For each cluster precompute column count + bounding size. Column
+    // count picks a value of C that drives cluster width ≈ children-area
+    // height (square-ish), which minimizes the cluster's bounding-rect
+    // area for its session count. Wider children + few of them → fewer
+    // columns + more rows (tall, narrow cluster).
+    const clusters = parentNodes.map(parent => {
+      const id = parent.dataset.flowNodeId;
+      const rawChildren = childrenByParent.get(id) || [];
+      const children = rawChildren.slice().sort((a, b) => {
+        const ra = convsById[a.dataset.id] || {};
+        const rb = convsById[b.dataset.id] || {};
+        const sa = ra.last_interacted || ra.modified || ra.mtime || 0;
+        const sb = rb.last_interacted || rb.modified || rb.mtime || 0;
+        return sb - sa;
+      });
+      const sample = children[0];
+      const cwChild = sample ? sample.offsetWidth : 280;
+      const chChild = sample ? sample.offsetHeight : 96;
       const pw = parent.offsetWidth;
       const ph = parent.offsetHeight;
-      let pLeft = parent.offsetLeft;
-      let pTop = parent.offsetTop;
-      let pRect = { left: pLeft, top: pTop, right: pLeft + pw, bottom: pTop + ph };
-      // Push the parent strictly downward until it clears every prior
-      // cluster's bounding rect. Vertical-only push preserves horizontal
-      // columns the user set up — the whole object moves only as much as
-      // needed to escape an existing cluster's zone.
-      let safety = 400;
-      while (clusterRects.some(o => rectsOverlap(o, pRect)) && safety-- > 0) {
-        pTop += PARENT_STEP_Y;
-        pRect = { left: pLeft, top: pTop, right: pLeft + pw, bottom: pTop + ph };
+      const N = children.length;
+      let C = 1;
+      if (N > 0) {
+        const target = Math.sqrt(N * chChild / cwChild);
+        C = Math.max(1, Math.min(MAX_COLS, Math.round(target)));
       }
-      parent.style.left = Math.round(pLeft) + 'px';
-      parent.style.top = Math.round(pTop) + 'px';
-      flowNodePositions[parent.dataset.flowNodeId] = { x: Math.round(pLeft), y: Math.round(pTop) };
+      const rows = N > 0 ? Math.ceil(N / C) : 0;
+      const childAreaW = N > 0 ? C * cwChild + (C - 1) * CHILD_GAP_X : 0;
+      const childAreaH = rows > 0 ? rows * chChild + (rows - 1) * CHILD_GAP_Y : 0;
+      const width = Math.max(pw, childAreaW);
+      const height = ph + (N > 0 ? SESSION_GAP_BELOW_PARENT + childAreaH : 0);
+      return { parent, children, C, cwChild, chChild, pw, ph, width, height, N };
+    });
 
-      const parentId = parent.dataset.flowNodeId;
-      const children = childrenByParent.get(parentId) || [];
-      if (children.length) {
-        children.sort((a, b) => {
-          const ra = convsById[a.dataset.id] || {};
-          const rb = convsById[b.dataset.id] || {};
-          const sa = ra.last_interacted || ra.modified || ra.mtime || 0;
-          const sb = rb.last_interacted || rb.modified || rb.mtime || 0;
-          return sb - sa;
-        });
+    // Bin-pack clusters into rows from viewport top-left. Each row fills
+    // left-to-right until the next cluster would exceed the row budget,
+    // then wraps. Row height is the tallest cluster in that row. Because
+    // the inputs (parent order, cluster sizes) are stable, the output is
+    // identical on every run — running Organize twice is a no-op.
+    const rowBudget = Math.max(MIN_ROW_WIDTH, vpR - vpL - PARENT_PAD * 2);
+    const startX = Math.max(0, vpL + PARENT_PAD);
+    const startY = Math.max(0, vpT + PARENT_PAD);
+    let cursorX = startX;
+    let cursorY = startY;
+    let rowMaxHeight = 0;
+    let rowHasCluster = false;
+    clusters.forEach(cluster => {
+      if (rowHasCluster && (cursorX - startX + cluster.width) > rowBudget) {
+        cursorX = startX;
+        cursorY += rowMaxHeight + CLUSTER_MARGIN;
+        rowMaxHeight = 0;
+        rowHasCluster = false;
       }
-      const baseY = pRect.bottom + SESSION_GAP_BELOW_PARENT;
-      // Track this cluster's growing bounding rect — used so children of the
-      // same cluster don't overlap each other (they're laid out in a grid,
-      // but we also use this rect to compute the final cluster zone).
-      let clusterBounds = {
-        left: pRect.left,
-        top: pRect.top,
-        right: pRect.right,
-        bottom: pRect.bottom,
-      };
-      const placedChildRects = [];
-      children.forEach(child => {
-        const cw = child.offsetWidth;
-        const ch = child.offsetHeight;
-        const colStep = cw + CHILD_GAP_X;
-        const rowStep = ch + CHILD_GAP_Y;
-        let placed = null;
-        for (let row = 0; row < 400 && !placed; row++) {
-          for (let col = 0; col < MAX_COLS; col++) {
-            const x = pRect.left + col * colStep;
-            const y = baseY + row * rowStep;
-            const cand = { left: x, top: y, right: x + cw, bottom: y + ch };
-            // Avoid (1) prior clusters' zones, (2) this cluster's already
-            // placed children, (3) this cluster's parent rect.
-            const collides = clusterRects.some(o => rectsOverlap(o, cand))
-              || placedChildRects.some(o => rectsOverlap(o, cand))
-              || rectsOverlap(pRect, cand);
-            if (!collides) {
-              placed = cand;
-              break;
-            }
-          }
-        }
-        if (!placed) {
-          // Fallback: stack at parent's column below everything we've placed.
-          let stackY = baseY;
-          [...clusterRects, ...placedChildRects, pRect].forEach(o => {
-            if (o.bottom + CHILD_GAP_Y > stackY) stackY = o.bottom + CHILD_GAP_Y;
-          });
-          placed = { left: pRect.left, top: stackY, right: pRect.left + cw, bottom: stackY + ch };
-        }
-        child.style.left = Math.round(placed.left) + 'px';
-        child.style.top = Math.round(placed.top) + 'px';
-        flowNodePositions[child.dataset.flowNodeId] = {
-          x: Math.round(placed.left),
-          y: Math.round(placed.top),
-        };
-        placedChildRects.push(placed);
-        if (placed.left < clusterBounds.left) clusterBounds.left = placed.left;
-        if (placed.top < clusterBounds.top) clusterBounds.top = placed.top;
-        if (placed.right > clusterBounds.right) clusterBounds.right = placed.right;
-        if (placed.bottom > clusterBounds.bottom) clusterBounds.bottom = placed.bottom;
+      const left = cursorX;
+      const top = cursorY;
+      const parent = cluster.parent;
+      parent.style.left = Math.round(left) + 'px';
+      parent.style.top = Math.round(top) + 'px';
+      flowNodePositions[parent.dataset.flowNodeId] = { x: Math.round(left), y: Math.round(top) };
+      const childBaseY = top + cluster.ph + SESSION_GAP_BELOW_PARENT;
+      cluster.children.forEach((child, idx) => {
+        const col = idx % cluster.C;
+        const row = Math.floor(idx / cluster.C);
+        const x = left + col * (cluster.cwChild + CHILD_GAP_X);
+        const y = childBaseY + row * (cluster.chChild + CHILD_GAP_Y);
+        child.style.left = Math.round(x) + 'px';
+        child.style.top = Math.round(y) + 'px';
+        flowNodePositions[child.dataset.flowNodeId] = { x: Math.round(x), y: Math.round(y) };
       });
-      clusterRects.push({
-        left: clusterBounds.left - CLUSTER_PAD,
-        top: clusterBounds.top - CLUSTER_PAD,
-        right: clusterBounds.right + CLUSTER_PAD,
-        bottom: clusterBounds.bottom + CLUSTER_PAD,
-      });
+      cursorX += cluster.width + CLUSTER_MARGIN;
+      if (cluster.height > rowMaxHeight) rowMaxHeight = cluster.height;
+      rowHasCluster = true;
     });
 
     persistFlowNodePositions();
     redrawFlowLinks(board);
-    if (typeof showOpToast === 'function') showOpToast('Organized — no overlaps.', 'info');
+    if (typeof showOpToast === 'function') showOpToast('Organized — tight pack.', 'info');
   }
 
   function flowDraftPositionForParent(parentNodeId, repoPath) {
@@ -6698,6 +6657,7 @@
         if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
           selectConversation(placeholder.id);
         }
+        if (engine === 'cursor') showOpToast('Cursor headless run started.', 'ok');
         if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
@@ -16707,8 +16667,11 @@
       { id: 'o3-mini',      label: 'o3-mini' },
     ],
     cursor: [
-      { id: 'composer-2.5-fast', label: 'composer-2.5-fast (default)' },
-      { id: 'composer-2.5',      label: 'composer-2.5' },
+      { id: 'composer-2.5-fast',             label: 'composer-2.5-fast (default)' },
+      { id: 'gpt-5.3-codex',                 label: 'gpt-5.3-codex' },
+      { id: 'gpt-5.3-codex-high',            label: 'gpt-5.3-codex-high' },
+      { id: 'claude-opus-4-8-thinking-high', label: 'claude-opus-4-8-thinking-high' },
+      { id: 'composer-2.5',                  label: 'composer-2.5' },
     ],
     gemini: [
       { id: 'gemini-2.5-pro',   label: 'gemini-2.5-pro' },
@@ -22100,6 +22063,7 @@
           if (spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
             selectConversation('spawning-' + tempPid);
           }
+          if (engine === 'cursor') showOpToast('Cursor headless run started.', 'ok');
           if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         } else {
           $kptRunBtn.textContent = data.error ? 'Failed' : 'Failed';
@@ -24922,6 +24886,7 @@
         if (placeholder && spawnUsesLogPlaceholder(engine) && typeof selectConversation === 'function') {
           selectConversation(placeholder.id);
         }
+        if (engine === 'cursor') showOpToast('Cursor headless run started.', 'ok');
         if (engine === 'antigravity') showOpToast('Antigravity headless run started.', 'ok');
         setTimeout(refreshConversationList, 600);
         setTimeout(refreshConversationList, 1500);
