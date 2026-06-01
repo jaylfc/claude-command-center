@@ -1693,6 +1693,7 @@
   const _sendingSessions = new Map();
   const _optimisticSessionTouches = new Map();
   const _SENDING_TIMEOUT_MS = 60000;
+  const _PENDING_SEND_ECHO_MAX_MS = _SENDING_TIMEOUT_MS + 15000;
   function _sessionRowMatches(c, sid) {
     if (!c || !sid) return false;
     return (c.session_id === sid) || (c.id === sid);
@@ -1743,6 +1744,16 @@
     if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
       renderSidebar(filterConversations($convSearch.value));
     }
+  }
+  function sessionIsOptimisticallySending(sid) {
+    if (!sid) return false;
+    const entry = _sendingSessions.get(sid);
+    if (!entry) return false;
+    if ((Date.now() - Number(entry.ts || 0)) > _SENDING_TIMEOUT_MS) {
+      clearSessionSending(sid);
+      return false;
+    }
+    return true;
   }
 
   let _optimisticAgentTimer = null;
@@ -2776,7 +2787,10 @@
       delete pane.pendingSendsByConv[convId];
       return;
     }
-    pane.pendingSendsByConv[convId] = _pendingSends.map(p => ({ text: p.text }));
+    pane.pendingSendsByConv[convId] = _pendingSends.map(p => ({
+      text: p.text,
+      ts: Number(p.ts || Date.now()),
+    }));
   }
 
   function appendPendingSendEcho(text, sid, paneId) {
@@ -2791,7 +2805,7 @@
       showOptimisticAgentIndicator($view);
       scrollConversationToEnd($view);
 
-      const entry = { text, element: pendingDiv };
+      const entry = { text, element: pendingDiv, ts: Date.now() };
       pending.element = pendingDiv;
       pending.list = _pendingSends;
       pending.entry = entry;
@@ -2827,7 +2841,13 @@
     const $view = getConvViewForPane(paneId);
     if (!$view) return;
     const sid = sessionIdByConv[convId] || convId;
-    for (const row of saved) {
+    const now = Date.now();
+    const fresh = saved.filter(row => row && row.text && Number(row.ts) && (now - Number(row.ts)) <= _PENDING_SEND_ECHO_MAX_MS);
+    if (fresh.length !== saved.length) {
+      if (fresh.length) pane.pendingSendsByConv[convId] = fresh;
+      else delete pane.pendingSendsByConv[convId];
+    }
+    for (const row of fresh) {
       const text = row && row.text;
       if (!text) continue;
       const normed = _normSend(text);
@@ -5917,6 +5937,36 @@
   try {
     if (localStorage.getItem('ccc-flow-include-archived') === '1') flowIncludeArchived = true;
   } catch (_) {}
+  // Flow-only pin: a session ID pinned here stays visible in the flow
+  // board even when it's archived and "Include archived" is off. This
+  // is independent of the conv-list pin (`c.pinned`) so the user can
+  // keep a finished branch visible in the flow without it cluttering
+  // the main list.
+  let flowPinnedSessionIds = new Set();
+  try {
+    const raw = JSON.parse(localStorage.getItem('ccc-flow-pinned-sessions') || '[]');
+    if (Array.isArray(raw)) flowPinnedSessionIds = new Set(raw.filter(x => typeof x === 'string'));
+  } catch (_) {}
+  function persistFlowPinnedSessionIds() {
+    try { localStorage.setItem('ccc-flow-pinned-sessions', JSON.stringify(Array.from(flowPinnedSessionIds))); } catch (_) {}
+  }
+  function isFlowPinned(rowOrId) {
+    if (!rowOrId) return false;
+    if (typeof rowOrId === 'string') return flowPinnedSessionIds.has(rowOrId);
+    return flowPinnedSessionIds.has(rowOrId.id || '')
+      || flowPinnedSessionIds.has(rowOrId.session_id || '');
+  }
+  function toggleFlowPin(sid) {
+    if (!sid) return;
+    if (flowPinnedSessionIds.has(sid)) flowPinnedSessionIds.delete(sid);
+    else flowPinnedSessionIds.add(sid);
+    persistFlowPinnedSessionIds();
+    const $s = document.getElementById('convSearch');
+    const convs = (typeof filterConversations === 'function')
+      ? filterConversations($s ? $s.value : '')
+      : (conversationsData || []);
+    renderSidebar(convs);
+  }
   let flowGestureStartZoom = 1;
   let flowDraftSessions = [];
   try {
@@ -6448,10 +6498,11 @@
   function flowIsVisibleSession(c) {
     if (!c) return false;
     if (c.source === 'backlog' || c.source === 'github_pr') return false;
-    if (c.archived && !flowIncludeArchived) return false;
+    const pinnedInFlow = isFlowPinned(c);
+    if (c.archived && !flowIncludeArchived && !pinnedInFlow) return false;
     const col = classifyKanbanColumn(c);
     if (col === 'backlog') return false;
-    if (col === 'archived' && !flowIncludeArchived) return false;
+    if (col === 'archived' && !flowIncludeArchived && !pinnedInFlow) return false;
     return true;
   }
 
@@ -7290,6 +7341,17 @@
       const archiveBtn = rec.kind === 'session'
         ? '<button type="button" class="flow-node-archive" data-flow-action="archive-session" title="Archive session" aria-label="Archive session">&#128229;</button>'
         : '';
+      const flowPinBtn = rec.kind === 'session' && rec.rowId
+        ? (() => {
+            const pinned = isFlowPinned(rec.rowId);
+            const title = pinned
+              ? 'Unpin from flow board'
+              : 'Pin to flow board — stays visible even when archived & hidden from list';
+            const glyph = pinned ? '📍' : '📌';
+            return '<button type="button" class="flow-node-flowpin' + (pinned ? ' is-pinned' : '')
+              + '" data-flow-action="toggle-flow-pin" title="' + title + '" aria-label="' + title + '" aria-pressed="' + (pinned ? 'true' : 'false') + '">' + glyph + '</button>';
+          })()
+        : '';
       const bodyHtml = rec.kind === 'draft-session'
         ? '<input type="text" class="flow-draft-input" data-draft-id="' + escapeAttr(rec.draftId) + '"'
           + ' value="' + escapeAttr(rec.title || '') + '" placeholder="Name or task this session..." autocomplete="off">'
@@ -7306,6 +7368,7 @@
         + addBtn
         + collapseBtn
         + archiveBtn
+        + flowPinBtn
         + '<div class="flow-node-kicker">' + escapeHtml(rec.kicker) + '</div>'
         + bodyHtml
         + '</div>';
@@ -7552,6 +7615,14 @@
             ev.preventDefault();
             ev.stopPropagation();
             archiveFlowSession(node.dataset.id);
+          });
+        }
+        const flowPinBtn = node.querySelector('[data-flow-action="toggle-flow-pin"]');
+        if (flowPinBtn) {
+          flowPinBtn.addEventListener('click', ev => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            toggleFlowPin(node.dataset.id);
           });
         }
         node.addEventListener('mouseenter', () => _convPrefetchSchedule(node.dataset.id));
@@ -10839,7 +10910,7 @@
       // by clearSessionSending when real sidecar data lands.
       let liveToolHtml = '';
       const sidVal = c.session_id || c.id;
-      if (sidVal && _sendingSessions.has(sidVal)) {
+      if (sidVal && sessionIsOptimisticallySending(sidVal)) {
         liveToolHtml = '<span class="conv-live-tool sending" title="Sending — waiting for the first response from the agent">'
           + '<span class="conv-live-name">● Sending&hellip;</span>'
           + '</span>';
