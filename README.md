@@ -4,12 +4,7 @@
 
 One local dashboard for every **Claude Code**, **Codex**, and **Antigravity** session on your Mac. Spawn in parallel, ship in parallel.
 
-![Claude Command Center demo](docs/images/demo.gif)
-
-> **Hero GIF placeholder.** The image above is the current demo loop
-> (`docs/images/demo.gif`). When a fresher 20–30s capture lands, swap
-> the path here — see [`docs/hero-placeholder.md`](docs/hero-placeholder.md)
-> for the target shot.
+![Claude Command Center demo](docs/images/demo.png)
 
 Install with curl:
 
@@ -30,8 +25,8 @@ Or download the macOS DMG and drag `CCC.app` to Applications:
 
 Try the read-only demo first: [ccc.amirfish.ai/demo](https://ccc.amirfish.ai/demo/) (or [amirfish1.github.io/claude-command-center/demo](https://amirfish1.github.io/claude-command-center/demo/)) - full kanban with seeded fake data, no install required.
 
-<video src="https://github.com/user-attachments/assets/9d00b168-c21c-4397-9334-e3b4a3515500" controls width="100%" poster="docs/images/kanban.png">
-  Your browser doesn't support inline video. <a href="https://github.com/amirfish1/claude-command-center/releases/download/v0.1.0/CCC-web.mp4">Download the demo</a> or watch the GIF above.
+<video src="https://github.com/amirfish1/claude-command-center/releases/download/v4.3.2.2/May-23-v4-CCC-v5.mp4" controls width="100%" poster="docs/images/kanban.png">
+  Your browser doesn't support inline video. <a href="https://github.com/amirfish1/claude-command-center/releases/download/v4.3.2.2/May-23-v4-CCC-v5.mp4">Download the demo</a> or watch the GIF above.
 </video>
 
 CCC latches onto every Claude Code, Codex, and Antigravity session on your Mac — terminal sessions, headless processes, and sessions you spawned from the dashboard. It treats each agent's on-disk state as the source of truth, so nothing slips through. Spawn the next task while the first is still building. Switch between projects without losing context. Ship multiple things at once.
