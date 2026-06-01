@@ -136,6 +136,21 @@ class TestClassifyAttentionSessionCases(unittest.TestCase):
         # The default next_step mentions the pending tool name.
         self.assertIn("Bash", item["next_step"])
 
+    def test_stale_codex_tool_is_priority_1_attention(self):
+        row = _session_row(
+            source="codex",
+            stale_tool_call=True,
+            stale_tool_age_s=3700,
+            pending_tool="write_stdin",
+            pending_file="session 7095",
+        )
+        item = self.server._classify_attention(row)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["kind"], "stale_tool_call")
+        self.assertEqual(item["priority"], 1)
+        self.assertIn("Codex", item["where"])
+        self.assertIn("Wake Codex", item["next_step"])
+
     def test_live_sidecar_waiting_is_priority_2(self):
         row = _session_row(is_live=True, sidecar_status="waiting")
         item = self.server._classify_attention(row)

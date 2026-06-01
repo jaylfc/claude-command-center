@@ -2726,6 +2726,67 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(parsed["blocks"][1]["name"], "run_terminal_cmd")
         self.assertIn("git status --short", parsed["blocks"][1].get("detail", ""))
 
+    def test_parse_cursor_event_skips_redacted_placeholder_text(self):
+        server = self.server
+        ev = {
+            "role": "assistant",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "[REDACTED]"},
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {"path": str(self.repo / "server.py")},
+                    },
+                    {"type": "text", "text": "Done.\n\n[REDACTED]"},
+                ],
+            },
+        }
+
+        parsed = server._parse_cursor_event(ev, 8)
+
+        self.assertEqual(parsed["type"], "assistant")
+        self.assertEqual([b["kind"] for b in parsed["blocks"]], ["tool_use", "text"])
+        self.assertEqual(parsed["blocks"][1]["text"], "Done.")
+        self.assertNotIn("[REDACTED]", json.dumps(parsed))
+
+    def test_resume_cursor_prefers_current_default_over_stale_spawn_model(self):
+        server = self.server
+        sid = "00000000-0000-4000-8000-000000000006"
+        proc = mock.Mock(pid=4249)
+        proc.poll.return_value = None
+        original_spawns = list(server._spawned_sessions)
+        server._spawned_sessions.clear()
+        try:
+            with mock.patch.dict(os.environ, {"CCC_CURSOR_MODEL": ""}), \
+                 mock.patch.object(
+                     server,
+                     "_resolve_cursor_bin",
+                     return_value={"available": True, "bin": "/usr/bin/cursor-agent-test"},
+                 ), mock.patch.object(
+                     server,
+                     "_spawn_registry_entry_for_session",
+                     return_value={"cwd": str(self.repo), "model": "composer-2.5-fast"},
+                 ), mock.patch.object(server, "_cursor_transcript_path", return_value=None), \
+                 mock.patch.object(server, "_git_toplevel_for_existing_dir", return_value=str(self.repo)), \
+                 mock.patch.object(server, "_spawn_model_for_engine", return_value="auto"), \
+                 mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
+                 mock.patch.object(server, "_record_spawn_to_registry"):
+                result = server.resume_session_cursor(sid, "second")
+        finally:
+            for entry in server._spawned_sessions:
+                fh = entry.get("log_fh")
+                if fh:
+                    fh.close()
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model"], "auto")
+        cmd = popen.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--model") + 1], "auto")
+
     def test_resolve_cursor_bin_uses_local_bin_candidate(self):
         server = self.server
         cursor_bin = pathlib.Path(self.tmp_home, ".local", "bin", "cursor-agent")
@@ -2791,6 +2852,54 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertTrue(rows[0]["has_commit"])
         self.assertEqual(parsed["events"][0]["type"], "user_text")
         self.assertEqual(parsed["events"][1]["type"], "assistant")
+
+    def test_find_cursor_conversations_ignores_redacted_placeholder_tail(self):
+        server = self.server
+        sid = "00000000-0000-4000-8000-000000000007"
+        slug = server._cursor_project_slug(self.repo)
+        transcript_dir = server.CURSOR_PROJECTS_ROOT / slug / "agent-transcripts" / sid
+        transcript_dir.mkdir(parents=True)
+        transcript_path = transcript_dir / f"{sid}.jsonl"
+        transcript_path.write_text(
+            "\n".join([
+                json.dumps({
+                    "role": "user",
+                    "timestamp": "2026-06-01T12:00:00Z",
+                    "message": {"content": [{"type": "text", "text": "Please inspect"}]},
+                }),
+                json.dumps({
+                    "role": "assistant",
+                    "timestamp": "2026-06-01T12:01:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "[REDACTED]"},
+                            {
+                                "type": "tool_use",
+                                "name": "Grep",
+                                "input": {"pattern": "needle", "path": str(self.repo)},
+                            },
+                        ],
+                    },
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        server._conv_meta_cache.clear()
+
+        rows = server.find_cursor_conversations(
+            repo_path=str(self.repo),
+            include_old=True,
+            repo_only=True,
+            resolve_pr_states=False,
+            resolve_worktree_dirty=False,
+        )
+        row = next(r for r in rows if r["session_id"] == sid)
+        parsed = server.parse_conversation(sid, use_cache=False)
+
+        self.assertIsNone(row["last_assistant_text"])
+        self.assertEqual(row["pending_tool"], "Grep")
+        self.assertEqual(parsed["events"][1]["blocks"][0]["kind"], "tool_use")
+        self.assertNotIn("[REDACTED]", json.dumps(parsed["events"]))
 
     def test_codex_app_server_queues_active_turn(self):
         server = self.server
@@ -4320,6 +4429,26 @@ class TestPendingInputs(unittest.TestCase):
         self.assertEqual(events[1]["text"], "r2")
         self.assertEqual(events[2]["text"], "t1")
         self.assertTrue(events[2]["pending"])
+
+    def test_conv_bytes_cache_misses_when_pending_input_queued(self):
+        """Pre-serialized /api/conversations bodies must not hide queued injects."""
+        sid = "cache-pending-test-session"
+        proj = self.server.PROJECTS_ROOT / "-cache-pending"
+        proj.mkdir(parents=True, exist_ok=True)
+        jsonl = proj / f"{sid}.jsonl"
+        jsonl.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n",
+            encoding="utf-8",
+        )
+        result = self.server.parse_conversation(sid, after_line=0, use_cache=False)
+        raw = json.dumps(result).encode()
+        self.server._conv_response_bytes_put(sid, 0, raw, None)
+        self.assertIsNotNone(self.server._conv_response_bytes_get(sid, 0))
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue[sid] = ["still waiting"]
+        self.assertIsNone(self.server._conv_response_bytes_get(sid, 0))
+        with self.server._pending_terminal_input_lock:
+            self.server._pending_terminal_input_queue.clear()
 
 
 class TestSessionUsageDedup(unittest.TestCase):

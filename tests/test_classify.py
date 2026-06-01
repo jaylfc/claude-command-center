@@ -1529,6 +1529,51 @@ class TestCodexActivityFields(unittest.TestCase):
         self.assertIsNone(dormant["sidecar_tool"])
         self.assertFalse(dormant["sidecar_in_flight"])
 
+    def test_stale_codex_tool_is_not_treated_as_running(self):
+        tail = {
+            "pending_tool": "write_stdin",
+            "pending_file": "session 7095",
+            "pending_tool_ts": 1700000000,
+            "last_meaningful_ts": 1700000000,
+            "last_event_type": "assistant",
+        }
+
+        stale = self.server._codex_stale_tool_fields(
+            tail,
+            now=1700000901,
+            threshold_s=900,
+        )
+        fields = self.server._codex_activity_fields_from_tail(tail, live=True)
+
+        self.assertTrue(stale["stale_tool_call"])
+        self.assertEqual(stale["stale_tool_age_s"], 901)
+        self.assertIsNone(fields["sidecar_tool"])
+        self.assertFalse(fields["sidecar_in_flight"])
+
+    def test_codex_tail_meta_records_pending_tool_timestamp(self):
+        event = {
+            "type": "response_item",
+            "timestamp": "2026-06-01T17:01:37.718Z",
+            "payload": {
+                "type": "function_call",
+                "name": "write_stdin",
+                "call_id": "call_stale",
+                "arguments": json.dumps({
+                    "session_id": 7095,
+                    "chars": "",
+                    "yield_time_ms": 1000,
+                }),
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            _write_jsonl_events(path, [event])
+            meta = self.server._extract_codex_tail_meta(path)
+
+        self.assertEqual(meta["pending_tool"], "write_stdin")
+        self.assertGreater(meta["pending_tool_ts"], 0)
+        self.assertEqual(meta["pending_tool_ts"], meta["last_meaningful_ts"])
+
 
 class TestShellCommandPreview(unittest.TestCase):
     @classmethod
@@ -1769,6 +1814,46 @@ class TestAddSidecarFields(unittest.TestCase):
         self.assertIsNone(entry["sidecar_file"])
         self.assertFalse(entry["sidecar_has_writes"])
         self.assertEqual(entry["sidecar_ts"], 0)
+
+
+class TestLiveSessionsActivity(unittest.TestCase):
+    """build_live_sessions_activity() backs /api/sessions/live-activity."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp_home = tempfile.mkdtemp(prefix="ccc-live-act-home-")
+        cls._prev_env = {"HOME": os.environ.get("HOME")}
+        os.environ["HOME"] = str(Path(cls.tmp_home).resolve())
+        cls.server = _fresh_server()
+        cls.sidecar_dir = cls.server.SIDECAR_STATE_DIR
+        cls.sidecar_dir.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        for k, v in cls._prev_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        shutil.rmtree(cls.tmp_home, ignore_errors=True)
+
+    def test_live_activity_includes_in_flight_bash(self):
+        sid = "live-bash-sid-000000000001"
+        inflight = {
+            "tool": "Bash",
+            "file": "git status",
+            "started_at": 1700000001,
+        }
+        (self.sidecar_dir / f"{sid}_in_flight.json").write_text(json.dumps(inflight))
+        with mock.patch.object(self.server, "_archive_session_is_live", return_value=True):
+            payload = self.server.build_live_sessions_activity()
+        self.assertIn(sid, payload)
+        row = payload[sid]
+        self.assertTrue(row.get("is_live"))
+        self.assertEqual(row.get("sidecar_tool"), "Bash")
+        self.assertTrue(row.get("sidecar_in_flight"))
 
 
 if __name__ == "__main__":

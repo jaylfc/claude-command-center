@@ -600,6 +600,83 @@ def _session_load_fail(err):
         })
 
 
+_SESSIONS_SINGLEFLIGHT_LOCK = threading.Lock()
+_SESSIONS_SINGLEFLIGHT = {}
+_SESSIONS_RESPONSE_CACHE = {}
+
+
+def _sessions_cache_ttl_seconds():
+    try:
+        ms = int(os.environ.get("CCC_SESSIONS_CACHE_TTL_MS", "2000"))
+    except (TypeError, ValueError):
+        ms = 2000
+    return max(0, ms) / 1000.0
+
+
+def _cached_sessions_rows(key):
+    ttl = _sessions_cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    with _SESSIONS_SINGLEFLIGHT_LOCK:
+        cached = _SESSIONS_RESPONSE_CACHE.get(key)
+        if not cached:
+            return None
+        if time.time() - cached.get("ts", 0) > ttl:
+            return None
+        return list(cached.get("rows") or [])
+
+
+def _load_sessions_singleflight(repo_path, *, include_old=False, progress=True):
+    """Run one /api/sessions scan per repo/age mode at a time.
+
+    The browser can trigger a foreground load, a restore load, and a poller load
+    close together. Each scan walks transcript stores and may run git/GitHub
+    probes; parallel copies just contend on the GIL and make unrelated endpoints
+    feel hung. Followers wait for the leader's short-lived cached result.
+    """
+    repo_path = resolve_repo_path(repo_path)
+    key = (repo_path, bool(include_old))
+    cached = _cached_sessions_rows(key)
+    if cached is not None:
+        return cached
+
+    while True:
+        with _SESSIONS_SINGLEFLIGHT_LOCK:
+            flight = _SESSIONS_SINGLEFLIGHT.get(key)
+            if flight is None:
+                event = threading.Event()
+                _SESSIONS_SINGLEFLIGHT[key] = {"event": event}
+                break
+            event = flight["event"]
+        event.wait(timeout=60)
+        cached = _cached_sessions_rows(key)
+        if cached is not None:
+            return cached
+
+    try:
+        if progress:
+            _session_load_begin(repo_path)
+        rows = find_all_sessions(
+            repo_path,
+            progress=_session_load_set_step if progress else None,
+            include_old=include_old,
+        )
+        if progress:
+            _session_load_complete(rows)
+        with _SESSIONS_SINGLEFLIGHT_LOCK:
+            _SESSIONS_RESPONSE_CACHE[key] = {"ts": time.time(), "rows": list(rows or [])}
+        return rows
+    except Exception as exc:
+        if progress:
+            _session_load_fail(exc)
+        raise
+    finally:
+        with _SESSIONS_SINGLEFLIGHT_LOCK:
+            flight = _SESSIONS_SINGLEFLIGHT.pop(key, None)
+            if flight:
+                flight["event"].set()
+
+
 # ── Archive-load progress (mirrors session-load) ──────────────────────────
 #
 # The archive view fires /api/conversations/all on every page load, which
@@ -2080,6 +2157,115 @@ def _archive_session_is_live(session_id):
     return session_id in _live_engine_session_ids()
 
 
+_LIVE_ACTIVITY_FIELD_KEYS = (
+    "is_live",
+    "sidecar_status",
+    "sidecar_has_writes",
+    "sidecar_tool",
+    "sidecar_file",
+    "sidecar_ts",
+    "sidecar_in_flight",
+    "pending_tool",
+    "pending_file",
+    "last_event_type",
+    "needs_approval",
+    "needs_approval_message",
+    "question_waiting",
+    "question_text",
+    "question_header",
+    "question_preamble",
+    "question_options",
+    "question_option_details",
+)
+
+
+def _discover_live_session_ids():
+    """Session ids that may have live-work indicators right now.
+
+    Cheap set union: Claude registry, engine CLI resume args, and any
+    sidecar marker files on disk. Used by /api/sessions/live-activity so the
+    sidebar can refresh WIP chips without re-scanning every JSONL.
+    """
+    sids = set()
+    try:
+        sids.update(_load_session_registry().keys())
+    except Exception:
+        pass
+    try:
+        sids.update(_live_engine_session_ids())
+    except Exception:
+        pass
+    if SIDECAR_STATE_DIR.is_dir():
+        try:
+            for f in SIDECAR_STATE_DIR.iterdir():
+                if not f.is_file():
+                    continue
+                name = f.stem
+                if name.endswith("_writes"):
+                    sid = name[: -len("_writes")]
+                elif name.endswith("_in_flight"):
+                    sid = name[: -len("_in_flight")]
+                elif name.endswith("_needs_approval"):
+                    sid = name[: -len("_needs_approval")]
+                else:
+                    sid = name
+                if sid:
+                    sids.add(sid)
+        except OSError:
+            pass
+    return sids
+
+
+def _live_activity_entry_for_session(session_id):
+    """Sidecar-shaped activity snapshot for one session (no JSONL walk)."""
+    entry = {"session_id": session_id, "is_live": _archive_session_is_live(session_id)}
+    if not entry["is_live"]:
+        return entry
+    engine = _detect_session_engine(session_id)
+    if engine == "codex":
+        path = _resolve_codex_rollout_path(session_id)
+        tail = _extract_codex_tail_meta(path) if path else {}
+        entry.update(_codex_activity_fields_from_tail(tail, True))
+        entry["pending_tool"] = tail.get("pending_tool")
+        entry["pending_file"] = tail.get("pending_file")
+        entry["last_event_type"] = tail.get("last_event_type")
+    elif engine == "gemini":
+        path = _resolve_gemini_chat_path(session_id)
+        tail = _extract_gemini_tail_meta(path) if path else {}
+        entry.update(_gemini_activity_fields_from_tail(tail, True))
+        entry["pending_tool"] = tail.get("pending_tool")
+        entry["pending_file"] = tail.get("pending_file")
+        entry["last_event_type"] = tail.get("last_event_type")
+    elif engine == "cursor":
+        path = _cursor_transcript_path(session_id)
+        tail = _extract_cursor_tail_meta(path) if path else {}
+        entry.update(_cursor_activity_fields_from_tail(tail, True))
+        entry["pending_tool"] = tail.get("pending_tool")
+        entry["pending_file"] = tail.get("pending_file")
+        entry["last_event_type"] = tail.get("last_event_type")
+    elif engine == "antigravity":
+        path = _antigravity_transcript_path(session_id)
+        tail = _extract_antigravity_tail_meta(path) if path else {}
+        entry.update(_antigravity_activity_fields_from_tail(tail, True))
+        entry["pending_tool"] = tail.get("pending_tool")
+        entry["pending_file"] = tail.get("pending_file")
+        entry["last_event_type"] = tail.get("last_event_type")
+    else:
+        _add_sidecar_fields(entry)
+    return entry
+
+
+def build_live_sessions_activity():
+    """Map session_id → live-work fields for every currently-live session."""
+    out = {}
+    for sid in _discover_live_session_ids():
+        if not _archive_session_is_live(sid):
+            continue
+        raw = _live_activity_entry_for_session(sid)
+        out[sid] = {k: raw.get(k) for k in _LIVE_ACTIVITY_FIELD_KEYS}
+    return out
+
+
 def _decode_project_slug(slug):
     """Best-effort reverse of _encode_project_slug. The encoding is lossy
     (every non-alphanumeric becomes `-`), so a single slug can map to many
@@ -2820,7 +3006,17 @@ def find_all_conversations(
 
 _ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 2
 _ARCHIVE_RESPONSE_CACHE_FILE = COMMAND_CENTER_STATE_DIR / "archive-conversations-cache.json"
-_ARCHIVE_RESPONSE_CACHE_FRESH_TTL = 30
+# The all-repos archive payload can be several MB on machines with years of
+# agent history. Refreshing it every 30 seconds keeps the Python server in a
+# near-permanent scan/JSON cycle and starves click-to-open requests. Keep the
+# default conservative for freshness, but make it tunable for power users.
+try:
+    _ARCHIVE_RESPONSE_CACHE_FRESH_TTL = max(
+        30.0,
+        float(os.environ.get("CCC_ARCHIVE_CACHE_TTL_SEC", "300")),
+    )
+except ValueError:
+    _ARCHIVE_RESPONSE_CACHE_FRESH_TTL = 300.0
 _ARCHIVE_RESPONSE_CACHE_LOCK = threading.Lock()
 _ARCHIVE_RESPONSE_CACHE_LOADED = False
 _ARCHIVE_RESPONSE_CACHE = {}
@@ -10290,7 +10486,8 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
     spawned_engine_by_pid = {s["pid"]: s.get("engine", "claude") for s in live_spawns}
     for c in conversations:
         c["source"] = "interactive"
-        c["is_live"] = c["session_id"] in live_sids
+        sid = c.get("session_id")
+        c["is_live"] = _archive_session_is_live(sid) if sid else False
         reg_pid = (registry.get(c["session_id"]) or {}).get("pid")
         c["spawn_pid"] = reg_pid if reg_pid in spawned_pids else None
         if c["spawn_pid"]:
@@ -10836,9 +11033,26 @@ _CONV_BYTES_CACHE_LOCK = threading.Lock()
 _CONV_BYTES_CACHE_MAX = 48
 
 
+def _session_has_pending_input(session_id):
+    """True when inject/resume queues still hold unsent text for this session."""
+    if not session_id:
+        return False
+    with _pending_resume_lock:
+        if _pending_resume_queue.get(session_id):
+            return True
+    with _pending_terminal_input_lock:
+        if _pending_terminal_input_queue.get(session_id):
+            return True
+    return False
+
+
 def _conv_response_bytes_get(conversation_id, after_line):
     mtime = _conv_parse_jsonl_mtime(conversation_id)
     if mtime <= 0:
+        return None
+    # Queued injects are not in the JSONL yet; a pre-baked response from
+    # before the queue grew would omit them until mtime changes.
+    if _session_has_pending_input(conversation_id):
         return None
     key = (conversation_id, int(after_line), mtime)
     with _CONV_BYTES_CACHE_LOCK:
@@ -12113,6 +12327,7 @@ def _run_worktree_init_hook(worktree_path, parent_repo, session_name, log_fh):
 CODEX_APP_BUNDLE_PATH = "/Applications/Codex.app/Contents/Resources/codex"
 CODEX_STATE_DB = Path.home() / ".codex" / "state_5.sqlite"
 CODEX_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
+_CODEX_META_VERSION = 2
 _CODEX_APP_SERVER_LOCK = threading.Condition()
 _CODEX_APP_SERVER_PROC = None
 _CODEX_APP_SERVER_READER = None
@@ -13887,11 +14102,17 @@ def _extract_codex_tail_meta(path):
     except OSError:
         return {}
     cached = _conv_meta_cache.get(str(path))
-    if cached and cached.get("mtime") == mtime and cached.get("engine") == "codex":
+    if (
+        cached
+        and cached.get("mtime") == mtime
+        and cached.get("engine") == "codex"
+        and cached.get("meta_version") == _CODEX_META_VERSION
+    ):
         return cached
 
     meta = {
         "engine": "codex",
+        "meta_version": _CODEX_META_VERSION,
         "mtime": mtime,
         "first_message": None,
         "last_meaningful_ts": 0,
@@ -13900,6 +14121,7 @@ def _extract_codex_tail_meta(path):
         "last_event_type": None,
         "pending_tool": None,
         "pending_file": None,
+        "pending_tool_ts": 0,
         "has_edit": False,
         "has_commit": False,
         "has_push": False,
@@ -13947,6 +14169,7 @@ def _extract_codex_tail_meta(path):
                         meta["last_event_type"] = "user"
                         meta["pending_tool"] = None
                         meta["pending_file"] = None
+                        meta["pending_tool_ts"] = 0
                         if ts_epoch:
                             meta["last_meaningful_ts"] = ts_epoch
                     elif ptype == "agent_message":
@@ -13964,6 +14187,7 @@ def _extract_codex_tail_meta(path):
                         meta["last_event_type"] = "result"
                         meta["pending_tool"] = None
                         meta["pending_file"] = None
+                        meta["pending_tool_ts"] = 0
                         if ts_epoch:
                             meta["last_meaningful_ts"] = ts_epoch
                     continue
@@ -13979,6 +14203,7 @@ def _extract_codex_tail_meta(path):
                         meta["last_meaningful_ts"] = ts_epoch
                     meta["pending_tool"] = _codex_tool_name(name) or name
                     meta["pending_file"] = (detail[:80] if isinstance(detail, str) else None)
+                    meta["pending_tool_ts"] = ts_epoch or meta.get("last_meaningful_ts") or mtime
                     if _codex_tool_name(name) == "apply_patch":
                         meta["has_edit"] = True
                         meta["last_edit_pos"] = pos
@@ -14011,6 +14236,7 @@ def _extract_codex_tail_meta(path):
                     if call:
                         meta["pending_tool"] = None
                         meta["pending_file"] = None
+                        meta["pending_tool_ts"] = 0
                     meta["last_event_type"] = "assistant"
                     if ts_epoch:
                         meta["last_meaningful_ts"] = ts_epoch
@@ -14038,6 +14264,35 @@ def _extract_codex_tail_meta(path):
     return meta
 
 
+def _codex_stale_tool_threshold_s():
+    try:
+        threshold = float(os.environ.get("CCC_CODEX_STALE_TOOL_SEC", "900"))
+    except (TypeError, ValueError):
+        threshold = 900.0
+    return max(0.0, threshold)
+
+
+def _codex_stale_tool_fields(tail, now=None, threshold_s=None):
+    threshold = _codex_stale_tool_threshold_s() if threshold_s is None else max(0.0, float(threshold_s))
+    fields = {
+        "stale_tool_call": False,
+        "stale_tool_age_s": 0,
+        "stale_tool_threshold_s": int(threshold),
+    }
+    if not tail or not tail.get("pending_tool"):
+        return fields
+    ts = tail.get("pending_tool_ts") or 0
+    if not ts:
+        return fields
+    try:
+        age = max(0.0, float(now if now is not None else time.time()) - float(ts))
+    except (TypeError, ValueError):
+        return fields
+    fields["stale_tool_age_s"] = int(age)
+    fields["stale_tool_call"] = bool(threshold > 0 and age >= threshold)
+    return fields
+
+
 def _codex_activity_fields_from_tail(tail, live):
     """Map Codex rollout tail state into the sidecar-shaped UI fields.
 
@@ -14061,6 +14316,8 @@ def _codex_activity_fields_from_tail(tail, live):
         "question_option_details": [],
     }
     if not live or not tail:
+        return fields
+    if _codex_stale_tool_fields(tail).get("stale_tool_call"):
         return fields
 
     ts = tail.get("last_meaningful_ts") or 0
@@ -14210,6 +14467,7 @@ def find_codex_conversations(
         spawn_pid = spawn_info.get("pid")
         spawn_alive = bool(spawn_info.get("alive"))
         codex_activity = _codex_activity_fields_from_tail(tail, spawn_alive)
+        codex_stale_tool = _codex_stale_tool_fields(tail)
         out.append({
             "id": sid,
             "session_id": sid,
@@ -14251,6 +14509,7 @@ def find_codex_conversations(
             "last_event_type": tail.get("last_event_type"),
             "pending_tool": tail.get("pending_tool"),
             "pending_file": tail.get("pending_file"),
+            "pending_tool_ts": tail.get("pending_tool_ts") or 0,
             "last_assistant_text": tail.get("last_assistant_text"),
             "tail_issue_number": None,
             "tail_pr_number": tail.get("tail_pr_number"),
@@ -14264,6 +14523,7 @@ def find_codex_conversations(
             "is_live": spawn_alive,
             "spawn_pid": spawn_pid,
             **codex_activity,
+            **codex_stale_tool,
             "needs_approval": False,
             "needs_approval_message": "",
             "model": row.get("model") or tail.get("model") or "",
@@ -15137,7 +15397,7 @@ CURSOR_HOME = Path.home() / ".cursor"
 CURSOR_PROJECTS_ROOT = CURSOR_HOME / "projects"
 CURSOR_LOCAL_BIN = Path.home() / ".local" / "bin" / "cursor-agent"
 CURSOR_CONTEXT_LIMIT = 0
-_CURSOR_META_VERSION = 1
+_CURSOR_META_VERSION = 2
 CURSOR_APP_BUNDLE_CANDIDATES = (
     Path("/Applications/Cursor.app/Contents/Resources/app/bin/cursor-agent"),
     Path("/Applications/Cursor.app/Contents/Resources/cursor-agent"),
@@ -16580,8 +16840,21 @@ def _cursor_message_text(ev):
     parts = []
     for block in _cursor_content_blocks(ev):
         if block.get("type") == "text" and isinstance(block.get("text"), str):
-            parts.append(block.get("text"))
+            text = _cursor_visible_text(block.get("text"))
+            if text:
+                parts.append(text)
     return "\n".join(p for p in parts if p)
+
+
+def _cursor_text_is_redacted_placeholder(text):
+    return isinstance(text, str) and text.strip().lower() == "[redacted]"
+
+
+def _cursor_visible_text(text):
+    if not isinstance(text, str):
+        return ""
+    lines = [line for line in text.splitlines() if not _cursor_text_is_redacted_placeholder(line)]
+    return "\n".join(lines).strip()
 
 
 def _cursor_user_text(text):
@@ -17075,7 +17348,7 @@ def _parse_cursor_event(ev, line_num, usage_map=None):
         for block in _cursor_content_blocks(ev):
             btype = block.get("type")
             if btype == "text":
-                text = (block.get("text") or "").strip()
+                text = _cursor_visible_text(block.get("text") or "")
                 if text:
                     blocks.append({"kind": "text", "text": text})
             elif btype == "tool_use":
@@ -19057,11 +19330,13 @@ def resume_session_cursor(session_id, text):
     if not Path(cwd).is_dir():
         cwd = str(Path.cwd())
     override = _get_session_override(session_id)
+    override_model = ((override or {}).get("model") if override else None)
     model = (
-        ((override or {}).get("model") if override else None)
+        override_model
         or os.environ.get("CCC_CURSOR_MODEL")
-        or spawned_ctx.get("model")
         or (tail or {}).get("model")
+        or _spawn_model_for_engine("cursor")
+        or spawned_ctx.get("model")
         or _spawn_fallback_model_for_engine("cursor")
     )
     timestamp = time.strftime("%Y%m%dT%H%M%S")
@@ -28104,17 +28379,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except RepoContextError as e:
                 self.send_json(e.as_payload(), e.status)
                 return
-            _session_load_begin(ctx["repo_path"])
-            try:
-                rows = find_all_sessions(
-                    ctx["repo_path"],
-                    progress=_session_load_set_step,
-                    include_old=include_old,
-                )
-                _session_load_complete(rows)
-            except Exception as exc:
-                _session_load_fail(exc)
-                raise
+            rows = _load_sessions_singleflight(
+                ctx["repo_path"],
+                include_old=include_old,
+                progress=True,
+            )
             _save_conv_meta_cache()
             self.send_json(rows)
         elif path == "/api/conversations":
@@ -28280,6 +28549,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_html(html)
             except OSError as e:
                 self.send_json({"error": "morning/kanban.html missing", "detail": str(e)}, 500)
+        elif path == "/api/sessions/live-activity":
+            # Cheap poll target for the sidebar: refresh WIP / tool chips for
+            # every live session without re-running the multi-MB archive scan.
+            self.send_json({"sessions": build_live_sessions_activity()})
         elif path == "/api/session-status":
             qs = urllib.parse.parse_qs(parsed.query)
             sid = qs.get("session_id", [""])[0]
@@ -28300,7 +28573,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if is_codex_status:
                 path = _resolve_codex_rollout_path(sid)
                 tail = _extract_codex_tail_meta(path) if path else {}
+                status["pending_tool"] = tail.get("pending_tool") if tail else None
+                status["pending_file"] = tail.get("pending_file") if tail else None
+                status["pending_tool_ts"] = tail.get("pending_tool_ts") if tail else 0
                 status.update(_codex_activity_fields_from_tail(tail, status.get("live")))
+                status.update(_codex_stale_tool_fields(tail))
             elif is_gemini_status:
                 path = _resolve_gemini_chat_path(sid)
                 tail = _extract_gemini_tail_meta(path) if path else {}
@@ -32048,6 +32325,22 @@ def _classify_attention(c):
         last_event = c.get("last_event_type")
         sidecar_status = c.get("sidecar_status")
 
+        if c.get("stale_tool_call"):
+            tool_age = c.get("stale_tool_age_s") or 0
+            age_minutes = max(1, round(tool_age / 60)) if tool_age else None
+            age_text = f" for about {age_minutes}m" if age_minutes else ""
+            return {
+                "kind": "stale_tool_call", "priority": 1,
+                "session_id": sid, "name": name,
+                "where": "Needs attention · Codex tool stopped reporting",
+                "did": state.get("did"),
+                "insight": state.get("insight"),
+                "next_step": state.get("next_step_user") or
+                    (f"Wake Codex — {pending_tool or 'a tool call'} has been open{age_text}" +
+                     (f" on {pending_file}" if pending_file else "")),
+                "has_structured": has_structured,
+            }
+
         if live and pending_tool:
             return {
                 "kind": "pending_tool", "priority": 1,
@@ -33059,9 +33352,11 @@ def main():
     print(f"  State dir:     {COMMAND_CENTER_STATE_DIR}")
     print(f"  Projects dir:  {PROJECTS_ROOT}")
     print(f"  Press Ctrl+C to stop")
-    # Warm the metadata cache in the background so the first /api/sessions
-    # request returns instantly instead of taking ~3s.
-    threading.Thread(target=_warm_cache, daemon=True).start()
+    # Cache warming is opt-in. On machines with a large ~/.claude/projects tree,
+    # the old always-on warmup could compete with the first foreground request
+    # and hold the Python GIL long enough to make the whole app feel stuck.
+    if os.environ.get("CCC_WARM_CACHE_ON_STARTUP", "0").lower() in ("1", "true", "yes"):
+        threading.Thread(target=_warm_cache, daemon=True).start()
     # Idle-session reaper: sweeps every 30 min, SIGTERMs `claude` processes
     # whose JSONL has been quiet for >24h. Catches abandoned-but-not-archived
     # sessions and forgotten cron agents that the archive-time kill misses.
