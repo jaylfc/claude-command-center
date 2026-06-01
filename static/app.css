@@ -970,6 +970,9 @@
   .conv-pane.is-codex-session {
     box-shadow: inset 4px 0 0 rgba(88, 166, 255, 0.72);
   }
+  .conv-pane.is-cursor-session {
+    box-shadow: inset 4px 0 0 rgba(226, 104, 64, 0.72);
+  }
   .conv-pane.is-antigravity-session {
     box-shadow: inset 4px 0 0 rgba(242, 204, 96, 0.72);
   }
@@ -1031,6 +1034,12 @@
     box-shadow:
       inset 0 0 0 1px rgba(88, 166, 255, 0.72),
       inset 4px 0 0 rgba(88, 166, 255, 0.88);
+  }
+  .conv-split[data-orientation="vertical"] .conv-pane.is-active.is-cursor-session,
+  .conv-split[data-orientation="horizontal"] .conv-pane.is-active.is-cursor-session {
+    box-shadow:
+      inset 0 0 0 1px rgba(226, 104, 64, 0.72),
+      inset 4px 0 0 rgba(226, 104, 64, 0.86);
   }
   .conv-split[data-orientation="vertical"] .conv-pane.is-active.is-antigravity-session,
   .conv-split[data-orientation="horizontal"] .conv-pane.is-active.is-antigravity-session {
@@ -2953,6 +2962,10 @@
     color: #c084fc;
     --icon-shadow-color: rgba(192, 132, 252, 0.45);
   }
+  .conv-session-icon.cursor {
+    color: #f08a6b;
+    --icon-shadow-color: rgba(226, 104, 64, 0.45);
+  }
   .conv-session-icon.antigravity {
     color: #f2cc60;
     --icon-shadow-color: rgba(242, 204, 96, 0.42);
@@ -3047,6 +3060,7 @@
   .conv-item .source-badge.pkood { background: rgba(210,153,34,0.2); color: var(--orange); }
   .conv-item .source-badge.codex { background: rgba(88,166,255,0.18); color: #79c0ff; }
   .conv-item .source-badge.gemini { background: rgba(122,162,255,0.16); color: #9bb7ff; }
+  .conv-item .source-badge.cursor { background: rgba(226,104,64,0.16); color: #f08a6b; }
   .conv-item .source-badge.antigravity { background: rgba(242,204,96,0.14); color: #f2cc60; }
   .pkood-tail-output {
     white-space: pre-wrap; word-break: break-word; font-family: 'SF Mono',SFMono-Regular,Consolas,monospace;
@@ -3282,6 +3296,25 @@
     border-color: var(--border); cursor: not-allowed; opacity: 0.5;
   }
   .conv-input-bar .send-btn svg { display: block; }
+  .conv-input-bar .steer-btn {
+    width: 32px; height: 32px; flex-shrink: 0;
+    border-radius: 999px; border: 1px solid rgba(210,153,34,0.42); cursor: pointer;
+    background: rgba(210,153,34,0.12); color: var(--orange);
+    line-height: 1; padding: 0;
+    display: none; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+  }
+  .conv-input-bar .steer-btn.visible { display: inline-flex; }
+  .conv-input-bar .steer-btn:hover {
+    background: rgba(210,153,34,0.20);
+    border-color: rgba(210,153,34,0.70);
+  }
+  .conv-input-bar .steer-btn:active { transform: translateY(1px); }
+  .conv-input-bar .steer-btn:disabled {
+    background: transparent; color: var(--text-muted);
+    border-color: var(--border); cursor: not-allowed; opacity: 0.5;
+  }
+  .conv-input-bar .steer-btn svg { display: block; }
   .conv-input-bar .tts-btn {
     width: 32px; height: 32px; flex-shrink: 0;
     border-radius: 999px; border: 1px solid var(--border); cursor: pointer;
@@ -3524,6 +3557,12 @@
     -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
   }
   .flow-toolbar-spacer { flex: 1 1 auto; min-width: 8px; }
+  .flow-toolbar-divider {
+    width: 1px; align-self: stretch;
+    background: var(--border);
+    margin: 4px 8px;
+    flex: 0 0 auto;
+  }
   .flow-toolbar-btn {
     border: 1px solid var(--border); border-radius: 6px;
     background: var(--bg); color: var(--text);
@@ -3692,6 +3731,26 @@
   .flow-node-session.is-read-only,
   .flow-node-session.is-no-edits,
   .flow-node-session.is-idle { border-left-color: var(--accent); }
+  .flow-node-session.is-archived {
+    opacity: 0.62;
+    border-left-color: var(--green) !important;
+    background: color-mix(in srgb, var(--surface) 88%, var(--green) 12%);
+  }
+  .flow-node-session.is-archived::before {
+    content: "\2713";
+    position: absolute;
+    top: 6px; right: 8px;
+    width: 16px; height: 16px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+    color: var(--green);
+    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    border: 1px solid var(--green);
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .flow-node-session.is-archived:hover { opacity: 0.92; }
   .flow-node-session.is-worktree::after {
     content: 'worktree'; position: absolute; right: 34px; top: 8px;
     font-size: 10px; font-weight: 700; color: var(--orange);

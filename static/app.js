@@ -5780,6 +5780,10 @@
   try {
     if (localStorage.getItem('ccc-flow-expanded') === '1') flowExpanded = true;
   } catch (_) {}
+  let flowIncludeArchived = false;
+  try {
+    if (localStorage.getItem('ccc-flow-include-archived') === '1') flowIncludeArchived = true;
+  } catch (_) {}
   let flowGestureStartZoom = 1;
   let flowDraftSessions = [];
   try {
@@ -5893,27 +5897,35 @@
   function flowToolbarHtml() {
     const expandedLabel = flowExpanded ? 'Collapse flow view' : 'Expand flow view';
     const recency = flowRecencyValue();
+    const archivedActive = flowIncludeArchived ? ' active' : '';
+    const archivedPressed = flowIncludeArchived ? 'true' : 'false';
     return '<div class="flow-toolbar">'
-      + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
-      + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
-      + '<button type="button" class="flow-toolbar-btn" data-flow-action="annotate" title="Annotate the visible page and save a local note for agent context.">&#9998; Annotate</button>'
-      + '<div class="flow-toolbar-group" role="group" aria-label="Flow recency">'
-      + flowRecencyButtonHtml('', 'All', recency)
-      + flowRecencyButtonHtml('1d', '1d', recency)
-      + flowRecencyButtonHtml('7d', '7d', recency)
+      + '<div class="flow-toolbar-group" role="group" aria-label="Add">'
+      +   '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
+      +   '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
       + '</div>'
-      + '<div class="flow-toolbar-group" role="group" aria-label="Flow collapse controls">'
-      + '<button type="button" class="flow-toolbar-btn" data-flow-action="collapse-all">Collapse all</button>'
-      + '<button type="button" class="flow-toolbar-btn" data-flow-action="expand-all">Expand all</button>'
-      + '<button type="button" class="flow-toolbar-btn" data-flow-action="organize" title="Keep all objects in place, line up session children below each parent — most recent leftmost.">Organize</button>'
+      + '<div class="flow-toolbar-divider"></div>'
+      + '<div class="flow-toolbar-group" role="group" aria-label="Filter">'
+      +   flowRecencyButtonHtml('', 'All', recency)
+      +   flowRecencyButtonHtml('1d', '1d', recency)
+      +   flowRecencyButtonHtml('7d', '7d', recency)
+      +   '<button type="button" class="flow-toolbar-btn' + archivedActive + '" data-flow-action="toggle-archived" aria-pressed="' + archivedPressed + '" title="Show completed/archived sessions in the flow with a check marker.">Include archived</button>'
       + '</div>'
-      + '<div class="flow-toolbar-spacer"></div>'
+      + '<div class="flow-toolbar-divider"></div>'
+      + '<div class="flow-toolbar-group" role="group" aria-label="Layout">'
+      +   '<button type="button" class="flow-toolbar-btn" data-flow-action="collapse-all">Collapse all</button>'
+      +   '<button type="button" class="flow-toolbar-btn" data-flow-action="expand-all">Expand all</button>'
+      +   '<button type="button" class="flow-toolbar-btn" data-flow-action="organize" title="Keep all objects in place, line up session children below each parent — most recent leftmost.">Organize</button>'
+      + '</div>'
+      + '<div class="flow-toolbar-divider"></div>'
       + '<div class="flow-zoom-controls" role="group" aria-label="Flow zoom">'
-      + '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>'
-      + '<button type="button" class="flow-toolbar-btn flow-zoom-value" data-flow-action="zoom-reset" title="Reset zoom" aria-label="Reset zoom">' + flowZoomLabel() + '</button>'
-      + '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>'
+      +   '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-out" title="Zoom out" aria-label="Zoom out">-</button>'
+      +   '<button type="button" class="flow-toolbar-btn flow-zoom-value" data-flow-action="zoom-reset" title="Reset zoom" aria-label="Reset zoom">' + flowZoomLabel() + '</button>'
+      +   '<button type="button" class="flow-toolbar-btn flow-icon-btn" data-flow-action="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>'
       + '</div>'
       + '<button type="button" class="flow-toolbar-btn flow-icon-btn flow-expand-btn" data-flow-action="toggle-expand" title="' + expandedLabel + '" aria-label="' + expandedLabel + '" aria-pressed="' + (flowExpanded ? 'true' : 'false') + '">' + flowExpandIconHtml() + '</button>'
+      + '<div class="flow-toolbar-spacer"></div>'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="annotate" title="Annotate the visible page and save a local note for agent context.">&#9998; Annotate</button>'
       + '</div>';
   }
 
@@ -6251,9 +6263,11 @@
   function flowIsVisibleSession(c) {
     if (!c) return false;
     if (c.source === 'backlog' || c.source === 'github_pr') return false;
-    if (c.archived) return false;
+    if (c.archived && !flowIncludeArchived) return false;
     const col = classifyKanbanColumn(c);
-    return col !== 'archived' && col !== 'backlog';
+    if (col === 'backlog') return false;
+    if (col === 'archived' && !flowIncludeArchived) return false;
+    return true;
   }
 
   function flowTimestampSec(value) {
@@ -6955,7 +6969,7 @@
           title: flowRowTitle(row),
           kicker: row.source || row.engine || 'session',
           meta,
-          className: 'flow-node-session is-' + status.key + worktree + (currentConversation === row.id ? ' active' : ''),
+          className: 'flow-node-session is-' + status.key + worktree + (currentConversation === row.id ? ' active' : '') + (row.archived ? ' is-archived' : ''),
         });
       });
       const repoLayoutDrafts = visibleDrafts.filter(draft => {
@@ -7196,6 +7210,16 @@
     if (expandAllBtn) expandAllBtn.addEventListener('click', () => setFlowAllNodesCollapsed(false, targetEl));
     const organizeBtn = targetEl && targetEl.querySelector('[data-flow-action="organize"]');
     if (organizeBtn) organizeBtn.addEventListener('click', () => organizeFlowSessions(targetEl));
+    const archivedBtn = targetEl && targetEl.querySelector('[data-flow-action="toggle-archived"]');
+    if (archivedBtn) archivedBtn.addEventListener('click', () => {
+      flowIncludeArchived = !flowIncludeArchived;
+      try { localStorage.setItem('ccc-flow-include-archived', flowIncludeArchived ? '1' : '0'); } catch (_) {}
+      const $s = document.getElementById('convSearch');
+      const convs = (typeof filterConversations === 'function')
+        ? filterConversations($s ? $s.value : '')
+        : (conversationsData || []);
+      renderSidebar(convs);
+    });
     if (targetEl) {
       targetEl.querySelectorAll('[data-flow-recency]').forEach(btn => {
         btn.addEventListener('click', ev => {
