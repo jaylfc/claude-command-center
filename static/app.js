@@ -2733,9 +2733,9 @@
       return;
     }
     if (!text) return;
-    if (_ttsActive) await stopTextToSpeech();
     // New-session mode: input doubles as the prompt for a fresh spawn.
     if (currentConversation === '__new__') {
+      if (_ttsActive) await stopTextToSpeech();
       await spawnFromInlineInput(text);
       return;
     }
@@ -2751,9 +2751,15 @@
       $input.style.borderColor = 'var(--red)';
       setTimeout(() => { $input.style.borderColor = ''; }, 1500);
     };
+    // Paint the optimistic echo + clear the input FIRST, synchronously, so the
+    // message appears the instant Enter is pressed. Anything async (stopping
+    // TTS, the inject-input fetch) happens after — previously an in-flight TTS
+    // teardown was awaited before this line, so sends during playback felt laggy
+    // ("sometimes ok" = only when TTS was off).
     const pendingSend = appendPendingSendEcho(text, sid);
     $input.value = '';
     clearInputDraftForConversation(draftConversation);
+    if (_ttsActive) await stopTextToSpeech();
     try {
       let res;
       if (currentSession.source === 'pkood') {
