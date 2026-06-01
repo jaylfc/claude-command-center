@@ -1,1 +1,0 @@
-Model pill no longer shows the raw `<synthetic>` (or `<unknown>` and similar) sentinel value that Claude Code writes into the JSONL when a message was synthesized client-side (interrupts, /clear stubs, fallback errors). The pill now falls back to the engine name with a tooltip explaining the situation, and the picker remains clickable.

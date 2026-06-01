@@ -1,1 +1,0 @@
-- Preserve the exact sidebar scroll offset when pinning rows so the list does not shift by a row.

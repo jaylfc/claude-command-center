@@ -1,1 +1,0 @@
-Fresh installs now land with the status rail (Original ask / Session activity / Files) on the right side of the conversation pane instead of the top strip. Users who explicitly chose 'top' or 'right' via the toggle keep their preference — only an unset `ccc-status-pos` key promotes to the new default.

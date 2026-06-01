@@ -1,1 +1,0 @@
-- Source-badge SVGs (the engine icons in session headers added in 17c3731) now stretch to fill their badge container instead of rendering at intrinsic SVG size.

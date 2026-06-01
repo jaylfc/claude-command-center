@@ -1,3 +1,0 @@
-- Added support for previewing markdown files in the right-side status rail (sidebar) when clicking them in the Files Panel, replacing the sidebar contents until closed.
-- Squeezed rail-action items (Launch, Vercel, Next.js, Session, etc.) into a compact horizontal wrapping row instead of a vertical stack.
-- Relaxed sandbox checks on `/api/reveal-file` and `/api/read-file` to allow opening pasted images and session-referenced files even when no active repo context is available.

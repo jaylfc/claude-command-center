@@ -1,1 +1,0 @@
-Sessions renamed via Claude Code's `/rename` slash command now show their new name in CCC's archive view, matching Claude Desktop. The archive walker was only honoring `custom-title` events whose value still equaled the original spawn `agent_name` — a `/rename` diverges from that and used to be dropped silently.

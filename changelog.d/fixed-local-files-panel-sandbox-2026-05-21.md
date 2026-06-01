@@ -1,1 +1,0 @@
-- Allowed safe local document and media files outside repo roots to open from the Files panel.

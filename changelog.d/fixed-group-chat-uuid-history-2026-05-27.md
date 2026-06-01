@@ -1,1 +1,0 @@
-Group chats now carry stable UUIDs, repair stale markdown headers from their sidecars, and re-activate closed chats when the human posts so the reader does not appear to switch to an empty/path-keyed chat.

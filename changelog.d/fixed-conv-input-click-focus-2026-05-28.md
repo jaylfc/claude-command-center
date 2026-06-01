@@ -1,1 +1,0 @@
-- Clicking anywhere in the conversation input bar now places the caret in the composer. Previously only a direct hit on the single-row textarea focused it, so clicking the surrounding padding or the bottom selector row left the bar feeling "dead" until a second click landed on the text.

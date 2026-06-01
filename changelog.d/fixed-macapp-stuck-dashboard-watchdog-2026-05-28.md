@@ -1,1 +1,0 @@
-- Mac app now recovers a dashboard stuck on the loading overlay. A watchdog polls the page after launch; if the overlay is still up past a grace window it reloads the webview, and if that doesn't help it restarts the server (capped to avoid restart loops). Covers both a stalled server handler thread and a hung `app.js` request where the page's own safety nets never register.

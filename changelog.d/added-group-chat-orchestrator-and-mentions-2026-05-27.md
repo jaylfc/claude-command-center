@@ -1,2 +1,0 @@
-- Group chat interface now highlights participant mentions with a blue styling, and introduces an orchestrator sidebar pane to track the waiting list and last spoken time of each participant.
-- Group chats now populate immediately in the sidebar on page load without waiting for the local archive background scan to finish.

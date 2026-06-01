@@ -1,1 +1,0 @@
-- Added real-time word highlighting to the text-to-speech player and updated the TTS engine to run entirely in the browser using the Web Speech API. Added ability to toggle playback speed from 1.0x to 1.5x on the fly.

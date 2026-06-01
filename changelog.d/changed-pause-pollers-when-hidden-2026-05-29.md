@@ -1,1 +1,0 @@
-Background pollers (session list, GH issues, group-chat status, Vercel/localhost/worktree badges, live status) now pause while the window is hidden and refresh once when you return to the tab — no wasted CPU or network in the background.

@@ -1,1 +1,0 @@
-- Group chat sticky header now dynamically updates the "Viewing Poster" based on the message currently visible at the top of the viewport instead of statically showing the last poster.

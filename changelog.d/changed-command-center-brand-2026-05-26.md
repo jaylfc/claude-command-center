@@ -1,1 +1,0 @@
-- Rename the visible app brand to Command Center for Claude, Codex, and Anti-Gravity.

@@ -1,1 +1,0 @@
-- Replace textual letter chips (A/G/C) and the separate blue live dot with a single unified, animated SVG engine icon at the start of each row.

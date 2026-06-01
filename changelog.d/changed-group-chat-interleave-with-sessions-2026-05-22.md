@@ -1,1 +1,0 @@
-- Group chats now interleave with session rows (or folder groups) inside the In Progress list, sorted by recency, instead of always sitting at the top.

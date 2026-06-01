@@ -1,1 +1,0 @@
-Fix native macOS app silently dropping `window.alert` / `window.confirm` / `window.prompt`, which made flow-board buttons like "+ Object" appear broken (the dialog never showed, so the click looked like a no-op). The app now renders these as native NSAlert panels.

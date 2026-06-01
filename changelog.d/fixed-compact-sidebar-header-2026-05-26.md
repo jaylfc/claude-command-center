@@ -1,1 +1,0 @@
-- Tighten the sidebar header so title metadata no longer wraps into a tall block.

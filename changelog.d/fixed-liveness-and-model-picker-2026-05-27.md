@@ -1,2 +1,0 @@
-- Fixed completed Antigravity sessions lingering as active/thinking in the UI by correctly determining process state.
-- Fixed the blank model selection dropdown for new sessions when selecting the Antigravity engine by populating the options upon entering new session mode.

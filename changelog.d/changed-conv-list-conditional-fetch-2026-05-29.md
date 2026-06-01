@@ -1,1 +1,0 @@
-The session list poll now uses a conditional request (ETag/If-None-Match): when nothing has changed the server returns `304 Not Modified` with no body, so the ~3MB payload isn't re-transferred, re-parsed, or re-rendered every 10 seconds.

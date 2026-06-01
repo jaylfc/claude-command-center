@@ -1,1 +1,0 @@
-- Keep pinned row pin icons visible and show an unpin X over the pin on hover.

@@ -1,1 +1,0 @@
-- Tightened the sidebar header: version and "Last updated …" now share one line, and a small `git: amirfish1/claude-command-center` link sits below "check for updates".

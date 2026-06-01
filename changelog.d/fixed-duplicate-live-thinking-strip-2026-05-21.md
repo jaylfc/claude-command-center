@@ -1,1 +1,0 @@
-- Removed the duplicate top live-activity strip so active sessions show one in-conversation status indicator.

@@ -1,1 +1,0 @@
-- Make the sidebar app title slightly larger with a colorful gradient treatment.

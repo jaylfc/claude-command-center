@@ -1,1 +1,0 @@
-- Stop the conversation SSE stream from re-reading and re-parsing the entire transcript every ~0.3s while a session is idle. The tail loop now skips the re-scan unless the JSONL's mtime changed, so leaving a large conversation open no longer pegs CPU and disk in the background. Applies to the Claude/Codex and Gemini/Antigravity stream paths.

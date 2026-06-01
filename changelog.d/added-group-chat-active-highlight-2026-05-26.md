@@ -1,1 +1,0 @@
-- The active group chat is now visually highlighted in the sidebar while its reader is open.

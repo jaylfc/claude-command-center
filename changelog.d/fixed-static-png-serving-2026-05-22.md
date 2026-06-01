@@ -1,1 +1,0 @@
-- Static-asset server now serves `.png` / `.jpg` / `.jpeg` / `.ico` (was css/js/svg/webmanifest/json only), so the new sidebar app icon at `/static/icon-app.png` actually loads.

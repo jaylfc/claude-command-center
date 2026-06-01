@@ -1,1 +1,0 @@
-- Fixed refreshes that could keep running a stale frontend bundle, leaving the session sidebar stuck on the archive loading checklist even though conversation data had finished loading.

@@ -1,1 +1,0 @@
-- Added a search box to the Files sidebar header to quickly filter files mentioned in the conversation.

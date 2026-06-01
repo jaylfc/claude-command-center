@@ -1,1 +1,0 @@
-- Fixed Antigravity follow-up sends spawning parallel resume processes and made pasted-image paths available to AGY resumes.

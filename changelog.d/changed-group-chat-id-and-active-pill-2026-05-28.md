@@ -1,1 +1,0 @@
-Group chat polish: the orchestrator panel now shows the chat's ID and filename in a "Chat" strip at the top (click to select for copy), and the "💬 N active coordinations" pill moves from the topbar to the bottom-left of the sidebar footer so it's glanceable without crowding the toolbar.

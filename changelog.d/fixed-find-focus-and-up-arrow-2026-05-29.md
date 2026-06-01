@@ -1,1 +1,0 @@
-Two fixes for in-page find (Cmd+F) in the conversation view: the input no longer loses focus after every keystroke (the browser's `window.find` moves focus to the matched element — now snapped back to the find input so live-find actually feels live), and Up arrow now cycles backward through matches symmetrically to Down arrow (previously only forward had a binding).

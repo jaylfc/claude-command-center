@@ -1,1 +1,0 @@
-- Antigravity-App send errors now surface the real cause — "language server not running, open Antigravity" — instead of always saying "no reusable model config", which only applies when the trajectory loaded but had no model picked.

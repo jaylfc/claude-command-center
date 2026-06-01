@@ -1,1 +1,0 @@
-- Show an explicit empty state in the session activity timeline and keep it mounted in the right rail, while Earlier ask stays above the conversation pane.

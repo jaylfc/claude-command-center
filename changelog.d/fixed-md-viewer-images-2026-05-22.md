@@ -1,1 +1,0 @@
-- PNG / JPG / etc. images in the right-rail markdown previewer now render. Adds `/api/local-image` that serves any local image file by absolute path, and rewrites `<img src>` in the rendered markdown to route through it so relative paths resolve against the markdown file's directory.

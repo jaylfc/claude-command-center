@@ -1,1 +1,0 @@
-- Return cached archive rows immediately after browser refresh while a fresh scan runs in the background.

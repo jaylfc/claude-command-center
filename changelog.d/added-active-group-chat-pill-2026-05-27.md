@@ -1,1 +1,0 @@
-- Bottom-left live-refresh status now shows a red "Active Group chat" pill while a group-chat orchestrator timer is active or recently triggered; clicking it opens the latest active chat.

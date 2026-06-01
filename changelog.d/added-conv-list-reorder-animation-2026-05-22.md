@@ -1,1 +1,0 @@
-- Conversation rows now smoothly slide from their old position to the new one when a session bumps to the top of its section after a fresh "last updated" time (FLIP-style animation).

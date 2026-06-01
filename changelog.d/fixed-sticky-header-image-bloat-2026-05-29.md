@@ -1,1 +1,0 @@
-Hide inline images in the conversation sticky-header "ask" preview slot — they used to render at up to 220px tall inside a 170px row, blowing out the preview and burying the actual prose. The full conversation view still shows them; a small "📎 image attached" marker appears in the preview so the user knows there was an attachment.

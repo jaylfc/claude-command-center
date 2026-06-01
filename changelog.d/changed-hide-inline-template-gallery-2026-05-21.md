@@ -1,1 +1,0 @@
-- Hid the template gallery from the inline new-session page while keeping the template machinery available.

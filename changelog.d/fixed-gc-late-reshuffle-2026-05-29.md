@@ -1,1 +1,0 @@
-Stop the conversation list from reshuffling a few seconds after load: group-chat rows are now seeded from a local cache so they appear in the first render instead of popping in (and re-sorting the list) when the active-chats fetch lands.

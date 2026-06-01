@@ -1,1 +1,0 @@
-The footer frame-health readout is now clickable: click it to pause/resume all CSS animations, a one-click A/B test for whether infinite box-shadow pulse animations (which WebKit can't GPU-composite) are the source of jank.

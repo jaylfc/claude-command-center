@@ -1,1 +1,0 @@
-- Cap session-name overrides at 120 chars on both read and write so a pasted annotation context (or Codex's raw first-message `title`) can no longer end up as an 11kB row title that stretches the sidebar and bloats `/api/sessions` payloads. Existing oversized entries in `session-names.json` are truncated on next load; codex rows clamp their SQLite `title` fallback too.

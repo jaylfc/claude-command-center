@@ -1,2 +1,0 @@
-- **Find in page**: Cmd-F now opens the find-in-page modal, and searching updates live as you type.
-- **UX Fixes Queue**: The "Add to UX fixes queue" button now respects your selected engine (Claude, Gemini, or Antigravity) and creates discoverable sessions in your history.

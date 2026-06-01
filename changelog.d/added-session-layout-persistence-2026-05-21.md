@@ -1,1 +1,0 @@
-- Persist split-pane layouts, division ratios, focused panes, and active conversations across browser refreshes and repository switches with repository-scoped isolation.

@@ -1,1 +1,0 @@
-- `/api/sessions/spawn` now accepts an optional `engine` field (`claude`, `codex`, or `antigravity`) so the bundled `ccc-orchestration` skill can launch non-Claude sibling sessions without switching endpoints; legacy `gemini` maps to `antigravity`.

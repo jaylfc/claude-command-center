@@ -1,1 +1,0 @@
-- Slightly reduce the size of the session SVG icons in the conversation list to 13px (from 16px) for a cleaner layout.

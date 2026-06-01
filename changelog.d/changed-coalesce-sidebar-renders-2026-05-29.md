@@ -1,1 +1,0 @@
-Coalesce background poller re-renders of the conversation list through a single animation frame, so overlapping live-status / session-list / group-chat ticks no longer trigger multiple redundant renders.

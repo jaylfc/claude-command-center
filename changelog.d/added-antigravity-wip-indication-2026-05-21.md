@@ -1,1 +1,0 @@
-- Add active WIP (Work in Progress) indication to Antigravity sessions in the sidebar and Kanban board when a prompt is running.

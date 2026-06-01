@@ -1,1 +1,0 @@
-- Antigravity new-session model choices now use AGY's supported settings path instead of a nonexistent `--model` flag.

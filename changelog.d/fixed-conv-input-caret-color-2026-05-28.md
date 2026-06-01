@@ -1,1 +1,0 @@
-Make the conversation input caret visible: pin `caret-color` to the accent color so the blinking cursor is obvious when the input gets focus (the default near-white caret over the dark transparent input bar was almost invisible, especially in the native WKWebView app).

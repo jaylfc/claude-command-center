@@ -1,1 +1,0 @@
-Gzip responses for HTML / JS / CSS / JSON / SVG / manifest, with an allowlist that explicitly excludes `text/event-stream` so SSE keeps streaming. Cuts `static/app.js` from ~920 KB to ~240 KB and `/api/conversations/all` from ~2.7 MB to ~500 KB on the wire.

@@ -1,1 +1,0 @@
-- Fixed UI hanging on "sending" when Claude Code CLI rejects a slash command (like `/remote-control` in headless mode). The system error message is now rendered inline as an assistant response instead of being silently swallowed.

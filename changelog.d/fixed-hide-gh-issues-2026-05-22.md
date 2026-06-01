@@ -1,1 +1,0 @@
-- Fix 'Hide GH issues' setting to conditionally clear native backlog items in List view without forcing Kanban mode, and automatically remove the Kanban board column when hidden.

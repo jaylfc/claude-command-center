@@ -1,1 +1,0 @@
-- Added a small "● Live refresh" pill in the bottom-left corner so it's obvious when the auto-refresh tickers are firing. The pill fades out whenever a text input or textarea is focused (which is exactly when the tickers pause for smoother typing), and pulses gently otherwise.

@@ -1,1 +1,0 @@
-- Showed the template gallery in the inline new-session screen.

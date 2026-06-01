@@ -1,1 +1,0 @@
-Fixed the localhost status pill spamming `400 Bad Request` every 15s when a dash-encoded project path leaked into the repo context; only absolute paths are sent now, and the pill falls back to "no repo" otherwise.
