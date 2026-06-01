@@ -2320,6 +2320,9 @@
   const INPUT_DRAFTS_KEY = 'ccc-input-drafts-v1';
   const INPUT_DRAFTS_MAX = 200;
   const INPUT_DRAFT_MAX_CHARS = 50000;
+  const INPUT_DRAFTS_SAVE_DEBOUNCE_MS = 400;
+  let _inputDraftsSaveTimer = 0;
+  const _inputDraftKeyCache = new Map();
   let inputDrafts = (() => {
     try {
       const raw = JSON.parse(localStorage.getItem(INPUT_DRAFTS_KEY) || '{}');
@@ -2354,16 +2357,44 @@
     } catch (_) {}
   }
 
+  function scheduleSaveInputDrafts() {
+    if (_inputDraftsSaveTimer) clearTimeout(_inputDraftsSaveTimer);
+    _inputDraftsSaveTimer = setTimeout(() => {
+      _inputDraftsSaveTimer = 0;
+      saveInputDrafts();
+    }, INPUT_DRAFTS_SAVE_DEBOUNCE_MS);
+  }
+
+  function flushSaveInputDrafts() {
+    if (_inputDraftsSaveTimer) {
+      clearTimeout(_inputDraftsSaveTimer);
+      _inputDraftsSaveTimer = 0;
+    }
+    saveInputDrafts();
+  }
+
+  function clearInputDraftKeyCache() {
+    _inputDraftKeyCache.clear();
+  }
+
   function inputDraftKeyForConversation(convId) {
     const id = String(convId || '');
     if (!id) return '';
-    if (id === '__new__') return 'new-session';
-    const row = (Array.isArray(conversationsData) ? conversationsData : [])
-      .find(c => c && c.id === id);
-    if ((row && row.source === 'backlog') || id.startsWith('backlog-issue-')) {
-      return 'repo:' + (rowRepoPath(row) || selectedRepoPath() || 'unknown') + ':conv:' + id;
+    if (_inputDraftKeyCache.has(id)) return _inputDraftKeyCache.get(id);
+    let key;
+    if (id === '__new__') {
+      key = 'new-session';
+    } else {
+      const row = (Array.isArray(conversationsData) ? conversationsData : [])
+        .find(c => c && c.id === id);
+      if ((row && row.source === 'backlog') || id.startsWith('backlog-issue-')) {
+        key = 'repo:' + (rowRepoPath(row) || selectedRepoPath() || 'unknown') + ':conv:' + id;
+      } else {
+        key = 'conv:' + id;
+      }
     }
-    return 'conv:' + id;
+    _inputDraftKeyCache.set(id, key);
+    return key;
   }
 
   function setInputDraftForKey(key, value) {
@@ -2372,7 +2403,7 @@
     if (!text) {
       if (inputDrafts[key]) {
         delete inputDrafts[key];
-        saveInputDrafts();
+        flushSaveInputDrafts();
       }
       return;
     }
@@ -2380,7 +2411,7 @@
       text: text.length > INPUT_DRAFT_MAX_CHARS ? text.slice(0, INPUT_DRAFT_MAX_CHARS) : text,
       updated: Date.now(),
     };
-    saveInputDrafts();
+    scheduleSaveInputDrafts();
   }
 
   function clearInputDraftForConversation(convId) {
@@ -2708,13 +2739,13 @@
   }
 
   async function refreshSlashCommandMenu(input) {
-    activatePaneFromComposer(input);
     const query = slashQueryForInput(input);
     const req = ++_slashMenuReq;
     if (query == null) {
       hideSlashCommandMenu();
       return;
     }
+    activatePaneFromComposer(input);
     const commands = await slashCommandsForCurrentContext();
     if (req !== _slashMenuReq) return;
     renderSlashCommandMenu(input, commands, query);
@@ -2805,11 +2836,17 @@
       showOptimisticAgentIndicator($view);
       scrollConversationToEnd($view);
 
-      const entry = { text, element: pendingDiv, ts: Date.now() };
+      const entry = { text, sid, element: pendingDiv, ts: Date.now(), timer: null };
       pending.element = pendingDiv;
       pending.list = _pendingSends;
       pending.entry = entry;
       pending.list.push(entry);
+      entry.timer = setTimeout(() => {
+        if (pending.list && pending.entry && pending.list.includes(pending.entry)) {
+          removePendingSendEcho(pending);
+          clearOptimisticAgentIndicator($view);
+        }
+      }, _PENDING_SEND_ECHO_MAX_MS);
       const convId = currentConversation;
       const pane = paneByPaneId(paneId || activePaneId());
       if (convId && pane) syncPendingSendsMapForConv(pane, convId);
@@ -2823,6 +2860,10 @@
     if (pending.element && pending.element.parentNode) {
       pending.element.parentNode.removeChild(pending.element);
     }
+    if (pending.entry && pending.entry.timer) {
+      clearTimeout(pending.entry.timer);
+      pending.entry.timer = null;
+    }
     if (pending.list && pending.entry) {
       const idx = pending.list.indexOf(pending.entry);
       if (idx >= 0) pending.list.splice(idx, 1);
@@ -2831,6 +2872,33 @@
     const convId = currentConversation;
     const pane = paneByPaneId(activePaneId());
     if (convId && pane) syncPendingSendsMapForConv(pane, convId);
+  }
+
+  function isCursorUsageLimitFailure(data, reason) {
+    const text = [
+      data && data.engine,
+      data && data.via,
+      data && data.code,
+      data && data.error,
+      data && data.message,
+      reason,
+    ].filter(Boolean).join(' ');
+    return /cursor/i.test(text) && /(usage limit|get cursor pro)/i.test(text);
+  }
+
+  function appendSendFailureNotice(pending, message, paneId) {
+    const $view = (pending && pending.element && pending.element.parentNode)
+      || getConvViewForPane(paneId)
+      || getConvView();
+    removePendingSendEcho(pending);
+    if (!$view) return;
+    clearOptimisticAgentIndicator($view);
+    const div = document.createElement('div');
+    div.className = 'event system send-failure';
+    div.innerHTML = '<span class="label">System</span>'
+      + '<span>' + escapeHtml(message) + '</span>';
+    $view.appendChild(div);
+    scrollConversationToEnd($view);
   }
 
   function restorePendingSendEchoes(convId, paneId) {
@@ -3000,10 +3068,14 @@
           scheduleCompactUsageRefresh(sid);
         }
       } else {
-        removePendingSendEcho(pendingSend);
+        const reason = formatInjectFailure(data, res.status);
+        if (isCursorUsageLimitFailure(data, reason)) {
+          appendSendFailureNotice(pendingSend, 'Cursor usage limit hit. Cursor says: ' + reason, paneId || activePaneId());
+        } else {
+          removePendingSendEcho(pendingSend);
+        }
         restoreInputAfterSendFailure($input, text);
         flashRed();
-        const reason = formatInjectFailure(data, res.status);
         showOpToast((injectMode === 'steer' ? 'Steer' : 'Send') + ' failed: ' + reason, 'error');
       }
     } catch (err) {
@@ -3411,6 +3483,26 @@
       $convInput.style.height = Math.min($convInput.scrollHeight, max) + 'px';
     });
   }
+  if (!window.__cccComposerDeferFlushBound) {
+    window.__cccComposerDeferFlushBound = true;
+    document.addEventListener('focusout', (e) => {
+      if (!_isComposerElement(e.target)) return;
+      requestAnimationFrame(() => {
+        if (!_isComposerFocused()) _flushComposerDeferredUpdates();
+      });
+    }, true);
+    window.addEventListener('beforeunload', () => {
+      flushSaveInputDrafts();
+      _flushComposerDeferredUpdates();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        flushSaveInputDrafts();
+        _flushComposerDeferredUpdates();
+      }
+    });
+  }
+
   if ($convInput) {
     $convInput.addEventListener('input', () => {
       rememberInputDraft($convInput, currentConversation);
@@ -4662,8 +4754,9 @@
   function setActivePaneById(paneId, activeConvId) {
     const idx = paneIndexByPaneId(paneId);
     if (idx < 0) return false;
+    const changed = splitState.activeIndex !== idx;
     splitState.activeIndex = idx;
-    saveSplitState();
+    if (changed) saveSplitState();
     if (arguments.length > 1) syncActivePaneChrome(activeConvId);
     else syncActivePaneChrome();
     return true;
@@ -5240,6 +5333,7 @@
       // Keep still-pending placeholders on top until they materialize.
       const placeholders = Array.from(pendingSpawns.values());
       conversationsData = [...placeholders, ...fresh];
+      clearInputDraftKeyCache();
       // Re-apply any in-flight archive/verify overrides so an /api/sessions
       // response that started before a click can't briefly un-archive a card.
       applyOptimisticOverrides(conversationsData);
@@ -6399,14 +6493,14 @@
     if (isQuestionWaiting) return { key: 'waiting', label: 'QUESTION' };
     if (c.needs_approval) return { key: 'waiting', label: 'needs approval' };
     if (c.stale_tool_call) return { key: 'attention', label: 'stuck' };
-    const codexOpenTurn = isCodexRow && !c.sidecar_status
+    const codexOpenTurn = isCodexRow && c.is_live && !c.sidecar_status
       && !c.stale_tool_call
       && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
-    const geminiOpenTurn = isGeminiRow && !c.sidecar_status
+    const geminiOpenTurn = isGeminiRow && c.is_live && !c.sidecar_status
       && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
-    const cursorOpenTurn = isCursorRow && !c.sidecar_status
+    const cursorOpenTurn = isCursorRow && c.is_live && !c.sidecar_status
       && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
-    const antigravityOpenTurn = isAntigravityRow && !c.sidecar_status
+    const antigravityOpenTurn = isAntigravityRow && c.is_live && !c.sidecar_status
       && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
     const isActiveSidecar = c.is_live && c.sidecar_status === 'active';
     const isWip = !!c.gh_in_progress || !!c.pending_spawn || (c.is_live && !!c.pending_tool)
@@ -7796,6 +7890,14 @@
           if (node.dataset.flowKind === 'session' && node.dataset.id) {
             targetEl.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
             node.classList.add('active');
+            // R: clicking a session in the flow board jumps straight to the
+            // conversation view — collapse the flow's full-screen mode AND
+            // tuck the conversation sidebar away so the chat takes the full
+            // viewport. The user explicitly wanted "flow → open conv with
+            // sidebar closed" as a single click; restoring the sidebar is a
+            // separate gesture (the chevron / Cmd+B).
+            if (flowExpanded) setFlowExpanded(false);
+            if (convPanelOpen && typeof setConvPanelOpen === 'function') setConvPanelOpen(false);
             selectConversation(node.dataset.id);
           }
         };
@@ -9061,7 +9163,7 @@
     // a transient hiccup. 12s gives enough time to notice + comprehend
     // without being annoyingly modal.
     const isPersistent = kind === 'error'
-      && (/cwd is gone/i.test(msg) || /macOS blocked/i.test(msg));
+      && (/cwd is gone/i.test(msg) || /macOS blocked/i.test(msg) || /usage limit|get cursor pro/i.test(msg));
     setTimeout(() => toast.remove(), isPersistent ? 12000 : (kind === 'error' ? 5000 : 3000));
   }
 
@@ -16840,7 +16942,36 @@
   // limit, with a peak indicator if it's higher than the latest.
   let _usageSessionId = null;
   let _usageData = null;
+  const _deferredStreamBatches = [];
+  let _deferredUsageSid = null;
+
+  function _isComposerElement(el) {
+    if (!el) return false;
+    if (el.id === 'cpInput') return true;
+    return !!(el.closest && el.closest('.conv-input-bar'));
+  }
+
+  function _isComposerFocused() {
+    return _isComposerElement(document.activeElement);
+  }
+
+  function _flushComposerDeferredUpdates() {
+    const batches = _deferredStreamBatches.splice(0);
+    for (const batch of batches) {
+      renderConversationEvents(batch.events, batch.paneId);
+    }
+    if (_deferredUsageSid) {
+      const sid = _deferredUsageSid;
+      _deferredUsageSid = null;
+      fetchSessionUsage(sid);
+    }
+  }
+
   async function fetchSessionUsage(sid) {
+    if (_isComposerFocused()) {
+      _deferredUsageSid = sid;
+      return;
+    }
     _usageSessionId = sid;
     _usageData = null;
     const slot = getInputContextSlot();
@@ -18006,6 +18137,10 @@
 
   function renderConversationEvents(events, paneId) {
     if (!Array.isArray(events)) return;  // defensive: backlog/unknown responses
+    if (_isComposerFocused()) {
+      _deferredStreamBatches.push({ events, paneId: paneId || activePaneId() });
+      return;
+    }
     paneId = paneId || activePaneId();
     const $view = getConvViewForPane(paneId) || $conversationsView;
     // Stick-to-bottom only when the user is *already* near the bottom.
@@ -18231,6 +18366,8 @@
         if (pIdx >= 0) {
           const p = _pendingSends[pIdx];
           if (p.element && p.element.parentNode) p.element.parentNode.removeChild(p.element);
+          if (p.timer) clearTimeout(p.timer);
+          if (p.sid) clearSessionSending(p.sid);
           _pendingSends.splice(pIdx, 1);
           const pane = paneByPaneId(paneId);
           if (pane && currentConversation) syncPendingSendsMapForConv(pane, currentConversation);
@@ -21579,6 +21716,7 @@
     // restore, etc.) sees a non-empty list while in archive mode. This
     // gets reset on toggle-off via loadConversationList().
     conversationsData = _prioritizeSessionIdMatches(applyConvSort(_applyOptimisticTouches(rowsForRender), { persist: true }), q);
+    clearInputDraftKeyCache();
 
     // Make sure the active sidebar mode stays active. Archive refreshes run on
     // search and on the 10s poll; if the board is open, refresh its cards
@@ -22764,10 +22902,14 @@
             setTimeout(refreshConversationList, 3500);
           }
         } else {
-          removePendingSendEcho(pendingSend);
+          const reason = formatInjectFailure(data, res.status);
+          if (isCursorUsageLimitFailure(data, reason)) {
+            appendSendFailureNotice(pendingSend, 'Cursor usage limit hit. Cursor says: ' + reason, activePaneId());
+          } else {
+            removePendingSendEcho(pendingSend);
+          }
           restoreInputAfterSendFailure($cpInput, text);
           flashRed();
-          const reason = formatInjectFailure(data, res.status);
           showOpToast('Send failed: ' + reason, 'error');
         }
       } catch (err) {
