@@ -1,0 +1,1 @@
+Conversations view no longer shows a spurious horizontal scrollbar at the bottom of the pane. Added `overflow-x: hidden` + `min-width: 0` to `.conversations-view` so long URLs / unbreakable tokens in a message wrap instead of pushing the pane wider than its container. Code blocks have their own inner horizontal scroll, so the clip doesn't lose any content.
