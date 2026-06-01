@@ -25029,7 +25029,20 @@
       queueMicrotask(restore);
       requestAnimationFrame(restore);
       setTimeout(restore, 60);
+      _findFocusGuardUntil = Date.now() + 300;
     }
+    let _findFocusGuardUntil = 0;
+    document.addEventListener('focusin', (e) => {
+      if (Date.now() > _findFocusGuardUntil) return;
+      if (e.target === $chatFindInput) return;
+      const modal = document.getElementById('chatFindModal');
+      if (!modal || modal.style.display === 'none') return;
+      try {
+        const len = $chatFindInput.value.length;
+        $chatFindInput.focus({ preventScroll: true });
+        $chatFindInput.setSelectionRange(len, len);
+      } catch (_) {}
+    }, true);
     $chatFindInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         e.preventDefault();
