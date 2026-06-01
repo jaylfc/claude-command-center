@@ -1,0 +1,1 @@
+Flow toolbar now has its own "Annotate" button. The global topbar (where Annotate normally lives) is hidden in expanded flow view, so previously you had to collapse the flow board just to grab a note. The new button delegates to the existing `#annotationStartBtn` click handler — same behavior, just reachable from the flow toolbar.

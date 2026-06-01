@@ -604,7 +604,7 @@
 
   // App config from server — populated before anything else renders.
   let APP_CONFIG = {
-    app_name: 'Command Center for Claude, Codex, and Anti-Gravity',
+    app_name: 'Command Center for Claude, Codex, Cursor, and Anti-Gravity',
     title_strip: [],
     repo: '',
     vercel_enabled: false,
@@ -1021,7 +1021,9 @@
         ? 'gemini --resume ' + sid
         : (engine === 'antigravity'
           ? 'agy --conversation ' + sid
-          : 'claude --resume ' + sid + ' --dangerously-skip-permissions'));
+          : (engine === 'cursor'
+            ? 'cursor-agent --resume ' + sid
+            : 'claude --resume ' + sid + ' --dangerously-skip-permissions')));
     if (!cwd) return resumeCmd;
     // Derive worktree branch from a `.claude/worktrees/...` path:
     // e.g. /Users/.../.claude/worktrees/claude-fix/issue-88 -> branch "claude-fix/issue-88"
@@ -1081,6 +1083,7 @@
   function launchTargetsForCurrentSession() {
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
     const antigravityTerminalHint = currentSession.can_headless_resume === true ? 'AGY conversation' : '/open in AGY';
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(currentSession.id || '');
@@ -1089,8 +1092,8 @@
       {
         id: 'desktop',
         label: 'Claude Desktop',
-        hint: (!isCodex && !isGemini && !isAntigravity && isUuid) ? 'app' : 'Claude only',
-        disabled: isCodex || isGemini || isAntigravity || !isUuid,
+        hint: (!isCodex && !isGemini && !isCursor && !isAntigravity && isUuid) ? 'app' : 'Claude only',
+        disabled: isCodex || isGemini || isCursor || isAntigravity || !isUuid,
       },
       {
         id: 'codex',
@@ -1199,8 +1202,9 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
-    if (!sid || isPkood || isCodex || isGemini || isAntigravity) {
+    if (!sid || isPkood || isCodex || isGemini || isCursor || isAntigravity) {
       $announceBtnConv.style.display = 'none';
       delete $announceBtnConv.dataset.sessionId;
       return;
@@ -1279,6 +1283,7 @@
     const isPkood = currentSession && currentSession.source === 'pkood';
     const isCodex = currentSession && currentSession.source === 'codex';
     const isGemini = currentSession && currentSession.source === 'gemini';
+    const isCursor = currentSession && currentSession.source === 'cursor';
     const isAntigravity = currentSession && currentSession.source === 'antigravity';
     const repos = (typeof repoListState !== 'undefined' && repoListState.repos) || [];
     const activeRepo = (currentSession && (currentSession.repoPath || currentSession.cwd)) || '';
@@ -1308,7 +1313,7 @@
         const sidNow = currentSession && currentSession.id;
         if (!sidNow || !target) return;
         
-        const isNonClaude = isPkood || isCodex || isGemini || isAntigravity;
+        const isNonClaude = isPkood || isCodex || isGemini || isCursor || isAntigravity;
         const confirmMsg = isNonClaude
           ? 'Pin session to ' + target + '?\n\nThe session will visually display under the new repo.'
           : 'Move session to ' + target + '?\n\nThe JSONL file gets relocated; resume will then run in the new repo.';
@@ -1393,6 +1398,7 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
     const canJump = live && liveStatus.tty && liveStatus.terminalApp;
     const canShowLaunch = !!sid && !isPkood;
@@ -2125,7 +2131,7 @@
   async function openInClaudeDesktop(ev) {
     const btn = ev && ev.currentTarget;
     if (!btn || !currentSession.id) return;
-    if (currentSession.source === 'codex' || currentSession.source === 'gemini' || currentSession.source === 'antigravity') return;
+    if (currentSession.source === 'codex' || currentSession.source === 'gemini' || currentSession.source === 'cursor' || currentSession.source === 'antigravity') return;
     const snapshot = actionButtonSnapshot(btn);
     btn.classList.add('opening');
     btn.disabled = true;
@@ -2206,6 +2212,7 @@
   const $convInputBar = document.getElementById('convInputBar');
   const $convInput = document.getElementById('convInput');
   const $convSendBtn = document.getElementById('convSendBtn');
+  const $convSteerBtn = document.getElementById('convSteerBtn');
   const $convTtsBtn = document.getElementById('convTtsBtn');
   const $convEscBtn = document.getElementById('convEscBtn');
   const $convTtyLabel = document.getElementById('convTtyLabel');
@@ -2390,6 +2397,9 @@
       } else if (isGemini) {
         $convTtyLabel.textContent = live ? (liveStatus.tty || 'gemini') : 'gemini';
         $convInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
+      } else if (isCursor) {
+        $convTtyLabel.textContent = live ? (liveStatus.tty || 'cursor') : 'cursor';
+        $convInput.placeholder = live ? 'Send to Cursor terminal...' : 'Resume Cursor and send...';
       } else if (isAntigravity) {
         $convTtyLabel.textContent = liveStatus.live ? (liveStatus.tty || 'antigravity') : 'antigravity';
         $convInput.placeholder = antigravityInputPlaceholder(currentSession);
@@ -2408,6 +2418,12 @@
       if ($convSendBtn) {
         $convSendBtn.disabled = !canSend;
         $convSendBtn.title = canSend ? 'Send' : 'Open Antigravity to continue this app session';
+      }
+      if ($convSteerBtn) {
+        const canSteer = canSend && isCodex && hasSession && !isNewSession && !isBacklogIssue;
+        $convSteerBtn.classList.toggle('visible', canSteer);
+        $convSteerBtn.disabled = !canSteer;
+        $convSteerBtn.title = canSteer ? 'Steer running Codex turn now' : 'Steer is only available for Codex sessions';
       }
       // Esc only makes sense when there's something live to interrupt — and
       // we don't support pkood interrupts. Hide it everywhere else so the
@@ -2444,6 +2460,10 @@
       if ($convSendBtn) {
         $convSendBtn.disabled = false;
         $convSendBtn.title = 'Send';
+      }
+      if ($convSteerBtn) {
+        $convSteerBtn.classList.remove('visible');
+        $convSteerBtn.disabled = true;
       }
     }
   }
@@ -2497,6 +2517,7 @@
     const source = currentSession && currentSession.source;
     if (source === 'codex') return 'Codex sessions do not use Claude slash commands';
     if (source === 'gemini') return 'Gemini sessions do not use Claude slash commands';
+    if (source === 'cursor') return 'Cursor sessions do not use Claude slash commands';
     if (source === 'antigravity') return 'Antigravity sessions do not use Claude slash commands';
     if (source === 'pkood') return 'pkood agents do not use Claude slash commands';
     if (currentConversation === '__new__') {
@@ -2699,10 +2720,11 @@
     $input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  async function sendToTerminal(paneId) {
+  async function sendToTerminal(paneId, mode = 'send') {
     if (paneId) {
       setActivePaneById(paneId);
     }
+    const injectMode = mode === 'steer' ? 'steer' : 'send';
     // Look up the input and send-button scoped to the target pane.
     // The static-HTML p1 element retains the global ids; cloned panes
     // (built by buildPaneElement) had their ids stripped, so we have
@@ -2710,6 +2732,8 @@
     const _paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId || activePaneId()}"]`);
     const $input = (_paneEl && _paneEl.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]')) || $convInput;
     const $sendBtn = (_paneEl && _paneEl.querySelector('.send-btn')) || $convSendBtn;
+    const $steerBtn = (_paneEl && _paneEl.querySelector('.steer-btn')) || $convSteerBtn;
+    const $actionBtn = injectMode === 'steer' ? ($steerBtn || $sendBtn) : $sendBtn;
     const text = ($input && $input.value || '').trim();
     const draftConversation = currentConversation;
     hideSlashCommandMenu();
@@ -2741,12 +2765,16 @@
     }
     const sid = currentSession.id;
     if (!sid) return;
+    if (injectMode === 'steer' && currentSession.source !== 'codex') {
+      showOpToast('Steer is only available for Codex sessions.', 'error');
+      return;
+    }
     if (currentSession.source === 'antigravity' && !antigravityCanSend(currentSession)) {
       if ($input) $input.blur();
       return;
     }
     const compactCommand = /^\/compact(?:\s|$)/i.test(text);
-    $sendBtn.disabled = true;
+    if ($actionBtn) $actionBtn.disabled = true;
     const flashRed = () => {
       $input.style.borderColor = 'var(--red)';
       setTimeout(() => { $input.style.borderColor = ''; }, 1500);
@@ -2773,7 +2801,7 @@
         res = await fetch('/api/inject-input', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ session_id: sid, text }),
+          body: JSON.stringify({ session_id: sid, text, mode: injectMode }),
         });
       }
       let data = {};
@@ -2791,7 +2819,7 @@
             ? 'Queued /compact until the terminal session is idle.'
             : 'Queued until the terminal session is idle.');
         } else if (data.via === 'codex-steer') {
-          showOpToast('Sent to running Codex turn.');
+          showOpToast('Steered running Codex turn.');
           setTimeout(refreshConversationList, 1500);
           setTimeout(refreshConversationList, 3500);
         } else if (data.via === 'codex-app-turn') {
@@ -2815,15 +2843,15 @@
         restoreInputAfterSendFailure($input, text);
         flashRed();
         const reason = formatInjectFailure(data, res.status);
-        showOpToast('Send failed: ' + reason, 'error');
+        showOpToast((injectMode === 'steer' ? 'Steer' : 'Send') + ' failed: ' + reason, 'error');
       }
     } catch (err) {
       removePendingSendEcho(pendingSend);
       restoreInputAfterSendFailure($input, text);
       flashRed();
-      showOpToast('Send failed: ' + (err.message || 'network error'), 'error');
+      showOpToast((injectMode === 'steer' ? 'Steer' : 'Send') + ' failed: ' + (err.message || 'network error'), 'error');
     }
-    $sendBtn.disabled = false;
+    if ($actionBtn) $actionBtn.disabled = false;
     $input.focus();
   }
 
@@ -3189,6 +3217,7 @@
 
   if ($convEscBtn) $convEscBtn.addEventListener('click', sendEscToTerminal);
   if ($convSendBtn) $convSendBtn.addEventListener('click', () => sendToTerminal('p1'));
+  if ($convSteerBtn) $convSteerBtn.addEventListener('click', () => sendToTerminal('p1', 'steer'));
   if ($convTtsBtn) {
     $convTtsBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
     $convTtsBtn.addEventListener('click', () => readLastMessageAloud('p1'));
@@ -4568,7 +4597,7 @@
     const title = (row && (row.display_name || row.ai_title || firstSentenceOf(row.first_message || '', 70)))
       || CONV_POPOUT_TARGET.slice(0, 8)
       || 'Conversation';
-    document.title = title + ' - Command Center for Claude, Codex, and Anti-Gravity';
+    document.title = title + ' - Command Center for Claude, Codex, Cursor, and Anti-Gravity';
   }
   function renderPopoutMissingConversation() {
     if (_popoutMissingShown || currentConversation) return;
@@ -4748,6 +4777,7 @@
     const prompt = (card.first_message || card.prompt || card.display_name || '').trim();
     const engineLabel = card.source === 'codex' ? 'Codex'
       : card.source === 'gemini' ? 'Gemini'
+      : card.source === 'cursor' ? 'Cursor'
       : card.source === 'antigravity' ? 'Antigravity'
       : card.source === 'pkood' ? 'pkood'
       : 'Claude';
@@ -4773,7 +4803,7 @@
       || conversationsData.find(x => x && x.id === 'spawning-' + tempPid);
     if (!placeholder) return null;
     placeholder.spawn_pid = realPid;
-    if ((placeholder.source === 'codex' || placeholder.source === 'gemini' || placeholder.source === 'antigravity') && logPath) {
+    if ((placeholder.source === 'codex' || placeholder.source === 'gemini' || placeholder.source === 'cursor' || placeholder.source === 'antigravity') && logPath) {
       placeholder.agent_log_path = logPath;
       if (placeholder.source === 'codex') placeholder.codex_log_path = logPath;
     }
@@ -4869,7 +4899,7 @@
     setCopyableSessionId($cpSessionId, sid || '');
     fetchConversationEvents();
     startConvStream();
-    if (sid && real.source !== 'codex') startSpawnStream(sid);
+    if (sid && real.source !== 'codex' && real.source !== 'cursor') startSpawnStream(sid);
     updateSplitInputBar();
     updateSplitToolbar();
   }
@@ -4879,7 +4909,7 @@
     const id = 'spawning-' + pid;
     // Backwards-compat: this used to take `usePkood: bool`. Accept
     // either the legacy boolean (true → 'pkood') or a new explicit
-    // string ('claude' | 'codex' | 'gemini' | 'antigravity' | 'pkood' | 'interactive').
+      // string ('claude' | 'codex' | 'gemini' | 'cursor' | 'antigravity' | 'pkood' | 'interactive').
     let source;
     if (sourceOrEngine === true) source = 'pkood';
     else if (sourceOrEngine === false || sourceOrEngine == null) source = 'interactive';
@@ -4900,7 +4930,7 @@
       name_overridden: false,
       // Fire-and-watch engines also get durable engine-native sessions; the
       // log path is only a fallback while the real row is materializing.
-      agent_log_path: (source === 'codex' || source === 'gemini' || source === 'antigravity') ? (logPath || null) : null,
+      agent_log_path: (source === 'codex' || source === 'gemini' || source === 'cursor' || source === 'antigravity') ? (logPath || null) : null,
       codex_log_path: source === 'codex' ? (logPath || null) : null,
     };
     if (meta && typeof meta === 'object') {
@@ -4929,7 +4959,7 @@
     // Auto-cleanup after 30s for Claude placeholders. Fire-and-watch placeholders
     // stick around until the durable thread row appears, with the spawn log
     // as a fallback if the CLI exits before creating a thread.
-    if (source !== 'codex' && source !== 'gemini' && source !== 'antigravity') {
+    if (source !== 'codex' && source !== 'gemini' && source !== 'cursor' && source !== 'antigravity') {
       setTimeout(() => {
         const direct = pendingSpawns.has(pid) ? [pid, pendingSpawns.get(pid)] : null;
         const adopted = direct || Array.from(pendingSpawns.entries()).find(([, c]) => c && c.id === id);
@@ -5095,7 +5125,7 @@
         setCopyableSessionId($cpSessionId, real.session_id || '');
         fetchConversationEvents();
         startConvStream();
-        if (real.session_id && real.source !== 'codex') startSpawnStream(real.session_id);
+        if (real.session_id && real.source !== 'codex' && real.source !== 'cursor') startSpawnStream(real.session_id);
         updateSplitInputBar();
         updateSplitToolbar();
       }
@@ -5854,6 +5884,7 @@
     return '<div class="flow-toolbar">'
       + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
       + '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
+      + '<button type="button" class="flow-toolbar-btn" data-flow-action="annotate" title="Annotate the visible page and save a local note for agent context.">&#9998; Annotate</button>'
       + '<div class="flow-toolbar-group" role="group" aria-label="Flow recency">'
       + flowRecencyButtonHtml('', 'All', recency)
       + flowRecencyButtonHtml('1d', '1d', recency)
@@ -6149,11 +6180,12 @@
     if (!c) return { key: '', label: '' };
     const isCodexRow = c.source === 'codex' || c.engine === 'codex';
     const isGeminiRow = c.source === 'gemini' || c.engine === 'gemini';
+    const isCursorRow = c.source === 'cursor' || c.engine === 'cursor';
     const isAntigravityRow = c.source === 'antigravity' || c.engine === 'antigravity';
     const activityAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
     const activityTs = c.sidecar_ts || c.last_interacted || c.modified || 0;
     const rowActivityAge = activityTs ? Math.max(0, Math.floor(Date.now() / 1000 - activityTs)) : 9999;
-    const midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow || isAntigravityRow) && c.last_event_type === 'user');
+    const midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow || isCursorRow || isAntigravityRow) && c.last_event_type === 'user');
     const isQuestionWaiting = c.is_live && (c.question_waiting || (c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion'));
     if (isQuestionWaiting) return { key: 'waiting', label: 'QUESTION' };
     if (c.needs_approval) return { key: 'waiting', label: 'needs approval' };
@@ -6161,11 +6193,13 @@
       && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
     const geminiOpenTurn = isGeminiRow && !c.sidecar_status
       && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
+    const cursorOpenTurn = isCursorRow && !c.sidecar_status
+      && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
     const antigravityOpenTurn = isAntigravityRow && !c.sidecar_status
       && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && rowActivityAge < 30 * 60));
     const isActiveSidecar = c.is_live && c.sidecar_status === 'active';
     const isWip = !!c.gh_in_progress || !!c.pending_spawn || (c.is_live && !!c.pending_tool)
-      || codexOpenTurn || geminiOpenTurn || antigravityOpenTurn
+      || codexOpenTurn || geminiOpenTurn || cursorOpenTurn || antigravityOpenTurn
       || (isActiveSidecar && (activityAge < 300 || midTurn || !c.sidecar_ts));
     if (isWip) return { key: 'working', label: 'WIP' };
     if (c.source === 'pkood') {
@@ -6950,6 +6984,11 @@
     const world = canvas && (canvas.querySelector('.flow-world') || canvas);
     const addBtn = targetEl && targetEl.querySelector('[data-flow-action="add-object"]');
     if (addBtn) addBtn.addEventListener('click', createFlowCustomObject);
+    const annotateBtn = targetEl && targetEl.querySelector('[data-flow-action="annotate"]');
+    if (annotateBtn) annotateBtn.addEventListener('click', () => {
+      const orig = document.getElementById('annotationStartBtn');
+      if (orig) orig.click();
+    });
     const zoomOutBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-out"]');
     const zoomInBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-in"]');
     const zoomResetBtn = targetEl && targetEl.querySelector('[data-flow-action="zoom-reset"]');
@@ -9010,12 +9049,14 @@
         const midTurn = c.last_event_type === 'assistant';
         const _isKanbanCodex = c.source === 'codex' || c.engine === 'codex';
         const _isKanbanGemini = c.source === 'gemini' || c.engine === 'gemini';
+        const _isKanbanCursor = c.source === 'cursor' || c.engine === 'cursor';
         const _isKanbanAntigravity = c.source === 'antigravity' || c.engine === 'antigravity';
         const _kanbanActivityAge = c.sidecar_ts ? (Date.now() / 1000 - c.sidecar_ts) : (c.last_interacted ? (Date.now() / 1000 - c.last_interacted) : 9999);
         const _codexKanbanWip = _isKanbanCodex && c.is_live && !c.sidecar_status && (!!c.pending_tool || ((c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60));
         const _geminiKanbanWip = _isKanbanGemini && c.is_live && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
+        const _cursorKanbanWip = _isKanbanCursor && c.is_live && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
         const _antigravityKanbanWip = _isKanbanAntigravity && c.is_live && (c.last_event_type === 'user' || c.last_event_type === 'assistant') && _kanbanActivityAge < 30 * 60;
-        const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip || _antigravityKanbanWip ? ' truly-active' : '';
+        const trulyActive = (c.is_live && c.sidecar_status === 'active' && (sidecarAge < 300 || midTurn)) || _codexKanbanWip || _geminiKanbanWip || _cursorKanbanWip || _antigravityKanbanWip ? ' truly-active' : '';
         const pendingSpawn = c.pending_spawn ? ' pending-spawn' : '';
         const recentlyBorn = isRecentlyBorn(c.session_id) ? ' recently-born' : '';
         const noEditsAttr = hasNoEdits(c) ? ' no-edits' : '';
@@ -10232,11 +10273,13 @@
       }
       const isCodexRow = c.source === 'codex' || c.engine === 'codex';
       const isGeminiRow = c.source === 'gemini' || c.engine === 'gemini';
+      const isCursorRow = c.source === 'cursor' || c.engine === 'cursor';
       const isAntigravityRow = c.source === 'antigravity' || c.engine === 'antigravity';
       let sourceBadge = '';
       if (c.source === 'pkood') sourceBadge = '<span class="source-badge pkood">pkood</span>';
       else if (isCodexRow) sourceBadge = '<span class="source-badge codex">codex</span>';
       else if (isGeminiRow) sourceBadge = '<span class="source-badge gemini">gemini</span>';
+      else if (isCursorRow) sourceBadge = '<span class="source-badge cursor">cursor</span>';
       else if (isAntigravityRow) sourceBadge = '<span class="source-badge antigravity">antigravity</span>';
       let iconType = 'claude';
       let iconTitleType = 'Claude';
@@ -10254,6 +10297,10 @@
         svgMarkup = '<svg class="conv-session-svg" viewBox="0 0 24 24" fill="currentColor" fill-rule="evenodd">'
             + '<path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" />'
             + '</svg>';
+      } else if (isCursorRow) {
+        iconType = 'cursor';
+        iconTitleType = 'Cursor';
+        svgMarkup = getEngineSvg('cursor');
       } else if (isAntigravityRow) {
         iconType = 'antigravity';
         iconTitleType = 'Antigravity';
@@ -10361,7 +10408,7 @@
       const _activityAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
       const _rowActivityTs = c.sidecar_ts || c.last_interacted || c.modified || 0;
       const _rowActivityAge = _rowActivityTs ? Math.max(0, Math.floor(Date.now() / 1000 - _rowActivityTs)) : 9999;
-      const _midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow || isAntigravityRow) && c.last_event_type === 'user');
+      const _midTurn = c.last_event_type === 'assistant' || ((isCodexRow || isGeminiRow || isCursorRow || isAntigravityRow) && c.last_event_type === 'user');
       const _isActiveSidecar = c.is_live && c.sidecar_status === 'active';
       const _isQuestionWaiting = c.is_live && (c.question_waiting || (c.sidecar_in_flight && c.sidecar_tool === 'AskUserQuestion'));
       const _isWaitingForUser = c.is_live && (c.needs_approval || _isQuestionWaiting);
@@ -10384,6 +10431,13 @@
         && c.is_live
         && !c.sidecar_status
         && (_geminiHasOpenTool
+          || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
+            && _rowActivityAge < _OPEN_TURN_FRESH_S));
+      const _cursorHasOpenTool = isCursorRow && !c.sidecar_status && !!c.pending_tool;
+      const _cursorOpenTurn = isCursorRow
+        && c.is_live
+        && !c.sidecar_status
+        && (_cursorHasOpenTool
           || (!!(c.last_event_type === 'user' || c.last_event_type === 'assistant')
             && _rowActivityAge < _OPEN_TURN_FRESH_S));
       const _antigravityHasOpenTool = isAntigravityRow && !c.sidecar_status && !!c.pending_tool;
@@ -10422,6 +10476,7 @@
         || _hasLivePendingTool
         || _codexOpenTurn
         || _geminiOpenTurn
+        || _cursorOpenTurn
         || _antigravityOpenTurn
         || _claudeWipFromSidecar;
       if (!liveToolHtml && _isWaitingForUser && !_isAgentRunning) {
@@ -10440,8 +10495,8 @@
       } else if (_isAgentRunning && !liveToolHtml) {
         const wipTitle = _knownActivityTool
           ? ((c.sidecar_in_flight ? 'Currently running' : 'Last known tool') + ': ' + _knownActivityTool)
-          : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : (isAntigravityRow ? 'Antigravity is working' : 'Agent is working')));
-        const wipLabel = (_codexOpenTurn || _geminiOpenTurn || _antigravityOpenTurn) ? 'WIP' : (_knownActivityTool || 'WIP');
+          : (isCodexRow ? 'Codex is working' : (isGeminiRow ? 'Gemini is working' : (isCursorRow ? 'Cursor is working' : (isAntigravityRow ? 'Antigravity is working' : 'Agent is working'))));
+        const wipLabel = (_codexOpenTurn || _geminiOpenTurn || _cursorOpenTurn || _antigravityOpenTurn) ? 'WIP' : (_knownActivityTool || 'WIP');
         signals += '<span class="conv-signal activity-working" title="' + escapeHtml(wipTitle) + '">' + escapeHtml(wipLabel) + '</span>';
       } else if (c.gh_in_progress && !liveToolHtml) {
         // Calmer "issue is in progress" chip — distinct from live WIP so
@@ -10585,7 +10640,7 @@
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
-      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned ? ' is-pinned' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + ((c.backlog_type === 'github' || isGithubPrRow) ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
+      return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isCursorRow ? ' is-cursor' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned ? ' is-pinned' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + ((c.backlog_type === 'github' || isGithubPrRow) ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
@@ -13066,12 +13121,20 @@
     }
     // Wire the cloned input bar to send into this specific pane.
     const sendBtn = clone.querySelector('.send-btn');
+    const steerBtn = clone.querySelector('.steer-btn');
     const ttsBtn = clone.querySelector('.tts-btn');
     const input = clone.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]');
     if (sendBtn) {
       sendBtn.addEventListener('click', (ev) => {
         ev.preventDefault();
         sendToTerminal(paneId);
+      });
+    }
+    if (steerBtn) {
+      steerBtn.classList.remove('visible');
+      steerBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        sendToTerminal(paneId, 'steer');
       });
     }
     if (ttsBtn) {
@@ -13861,6 +13924,7 @@
     if (paneEl) {
       paneEl.classList.toggle('is-codex-session', source === 'codex');
       paneEl.classList.toggle('is-gemini-session', source === 'gemini');
+      paneEl.classList.toggle('is-cursor-session', source === 'cursor');
       paneEl.classList.toggle('is-antigravity-session', source === 'antigravity');
     }
     const isPendingSpawn = !!(selectedConv && selectedConv.pending_spawn);
@@ -13925,7 +13989,7 @@
         // backend finds a CCC-spawned headless process for this session.
         // No-op for externally launched, IDE-launched, or pkood sessions.
         const sid = sessionIdByConv[id] || '';
-        if (sid && source !== 'codex' && source !== 'antigravity' && source !== 'backlog') startSpawnStream(sid, paneId);
+        if (sid && source !== 'codex' && source !== 'cursor' && source !== 'antigravity' && source !== 'backlog') startSpawnStream(sid, paneId);
       }
     } finally {
       finishConversationPaneLoad();
@@ -13942,17 +14006,19 @@
     const isPkood = currentSession.source === 'pkood';
     const isCodex = currentSession.source === 'codex';
     const isGemini = currentSession.source === 'gemini';
+    const isCursor = currentSession.source === 'cursor';
     const isAntigravity = currentSession.source === 'antigravity';
     const antigravityCanSendNow = antigravityCanSend(currentSession);
     const live = liveStatus.live && liveStatus.tty;
     const hasSession = !!currentSession.id;
     if (hasSession && kanbanView) {
       $convPanelInput.classList.add('visible');
-      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (isAntigravity ? (liveStatus.tty || 'antigravity') : (liveStatus.tty || (live ? '' : 'offline')))));
+      if ($cpTtyLabel) $cpTtyLabel.textContent = isPkood ? 'pkood' : (isCodex ? (liveStatus.tty || 'codex') : (isGemini ? (liveStatus.tty || 'gemini') : (isCursor ? (liveStatus.tty || 'cursor') : (isAntigravity ? (liveStatus.tty || 'antigravity') : (liveStatus.tty || (live ? '' : 'offline'))))));
       if ($cpInput) {
         if (isPkood) $cpInput.placeholder = 'Send to pkood agent...';
         else if (isCodex) $cpInput.placeholder = live ? 'Send to Codex terminal...' : 'Resume Codex and send...';
         else if (isGemini) $cpInput.placeholder = live ? 'Send to Gemini terminal...' : 'Resume Gemini and send...';
+        else if (isCursor) $cpInput.placeholder = live ? 'Send to Cursor terminal...' : 'Resume Cursor and send...';
         else if (isAntigravity) $cpInput.placeholder = antigravityInputPlaceholder(currentSession);
         else if (live) $cpInput.placeholder = 'Send to terminal...';
         else $cpInput.placeholder = 'Send to terminal (offline)...';
