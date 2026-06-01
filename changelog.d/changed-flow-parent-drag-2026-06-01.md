@@ -1,0 +1,1 @@
+Dragging a repo or object node in the flow board now moves all of its descendants (sessions, drafts, nested objects) along with it by default — the cluster travels as one. Hold Alt while dragging to break that link and move only the parent node, leaving children in place (useful when you want to reparent or reorganize manually).

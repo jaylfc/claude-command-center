@@ -6344,6 +6344,29 @@
     return flowCurrentRepoForDraft();
   }
 
+  function flowCollectDescendantIds(rootId, world) {
+    const result = new Set();
+    if (!rootId || !world) return result;
+    const childMap = new Map();
+    world.querySelectorAll('.flow-node[data-flow-parent]').forEach(el => {
+      const p = el.dataset.flowParent;
+      if (!p) return;
+      if (!childMap.has(p)) childMap.set(p, []);
+      childMap.get(p).push(el.dataset.flowNodeId);
+    });
+    const queue = [rootId];
+    while (queue.length) {
+      const cur = queue.shift();
+      const kids = childMap.get(cur) || [];
+      for (const k of kids) {
+        if (!k || result.has(k)) continue;
+        result.add(k);
+        queue.push(k);
+      }
+    }
+    return result;
+  }
+
   function organizeFlowSessions(targetEl) {
     const board = targetEl || document.getElementById('flowBoard');
     if (!board) return;
@@ -7183,7 +7206,16 @@
         const nodeWasSelected = !!flowSelectedNodes[nodeId];
         if (!nodeWasSelected && flowSelectedNodeCount()) clearFlowSelectedNodes(targetEl);
         const selectedIds = nodeWasSelected ? new Set(flowSelectedNodeIds()) : new Set([nodeId]);
-        const dragNodes = nodeWasSelected && selectedIds.size > 1
+        // Parent-drag: when dragging a repo/object node without alt held,
+        // bring every descendant along so the cluster moves as one. Alt-drag
+        // (or an existing multi-selection) preserves the prior behavior of
+        // moving only what the user picked.
+        const isParentKind = node.dataset.flowKind === 'object' || node.dataset.flowKind === 'repo';
+        const altDrag = !!ev.altKey;
+        if (isParentKind && !altDrag && !nodeWasSelected) {
+          flowCollectDescendantIds(nodeId, world).forEach(id => selectedIds.add(id));
+        }
+        const dragNodes = selectedIds.size > 1
           ? Array.from(world.querySelectorAll('.flow-node')).filter(el => selectedIds.has(el.dataset.flowNodeId))
           : [node];
         if (dragNodes.indexOf(node) === -1) dragNodes.push(node);
