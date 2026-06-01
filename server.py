@@ -604,7 +604,7 @@ def _session_load_fail(err):
 #
 # The archive view fires /api/conversations/all on every page load, which
 # does an 8-stage scan: list folders, read JSONL headers, infer effective
-# repos, extract tail meta, probe worktree dirty state, scan codex/gemini
+# repos, extract tail meta, probe worktree dirty state, scan codex/gemini/cursor
 # stores, prime PR states (gh CLI fan-out), refresh cross-repo PRs.
 # On a cold cache with many folders this is the 5-15s wait the user sees
 # behind the generic "Loading archive…" spinner. The progress channel here
@@ -646,6 +646,7 @@ def _archive_load_begin():
         "infer":       {"key": "infer",       "label": "Inferring active branches",        "state": "pending", "detail": "Walking recent sessions."},
         "worktrees":   {"key": "worktrees",   "label": "Checking worktree status",         "state": "pending", "detail": "git status per recent worktree."},
         "codex":       {"key": "codex",       "label": "Codex / Gemini conversations",     "state": "pending", "detail": "Scanning sibling stores."},
+        "cursor":      {"key": "cursor",      "label": "Cursor conversations",             "state": "pending", "detail": "Scanning ~/.cursor/projects/."},
         "antigravity": {"key": "antigravity", "label": "Antigravity conversations",        "state": "pending", "detail": "Scanning ~/.gemini/antigravity/brain/."},
         "pr_states":   {"key": "pr_states",   "label": "Refreshing pull-request status",   "state": "pending", "detail": "gh pr view per known PR."},
         "issues":      {"key": "issues",      "label": "Refreshing GitHub issues",         "state": "pending", "detail": "gh issue list per repo."},
@@ -660,7 +661,7 @@ def _archive_load_begin():
             "started_at": now,
             "updated_at": now,
             "steps": steps,
-            "order": ["folders", "transcripts", "infer", "worktrees", "codex", "antigravity", "pr_states", "issues", "group_chats"],
+            "order": ["folders", "transcripts", "infer", "worktrees", "codex", "cursor", "antigravity", "pr_states", "issues", "group_chats"],
         })
 
 
@@ -1212,20 +1213,22 @@ def extract_session_slash_commands(session_id):
 
 
 def _detect_session_engine(session_id):
-    """Best-effort: codex/gemini are detected by their per-engine session
+    """Best-effort: non-Claude engines are detected by their per-engine session
     stores; everything else is treated as `claude`."""
     if not session_id:
         return "claude"
     for s in _spawned_sessions:
         if s.get("session_id") == session_id or s.get("resumed_sid") == session_id:
             engine = s.get("engine")
-            if engine in ("claude", "codex", "gemini", "antigravity"):
+            if engine in ("claude", "codex", "gemini", "cursor", "antigravity"):
                 return engine
     spawned = _spawn_registry_entry_for_session(session_id)
-    if spawned and spawned.get("engine") in ("claude", "codex", "gemini", "antigravity"):
+    if spawned and spawned.get("engine") in ("claude", "codex", "gemini", "cursor", "antigravity"):
         return spawned.get("engine")
     if _is_codex_session(session_id):
         return "codex"
+    if _is_cursor_session(session_id):
+        return "cursor"
     if _is_antigravity_session(session_id):
         return "antigravity"
     if _is_gemini_session(session_id):
@@ -1706,7 +1709,7 @@ def _spawn_repo_context(cwd=None, repo_path=None):
     return {"repo_path": resolved, "cwd": str(p)}
 
 
-_ORCHESTRATION_SPAWN_ENGINES = ("claude", "codex", "antigravity")
+_ORCHESTRATION_SPAWN_ENGINES = ("claude", "codex", "cursor", "antigravity")
 _ORCHESTRATION_SPAWN_ENGINE_ALIASES = {
     "claude": "claude",
     "claude-code": "claude",
@@ -1714,6 +1717,9 @@ _ORCHESTRATION_SPAWN_ENGINE_ALIASES = {
     "codex": "codex",
     "openai-codex": "codex",
     "openai_codex": "codex",
+    "cursor": "cursor",
+    "cursor-agent": "cursor",
+    "cursor_agent": "cursor",
     "antigravity": "antigravity",
     "agy": "antigravity",
     "gemini": "antigravity",
@@ -1741,6 +1747,8 @@ def _spawn_fallback_model_for_engine(engine):
         return "opus"
     if engine == "codex":
         return os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
+    if engine == "cursor":
+        return os.environ.get("CCC_CURSOR_MODEL", "composer-2.5-fast")
     if engine == "antigravity":
         return os.environ.get("CCC_ANTIGRAVITY_MODEL") or _antigravity_cli_configured_model()
     return ""
@@ -1752,7 +1760,7 @@ def _load_spawn_defaults():
     These defaults are intentionally server-side rather than localStorage so
     ccc-orchestration and other scripted callers see the same values as the UI.
     Missing file means the historical behavior: Claude + opus, Codex env/gpt,
-    and Antigravity's configured CLI model when one exists.
+    Cursor env/composer, and Antigravity's configured CLI model when one exists.
     """
     defaults = {
         "engine": "claude",
@@ -1782,7 +1790,7 @@ def _load_spawn_defaults():
             model = _clean_spawn_default_model(value)
             if len(model) <= 200:
                 models[norm] = model
-    for required in ("claude", "codex"):
+    for required in ("claude", "codex", "cursor"):
         if not models.get(required):
             models[required] = defaults["models"].get(required) or _spawn_fallback_model_for_engine(required)
     return {"engine": engine, "models": models}
@@ -1817,7 +1825,7 @@ def _save_spawn_defaults(config):
             model = _clean_spawn_default_model(value)
             if len(model) > 200:
                 return {"ok": False, "error": f"{engine} model is too long"}
-            if engine in ("claude", "codex") and not model:
+            if engine in ("claude", "codex", "cursor") and not model:
                 model = _spawn_fallback_model_for_engine(engine)
             current["models"][engine] = model
 
@@ -2008,19 +2016,68 @@ def _bust_pr_state_cache(url=None):
             _PR_STATE_CACHE.clear()
 
 
-def _archive_session_is_live(session_id):
-    """A session is "live" if any sidecar marker exists for it. Sidecars
-    are written by Claude Code's hooks and removed when sessions end, so
-    their presence is the canonical "agent is doing something" signal."""
-    if not session_id or not SIDECAR_STATE_DIR.is_dir():
-        return False
+# Cache of session ids whose engine CLI (codex/gemini/cursor) is currently
+# running, resolved by matching live process command lines against resume
+# args. Claude sessions are covered by sidecar markers instead (see below) and
+# are NOT included here. Rebuilt at most once per _ENGINE_LIVE_TTL seconds so
+# the bulk session list (which calls _archive_session_is_live per row) does a
+# single ps scan rather than one per row.
+_engine_live_sids_cache = {"ts": 0.0, "sids": frozenset()}
+_ENGINE_LIVE_TTL = 4.0
+
+
+def _live_engine_session_ids():
+    """Set of session ids for non-Claude engine CLIs currently running.
+
+    One ps-backed scan per engine, cached for _ENGINE_LIVE_TTL. We only count
+    sessions whose id appears in a live process's resume args (the exact-match
+    signal), which is cheap and unambiguous — no cwd heuristics here, since the
+    bulk list can't afford per-row disambiguation."""
+    now = time.time()
+    cached = _engine_live_sids_cache
+    if now - cached["ts"] < _ENGINE_LIVE_TTL:
+        return cached["sids"]
+    sids = set()
     try:
-        for suffix in (".json", "_writes", "_in_flight.json", "_needs_approval.json"):
-            if (SIDECAR_STATE_DIR / f"{session_id}{suffix}").exists():
-                return True
-    except OSError:
-        pass
-    return False
+        scanners = (
+            ("codex", find_live_codex_processes),
+            ("gemini", find_live_gemini_processes),
+            ("cursor", find_live_cursor_processes),
+        )
+        for engine, scan in scanners:
+            for p in scan():
+                cmd = p.get("command") or ""
+                # Pull any resume-arg session id out of the command line. The
+                # matcher needs a candidate id, so test each whitespace token
+                # that looks like a session id against the exact matcher.
+                for tok in cmd.split():
+                    if len(tok) >= 16 and _command_targets_engine_session(cmd, tok, engine):
+                        sids.add(tok)
+    except Exception:
+        # Never let liveness detection break the list; fall back to last cache.
+        return cached["sids"]
+    result = frozenset(sids)
+    _engine_live_sids_cache["ts"] = now
+    _engine_live_sids_cache["sids"] = result
+    return result
+
+
+def _archive_session_is_live(session_id):
+    """A session is "live" if any sidecar marker exists for it, OR a non-Claude
+    engine CLI (codex/gemini/cursor) is running it. Claude sidecars are written
+    by Claude Code's hooks and removed when sessions end; other engines don't
+    write sidecars, so we additionally consult the live-process scan — without
+    this, codex/gemini rows never showed the live glow even while Thinking."""
+    if not session_id:
+        return False
+    if SIDECAR_STATE_DIR.is_dir():
+        try:
+            for suffix in (".json", "_writes", "_in_flight.json", "_needs_approval.json"):
+                if (SIDECAR_STATE_DIR / f"{session_id}{suffix}").exists():
+                    return True
+        except OSError:
+            pass
+    return session_id in _live_engine_session_ids()
 
 
 def _decode_project_slug(slug):
@@ -2721,6 +2778,18 @@ def find_all_conversations(
     except Exception:
         pass
 
+    # Add Cursor agent transcripts from ~/.cursor/projects.
+    try:
+        out.extend(find_cursor_conversations(
+            include_old=True,
+            repo_only=False,
+            limit=limit_per_folder,
+            resolve_pr_states=resolve_pr_states,
+            resolve_worktree_dirty=resolve_worktree_dirty,
+        ))
+    except Exception:
+        pass
+
     # Add Antigravity sessions to the archive. Antigravity stores JSONL
     # transcripts under ~/.gemini/antigravity/brain/<uuid>/.
     try:
@@ -2979,6 +3048,7 @@ def _build_archive_conversations(
     progress("infer",       state="running")
     progress("worktrees",   state="running")
     progress("codex",       state="running")
+    progress("cursor",      state="running")
     progress("antigravity", state="running")
     raw_convs = find_all_conversations(
         resolve_pr_states=resolve_pr_states,
@@ -2997,6 +3067,7 @@ def _build_archive_conversations(
     else:
         progress("worktrees",   state="skipped", detail="Deferred until archive rows are visible.")
     progress("codex",       state="done")
+    progress("cursor",      state="done")
     progress("antigravity", state="done")
     if include_prs:
         progress("pr_states",   state="running", detail="gh pr view per known PR URL.")
@@ -4166,6 +4237,8 @@ def enqueue_annotation_ux_fixes_queue(text, queue_name=ANNOTATION_UX_FIXES_QUEUE
         spawned = spawn_session_antigravity(text, name=queue_name, repo_path=repo_path)
     elif engine == "gemini":
         spawned = spawn_session_gemini(text, name=queue_name, repo_path=repo_path)
+    elif engine == "cursor":
+        spawned = spawn_session_cursor(text, name=queue_name, repo_path=repo_path)
     else:
         spawned = spawn_session(text, name=queue_name, repo_path=repo_path)
         
@@ -6285,6 +6358,43 @@ def find_live_gemini_processes():
     return procs
 
 
+def find_live_cursor_processes():
+    """Return running Cursor Agent processes with pid, tty, cwd, terminal app, command."""
+    procs = []
+    try:
+        ps_out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,tty=,comm=,args="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return procs
+    for line in ps_out.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 3:
+            continue
+        pid_s, tty, comm = parts[:3]
+        args = parts[3] if len(parts) > 3 else ""
+        arg_parts = args.split()
+        basenames = {comm.rsplit("/", 1)[-1]}
+        basenames.update(p.rsplit("/", 1)[-1] for p in arg_parts[:4])
+        if "cursor-agent" not in basenames:
+            continue
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        cwd = _proc_cwd(pid)
+        term_app, _term_pid = _proc_ancestor_terminal(pid)
+        procs.append({
+            "pid": pid,
+            "tty": tty if tty != "??" else None,
+            "cwd": cwd,
+            "terminal_app": term_app,
+            "command": args,
+        })
+    return procs
+
+
 def find_live_antigravity_processes():
     """Return running Antigravity CLI processes with pid, tty, cwd, terminal app, command."""
     procs = []
@@ -6338,6 +6448,14 @@ def _command_targets_engine_session(command, session_id, engine):
         return any(tok == session_id and "resume" in head[:idx]
                    for idx, tok in enumerate(head))
     if engine == "gemini":
+        return any(
+            tok == session_id and (
+                "--resume" in tokens[:idx] or
+                (idx > 0 and tokens[idx - 1] in ("--resume", "resume"))
+            )
+            for idx, tok in enumerate(tokens)
+        )
+    if engine == "cursor":
         return any(
             tok == session_id and (
                 "--resume" in tokens[:idx] or
@@ -6554,6 +6672,55 @@ def session_live_status(session_id, session_cwd):
         result["live"] = True
         return result
 
+    if _is_cursor_session(session_id):
+        path = _cursor_transcript_path(session_id)
+        if path:
+            try:
+                result["recently_written"] = (time.time() - path.stat().st_mtime) < 300
+            except OSError:
+                pass
+        registry_known = _spawn_registry_has_session(session_id, "cursor")
+        entry = _live_spawn_registry_entry_for_session(session_id, "cursor")
+        if entry:
+            pid = entry["pid"]
+            result["pid"] = pid
+            result["tty"] = _process_tty(pid)
+            result["cwd"] = _proc_cwd(pid) or entry.get("cwd") or session_cwd
+            result["terminal_app"], _term_pid = _proc_ancestor_terminal(pid)
+            result["live"] = True
+            result["match_count"] = 1
+            return result
+        if not session_cwd:
+            session_cwd = find_session_cwd(session_id)
+        exact_matches = []
+        cwd_matches = []
+        for p in find_live_cursor_processes():
+            cmd = p.get("command") or ""
+            if _command_targets_engine_session(cmd, session_id, "cursor"):
+                exact_matches.append(p)
+            elif not registry_known and session_cwd and p.get("cwd") == session_cwd:
+                cwd_matches.append(p)
+        matches = exact_matches or cwd_matches
+        result["match_count"] = len(matches)
+        if not matches:
+            return result
+        if len(matches) > 1:
+            exact = [
+                p for p in matches
+                if _command_targets_engine_session(p.get("command") or "", session_id, "cursor")
+            ]
+            if len(exact) == 1:
+                matches = exact
+            else:
+                result["ambiguous"] = True
+                return result
+        match = matches[0]
+        result["pid"] = match["pid"]
+        result["tty"] = match.get("tty")
+        result["terminal_app"] = match.get("terminal_app")
+        result["live"] = True
+        return result
+
     if _is_antigravity_session(session_id):
         path = _antigravity_transcript_path(session_id)
         if path:
@@ -6695,6 +6862,8 @@ def _build_resume_command(session_id, cwd, cwd_exists):
         resume_cmd = f"codex resume {session_id}"
     elif is_gemini:
         resume_cmd = f"gemini --resume {session_id}"
+    elif _is_cursor_session(session_id):
+        resume_cmd = f"cursor-agent --resume {session_id}"
     elif is_antigravity:
         # Two flavors of Antigravity session live on disk:
         #   1. AGY CLI sessions — have a `.pb` in ~/.gemini/antigravity-cli/
@@ -7748,6 +7917,14 @@ def find_session_cwd(session_id):
             return cwd
     if _is_antigravity_session(session_id):
         cwd = _extract_antigravity_cwd(session_id)
+        if cwd:
+            cwd = _resolve_session_cwd(session_id, cwd)
+            _session_cwd_cache[session_id] = cwd
+            return cwd
+    cursor_path = _cursor_transcript_path(session_id)
+    if cursor_path:
+        tail = _extract_cursor_tail_meta(cursor_path) or {}
+        cwd = tail.get("cwd") or _cursor_cwd_from_transcript_path(cursor_path)
         if cwd:
             cwd = _resolve_session_cwd(session_id, cwd)
             _session_cwd_cache[session_id] = cwd
@@ -10146,6 +10323,19 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
             progress("gemini", state="error", detail=f"Gemini session scan failed: {exc}")
 
     if progress:
+        progress("cursor", state="running", detail="Reading Cursor sessions.")
+    try:
+        conversations.extend(find_cursor_conversations(
+            repo_path=repo_path,
+            include_old=include_old,
+            repo_only=True,
+            progress=progress,
+        ))
+    except Exception as exc:
+        if progress:
+            progress("cursor", state="error", detail=f"Cursor session scan failed: {exc}")
+
+    if progress:
         progress("antigravity", state="running", detail="Reading Antigravity sessions.")
     try:
         conversations.extend(find_antigravity_conversations(
@@ -10288,7 +10478,7 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
         )
     desktop_meta = _load_desktop_app_metadata()
     for c in conversations:
-        if c.get("source") not in ("codex", "gemini", "antigravity"):
+        if c.get("source") not in ("codex", "gemini", "cursor", "antigravity"):
             _add_sidecar_fields(c)
         # Desktop-app metadata decoration: use human-friendly title if present,
         # and flag the session as having been touched by the desktop app.
@@ -10417,6 +10607,9 @@ def _resolve_conversation_reader(conversation_id, repo_path=None):
     codex_path = _resolve_codex_rollout_path(conversation_id)
     if codex_path and codex_path.is_file():
         return codex_path, _parse_codex_event
+    cursor_path = _cursor_transcript_path(conversation_id)
+    if cursor_path and cursor_path.is_file():
+        return cursor_path, _parse_cursor_event
     antigravity_path = _antigravity_transcript_path(conversation_id)
     if antigravity_path and antigravity_path.is_file():
         return antigravity_path, _parse_antigravity_event
@@ -10514,6 +10707,8 @@ def _conv_parse_jsonl_mtime(conversation_id, repo_path=None):
                 path = None
         if _is_gemini_session(conversation_id):
             resolved = _resolve_gemini_chat_path(conversation_id)
+        elif _is_cursor_session(conversation_id):
+            resolved = _cursor_transcript_path(conversation_id)
         elif _is_antigravity_session(conversation_id):
             resolved = _antigravity_transcript_path(conversation_id)
         else:
@@ -11333,6 +11528,8 @@ def _extract_files_from_conversation(conversation_id):
         return _extract_files_from_gemini_conversation(conversation_id)
     if _is_codex_session(conversation_id):
         return _extract_files_from_codex_conversation(conversation_id)
+    if _is_cursor_session(conversation_id):
+        return _extract_files_from_cursor_conversation(conversation_id)
     if _is_antigravity_session(conversation_id):
         return _extract_files_from_antigravity_conversation(conversation_id)
 
@@ -12273,6 +12470,64 @@ def _codex_resume_or_steer_via_app_server(
             "error": _codex_error_text(started),
         }
     return {"ok": False, "fallback": "exec", "error": _codex_error_text(started)}
+
+
+def _codex_steer_via_app_server(session_id, text, cwd=None, model=None, image_paths=None):
+    if os.environ.get("CCC_CODEX_APP_SERVER", "1").lower() in ("0", "false", "no"):
+        return {
+            "ok": False,
+            "via": "codex-steer",
+            "code": "codex_steer_unavailable",
+            "error": "Codex app-server disabled",
+        }
+    resume_params = {
+        "threadId": session_id,
+        "excludeTurns": False,
+    }
+    if cwd:
+        resume_params["cwd"] = cwd
+    if model:
+        resume_params["model"] = model
+    resumed = _codex_app_server_request("thread/resume", resume_params, timeout=20)
+    if resumed.get("error"):
+        return {
+            "ok": False,
+            "via": "codex-steer",
+            "code": "codex_steer_unavailable",
+            "error": _codex_error_text(resumed),
+        }
+    thread = ((resumed.get("result") or {}).get("thread") or {})
+    active_turn = _codex_latest_active_turn(thread)
+    status = (thread.get("status") or {}).get("type")
+    if status != "active" or not active_turn:
+        return {
+            "ok": False,
+            "via": "codex-steer",
+            "code": "codex_no_active_turn",
+            "error": "No running Codex turn to steer",
+        }
+    steered = _codex_app_server_request(
+        "turn/steer",
+        {
+            "threadId": session_id,
+            "expectedTurnId": active_turn["id"],
+            "input": _codex_user_input(text, image_paths=image_paths),
+        },
+        timeout=20,
+    )
+    if _codex_response_succeeded(steered):
+        return {
+            "ok": True,
+            "via": "codex-steer",
+            "turn_id": (steered["result"] or {}).get("turnId") or active_turn["id"],
+            "session_id": session_id,
+        }
+    return {
+        "ok": False,
+        "via": "codex-steer",
+        "code": "codex_steer_failed",
+        "error": _codex_error_text(steered) or "Codex steer failed",
+    }
 
 
 def _codex_state_db_candidates():
@@ -14501,7 +14756,7 @@ def _inject_bg_agent_via_pty_socket(worker, text):
 
 
 def _start_resume_queue_watcher() -> None:
-    """Drain queued prompts once Codex/Gemini or live terminal sessions go idle."""
+    """Drain queued prompts once fire-and-watch engines or live terminal sessions go idle."""
     _load_pending_inputs()
     def _watcher():
         while True:
@@ -14512,7 +14767,7 @@ def _start_resume_queue_watcher() -> None:
                 busy = any(
                     s.get("resumed_sid") == sid and _poll_spawn_entry(s) is None
                     for s in _spawned_sessions
-                    if s.get("engine") in ("codex", "gemini", "antigravity")
+                    if s.get("engine") in ("codex", "gemini", "cursor", "antigravity")
                 )
                 if busy:
                     continue
@@ -14531,6 +14786,8 @@ def _start_resume_queue_watcher() -> None:
                         resume_session_codex(sid, text)
                     elif _is_gemini_session(sid):
                         resume_session_gemini(sid, text)
+                    elif _is_cursor_session(sid):
+                        resume_session_cursor(sid, text)
                     elif _is_antigravity_session(sid):
                         resume_session_antigravity(sid, text)
                 except Exception:
@@ -14580,7 +14837,7 @@ def _queue_codex_resume(session_id, text, pid=None):
 
 
 
-def resume_session_codex(session_id, text):
+def resume_session_codex(session_id, text, *, steer=False):
     """Resume a dormant Codex thread with a new prompt via `codex exec resume`."""
     text = _strip_ccc_session_state_instruction(text)
     if not text:
@@ -14618,6 +14875,14 @@ def resume_session_codex(session_id, text):
     override = _get_session_override(session_id)
     override_model = (override or {}).get("model") if override else None
     model = override_model or os.environ.get("CCC_CODEX_MODEL") or row.get("model") or "gpt-5.5"
+    if steer:
+        return _codex_steer_via_app_server(
+            session_id,
+            text,
+            cwd=cwd,
+            model=model,
+            image_paths=image_paths,
+        )
     app_result = _codex_resume_or_steer_via_app_server(
         session_id,
         text,
@@ -14868,6 +15133,17 @@ ANTIGRAVITY_APP_LS_SERVICE = "exa.language_server_pb.LanguageServerService"
 # `string title;` — see _load_antigravity_summary_titles below.
 ANTIGRAVITY_SUMMARIES_PROTO = ANTIGRAVITY_HOME / "agyhub_summaries_proto.pb"
 GEMINI_CONTEXT_LIMIT = 1_000_000
+CURSOR_HOME = Path.home() / ".cursor"
+CURSOR_PROJECTS_ROOT = CURSOR_HOME / "projects"
+CURSOR_LOCAL_BIN = Path.home() / ".local" / "bin" / "cursor-agent"
+CURSOR_CONTEXT_LIMIT = 0
+_CURSOR_META_VERSION = 1
+CURSOR_APP_BUNDLE_CANDIDATES = (
+    Path("/Applications/Cursor.app/Contents/Resources/app/bin/cursor-agent"),
+    Path("/Applications/Cursor.app/Contents/Resources/cursor-agent"),
+    Path.home() / "Applications" / "Cursor.app" / "Contents" / "Resources" / "app" / "bin" / "cursor-agent",
+    Path.home() / "Applications" / "Cursor.app" / "Contents" / "Resources" / "cursor-agent",
+)
 
 
 _antigravity_summary_cache = {"mtime": 0, "titles": {}}
@@ -15032,6 +15308,42 @@ def _resolve_antigravity_bin():
         "bin": None,
         "code": "antigravity_unavailable",
         "reason": "Antigravity CLI not found. Install AGY CLI or set CCC_ANTIGRAVITY_BIN.",
+    }
+
+
+def _resolve_cursor_bin():
+    """Locate a usable Cursor Agent binary.
+
+    Priority order:
+      1. $CCC_CURSOR_BIN when set and executable.
+      2. `shutil.which("cursor-agent")`.
+      3. ~/.local/bin/cursor-agent.
+      4. Known Cursor.app bundle locations, when present.
+    """
+    env_bin = os.environ.get("CCC_CURSOR_BIN")
+    if env_bin:
+        expanded = os.path.expanduser(env_bin)
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return {"available": True, "bin": expanded, "source": "env"}
+        return {
+            "available": False,
+            "bin": None,
+            "code": "cursor_unavailable",
+            "reason": f"CCC_CURSOR_BIN is set to {env_bin!r} but it isn't an executable file",
+        }
+    which_bin = shutil.which("cursor-agent")
+    if which_bin:
+        return {"available": True, "bin": which_bin, "source": "path"}
+    if CURSOR_LOCAL_BIN.is_file() and os.access(CURSOR_LOCAL_BIN, os.X_OK):
+        return {"available": True, "bin": str(CURSOR_LOCAL_BIN), "source": "candidate"}
+    for candidate in CURSOR_APP_BUNDLE_CANDIDATES:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return {"available": True, "bin": str(candidate), "source": "bundle"}
+    return {
+        "available": False,
+        "bin": None,
+        "code": "cursor_unavailable",
+        "reason": "Cursor Agent CLI not found. Install Cursor, install cursor-agent, or set CCC_CURSOR_BIN.",
     }
 
 
@@ -16132,6 +16444,829 @@ def _extract_gemini_timeline(session_id):
                     entry["pr_number"] = int(m.group(1))
             events.append(entry)
     return {"events": events, "total_turns": turn}
+
+
+# ---------------------------------------------------------------------------
+# Cursor Agent integration
+# ---------------------------------------------------------------------------
+
+_CURSOR_USER_QUERY_RE = re.compile(
+    r"<user_query>\s*(.*?)\s*</user_query>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _cursor_project_slug(path):
+    try:
+        resolved = Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        resolved = Path(str(path or ""))
+    return re.sub(r"[^A-Za-z0-9]", "-", str(resolved).lstrip("/"))
+
+
+def _cursor_cwd_from_project_slug(slug):
+    slug = str(slug or "").strip()
+    if not slug:
+        return ""
+    try:
+        for repo in _known_repo_paths():
+            if _cursor_project_slug(repo) == slug:
+                return repo
+    except Exception:
+        pass
+    decoded = _decode_project_slug("-" + slug)
+    if decoded:
+        try:
+            return str(decoded.resolve())
+        except (OSError, RuntimeError, ValueError):
+            return str(decoded)
+    naive = "/" + slug.replace("-", "/")
+    try:
+        p = Path(naive)
+        if p.is_dir():
+            return str(p.resolve())
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return ""
+
+
+def _cursor_project_slug_from_transcript(path):
+    try:
+        return Path(path).parents[2].name
+    except (IndexError, TypeError, ValueError):
+        return ""
+
+
+def _cursor_cwd_from_transcript_path(path):
+    return _cursor_cwd_from_project_slug(_cursor_project_slug_from_transcript(path))
+
+
+def _cursor_transcript_paths():
+    root = CURSOR_PROJECTS_ROOT
+    if not root.is_dir():
+        return []
+    paths = []
+    try:
+        for path in root.glob("*/agent-transcripts/*/*.jsonl"):
+            if path.is_file():
+                paths.append(path)
+    except OSError:
+        return []
+    try:
+        paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        paths.sort(key=lambda p: str(p), reverse=True)
+    return paths
+
+
+def _cursor_transcript_path(session_id):
+    if not session_id:
+        return None
+    sid = str(session_id).strip()
+    root = CURSOR_PROJECTS_ROOT
+    if not sid or not root.is_dir():
+        return None
+    paths = []
+    try:
+        exact = list(root.glob(f"*/agent-transcripts/{sid}/{sid}.jsonl"))
+        fallback = list(root.glob(f"*/agent-transcripts/{sid}/*.jsonl"))
+        paths = [p for p in (exact + fallback) if p.is_file()]
+    except OSError:
+        paths = []
+    if not paths:
+        return None
+    try:
+        paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        paths.sort(key=lambda p: str(p), reverse=True)
+    return paths[0]
+
+
+def _is_cursor_session(session_id):
+    path = _cursor_transcript_path(session_id)
+    return bool(path and path.is_file())
+
+
+def _cursor_chat_id_from_path(path):
+    try:
+        p = Path(path)
+        return p.stem or p.parent.name
+    except (TypeError, ValueError):
+        return ""
+
+
+def _cursor_content_blocks(ev):
+    if not isinstance(ev, dict):
+        return []
+    msg = ev.get("message")
+    content = msg.get("content") if isinstance(msg, dict) and "content" in msg else ev.get("content")
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        return [b for b in content if isinstance(b, dict)]
+    if isinstance(ev.get("text"), str):
+        return [{"type": "text", "text": ev.get("text")}]
+    return []
+
+
+def _cursor_event_role(ev):
+    if not isinstance(ev, dict):
+        return ""
+    msg = ev.get("message")
+    return ev.get("role") or (msg.get("role") if isinstance(msg, dict) else "") or ""
+
+
+def _cursor_message_text(ev):
+    parts = []
+    for block in _cursor_content_blocks(ev):
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block.get("text"))
+    return "\n".join(p for p in parts if p)
+
+
+def _cursor_user_text(text):
+    if not isinstance(text, str):
+        return ""
+    match = _CURSOR_USER_QUERY_RE.search(text)
+    if match:
+        text = match.group(1)
+    return _strip_ccc_session_state_instruction(text).strip()
+
+
+def _cursor_event_epoch(ev):
+    ts = (ev or {}).get("timestamp") or (ev or {}).get("created_at") or (ev or {}).get("time") or ""
+    return _iso_ts_epoch(ts)
+
+
+def _cursor_event_timestamp(ev):
+    return (ev or {}).get("timestamp") or (ev or {}).get("created_at") or (ev or {}).get("time") or ""
+
+
+def _cursor_tool_name(block):
+    return (block.get("name") or block.get("tool_name") or block.get("displayName") or "tool").rsplit(".", 1)[-1]
+
+
+def _cursor_tool_args(block):
+    args = block.get("input")
+    if not isinstance(args, dict):
+        args = block.get("args")
+    return args if isinstance(args, dict) else {}
+
+
+def _cursor_tool_command(block):
+    args = _cursor_tool_args(block)
+    cmd = args.get("command") or args.get("cmd") or args.get("script") or ""
+    return cmd if isinstance(cmd, str) else ""
+
+
+def _cursor_tool_workdir(block):
+    args = _cursor_tool_args(block)
+    cwd = args.get("cwd") or args.get("workdir") or args.get("workspace") or ""
+    return cwd if isinstance(cwd, str) else ""
+
+
+def _cursor_tool_detail(block):
+    args = _cursor_tool_args(block)
+    cmd = _cursor_tool_command(block)
+    if cmd:
+        return _shell_command_activity_label(cmd, max_len=1200)
+    for key in (
+        "file_path", "target_file", "path", "notebook_path", "directory",
+        "pattern", "query", "glob_pattern", "description", "prompt", "message",
+    ):
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            return _prompt_fragment(value, 240)
+    for raw in _ffc_flatten_strings(args):
+        if isinstance(raw, str) and raw:
+            return _prompt_fragment(raw, 240)
+    return ""
+
+
+def _extract_cursor_tail_meta(path):
+    try:
+        path = Path(path)
+        mtime = path.stat().st_mtime
+    except (OSError, TypeError, ValueError):
+        return {}
+    cached = _conv_meta_cache.get(str(path))
+    if (
+        cached
+        and cached.get("mtime") == mtime
+        and cached.get("engine") == "cursor"
+        and cached.get("meta_version") == _CURSOR_META_VERSION
+    ):
+        return cached
+
+    meta = {
+        "engine": "cursor",
+        "meta_version": _CURSOR_META_VERSION,
+        "mtime": mtime,
+        "first_message": None,
+        "last_meaningful_ts": 0,
+        "last_prompt": None,
+        "last_assistant_text": None,
+        "last_event_type": None,
+        "pending_tool": None,
+        "pending_file": None,
+        "has_edit": False,
+        "has_commit": False,
+        "has_push": False,
+        "last_edit_pos": 0,
+        "last_commit_pos": 0,
+        "last_push_pos": 0,
+        "tail_pr_number": None,
+        "tail_pr_url": None,
+        "tail_branch": None,
+        "tail_worktree_path": None,
+        "has_external_cd": False,
+        "cwd": _cursor_cwd_from_transcript_path(path),
+        "model": None,
+    }
+    pr_url_re = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d{1,7})")
+    pending_tool = False
+    pos = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                pos += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts_epoch = _cursor_event_epoch(ev)
+                if ts_epoch:
+                    meta["last_meaningful_ts"] = ts_epoch
+                if isinstance(ev.get("cwd"), str) and ev.get("cwd").strip():
+                    meta["cwd"] = ev.get("cwd").strip()
+                if isinstance(ev.get("workspace"), str) and ev.get("workspace").strip():
+                    meta["cwd"] = ev.get("workspace").strip()
+                if isinstance(ev.get("model"), str) and ev.get("model").strip():
+                    meta["model"] = ev.get("model").strip()
+                role = _cursor_event_role(ev)
+                if role == "user":
+                    text = _cursor_user_text(_cursor_message_text(ev))
+                    if text:
+                        meta["first_message"] = meta["first_message"] or text
+                        meta["last_prompt"] = text
+                    meta["last_event_type"] = "user"
+                    meta["pending_tool"] = None
+                    meta["pending_file"] = None
+                    pending_tool = False
+                    continue
+                if role != "assistant":
+                    if pending_tool:
+                        meta["pending_tool"] = None
+                        meta["pending_file"] = None
+                        pending_tool = False
+                    continue
+                text = _cursor_message_text(ev).strip()
+                if text:
+                    meta["last_assistant_text"] = text
+                    meta.update(_extract_codex_summary_signals(text, pr_url_re))
+                meta["last_event_type"] = "assistant"
+                for block in _cursor_content_blocks(ev):
+                    if block.get("type") != "tool_use":
+                        continue
+                    name = _cursor_tool_name(block)
+                    detail = _cursor_tool_detail(block)
+                    meta["pending_tool"] = name
+                    meta["pending_file"] = detail[:80] if isinstance(detail, str) else None
+                    pending_tool = True
+                    lname = name.lower()
+                    if lname in (
+                        "edit", "write", "writefile", "write_file", "replace",
+                        "replace_file", "apply_patch", "notebookedit",
+                    ):
+                        meta["has_edit"] = True
+                        meta["last_edit_pos"] = pos
+                    cmd = _cursor_tool_command(block)
+                    if cmd:
+                        signals = _codex_command_signals(
+                            cmd,
+                            base_cwd=_cursor_tool_workdir(block) or meta.get("cwd"),
+                        )
+                        if signals["edit"]:
+                            meta["has_edit"] = True
+                            meta["last_edit_pos"] = pos
+                        if signals["commit"]:
+                            meta["has_commit"] = True
+                            meta["last_commit_pos"] = pos
+                        if signals["push"]:
+                            meta["has_push"] = True
+                            meta["last_push_pos"] = pos
+                        if signals["external_cd"]:
+                            meta["has_external_cd"] = True
+                        if signals.get("worktree_path"):
+                            meta["tail_worktree_path"] = signals["worktree_path"]
+                        if signals.get("worktree_branch"):
+                            meta["tail_branch"] = signals["worktree_branch"]
+    except OSError:
+        return {}
+
+    if not meta.get("last_meaningful_ts"):
+        meta["last_meaningful_ts"] = mtime
+    with _conv_meta_cache_lock:
+        _conv_meta_cache[str(path)] = meta
+        global _conv_meta_cache_dirty
+        _conv_meta_cache_dirty = True
+    return meta
+
+
+def _cursor_activity_fields_from_tail(tail, live):
+    return _codex_activity_fields_from_tail(tail, live)
+
+
+def _extract_cursor_chat_id_from_log(log_path):
+    if not log_path:
+        return None
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for key in ("chatId", "chat_id", "session_id", "conversationId", "conversation_id"):
+                    sid = ev.get(key)
+                    if isinstance(sid, str) and _SESSION_UUID_RE.match(sid):
+                        return sid
+                nested = ev.get("chat") or ev.get("conversation")
+                if isinstance(nested, dict):
+                    sid = nested.get("id")
+                    if isinstance(sid, str) and _SESSION_UUID_RE.match(sid):
+                        return sid
+    except OSError:
+        return None
+    return None
+
+
+def _cursor_session_id_for_spawn_entry(entry):
+    if not isinstance(entry, dict):
+        return None
+    cwd = entry.get("cwd") or entry.get("repo_path") or ""
+    if not cwd:
+        return None
+    slug = _cursor_project_slug(cwd)
+    try:
+        candidates = [
+            p for p in CURSOR_PROJECTS_ROOT.glob(f"{slug}/agent-transcripts/*/*.jsonl")
+            if p.is_file()
+        ]
+    except OSError:
+        candidates = []
+    if not candidates:
+        return None
+    started = _spawn_registry_entry_epoch(entry)
+    prompt = re.sub(
+        r"\s+",
+        " ",
+        _strip_ccc_session_state_instruction(entry.get("prompt") or entry.get("command_summary") or "").strip(),
+    ).lower()
+    matched = []
+    for path in candidates:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if started and st.st_mtime < started - 120:
+            continue
+        tail = _extract_cursor_tail_meta(path) or {}
+        first = re.sub(r"\s+", " ", (tail.get("first_message") or "").strip()).lower()
+        if prompt and first and not (first.startswith(prompt[:80]) or prompt.startswith(first[:80])):
+            continue
+        matched.append((st.st_mtime, path))
+    if not matched:
+        return None
+    matched.sort(key=lambda item: item[0], reverse=True)
+    return _cursor_chat_id_from_path(matched[0][1])
+
+
+def _cursor_spawn_pid_by_session_id():
+    out = {}
+    for s in _spawned_sessions:
+        if s.get("engine") != "cursor":
+            continue
+        sid = (
+            s.get("session_id")
+            or s.get("resumed_sid")
+            or _extract_cursor_chat_id_from_log(s.get("log"))
+            or _cursor_session_id_for_spawn_entry(s)
+        )
+        if sid:
+            if not s.get("session_id"):
+                s["session_id"] = sid
+                _update_spawn_session_id_in_registry(s.get("pid"), sid)
+            if sid not in out:
+                try:
+                    alive = _poll_spawn_entry(s) is None
+                except Exception:
+                    alive = False
+                out[sid] = {
+                    "pid": s.get("pid"),
+                    "alive": alive,
+                    "log": s.get("log"),
+                    "cwd": s.get("cwd") or "",
+                    "repo_path": s.get("repo_path") or "",
+                    "spawned_at": s.get("started") or "",
+                    "prompt": s.get("prompt") or "",
+                    "model": s.get("model") or "",
+                }
+    return out
+
+
+def find_cursor_conversations(
+    repo_path=None,
+    include_old=True,
+    repo_only=True,
+    progress=None,
+    limit=None,
+    resolve_pr_states=True,
+    resolve_worktree_dirty=True,
+):
+    paths = _cursor_transcript_paths()
+    if not paths:
+        return []
+    repo_path_obj = None
+    if repo_only:
+        repo_path = resolve_repo_path(repo_path)
+        repo_path_obj = Path(repo_path)
+    try:
+        repo_pins = _load_repo_pins()
+    except Exception:
+        repo_pins = {}
+    try:
+        name_overrides = _load_session_name_overrides()
+    except Exception:
+        name_overrides = {}
+    try:
+        archived_set = set(_load_archived_conversations())
+    except Exception:
+        archived_set = set()
+    try:
+        verified_set = set(_load_verified_conversations())
+    except Exception:
+        verified_set = set()
+    try:
+        last_interactions = _load_last_interactions()
+    except Exception:
+        last_interactions = {}
+
+    cutoff = _session_scan_cutoff_ts(include_old)
+    max_rows = _session_scan_file_limit(include_old)
+    spawn_by_sid = _cursor_spawn_pid_by_session_id()
+    git_top_cache = {}
+    out = []
+    scanned = 0
+    for path in paths:
+        if limit and scanned >= int(limit):
+            break
+        sid = _cursor_chat_id_from_path(path)
+        if not sid:
+            continue
+        scanned += 1
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        tail = _extract_cursor_tail_meta(path) or {}
+        spawn_info = spawn_by_sid.get(sid) or {}
+        cwd = tail.get("cwd") or spawn_info.get("cwd") or _cursor_cwd_from_transcript_path(path)
+        pinned = repo_pins.get(sid)
+        pinned_repo = False
+        if repo_only:
+            if pinned and pinned != repo_path:
+                continue
+            if pinned == repo_path:
+                pinned_repo = True
+            elif not _codex_cwd_matches_repo(cwd, repo_path_obj, git_top_cache):
+                continue
+        modified = tail.get("last_meaningful_ts") or st.st_mtime
+        if spawn_info.get("log"):
+            try:
+                modified = max(modified, Path(spawn_info["log"]).stat().st_mtime)
+            except OSError:
+                pass
+        freshness = max(modified, last_interactions.get(sid) or 0)
+        if not include_old and sid not in spawn_by_sid and cutoff > 0 and freshness < cutoff:
+            continue
+        if not include_old and max_rows > 0 and len(out) >= max_rows:
+            continue
+        first_message = (tail.get("first_message") or "").strip()
+        display_name = (
+            name_overrides.get(sid)
+            or (first_message[:80] if first_message else None)
+            or "Cursor session"
+        )
+        tail_worktree_path = tail.get("tail_worktree_path") or ""
+        effective_cwd = tail_worktree_path or cwd
+        try:
+            cwd_exists = bool(effective_cwd and Path(effective_cwd).is_dir())
+        except OSError:
+            cwd_exists = False
+        folder_path = pinned or cwd or effective_cwd or ""
+        if folder_path:
+            _git_root = _find_git_root(folder_path)
+            folder_label = _resolve_dir_case(_git_root or folder_path)
+        else:
+            folder_label = "Cursor"
+        _wt_worktree_label = None
+        _wt_idx = folder_label.find("-wt-")
+        if _wt_idx > 0:
+            _wt_worktree_label = folder_label[_wt_idx + 4:]
+            folder_label = folder_label[:_wt_idx]
+        spawn_pid = spawn_info.get("pid")
+        spawn_alive = bool(spawn_info.get("alive"))
+        is_live = spawn_alive
+        activity_tail = tail
+        cursor_activity = _cursor_activity_fields_from_tail(activity_tail, is_live)
+        branch = tail.get("tail_branch") or _git_branch_for_cwd(effective_cwd)
+        out.append({
+            "id": sid,
+            "session_id": sid,
+            "source": "cursor",
+            "engine": "cursor",
+            "timestamp": "",
+            "branch": branch,
+            "git_branch": branch,
+            "first_message": first_message[:200],
+            "display_name": display_name,
+            "name_overridden": bool(name_overrides.get(sid)),
+            "last_prompt": (tail.get("last_prompt") or "")[:200],
+            "size": st.st_size,
+            "modified": modified,
+            "modified_human": time.strftime("%Y-%m-%d %H:%M", time.localtime(modified)),
+            "mtime": modified,
+            "jsonl_path": str(path),
+            "folder_label": folder_label,
+            "folder_path": folder_path,
+            "worktree_label": _wt_worktree_label,
+            "session_cwd": effective_cwd,
+            "session_cwd_exists": cwd_exists,
+            "session_cwd_is_worktree": bool(
+                tail_worktree_path or (effective_cwd and (Path(effective_cwd) / ".git").is_file())
+            ),
+            "worktree_dirty": (
+                _worktree_dirty_cached(effective_cwd, modified)
+                if resolve_worktree_dirty and effective_cwd else False
+            ),
+            "effective_branch": tail.get("tail_branch") or None,
+            "effective_kind": "worktree" if tail_worktree_path else None,
+            "has_edit": tail.get("has_edit", False),
+            "has_commit": tail.get("has_commit", False),
+            "has_push": tail.get("has_push", False),
+            "last_edit_pos": tail.get("last_edit_pos", 0),
+            "last_commit_pos": tail.get("last_commit_pos", 0),
+            "last_push_pos": tail.get("last_push_pos", 0),
+            "last_event_type": tail.get("last_event_type"),
+            "pending_tool": tail.get("pending_tool"),
+            "pending_file": tail.get("pending_file"),
+            "last_assistant_text": tail.get("last_assistant_text"),
+            "tail_issue_number": None,
+            "tail_pr_number": tail.get("tail_pr_number"),
+            "tail_pr_url": tail.get("tail_pr_url"),
+            "pr_state": None,
+            "session_state": _parse_session_state(tail.get("last_assistant_text")),
+            "archived": sid in archived_set,
+            "verified": sid in verified_set,
+            "pinned_repo": pinned_repo,
+            "last_interacted": last_interactions.get(sid),
+            "is_live": is_live,
+            "spawn_pid": spawn_pid,
+            **cursor_activity,
+            "needs_approval": False,
+            "needs_approval_message": "",
+            "model": tail.get("model") or spawn_info.get("model") or "",
+            "reasoning_effort": "",
+        })
+    if resolve_pr_states:
+        _prime_pr_states(c.get("tail_pr_url") for c in out)
+        for c in out:
+            if c.get("tail_pr_url"):
+                c["pr_state"] = _get_pr_state(c["tail_pr_url"])
+    out.sort(key=lambda x: x.get("last_interacted") or x.get("modified") or 0, reverse=True)
+    if progress:
+        progress(
+            "cursor",
+            state="done",
+            count=len(out),
+            total=scanned,
+            detail=f"{len(out)} Cursor session card(s) ready.",
+        )
+    return out
+
+
+def _parse_cursor_event(ev, line_num, usage_map=None):
+    role = _cursor_event_role(ev)
+    ts = _cursor_event_timestamp(ev)
+    if role == "user":
+        text = _cursor_user_text(_cursor_message_text(ev))
+        if text:
+            return {"line": line_num, "ts": ts, "type": "user_text", "text": text, "images": []}
+        return None
+    if role == "assistant":
+        blocks = []
+        for block in _cursor_content_blocks(ev):
+            btype = block.get("type")
+            if btype == "text":
+                text = (block.get("text") or "").strip()
+                if text:
+                    blocks.append({"kind": "text", "text": text})
+            elif btype == "tool_use":
+                detail = _cursor_tool_detail(block)
+                if isinstance(detail, str) and len(detail) > 1200:
+                    detail = detail[:1200] + "..."
+                out = {
+                    "kind": "tool_use",
+                    "name": _cursor_tool_name(block),
+                    "detail": detail or "",
+                }
+                command_text = _cursor_tool_command(block)
+                if command_text:
+                    redacted_command = _redacted_shell_command_text(command_text, max_len=12000)
+                    if redacted_command and (
+                        "\n" in redacted_command
+                        or len(redacted_command) > 160
+                        or re.sub(r"\s+", " ", redacted_command).strip() != (detail or "")
+                    ):
+                        out["command"] = redacted_command
+                        here = _extract_shell_heredoc(command_text)
+                        out["command_kind"] = _shell_script_label(here.get("head", "")) if here else "Shell command"
+                blocks.append(out)
+        if blocks:
+            return {
+                "line": line_num,
+                "ts": ts,
+                "type": "assistant",
+                "message_id": f"cursor-{line_num}",
+                "blocks": blocks,
+            }
+    if role in ("tool", "tool_result"):
+        text = _cursor_message_text(ev)
+        if text:
+            if len(text) > 800:
+                text = text[:800] + "\n..."
+            return {
+                "line": line_num,
+                "ts": ts,
+                "type": "tool_result",
+                "text": text,
+                "tool_use_id": ev.get("tool_use_id") or ev.get("id") or "",
+                "is_error": bool(ev.get("is_error") or ev.get("error")),
+            }
+    return None
+
+
+def _extract_cursor_usage(session_id):
+    empty = {
+        "latest_input_tokens": 0,
+        "peak_input_tokens": 0,
+        "total_output_tokens": 0,
+        "total_input_tokens": 0,
+        "total_cache_creation_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "model": "",
+        "context_limit": CURSOR_CONTEXT_LIMIT,
+        "cost_usd": 0.0,
+        "cost_breakdown_usd": {"input": 0.0, "cache_creation": 0.0,
+                               "cache_read": 0.0, "output": 0.0},
+        "engine": "cursor",
+        "override": _get_session_override(session_id),
+    }
+    path = _cursor_transcript_path(session_id)
+    tail = _extract_cursor_tail_meta(path) if path else {}
+    spawned = _spawn_registry_entry_for_session(session_id, "cursor") or {}
+    return {**empty, "model": (tail or {}).get("model") or spawned.get("model") or ""}
+
+
+def _extract_cursor_timeline(session_id):
+    path = _cursor_transcript_path(session_id)
+    if not path:
+        return {"events": [], "total_turns": 0}
+    events = []
+    turn = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if _cursor_event_role(ev) != "assistant":
+                    continue
+                turn += 1
+                ts = _cursor_event_timestamp(ev)
+                for block in _cursor_content_blocks(ev):
+                    if block.get("type") != "tool_use":
+                        continue
+                    cmd = _cursor_tool_command(block)
+                    if not cmd:
+                        continue
+                    kind = None
+                    subject = ""
+                    if _TIMELINE_PR_CREATE_RE.search(cmd):
+                        kind = "pr"
+                        m = _TIMELINE_PR_TITLE_RE.search(cmd)
+                        if m:
+                            subject = m.group(1)
+                    elif _TIMELINE_PUSH_RE.search(cmd):
+                        kind = "push"
+                    elif _TIMELINE_COMMIT_RE.search(cmd):
+                        kind = "commit"
+                        m = _TIMELINE_COMMIT_MSG_RE.search(cmd)
+                        if m:
+                            subject = m.group(1)
+                    if kind:
+                        events.append({
+                            "kind": kind,
+                            "turn": turn,
+                            "ts": ts,
+                            "subject": subject,
+                            "success": None,
+                        })
+    except OSError:
+        return {"events": [], "total_turns": 0}
+    return {"events": events, "total_turns": turn}
+
+
+def _extract_files_from_cursor_conversation(session_id):
+    path = _cursor_transcript_path(session_id)
+    if not path:
+        return {"count": 0, "truncated": False, "groups": {}}
+    seen = {}
+    truncated = False
+
+    def consider(target, kind, line):
+        nonlocal truncated
+        if not target or target in seen:
+            return
+        category = _categorize_file_target(target)
+        if not category:
+            return
+        if len(seen) >= _FFC_MAX_ENTRIES:
+            truncated = True
+            return
+        if kind == "url":
+            try:
+                parsed = urllib.parse.urlsplit(target)
+                tail = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+                label = tail or parsed.netloc or target
+            except ValueError:
+                label = target
+        else:
+            label = os.path.basename(target) or target
+        seen[target] = {
+            "label": label,
+            "target": target,
+            "kind": kind,
+            "category": category,
+            "first_line": line,
+        }
+
+    def consider_text(text, line):
+        if not isinstance(text, str) or not text:
+            return
+        for target, kind in _ffc_iter_targets(text):
+            consider(target, kind, line)
+
+    line_num = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_num += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                consider_text(_cursor_message_text(ev), line_num)
+                for block in _cursor_content_blocks(ev):
+                    if block.get("type") != "tool_use":
+                        continue
+                    args = _cursor_tool_args(block)
+                    for key in ("file_path", "target_file", "path", "notebook_path"):
+                        value = args.get(key)
+                        if isinstance(value, str) and value.startswith("/"):
+                            consider(value, "path", line_num)
+                    for raw in _ffc_flatten_strings(args):
+                        consider_text(raw, line_num)
+    except OSError:
+        pass
+
+    groups = {}
+    for row in seen.values():
+        groups.setdefault(row["category"], []).append(row)
+    for rows in groups.values():
+        rows.sort(key=lambda r: r["first_line"])
+    return {"count": len(seen), "truncated": truncated, "groups": groups}
 
 
 # ---------------------------------------------------------------------------
@@ -17892,6 +19027,220 @@ def spawn_session_gemini(prompt, name=None, cwd=None, repo_path=None, worktree=F
     )
 
 
+def resume_session_cursor(session_id, text):
+    """Resume a Cursor Agent chat with a one-shot headless prompt."""
+    text = _strip_ccc_session_state_instruction(text)
+    if not session_id or not text:
+        return {"ok": False, "error": "missing session_id or text"}
+    resolved = _resolve_cursor_bin()
+    if not resolved["available"]:
+        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    for s in _spawned_sessions:
+        if s.get("engine") == "cursor" and s.get("resumed_sid") == session_id:
+            try:
+                if _poll_spawn_entry(s) is None:
+                    with _pending_resume_lock:
+                        _pending_resume_queue.setdefault(session_id, []).append(text)
+                    _save_pending_inputs()
+                    return {
+                        "ok": True,
+                        "queued": True,
+                        "pid": s.get("pid"),
+                        "via": "cursor-resume-queued",
+                    }
+            except Exception:
+                pass
+    spawned_ctx = _spawn_registry_entry_for_session(session_id, "cursor") or {}
+    path = _cursor_transcript_path(session_id)
+    tail = _extract_cursor_tail_meta(path) if path else {}
+    cwd = spawned_ctx.get("cwd") or (tail or {}).get("cwd") or find_session_cwd(session_id) or str(Path.cwd())
+    if not Path(cwd).is_dir():
+        cwd = str(Path.cwd())
+    override = _get_session_override(session_id)
+    model = (
+        ((override or {}).get("model") if override else None)
+        or os.environ.get("CCC_CURSOR_MODEL")
+        or spawned_ctx.get("model")
+        or (tail or {}).get("model")
+        or _spawn_fallback_model_for_engine("cursor")
+    )
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    log_filename = f"resume-cursor-{session_id[:8]}-{timestamp}.log"
+    repo_for_logs = _git_toplevel_for_existing_dir(cwd) or cwd
+    log_dir = repo_log_dir(repo_for_logs)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / log_filename
+    cmd = [
+        resolved["bin"],
+        "--print",
+        "--output-format", "stream-json",
+        "--stream-partial-output",
+        "--resume", session_id,
+        "--workspace", cwd,
+        "--model", model,
+        text,
+    ]
+    log_fh = open(log_path, "w")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        return {"ok": False, "error": str(e), "via": "cursor-resume"}
+    entry = {
+        "pid": proc.pid,
+        "name": f"resume-cursor-{session_id[:8]}",
+        "log": str(log_path),
+        "prompt": text[:200],
+        "started": timestamp,
+        "proc": proc,
+        "log_fh": log_fh,
+        "resumed_sid": session_id,
+        "fifo": None,
+        "stdin_fd": None,
+        "engine": "cursor",
+        "cwd": cwd,
+        "repo_path": repo_for_logs,
+        "model": model,
+    }
+    _spawned_sessions.append(entry)
+    _record_spawn_to_registry(
+        pid=proc.pid,
+        name=entry["name"],
+        log_path=log_path,
+        cwd=cwd,
+        spawned_at=timestamp,
+        command_summary=text[:200],
+        fifo=None,
+        engine="cursor",
+        session_id=session_id,
+        repo_path=repo_for_logs,
+        model=model,
+    )
+    return {
+        "ok": True,
+        "pid": proc.pid,
+        "log": str(log_path),
+        "resumed": True,
+        "via": "cursor-resume",
+        "model": model,
+    }
+
+
+def spawn_session_cursor(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
+    """Spawn a headless Cursor Agent run and return tracking info."""
+    prompt = _strip_ccc_session_state_instruction(prompt or "")
+    if not prompt:
+        return {"ok": False, "error": "missing prompt"}
+    resolved = _resolve_cursor_bin()
+    if not resolved["available"]:
+        return {"ok": False, "error": resolved["reason"], "code": resolved.get("code")}
+    ctx = _spawn_repo_context(cwd=cwd, repo_path=repo_path)
+    spawn_cwd = ctx["cwd"]
+    repo_for_logs = ctx["repo_path"]
+    session_name = _slugify(name or prompt) or "cursor"
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    log_filename = f"spawn-cursor-{session_name}-{timestamp}.log"
+    model_to_use = _spawn_model_for_engine("cursor", model) or _spawn_fallback_model_for_engine("cursor")
+    if model_to_use:
+        _set_session_model(log_filename[:-4], model_to_use, False)
+    log_dir = repo_log_dir(repo_for_logs)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / log_filename
+
+    worktree_path = None
+    worktree_branch = None
+    if worktree:
+        try:
+            worktree_path, worktree_branch = _create_worktree_for_spawn(
+                spawn_cwd, session_name,
+            )
+            spawn_cwd = worktree_path
+        except RuntimeError as e:
+            return {"ok": False, "error": f"worktree creation failed: {e}"}
+
+    cmd = [
+        resolved["bin"],
+        "--print",
+        "--output-format", "stream-json",
+        "--stream-partial-output",
+        "--force",
+        "--trust",
+        "--workspace", spawn_cwd,
+        "--model", model_to_use,
+        prompt,
+    ]
+
+    log_fh = open(log_path, "w")
+    if worktree_path:
+        _run_worktree_init_hook(worktree_path, ctx["repo_path"], session_name, log_fh)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            cwd=spawn_cwd,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log_fh.close()
+        return {"ok": False, "error": str(e), "code": "cursor_launch_failed", "via": "cursor-spawn"}
+    failure = _spawn_early_failure_payload(
+        proc, log_path, log_fh, engine="cursor", via="cursor-spawn",
+    )
+    if failure:
+        return failure
+
+    entry = {
+        "pid": proc.pid,
+        "name": session_name,
+        "log": str(log_path),
+        "prompt": prompt[:200],
+        "started": timestamp,
+        "proc": proc,
+        "log_fh": log_fh,
+        "fifo": None,
+        "stdin_fd": None,
+        "engine": "cursor",
+        "cwd": spawn_cwd,
+        "repo_path": repo_for_logs,
+        "model": model_to_use,
+    }
+    _spawned_sessions.append(entry)
+    _record_spawn_to_registry(
+        pid=proc.pid,
+        name=session_name,
+        log_path=log_path,
+        cwd=spawn_cwd,
+        spawned_at=timestamp,
+        command_summary=prompt[:200],
+        fifo=None,
+        engine="cursor",
+        repo_path=repo_for_logs,
+        model=model_to_use,
+    )
+
+    resp = {
+        "ok": True,
+        "pid": proc.pid,
+        "name": session_name,
+        "log": str(log_path),
+        "via": "cursor-spawn",
+        "model": model_to_use,
+    }
+    if worktree_path:
+        resp["worktree_path"] = worktree_path
+        resp["worktree_branch"] = worktree_branch
+    return _finalize_spawn_response(resp, entry, ctx)
+
+
 def spawn_session_antigravity(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
     """Spawn a headless AGY print-mode run and return tracking info.
 
@@ -18376,6 +19725,8 @@ def _spawn_session_id_from_entry(entry):
         sid = _extract_codex_thread_id_from_log(log)
     elif engine == "gemini":
         sid = _extract_gemini_session_id_from_log(log)
+    elif engine == "cursor":
+        sid = _extract_cursor_chat_id_from_log(log) or _cursor_session_id_for_spawn_entry(entry)
     elif engine == "antigravity":
         meta = {}
         if log:
@@ -19235,7 +20586,7 @@ def _pid_is_zombie(pid):
 
 def _live_spawn_registry_entry_for_session(session_id, engine):
     """Return the live spawned-process registry entry for a session/engine."""
-    if not session_id or engine not in ("codex", "gemini", "antigravity"):
+    if not session_id or engine not in ("codex", "gemini", "cursor", "antigravity"):
         return None
     for entry in _load_spawn_registry():
         if entry.get("engine") != engine or entry.get("session_id") != session_id:
@@ -19251,7 +20602,7 @@ def _live_spawn_registry_entry_for_session(session_id, engine):
 
 
 def _spawn_registry_has_session(session_id, engine):
-    if not session_id or engine not in ("codex", "gemini", "antigravity"):
+    if not session_id or engine not in ("codex", "gemini", "cursor", "antigravity"):
         return False
     return any(
         entry.get("engine") == engine and entry.get("session_id") == session_id
@@ -19295,8 +20646,8 @@ def _record_spawn_to_registry(
     event).
     The fifo path is persisted so a fresh CCC instance can reopen the
     write side after a restart and continue injecting messages (Claude
-    only — Codex/Gemini headless runs are one-shot).
-    `engine` ("claude", "codex", "gemini", or "antigravity") tells the boot-time reattach sweep
+    only — Codex/Gemini/Cursor headless runs are one-shot).
+    `engine` ("claude", "codex", "gemini", "cursor", or "antigravity") tells the boot-time reattach sweep
     which ps-grep to use and which JSONL ingestion path to skip."""
     entries = _load_spawn_registry()
     entries.append({
@@ -19351,10 +20702,10 @@ def _pid_is_engine_process(pid, engine):
     (any python process whose argv mentions the engine name would otherwise
     pass).
 
-    `engine` is one of "claude", "codex", "gemini", or "antigravity" — the basename we expect
+    `engine` is one of "claude", "codex", "gemini", "cursor", or "antigravity" — the basename we expect
     at argv[0] (Gemini's npm wrapper may appear as a node process whose argv
     includes the gemini script path)."""
-    if engine not in ("claude", "codex", "gemini", "antigravity"):
+    if engine not in ("claude", "codex", "gemini", "cursor", "antigravity"):
         return False
     if _pid_is_zombie(pid):
         return False
@@ -19376,10 +20727,14 @@ def _pid_is_engine_process(pid, engine):
     first = parts[0].rsplit("/", 1)[-1]
     if first == engine:
         return True
+    if engine == "cursor" and first == "cursor-agent":
+        return True
     if engine == "antigravity" and first == "agy":
         return True
     if engine == "gemini":
         return any(p.rsplit("/", 1)[-1] == "gemini" for p in parts[1:4])
+    if engine == "cursor":
+        return any(p.rsplit("/", 1)[-1] == "cursor-agent" for p in parts[1:4])
     if engine == "antigravity":
         return any(p.rsplit("/", 1)[-1] in ("agy", "antigravity") for p in parts[1:4])
     return False
@@ -19454,6 +20809,14 @@ def _reattach_spawned_orphans():
         elif engine == "gemini" and not session_id and log_path:
             try:
                 session_id = _extract_gemini_session_id_from_log(log_path)
+            except Exception:
+                session_id = None
+        elif engine == "cursor" and not session_id:
+            try:
+                session_id = (
+                    _extract_cursor_chat_id_from_log(log_path)
+                    or _cursor_session_id_for_spawn_entry(entry)
+                )
             except Exception:
                 session_id = None
         # Looks legit — re-add to the in-memory map with a stub proc.
@@ -20955,7 +22318,7 @@ def _group_chat_add_participant(raw_path: str, session_id: str, display_name: st
     }
 
 
-def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False):
+def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, mode="send"):
     """Route `text` to a session using the same fall-through as /api/inject-input:
     terminal-control AppleScript when there's a TTY, FIFO write to a live spawn,
     else `claude --resume` headless. Returns a dict with at least
@@ -20964,17 +22327,23 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False):
     text = _strip_ccc_session_state_instruction(text)
     if not session_id or not text:
         return {"ok": False, "error": "missing session_id or text"}
+    mode = "steer" if str(mode or "").lower() == "steer" else "send"
     cwd = find_session_cwd(session_id)
     status = session_live_status(session_id, cwd)
     tty = status.get("tty")
     term_app = status.get("terminal_app")
     has_tty = bool(tty) and tty != "??"
     is_codex = _is_codex_session(session_id)
+    is_cursor = _is_cursor_session(session_id)
+    if is_codex and mode == "steer":
+        return resume_session_codex(session_id, text, steer=True)
     if status.get("live") and has_tty:
         if not _from_terminal_queue:
             if _terminal_input_queue_has_pending(session_id) or _session_status_is_busy(status):
                 if is_codex:
                     return resume_session_codex(session_id, text)
+                if is_cursor:
+                    return resume_session_cursor(session_id, text)
                 return _queue_terminal_input(session_id, text, status)
         return inject_input_via_keystroke(tty, term_app or "Terminal", text)
     if status.get("live") and status.get("kind") == "bg":
@@ -20989,6 +22358,8 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False):
         return resume_session_codex(session_id, text)
     if _is_gemini_session(session_id):
         return resume_session_gemini(session_id, text)
+    if is_cursor:
+        return resume_session_cursor(session_id, text)
     if _is_antigravity_session(session_id):
         return resume_session_antigravity(session_id, text)
     if not status.get("live") or not has_tty:
@@ -21022,8 +22393,8 @@ def _set_session_model(session_id, model, context_1m):
     """Apply a model+context choice to a session.
 
     Live Claude (TTY or spawned) gets a real `/model <alias>[1m]` slash
-    command injected into the running process. Codex, Gemini, Antigravity, and
-    dormant Claude have no runtime-switch mechanism, so the choice is persisted
+    command injected into the running process. Codex, Gemini, Cursor,
+    Antigravity, and dormant Claude have no runtime-switch mechanism, so the choice is persisted
     to the session-overrides sidecar and applied on the next resume.
 
     Always writes the override regardless — that way a refresh shows the
@@ -21361,6 +22732,8 @@ def ask_engine_session_and_wait(session_id, text, timeout_ms, engine):
         spawn_result = resume_session_codex(session_id, text)
     elif engine == "gemini":
         spawn_result = resume_session_gemini(session_id, text)
+    elif engine == "cursor":
+        spawn_result = resume_session_cursor(session_id, text)
     elif engine == "antigravity":
         spawn_result = resume_session_antigravity(session_id, text)
     else:
@@ -23528,6 +24901,11 @@ def _resolve_spawn_log_for_session(session_id):
             matches = _extract_codex_thread_id_from_log(log) == session_id
         elif s.get("engine") == "gemini":
             matches = _extract_gemini_session_id_from_log(log) == session_id
+        elif s.get("engine") == "cursor":
+            matches = (
+                _extract_cursor_chat_id_from_log(log) == session_id
+                or _cursor_session_id_for_spawn_entry(s) == session_id
+            )
         else:
             matches = session_id in _log_session_ids(log)
         if matches:
@@ -23551,6 +24929,11 @@ def _resolve_spawn_log_for_session(session_id):
                     matches = _extract_codex_thread_id_from_log(log) == session_id
                 elif entry.get("engine") == "gemini":
                     matches = _extract_gemini_session_id_from_log(log) == session_id
+                elif entry.get("engine") == "cursor":
+                    matches = (
+                        _extract_cursor_chat_id_from_log(log) == session_id
+                        or _cursor_session_id_for_spawn_entry(entry) == session_id
+                    )
                 else:
                     sids_in_log = _log_session_ids(log)
                     matches = session_id in sids_in_log
@@ -23596,7 +24979,7 @@ def _normalize_spawn_event(ev):
     if not isinstance(ev, dict):
         return None
     t = ev.get("type")
-    if t == "message" and ev.get("role") == "assistant":
+    if t == "message" and ev.get("role") == "assistant" and isinstance(ev.get("content"), str):
         text = ev.get("content") or ""
         if not text:
             return None
@@ -23604,6 +24987,34 @@ def _normalize_spawn_event(ev):
             "type": "assistant_block",
             "message_id": "gemini-stream",
             "blocks": [{"type": "text", "text": text}],
+        }
+    if (not t or t == "message") and _cursor_event_role(ev) == "assistant":
+        blocks = []
+        for c in _cursor_content_blocks(ev):
+            ct = c.get("type")
+            if ct == "text":
+                blocks.append({"type": "text", "text": c.get("text", "")})
+            elif ct == "tool_use":
+                inp = _cursor_tool_args(c)
+                summary = _tool_use_detail(_cursor_tool_name(c), inp, max_len=160)
+                if not summary:
+                    summary = (
+                        inp.get("file_path") or inp.get("path")
+                        or inp.get("pattern") or inp.get("command")
+                        or inp.get("description") or ""
+                    )
+                blocks.append({
+                    "type": "tool_use",
+                    "name": _cursor_tool_name(c),
+                    "id": c.get("id", ""),
+                    "summary": _prompt_fragment(str(summary), 160) if summary else "",
+                })
+        if not blocks:
+            return None
+        return {
+            "type": "assistant_block",
+            "message_id": ev.get("id") or ev.get("message_id") or "cursor-stream",
+            "blocks": blocks,
         }
     if t == "tool_use":
         params = ev.get("parameters") if isinstance(ev.get("parameters"), dict) else {}
@@ -23802,6 +25213,51 @@ def _scan_session_tool_paths(session_id, max_events=400):
 
     Capped at ~400 assistant events for bounded latency on long sessions.
     """
+    if _is_cursor_session(session_id):
+        path = _cursor_transcript_path(session_id)
+        file_paths = []
+        cd_targets = []
+        cd_seen = set()
+        seen_events = 0
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if seen_events >= max_events:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if _cursor_event_role(ev) != "assistant":
+                        continue
+                    seen_events += 1
+                    for block in _cursor_content_blocks(ev):
+                        if block.get("type") != "tool_use":
+                            continue
+                        args = _cursor_tool_args(block)
+                        for key in ("file_path", "target_file", "path", "notebook_path"):
+                            raw = args.get(key)
+                            if isinstance(raw, str) and raw.startswith("/"):
+                                file_paths.append(raw)
+                        cmd = _cursor_tool_command(block)
+                        if cmd:
+                            for m in _BASH_CD_RE.finditer(cmd):
+                                cd_path = m.group(1).strip("'\"")
+                                if (cd_path.startswith("/") or cd_path.startswith("~")) and cd_path not in cd_seen:
+                                    cd_seen.add(cd_path)
+                                    cd_targets.append(cd_path)
+                            for m in _BASH_GIT_C_RE.finditer(cmd):
+                                gc_path = m.group(1).strip("'\"")
+                                if (gc_path.startswith("/") or gc_path.startswith("~")) and gc_path not in cd_seen:
+                                    cd_seen.add(gc_path)
+                                    cd_targets.append(gc_path)
+        except OSError:
+            return [], []
+        return file_paths, cd_targets
+
     if _is_antigravity_session(session_id):
         path = _antigravity_transcript_path(session_id)
         file_paths = []
@@ -24342,6 +25798,10 @@ def _session_tail_worktree_hint(session_id):
             path = _resolve_gemini_chat_path(session_id)
             tail = _extract_gemini_tail_meta(path) if path else None
             source = "worktree-add"
+        elif _is_cursor_session(session_id):
+            path = _cursor_transcript_path(session_id)
+            tail = _extract_cursor_tail_meta(path) if path else None
+            source = "worktree-add"
         elif _is_antigravity_session(session_id):
             path = _antigravity_transcript_path(session_id)
             tail = _extract_antigravity_tail_meta(path) if path else None
@@ -24615,6 +26075,8 @@ def extract_session_timeline(session_id):
         return _extract_codex_timeline(session_id)
     if _is_gemini_session(session_id):
         return _extract_gemini_timeline(session_id)
+    if _is_cursor_session(session_id):
+        return _extract_cursor_timeline(session_id)
     if _is_antigravity_session(session_id):
         return _extract_antigravity_timeline(session_id)
     if not PROJECTS_ROOT.is_dir():
@@ -24889,6 +26351,10 @@ def extract_session_usage(session_id):
     if _is_gemini_session(session_id):
         result = _extract_gemini_usage(session_id)
         result.setdefault("engine", "gemini")
+        return result
+    if _is_cursor_session(session_id):
+        result = _extract_cursor_usage(session_id)
+        result.setdefault("engine", "cursor")
         return result
     if _is_antigravity_session(session_id):
         result = _extract_antigravity_usage(session_id)
@@ -26588,6 +28054,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             info = _resolve_gemini_bin()
             info["model"] = os.environ.get("CCC_GEMINI_MODEL", "auto")
             info["approval_mode"] = os.environ.get("CCC_GEMINI_APPROVAL_MODE", "yolo")
+            self.send_json(info)
+        elif path == "/api/sessions/spawn-cursor/availability":
+            info = _resolve_cursor_bin()
+            info["model"] = _spawn_model_for_engine("cursor")
             self.send_json(info)
         elif path == "/api/sessions/spawn-antigravity/availability":
             info = _resolve_antigravity_bin()
@@ -28512,6 +29982,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             worktree=worktree_flag,
                             model=model,
                         )
+                    elif engine == "cursor":
+                        result = spawn_session_cursor(
+                            prompt,
+                            name=name,
+                            cwd=spawn_cwd,
+                            repo_path=payload.get("repo_path"),
+                            worktree=worktree_flag,
+                            model=model,
+                        )
                     elif engine == "antigravity":
                         result = spawn_session_antigravity(
                             prompt,
@@ -28537,6 +30016,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         "codex_launch_failed",
                         "gemini_unavailable",
                         "gemini_launch_failed",
+                        "cursor_unavailable",
+                        "cursor_launch_failed",
                         "antigravity_unavailable",
                         "antigravity_launch_failed",
                     ):
@@ -28658,6 +30139,64 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         worktree=bool(payload.get("worktree")),
                     )
                     if result.get("code") in ("gemini_unavailable", "gemini_launch_failed"):
+                        self.send_json(result, 503)
+                    else:
+                        self.send_json(result)
+                except RepoContextError as e:
+                    self.send_json(e.as_payload(), e.status)
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)}, 500)
+        elif path == "/api/sessions/spawn-cursor":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            prompt = (payload.get("prompt") or "").strip()
+            name = (payload.get("name") or "").strip() or None
+            cwd_raw = payload.get("cwd")
+            cwd_input = cwd_raw.strip() if isinstance(cwd_raw, str) else ""
+            cwd_resolved = None
+            cwd_error = None
+            if cwd_input:
+                try:
+                    expanded = os.path.expanduser(cwd_input)
+                    candidate = Path(expanded).resolve()
+                except (OSError, RuntimeError) as e:
+                    cwd_error = f"could not resolve path ({e})"
+                else:
+                    home = Path.home().resolve()
+                    try:
+                        st = os.stat(candidate)
+                    except OSError as e:
+                        cwd_error = f"path does not exist ({e.strerror or e})"
+                    else:
+                        if not stat.S_ISDIR(st.st_mode):
+                            cwd_error = f"not a directory: {candidate}"
+                        else:
+                            try:
+                                candidate.relative_to(home)
+                            except ValueError:
+                                cwd_error = f"path is outside $HOME ({home}): {candidate}"
+                            else:
+                                cwd_resolved = candidate
+            model = payload.get("model")
+            if not prompt:
+                self.send_json({"ok": False, "error": "missing prompt"}, 400)
+            elif cwd_error:
+                self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
+            else:
+                try:
+                    result = spawn_session_cursor(
+                        prompt,
+                        name=name,
+                        cwd=str(cwd_resolved) if cwd_resolved else None,
+                        repo_path=payload.get("repo_path"),
+                        worktree=bool(payload.get("worktree")),
+                        model=model,
+                    )
+                    if result.get("code") in ("cursor_unavailable", "cursor_launch_failed"):
                         self.send_json(result, 503)
                     else:
                         self.send_json(result)
@@ -29777,14 +31316,18 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 payload = {}
             sid = payload.get("session_id", "")
             text = payload.get("text", "")
+            mode = (payload.get("mode") or ("steer" if payload.get("steer") else "send") or "send")
+            mode = str(mode).strip().lower()
             if not sid or not text:
                 self.send_json({"ok": False, "error": "missing session_id or text"})
+            elif mode not in ("send", "steer"):
+                self.send_json({"ok": False, "error": "invalid mode"}, 400)
             else:
                 # Stamp interaction up-front: the user clicked/typed on this
                 # card, which is the whole signal we want — independent of
                 # whether the keystroke injection itself ends up succeeding.
                 _record_interaction(sid)
-                self.send_json(_inject_text_into_session(sid, text))
+                self.send_json(_inject_text_into_session(sid, text, mode=mode))
         elif re.match(r"^/api/session/[a-zA-Z0-9-]+/model/clear$", path):
             sid = path.split("/")[3]
             _clear_session_override(sid)
@@ -31078,7 +32621,7 @@ def _raise_open_file_limit(min_soft=2048):
 #   2. version           — the __version__ string from this file.
 #   3. platform          — sys.platform value ("darwin", "linux", ...).
 #   4. engines           — comma-list of installed CLI engines among
-#                          {claude, codex, gemini, antigravity}, derived only from
+#                          {claude, codex, gemini, cursor, antigravity}, derived only from
 #                          "is the binary available" — NO usage signal,
 #                          NO per-engine counts, NO version probing.
 #   5. last_active_date  — ISO date only (YYYY-MM-DD) of the most recent
@@ -31271,6 +32814,11 @@ def _telemetry_detect_engines():
     try:
         if _resolve_gemini_bin().get("available"):
             out.append("gemini")
+    except Exception:
+        pass
+    try:
+        if _resolve_cursor_bin().get("available"):
+            out.append("cursor")
     except Exception:
         pass
     try:

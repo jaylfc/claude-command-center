@@ -1,0 +1,1 @@
+Added Cursor as a dashboard engine alongside Claude, Codex, and Antigravity. CCC can discover Cursor agent transcripts, spawn headless `cursor-agent` runs, resume existing Cursor chats, show Cursor rows/logs in the UI, and manage Cursor spawn defaults.
