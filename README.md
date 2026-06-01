@@ -74,7 +74,7 @@ that already exists.
 
 ## Quickstart
 
-**Try the demo:** [amirfish1.github.io/claude-command-center](https://amirfish1.github.io/claude-command-center/) — read-only kanban with seeded fake data, no install required.
+**Try the demo:** [ccc.amirfish.ai/demo](https://ccc.amirfish.ai/demo/) — read-only kanban with seeded fake data, no install required.
 
 Requirements: macOS, Python 3, and [Claude Code](https://docs.claude.com/en/docs/claude-code) installed.
 Optional: [`gh`](https://cli.github.com/) for GitHub integration, `vercel` for deploy status.
