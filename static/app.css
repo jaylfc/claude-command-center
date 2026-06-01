@@ -726,6 +726,30 @@
   }
   .conv-sticky-header .conv-sticky-header__close:hover { opacity: 1; color: var(--red); }
 
+  /* RTL support — `unicode-bidi: plaintext` lets each block (paragraph,
+     blockquote, code block) detect its own direction from its first
+     strong directional character (Hebrew/Arabic flips to RTL, Latin
+     stays LTR). `text-align: start` aligns each block to its own
+     reading edge so mixed-language conversations land correctly
+     without per-message tagging. Code blocks override back to LTR so
+     code stays readable. */
+  .assistant-text,
+  .assistant-text > *,
+  .user-msg,
+  .gc-message-body,
+  .gc-chat-doc {
+    unicode-bidi: plaintext;
+    text-align: start;
+  }
+  .assistant-text pre,
+  .assistant-text code,
+  .user-msg pre,
+  .user-msg code {
+    unicode-bidi: normal;
+    direction: ltr;
+    text-align: left;
+  }
+
   .assistant-text {
     font-size: 15px; padding: 4px 0;
     line-height: 1.5;
@@ -8512,6 +8536,16 @@ body.status-pos-right .conv-sticky-header .csh-col-ask {
 ::highlight(tts-highlight) {
   color: #eab308;
   background-color: transparent;
+}
+
+/* In-conversation Cmd+F (CSS Highlight API — never steals focus) */
+::highlight(chat-find) {
+  background-color: rgba(178, 102, 255, 0.35);
+  color: inherit;
+}
+::highlight(chat-find-active) {
+  background-color: rgba(178, 102, 255, 0.85);
+  color: inherit;
 }
 
 /* ── What's New Link ── */
