@@ -10437,6 +10437,7 @@
     const _sessionConvs = [];
     const _ghIssueConvs = [];
     const _readyToMergeConvs = [];
+    const _readyToMergeSeenPrNums = new Set();
     const _archivedConvs = [];
     const _idSearchConvs = [];
     const _inGroupChatIds = new Set(_gcActiveChats.flatMap(c => c.session_ids || []));
@@ -10463,6 +10464,13 @@
       const _prDone = _prState === 'MERGED' || _prState === 'CLOSED';
       const _prStatePending = c._pr_state_pending === true;
       if (c.source !== 'pkood' && c.tail_pr_number && !_prStatePending && !_prDone) {
+        // Dedup: one row per PR number. Convs are sorted by recency
+        // upstream, so the first encounter is the freshest row for that
+        // PR — secondary rows (same PR in another session, GitHub-issue
+        // mirror) get suppressed here. Without this, dual-source PRs
+        // appeared as two visually identical rows in Ready to merge.
+        if (_readyToMergeSeenPrNums.has(c.tail_pr_number)) continue;
+        _readyToMergeSeenPrNums.add(c.tail_pr_number);
         _readyToMergeConvs.push(c);
         continue;
       }

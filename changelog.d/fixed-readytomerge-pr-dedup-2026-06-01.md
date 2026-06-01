@@ -1,0 +1,1 @@
+Ready to merge no longer shows the same PR twice. When two conversations both reference the same `tail_pr_number` (e.g. a coding session + a GitHub-issue mirror), only the most recent one is kept in the section. The convs list is already sorted by recency upstream, so first-seen wins.
