@@ -54,7 +54,7 @@
     hiStatus:       { ms: 4000,  label: 'hist-ix', surface: 'Top bar — history/search index pill',         desc: 'History-index progress (4s while indexing, else 60s).' },
     liveStatus:     { ms: 5000,  label: 'status',  surface: 'Sidebar — conversation row status',           desc: 'Session statuses — the live row dots + state.' },
     issues:         { ms: 10000, label: 'issues',  surface: 'Sidebar — GitHub Issues section',             desc: 'GitHub issues for the active repo.' },
-    sessionsList:   { ms: 10000, label: 'sessions',surface: 'Sidebar — session list',                      desc: 'Session list refetch (~3MB).' },
+    sessionsList:   { ms: 60000, label: 'sessions',surface: 'Sidebar — session list',                      desc: 'Archive/session refresh (~3MB, stale-cache).' },
     gcActive:       { ms: 15000, label: 'gc-live', surface: 'Sidebar — active-group-chat footer pill',     desc: 'Active group-chat coordinations badge.' },
     vercelDeploy:   { ms: 15000, label: 'vercel',  surface: 'Top bar — Vercel deploy badge',               desc: 'Latest Vercel deploy status.' },
     localhost:      { ms: 15000, label: 'localhost',surface: 'Top bar — localhost pill',                   desc: 'Localhost dev-server reachability probe.' },
@@ -6386,6 +6386,39 @@
     return result;
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // ORGANIZE: layout rules (kept here so they don't drift over time).
+  // When adding a new rule, append here AND list it in the changelog,
+  // and keep the algorithm a pure function of its inputs so R1 holds.
+  //
+  // R1. Idempotent — running Organize twice gives the same result as
+  //     once. Algorithm is a pure function of (parent order, cluster
+  //     sizes, viewport width); no state from previous runs is read.
+  // R2. Minimum cluster area — for each cluster, column count C is
+  //     chosen so cluster width ≈ children-area height
+  //     (C = round(sqrt(N * ch / cw)), clamped to [1, MAX_COLS]).
+  // R3. Consistent margins — CLUSTER_MARGIN px between every cluster
+  //     in both axes; PARENT_PAD px from viewport edges.
+  // R4. Tight pack — bin-pack from top-left; row wraps when next
+  //     cluster would exceed rowBudget. No isolated rectangles or
+  //     gaps beyond CLUSTER_MARGIN between any two neighbors.
+  // R5. Children indent — child sessions placed below their parent
+  //     are offset CHILD_INDENT_X px to the right of the parent's
+  //     left edge so the hierarchy reads visually.
+  // R6. Connector lines always render BEHIND nodes — handled in CSS:
+  //     `.flow-links { z-index: 0 }` vs `.flow-node { z-index: 1 }`.
+  //     Archived/completed nodes use MUTED COLORS (not opacity) so
+  //     lines don't bleed through them.
+  // R7. Nested objects (object whose parent is another object) must
+  //     be placed to the right OR below their parent, never to the
+  //     left or above. Topological sort places parents before their
+  //     descendants and pins nested anchors to (parentRight +
+  //     NESTED_GAP_X, parentTop).
+  // R8. Within a cluster, non-archived sessions sit above/left of
+  //     archived sessions; within each group, sort reverse-
+  //     chronological (most recent first). Archived sessions only
+  //     appear when "Include archived" is on.
+  // ──────────────────────────────────────────────────────────────────
   function organizeFlowSessions(targetEl) {
     const board = targetEl || document.getElementById('flowBoard');
     if (!board) return;
@@ -6405,15 +6438,19 @@
     const SESSION_GAP_BELOW_PARENT = 14;
     const CHILD_GAP_X = 14;
     const CHILD_GAP_Y = 10;
+    const CHILD_INDENT_X = 10;     // R5
+    const NESTED_GAP_X = 24;       // R7
     const MAX_COLS = 4;
     const MIN_ROW_WIDTH = 720;
 
     const parentNodes = [];
+    const parentNodeIds = new Set();
     const childrenByParent = new Map();
     world.querySelectorAll('.flow-node').forEach(node => {
       const kind = node.dataset.flowKind;
       if (kind === 'object' || kind === 'repo') {
         parentNodes.push(node);
+        parentNodeIds.add(node.dataset.flowNodeId);
       } else if (kind === 'session' || kind === 'draft-session') {
         const parentId = node.dataset.flowParent || flowNodeParents[node.dataset.flowNodeId] || '';
         if (!parentId) return;
@@ -6426,31 +6463,59 @@
       return;
     }
 
-    // Stable processing order: by (parent's current Y, X). Keeps the
-    // post-Organize layout close to the user's spatial intent and — given
-    // the deterministic bin-pack below — produces identical output on
-    // repeated runs (idempotent).
+    // R7 prerequisite: which parent-kind ancestor (object/repo) each
+    // parent belongs to, if any.
+    const ancestorOf = new Map();
+    parentNodes.forEach(node => {
+      const id = node.dataset.flowNodeId;
+      const explicit = node.dataset.flowParent || flowNodeParents[id] || '';
+      if (explicit && parentNodeIds.has(explicit) && explicit !== id) {
+        ancestorOf.set(id, explicit);
+      }
+    });
+
+    // Stable order (R1): by current (Y, X). Then topological reorder
+    // so an ancestor object is always emitted BEFORE its nested child.
     parentNodes.sort((a, b) => {
       const dy = a.offsetTop - b.offsetTop;
       if (dy !== 0) return dy;
       return a.offsetLeft - b.offsetLeft;
     });
+    const orderedParents = [];
+    const emitted = new Set();
+    const pending = parentNodes.slice();
+    let topoSafety = pending.length * pending.length + 1;
+    while (pending.length && topoSafety-- > 0) {
+      const idx = pending.findIndex(p => {
+        const anc = ancestorOf.get(p.dataset.flowNodeId);
+        return !anc || emitted.has(anc);
+      });
+      if (idx === -1) break;
+      const next = pending.splice(idx, 1)[0];
+      orderedParents.push(next);
+      emitted.add(next.dataset.flowNodeId);
+    }
+    pending.forEach(p => orderedParents.push(p));
 
-    // For each cluster precompute column count + bounding size. Column
-    // count picks a value of C that drives cluster width ≈ children-area
-    // height (square-ish), which minimizes the cluster's bounding-rect
-    // area for its session count. Wider children + few of them → fewer
-    // columns + more rows (tall, narrow cluster).
-    const clusters = parentNodes.map(parent => {
+    // R8 child sort: non-archived (rev-chron) above archived (rev-chron).
+    const recencyOf = node => {
+      const r = convsById[node.dataset.id] || {};
+      return r.last_interacted || r.modified || r.mtime || 0;
+    };
+    const isArchivedNode = node => !!(convsById[node.dataset.id] || {}).archived
+      || (node.classList && node.classList.contains('is-archived'));
+    const sortChildren = arr => arr.slice().sort((a, b) => {
+      const aa = isArchivedNode(a) ? 1 : 0;
+      const bb = isArchivedNode(b) ? 1 : 0;
+      if (aa !== bb) return aa - bb;
+      return recencyOf(b) - recencyOf(a);
+    });
+
+    // R2 cluster sizing: column count minimizes bounding-rect area.
+    const clusters = orderedParents.map(parent => {
       const id = parent.dataset.flowNodeId;
       const rawChildren = childrenByParent.get(id) || [];
-      const children = rawChildren.slice().sort((a, b) => {
-        const ra = convsById[a.dataset.id] || {};
-        const rb = convsById[b.dataset.id] || {};
-        const sa = ra.last_interacted || ra.modified || ra.mtime || 0;
-        const sb = rb.last_interacted || rb.modified || rb.mtime || 0;
-        return sb - sa;
-      });
+      const children = sortChildren(rawChildren);
       const sample = children[0];
       const cwChild = sample ? sample.offsetWidth : 280;
       const chChild = sample ? sample.offsetHeight : 96;
@@ -6463,18 +6528,21 @@
         C = Math.max(1, Math.min(MAX_COLS, Math.round(target)));
       }
       const rows = N > 0 ? Math.ceil(N / C) : 0;
-      const childAreaW = N > 0 ? C * cwChild + (C - 1) * CHILD_GAP_X : 0;
+      const childAreaW = N > 0 ? CHILD_INDENT_X + C * cwChild + (C - 1) * CHILD_GAP_X : 0;
       const childAreaH = rows > 0 ? rows * chChild + (rows - 1) * CHILD_GAP_Y : 0;
       const width = Math.max(pw, childAreaW);
       const height = ph + (N > 0 ? SESSION_GAP_BELOW_PARENT + childAreaH : 0);
-      return { parent, children, C, cwChild, chChild, pw, ph, width, height, N };
+      return {
+        parent, children, C, cwChild, chChild, pw, ph, width, height, N,
+        ancestor: ancestorOf.get(id) || '',
+      };
     });
+    const clusterById = new Map();
+    clusters.forEach(c => clusterById.set(c.parent.dataset.flowNodeId, c));
+    const placedPos = new Map();
 
-    // Bin-pack clusters into rows from viewport top-left. Each row fills
-    // left-to-right until the next cluster would exceed the row budget,
-    // then wraps. Row height is the tallest cluster in that row. Because
-    // the inputs (parent order, cluster sizes) are stable, the output is
-    // identical on every run — running Organize twice is a no-op.
+    // R3/R4 bin-pack for top-level clusters; R7 anchors nested
+    // clusters to (ancestor.right + NESTED_GAP_X, ancestor.top).
     const rowBudget = Math.max(MIN_ROW_WIDTH, vpR - vpL - PARENT_PAD * 2);
     const startX = Math.max(0, vpL + PARENT_PAD);
     const startY = Math.max(0, vpT + PARENT_PAD);
@@ -6483,31 +6551,47 @@
     let rowMaxHeight = 0;
     let rowHasCluster = false;
     clusters.forEach(cluster => {
-      if (rowHasCluster && (cursorX - startX + cluster.width) > rowBudget) {
-        cursorX = startX;
-        cursorY += rowMaxHeight + CLUSTER_MARGIN;
-        rowMaxHeight = 0;
-        rowHasCluster = false;
+      let left;
+      let top;
+      const isNested = cluster.ancestor && placedPos.has(cluster.ancestor);
+      if (isNested) {
+        const anc = placedPos.get(cluster.ancestor);
+        left = anc.left + anc.width + NESTED_GAP_X;
+        top = anc.top;
+      } else {
+        if (rowHasCluster && (cursorX - startX + cluster.width) > rowBudget) {
+          cursorX = startX;
+          cursorY += rowMaxHeight + CLUSTER_MARGIN;
+          rowMaxHeight = 0;
+          rowHasCluster = false;
+        }
+        left = cursorX;
+        top = cursorY;
       }
-      const left = cursorX;
-      const top = cursorY;
       const parent = cluster.parent;
       parent.style.left = Math.round(left) + 'px';
       parent.style.top = Math.round(top) + 'px';
       flowNodePositions[parent.dataset.flowNodeId] = { x: Math.round(left), y: Math.round(top) };
+      // R5: indent children.
+      const childBaseX = left + CHILD_INDENT_X;
       const childBaseY = top + cluster.ph + SESSION_GAP_BELOW_PARENT;
       cluster.children.forEach((child, idx) => {
         const col = idx % cluster.C;
         const row = Math.floor(idx / cluster.C);
-        const x = left + col * (cluster.cwChild + CHILD_GAP_X);
+        const x = childBaseX + col * (cluster.cwChild + CHILD_GAP_X);
         const y = childBaseY + row * (cluster.chChild + CHILD_GAP_Y);
         child.style.left = Math.round(x) + 'px';
         child.style.top = Math.round(y) + 'px';
         flowNodePositions[child.dataset.flowNodeId] = { x: Math.round(x), y: Math.round(y) };
       });
-      cursorX += cluster.width + CLUSTER_MARGIN;
-      if (cluster.height > rowMaxHeight) rowMaxHeight = cluster.height;
-      rowHasCluster = true;
+      placedPos.set(parent.dataset.flowNodeId, {
+        left, top, width: cluster.width, height: cluster.height,
+      });
+      if (!isNested) {
+        cursorX += cluster.width + CLUSTER_MARGIN;
+        if (cluster.height > rowMaxHeight) rowMaxHeight = cluster.height;
+        rowHasCluster = true;
+      }
     });
 
     persistFlowNodePositions();
@@ -20659,6 +20743,8 @@
   let _archiveStaleRetryId = null;
   let _archiveSideDataHydratedAt = 0;
   let _archivePrHydratedAt = 0;
+  const ARCHIVE_REFRESH_INTERVAL_MS = 60 * 1000;
+  const ARCHIVE_STALE_RETRY_MS = 30 * 1000;
   const ARCHIVE_HYDRATE_TTL_MS = 5 * 60 * 1000;
   function _archiveQuery() {
     return document.getElementById('convSearch')?.value || '';
@@ -20696,10 +20782,11 @@
     if (_archiveStaleRetryId) return;
     _archiveStaleRetryId = setTimeout(() => {
       _archiveStaleRetryId = null;
+      if (document.hidden || activeTab !== 'sessions' || conversationPaneLoading) return;
       refreshArchiveData({ staleOk: true })
         .then(() => renderArchiveList(_archiveQuery()))
         .catch(() => {});
-    }, 2500);
+    }, ARCHIVE_STALE_RETRY_MS);
   }
   function _hydrateArchiveSideData(force = false) {
     if (_archiveSideDataPromise) return _archiveSideDataPromise;
@@ -22340,11 +22427,9 @@
   // Apply initial font scale to split view
   if ($convPanelView) $convPanelView.style.zoom = convFontScale;
 
-  // Auto-refresh session data every 10s — keeps kanban columns, signals,
-  // and relative times up to date without manual refresh. Routes through
-  // loadConversationList() so the merge logic (placeholder preservation,
-  // display-name override carry-over, sticky columns) lives in one place —
-  // divergence here was what caused new-session rows to flicker.
+  // Auto-refresh archive/session data on a slower cadence. This payload is
+  // multi-MB on long-running installs, so the 5s live-status poll owns
+  // real-time row activity while this refresh catches structural changes.
   if (!CONV_POPOUT_MODE) {
 	  setInterval(async () => {
 		    if (_pollerSkip('sessionsList')) return; if (activeTab !== 'sessions') return;
@@ -22368,7 +22453,7 @@
       if (deferSidebarRenderIfDragging()) return;
       _scheduleSidebarRender();
 	    } catch (_) { /* best-effort */ }
-	  }, 10000);
+	  }, ARCHIVE_REFRESH_INTERVAL_MS);
   }
 
   // The convToolbar new-session input + Run/pkood toggle were removed —

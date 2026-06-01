@@ -3731,10 +3731,19 @@
   .flow-node-session.is-read-only,
   .flow-node-session.is-no-edits,
   .flow-node-session.is-idle { border-left-color: var(--accent); }
+  /* Archived sessions: muted colors + check badge.
+     IMPORTANT: keep the node fully opaque so connector lines (z-index 0)
+     stay hidden BEHIND the node. Using opacity on the node lets the lines
+     bleed through, which reads as "lines are in front of sessions". */
   .flow-node-session.is-archived {
-    opacity: 0.62;
     border-left-color: var(--green) !important;
-    background: color-mix(in srgb, var(--surface) 88%, var(--green) 12%);
+    background: color-mix(in srgb, var(--surface) 80%, var(--green) 20%);
+    color: color-mix(in srgb, var(--text) 70%, transparent);
+  }
+  .flow-node-session.is-archived .flow-node-title,
+  .flow-node-session.is-archived .flow-node-meta,
+  .flow-node-session.is-archived .flow-node-kicker {
+    color: color-mix(in srgb, var(--text) 72%, transparent);
   }
   .flow-node-session.is-archived::before {
     content: "\2713";
@@ -3744,13 +3753,12 @@
     display: inline-flex; align-items: center; justify-content: center;
     font-size: 12px; font-weight: 700;
     color: var(--green);
-    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    background: var(--surface);
     border: 1px solid var(--green);
     border-radius: 50%;
     pointer-events: none;
-    z-index: 1;
+    z-index: 2;
   }
-  .flow-node-session.is-archived:hover { opacity: 0.92; }
   .flow-node-session.is-worktree::after {
     content: 'worktree'; position: absolute; right: 34px; top: 8px;
     font-size: 10px; font-weight: 700; color: var(--orange);
