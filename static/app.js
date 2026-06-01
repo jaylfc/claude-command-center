@@ -2707,11 +2707,35 @@
 
   function renderSlashCommandMenu(input, commands, query) {
     const q = (query || '').toLowerCase();
-    const matches = (commands || []).filter(c => {
+    // Score each candidate so name matches beat description matches.
+    // Without this, typing "/context" was ranked equal between /context
+    // (name match) and /compact (whose description "Compact conversation
+    // CONTEXT" includes the substring), and the alphabetically-first one
+    // (/compact) won by accident. Lower score = better.
+    const scored = (commands || []).reduce((acc, c) => {
       const name = (c.name || '').toLowerCase();
+      const nameNoSlash = name.startsWith('/') ? name.slice(1) : name;
       const desc = (c.description || '').toLowerCase();
-      return !q || name.includes(q) || desc.includes(q);
+      let score = -1;
+      if (!q) {
+        score = 9;
+      } else if (nameNoSlash === q) {
+        score = 0;                                 // exact name (sans slash)
+      } else if (nameNoSlash.startsWith(q)) {
+        score = 1;                                 // name prefix — strongest fuzzy
+      } else if (name.includes(q)) {
+        score = 2;                                 // name substring
+      } else if (desc.includes(q)) {
+        score = 3;                                 // description substring
+      }
+      if (score >= 0) acc.push({ cmd: c, score });
+      return acc;
+    }, []);
+    scored.sort((a, b) => {
+      if (a.score !== b.score) return a.score - b.score;
+      return (a.cmd.name || '').localeCompare(b.cmd.name || '');
     });
+    const matches = scored.map(x => x.cmd);
     if (!matches.length) {
       hideSlashCommandMenu();
       return;

@@ -1,0 +1,1 @@
+Slash command suggestions are now ranked so name matches beat description matches. Typing `/context` no longer highlights `/compact` (whose description includes the word "context"). Scoring: exact name (after `/`) > name prefix > name substring > description substring; ties broken alphabetically.
