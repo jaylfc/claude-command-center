@@ -11424,7 +11424,28 @@
         if (id) _flipBefore.set(id, row.getBoundingClientRect().top);
       }
     }
+    // WKWebView blurs any focused input adjacent to an innerHTML swap.
+    // Capture the focused input's selection state before we replace
+    // #convList's contents so we can restore it afterwards — covers BOTH
+    // the user-typing case (sidebar search, conv input) and the
+    // poller-driven re-render case (liveStatus / sessions / gcActive
+    // ticks that fire while the user is mid-keystroke). The earlier
+    // fix in _scheduleConvSearchRender only covered the input-debounced
+    // path; this catches every render the function does.
+    const _focusInputBefore = (_activeEl && _activeEl.tagName === 'INPUT' && _userIsTyping)
+      ? _activeEl
+      : null;
+    const _focusInputCaretStart = _focusInputBefore ? _focusInputBefore.selectionStart : null;
+    const _focusInputCaretEnd = _focusInputBefore ? _focusInputBefore.selectionEnd : null;
     $convList.innerHTML = _convListHtml;
+    if (_focusInputBefore && document.activeElement !== _focusInputBefore && document.contains(_focusInputBefore)) {
+      try {
+        _focusInputBefore.focus({ preventScroll: true });
+        if (_focusInputCaretStart != null && _focusInputCaretEnd != null) {
+          _focusInputBefore.setSelectionRange(_focusInputCaretStart, _focusInputCaretEnd);
+        }
+      } catch (_) { /* defensive */ }
+    }
     if (_flipBefore.size > 0 && !document.hidden) {
       const _flipNewRows = $convList.querySelectorAll('[data-id]');
       const _flipMoves = [];
