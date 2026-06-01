@@ -100,6 +100,7 @@ class TestServerImports(unittest.TestCase):
                         "models": {
                             "claude": "sonnet-4-6",
                             "codex": "gpt-5-codex",
+                            "cursor": "composer-2.5",
                             "antigravity": "",
                         },
                     })
@@ -119,6 +120,10 @@ class TestServerImports(unittest.TestCase):
                     })
                     self.assertEqual(engine, "claude")
                     self.assertEqual(model, "opus-4-7")
+
+                    engine, model = server._spawn_request_engine_and_model({"engine": "cursor"})
+                    self.assertEqual(engine, "cursor")
+                    self.assertEqual(model, "composer-2.5")
 
                     engine, model = server._spawn_request_engine_and_model({"engine": "gemini"})
                     self.assertEqual(engine, "antigravity")
@@ -264,7 +269,9 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("data-flow-action=\"collapse-all\"", app_js)
         self.assertIn("flowRecencyButtonHtml('1d', '1d'", app_js)
         self.assertIn("flowHasCollapsedAncestor(nodeId, repoId)", app_js)
-        self.assertIn("return col !== 'archived' && col !== 'backlog';", app_js)
+        self.assertIn("function flowIsVisibleSession", app_js)
+        self.assertIn("if (col === 'backlog') return false;", app_js)
+        self.assertIn("if (col === 'archived' && !flowIncludeArchived) return false;", app_js)
         self.assertIn("flow_parent_node_id", app_js)
         self.assertIn("return ts ? relativeTime(ts) : '';", app_js)
         self.assertIn("const next = sidebarViewMode === 'list' ? 'flow' : 'list';", app_js)
@@ -309,6 +316,27 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("function openActiveGroupChatPillTarget", app_js)
         self.assertIn("orchestrator_timer_active", app_js)
         self.assertIn("orchestrator_last_trigger_at", server_py)
+
+    def test_codex_steer_button_is_distinct_from_send(self):
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        index_html = pathlib.Path(PROJECT_ROOT, "static", "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="convSteerBtn"', index_html)
+        self.assertIn(".conv-input-bar .steer-btn", app_css)
+        self.assertIn("sendToTerminal('p1', 'steer')", app_js)
+        self.assertIn("mode: injectMode", app_js)
+
+    def test_cursor_engine_is_wired_in_static_ui(self):
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        index_html = pathlib.Path(PROJECT_ROOT, "static", "index.html").read_text(encoding="utf-8")
+        self.assertIn('<option value="cursor">cursor</option>', index_html)
+        self.assertIn('<option value="cursor">Cursor</option>', index_html)
+        self.assertIn("'cursor', 'antigravity'", app_js)
+        self.assertIn("/api/sessions/spawn-cursor", app_js)
+        self.assertIn("composer-2.5-fast", app_js)
+        self.assertIn("renderCursorLogHtml", app_js)
+        self.assertIn(".source-badge.cursor", app_css)
 
 
 class TestPrStateResolution(unittest.TestCase):
@@ -747,6 +775,63 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertTrue(result["ok"])
         inject.assert_called_once_with("ttys009", "Terminal", "hello")
         resume.assert_not_called()
+
+    def test_codex_busy_terminal_routes_to_resume_for_app_queue(self):
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        with mock.patch.object(self.server, "_is_codex_session", return_value=True), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={
+                     "live": True,
+                     "tty": "ttys009",
+                     "terminal_app": "Terminal",
+                     "status": "busy",
+                 },
+             ), \
+             mock.patch.object(
+                 self.server,
+                 "resume_session_codex",
+                 return_value={"ok": True, "queued": True, "via": "codex-app-queued"},
+             ) as resume, \
+             mock.patch.object(self.server, "inject_input_via_keystroke") as inject:
+            result = self.server._inject_text_into_session(sid, "hello")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["via"], "codex-app-queued")
+        resume.assert_called_once_with(sid, "hello")
+        inject.assert_not_called()
+
+    def test_codex_steer_mode_routes_to_resume_steer(self):
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        with mock.patch.object(self.server, "_is_codex_session", return_value=True), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={
+                     "live": True,
+                     "tty": "ttys009",
+                     "terminal_app": "Terminal",
+                     "status": "busy",
+                 },
+             ), \
+             mock.patch.object(
+                 self.server,
+                 "resume_session_codex",
+                 return_value={"ok": True, "via": "codex-steer"},
+             ) as resume, \
+             mock.patch.object(self.server, "inject_input_via_keystroke") as inject:
+            result = self.server._inject_text_into_session(sid, "hello", mode="steer")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["via"], "codex-steer")
+        resume.assert_called_once_with(sid, "hello", steer=True)
+        inject.assert_not_called()
 
     def test_codex_without_live_tty_uses_resume(self):
         sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
@@ -1772,6 +1857,17 @@ class TestRepoContextHelpers(unittest.TestCase):
         sig = inspect.signature(server.spawn_session_gemini)
         self.assertEqual(list(sig.parameters), ["prompt", "name", "cwd", "repo_path", "worktree", "model"])
 
+    def test_spawn_session_cursor_exists(self):
+        """`spawn_session_cursor` must exist alongside the other engines
+        and accept explicit cwd/repo context."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "spawn_session_cursor"))
+        import inspect
+        sig = inspect.signature(server.spawn_session_cursor)
+        self.assertEqual(list(sig.parameters), ["prompt", "name", "cwd", "repo_path", "worktree", "model"])
+
     def test_orchestration_spawn_engine_normalization(self):
         for mod in ("server", "morning", "morning_store"):
             sys.modules.pop(mod, None)
@@ -1779,6 +1875,7 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertEqual(server._normalize_orchestration_spawn_engine(None), "claude")
         self.assertEqual(server._normalize_orchestration_spawn_engine("Claude"), "claude")
         self.assertEqual(server._normalize_orchestration_spawn_engine("Codex"), "codex")
+        self.assertEqual(server._normalize_orchestration_spawn_engine("cursor-agent"), "cursor")
         self.assertEqual(server._normalize_orchestration_spawn_engine("antigravity"), "antigravity")
         self.assertEqual(server._normalize_orchestration_spawn_engine("gemini"), "antigravity")
 
@@ -1858,6 +1955,8 @@ class TestRepoContextHelpers(unittest.TestCase):
                     r.stdout = "/Applications/Codex.app/Contents/Resources/codex exec --json\n"
                 elif pid == "33333":
                     r.stdout = "/usr/local/bin/node /usr/local/bin/gemini --output-format stream-json\n"
+                elif pid == "44444":
+                    r.stdout = "/Users/test/.local/bin/cursor-agent --resume 00000000-0000-4000-8000-000000000005\n"
             return r
 
         with mock.patch.object(server.subprocess, "run", side_effect=fake_run):
@@ -1867,6 +1966,8 @@ class TestRepoContextHelpers(unittest.TestCase):
             self.assertFalse(server._pid_is_engine_process(22222, "claude"))
             self.assertTrue(server._pid_is_engine_process(33333, "gemini"))
             self.assertFalse(server._pid_is_engine_process(33333, "codex"))
+            self.assertTrue(server._pid_is_engine_process(44444, "cursor"))
+            self.assertFalse(server._pid_is_engine_process(44444, "codex"))
 
     def test_pid_is_engine_process_rejects_zombie(self):
         """A defunct reattached resume must not keep a Codex card live."""
@@ -2483,11 +2584,12 @@ class TestRepoContextHelpers(unittest.TestCase):
         original_spawns = list(server._spawned_sessions)
         server._spawned_sessions.clear()
         try:
-            with mock.patch.object(
-                server,
-                "_resolve_codex_bin",
-                return_value={"available": True, "bin": "/usr/bin/codex-test"},
-            ), mock.patch.object(server, "_codex_thread_row", return_value={"cwd": str(self.repo)}), \
+            with mock.patch.dict(os.environ, {"CCC_CODEX_APP_SERVER": "0"}), \
+                 mock.patch.object(
+                     server,
+                     "_resolve_codex_bin",
+                     return_value={"available": True, "bin": "/usr/bin/codex-test"},
+                 ), mock.patch.object(server, "_codex_thread_row", return_value={"cwd": str(self.repo)}), \
                  mock.patch.object(server, "_git_toplevel_for_existing_dir", return_value=str(self.repo)), \
                  mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
                  mock.patch.object(server, "_record_spawn_to_registry"):
@@ -2505,6 +2607,381 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIn("--image", cmd)
         self.assertEqual(cmd[cmd.index("--image") + 1], str(image))
         self.assertIn(sid, cmd)
+
+    def test_resolve_cursor_bin_honors_env(self):
+        server = self.server
+        cursor_bin = pathlib.Path(self.tmp_home, "cursor-agent")
+        cursor_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        cursor_bin.chmod(cursor_bin.stat().st_mode | stat.S_IXUSR)
+
+        with mock.patch.dict(os.environ, {"CCC_CURSOR_BIN": str(cursor_bin)}):
+            result = server._resolve_cursor_bin()
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["bin"], str(cursor_bin))
+        self.assertEqual(result["source"], "env")
+
+    def test_spawn_cursor_builds_stream_json_command(self):
+        server = self.server
+        proc = mock.Mock(pid=4247)
+        proc.poll.return_value = None
+        original_spawns = list(server._spawned_sessions)
+        server._spawned_sessions.clear()
+        try:
+            with mock.patch.object(
+                server,
+                "_resolve_cursor_bin",
+                return_value={"available": True, "bin": "/usr/bin/cursor-agent-test"},
+            ), mock.patch.object(server.subprocess, "Popen", return_value=proc) as popen, \
+                 mock.patch.object(server, "_record_spawn_to_registry") as record, \
+                 mock.patch.object(server, "_wait_for_spawn_session_id", return_value=None):
+                result = server.spawn_session_cursor(
+                    "do cursor work",
+                    name="cursor work",
+                    repo_path=str(self.repo),
+                    model="composer-2.5",
+                )
+        finally:
+            for entry in server._spawned_sessions:
+                fh = entry.get("log_fh")
+                if fh:
+                    fh.close()
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["engine"], "cursor")
+        self.assertEqual(result["model"], "composer-2.5")
+        cmd = popen.call_args.args[0]
+        self.assertEqual(cmd[0], "/usr/bin/cursor-agent-test")
+        self.assertIn("--print", cmd)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
+        self.assertIn("--stream-partial-output", cmd)
+        self.assertIn("--force", cmd)
+        self.assertIn("--trust", cmd)
+        self.assertEqual(cmd[cmd.index("--workspace") + 1], str(self.repo))
+        self.assertEqual(cmd[cmd.index("--model") + 1], "composer-2.5")
+        self.assertEqual(cmd[-1], "do cursor work")
+        self.assertEqual(popen.call_args.kwargs["cwd"], str(self.repo))
+        record.assert_called_once()
+
+    def test_resume_cursor_queues_when_resume_already_running(self):
+        server = self.server
+        sid = "00000000-0000-4000-8000-000000000004"
+        original_spawns = list(server._spawned_sessions)
+        with server._pending_resume_lock:
+            original_queue = dict(server._pending_resume_queue)
+            server._pending_resume_queue.clear()
+        server._spawned_sessions[:] = [{
+            "engine": "cursor",
+            "resumed_sid": sid,
+            "pid": 4248,
+        }]
+        try:
+            with mock.patch.object(
+                server,
+                "_resolve_cursor_bin",
+                return_value={"available": True, "bin": "/usr/bin/cursor-agent-test"},
+            ), mock.patch.object(server, "_poll_spawn_entry", return_value=None), \
+                 mock.patch.object(server.subprocess, "Popen") as popen:
+                result = server.resume_session_cursor(sid, "second")
+        finally:
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["via"], "cursor-resume-queued")
+        popen.assert_not_called()
+        with server._pending_resume_lock:
+            self.assertEqual(server._pending_resume_queue.get(sid), ["second"])
+            server._pending_resume_queue.clear()
+            server._pending_resume_queue.update(original_queue)
+
+    def test_parse_cursor_event_reads_text_and_tool_blocks(self):
+        server = self.server
+        ev = {
+            "role": "assistant",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "I will inspect it."},
+                    {
+                        "type": "tool_use",
+                        "name": "run_terminal_cmd",
+                        "input": {"command": "git status --short"},
+                    },
+                ],
+            },
+        }
+
+        parsed = server._parse_cursor_event(ev, 7)
+
+        self.assertEqual(parsed["type"], "assistant")
+        self.assertEqual(parsed["message_id"], "cursor-7")
+        self.assertEqual(parsed["blocks"][0]["kind"], "text")
+        self.assertEqual(parsed["blocks"][0]["text"], "I will inspect it.")
+        self.assertEqual(parsed["blocks"][1]["kind"], "tool_use")
+        self.assertEqual(parsed["blocks"][1]["name"], "run_terminal_cmd")
+        self.assertIn("git status --short", parsed["blocks"][1].get("detail", ""))
+
+    def test_resolve_cursor_bin_uses_local_bin_candidate(self):
+        server = self.server
+        cursor_bin = pathlib.Path(self.tmp_home, ".local", "bin", "cursor-agent")
+        cursor_bin.parent.mkdir(parents=True)
+        cursor_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        cursor_bin.chmod(cursor_bin.stat().st_mode | stat.S_IXUSR)
+
+        with mock.patch.dict(os.environ, {"CCC_CURSOR_BIN": ""}), \
+             mock.patch.object(server.shutil, "which", return_value=None), \
+             mock.patch.object(server, "CURSOR_LOCAL_BIN", cursor_bin), \
+             mock.patch.object(server, "CURSOR_APP_BUNDLE_CANDIDATES", ()):
+            result = server._resolve_cursor_bin()
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["bin"], str(cursor_bin))
+        self.assertEqual(result["source"], "candidate")
+
+    def test_find_cursor_conversations_reads_agent_transcript(self):
+        server = self.server
+        sid = "00000000-0000-4000-8000-000000000005"
+        slug = server._cursor_project_slug(self.repo)
+        transcript_dir = server.CURSOR_PROJECTS_ROOT / slug / "agent-transcripts" / sid
+        transcript_dir.mkdir(parents=True)
+        transcript_path = transcript_dir / f"{sid}.jsonl"
+        transcript_path.write_text(
+            "\n".join([
+                json.dumps({
+                    "role": "user",
+                    "timestamp": "2026-06-01T12:00:00Z",
+                    "message": {"content": [{"type": "text", "text": "<user_query>\nPlease inspect\n</user_query>"}]},
+                }),
+                json.dumps({
+                    "role": "assistant",
+                    "timestamp": "2026-06-01T12:01:00Z",
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "I will commit it."},
+                            {
+                                "type": "tool_use",
+                                "name": "run_terminal_cmd",
+                                "input": {"command": "git commit -m 'cursor test'"},
+                            },
+                        ],
+                    },
+                }),
+            ]) + "\n",
+            encoding="utf-8",
+        )
+
+        rows = server.find_cursor_conversations(
+            repo_path=str(self.repo),
+            include_old=True,
+            repo_only=True,
+            resolve_pr_states=False,
+            resolve_worktree_dirty=False,
+        )
+        parsed = server.parse_conversation(sid, use_cache=False)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "cursor")
+        self.assertEqual(rows[0]["engine"], "cursor")
+        self.assertEqual(rows[0]["first_message"], "Please inspect")
+        self.assertTrue(rows[0]["has_commit"])
+        self.assertEqual(parsed["events"][0]["type"], "user_text")
+        self.assertEqual(parsed["events"][1]["type"], "assistant")
+
+    def test_codex_app_server_queues_active_turn(self):
+        server = self.server
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        calls = []
+
+        def fake_request(method, params=None, timeout=20):
+            calls.append((method, params, timeout))
+            if method == "thread/resume":
+                return {
+                    "result": {
+                        "thread": {
+                            "status": {"type": "active", "activeFlags": []},
+                            "turns": [
+                                {"id": "turn-old", "status": "completed"},
+                                {"id": "turn-active", "status": "inProgress"},
+                            ],
+                        }
+                    }
+                }
+            if method == "turn/start":
+                return {"result": {"turn": {"id": "turn-next"}}}
+            raise AssertionError(f"unexpected method: {method}")
+
+        with mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request):
+            result = server._codex_resume_or_steer_via_app_server(
+                sid,
+                "look here",
+                cwd=str(self.repo),
+                model="gpt-test",
+                image_paths=["/tmp/paste.png"],
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["via"], "codex-app-queued")
+        self.assertEqual(calls[0][0], "thread/resume")
+        self.assertEqual(calls[1][0], "turn/start")
+        start_params = calls[1][1]
+        self.assertEqual(start_params["threadId"], sid)
+        self.assertNotIn("cwd", start_params)
+        self.assertNotIn("model", start_params)
+        self.assertNotIn("approvalPolicy", start_params)
+        self.assertNotIn("sandboxPolicy", start_params)
+        self.assertEqual(
+            start_params["input"],
+            [
+                {"type": "text", "text": "look here"},
+                {"type": "localImage", "path": "/tmp/paste.png"},
+            ],
+        )
+
+    def test_codex_app_server_steers_active_turn(self):
+        server = self.server
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        calls = []
+
+        def fake_request(method, params=None, timeout=20):
+            calls.append((method, params, timeout))
+            if method == "thread/resume":
+                return {
+                    "result": {
+                        "thread": {
+                            "status": {"type": "active", "activeFlags": []},
+                            "turns": [
+                                {"id": "turn-old", "status": "completed"},
+                                {"id": "turn-active", "status": "inProgress"},
+                            ],
+                        }
+                    }
+                }
+            if method == "turn/steer":
+                return {"result": {"turnId": "turn-active"}}
+            raise AssertionError(f"unexpected method: {method}")
+
+        with mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request):
+            result = server._codex_steer_via_app_server(
+                sid,
+                "look now",
+                cwd=str(self.repo),
+                model="gpt-test",
+                image_paths=["/tmp/paste.png"],
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["via"], "codex-steer")
+        self.assertEqual(calls[0][0], "thread/resume")
+        self.assertEqual(calls[1][0], "turn/steer")
+        steer_params = calls[1][1]
+        self.assertEqual(steer_params["expectedTurnId"], "turn-active")
+        self.assertEqual(
+            steer_params["input"],
+            [
+                {"type": "text", "text": "look now"},
+                {"type": "localImage", "path": "/tmp/paste.png"},
+            ],
+        )
+
+    def test_codex_app_server_steer_requires_active_turn(self):
+        server = self.server
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        calls = []
+
+        def fake_request(method, params=None, timeout=20):
+            calls.append(method)
+            if method == "thread/resume":
+                return {
+                    "result": {
+                        "thread": {
+                            "status": {"type": "idle"},
+                            "turns": [],
+                        }
+                    }
+                }
+            raise AssertionError(f"unexpected method: {method}")
+
+        with mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request):
+            result = server._codex_steer_via_app_server(sid, "look now")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["via"], "codex-steer")
+        self.assertEqual(result["code"], "codex_no_active_turn")
+        self.assertEqual(calls, ["thread/resume"])
+
+    def test_codex_app_server_does_not_start_parallel_turn_when_disallowed(self):
+        server = self.server
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        calls = []
+
+        def fake_request(method, params=None, timeout=20):
+            calls.append(method)
+            if method == "thread/resume":
+                return {
+                    "result": {
+                        "thread": {
+                            "status": {"type": "idle"},
+                            "turns": [],
+                        }
+                    }
+                }
+            raise AssertionError(f"unexpected method: {method}")
+
+        with mock.patch.object(server, "_codex_app_server_request", side_effect=fake_request):
+            result = server._codex_resume_or_steer_via_app_server(
+                sid,
+                "second",
+                allow_start=False,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["fallback"], "queue")
+        self.assertEqual(calls, ["thread/resume"])
+
+    def test_resume_codex_prefers_app_server_before_queued_cli_resume(self):
+        server = self.server
+        sid = "019e2bbb-d5e0-7df2-a1f7-26fbcf363484"
+        original_spawns = list(server._spawned_sessions)
+        with server._pending_resume_lock:
+            original_queue = dict(server._pending_resume_queue)
+            server._pending_resume_queue.clear()
+        server._spawned_sessions[:] = [{
+            "engine": "codex",
+            "resumed_sid": sid,
+            "pid": 4242,
+        }]
+        try:
+            with mock.patch.object(
+                server,
+                "_resolve_codex_bin",
+                return_value={"available": True, "bin": "/usr/bin/codex-test"},
+            ), mock.patch.object(server, "_codex_thread_row", return_value={"cwd": str(self.repo)}), \
+                 mock.patch.object(server, "_git_toplevel_for_existing_dir", return_value=str(self.repo)), \
+                 mock.patch.object(
+                     server,
+                     "_codex_resume_or_steer_via_app_server",
+                     return_value={"ok": True, "queued": True, "via": "codex-app-queued"},
+                 ) as app_queue, \
+                 mock.patch.object(server, "_poll_spawn_entry", return_value=None), \
+                 mock.patch.object(server.subprocess, "Popen") as popen:
+                result = server.resume_session_codex(sid, "second")
+        finally:
+            server._spawned_sessions.clear()
+            server._spawned_sessions.extend(original_spawns)
+            with server._pending_resume_lock:
+                server._pending_resume_queue.clear()
+                server._pending_resume_queue.update(original_queue)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["via"], "codex-app-queued")
+        app_queue.assert_called_once()
+        popen.assert_not_called()
 
     def test_resume_antigravity_adds_pasted_image_dir(self):
         """AGY needs pasted-image folders in its repeatable --add-dir workspace."""

@@ -2,7 +2,7 @@
 
 **Start the next while Claude builds the first.**
 
-One local dashboard for every **Claude Code**, **Codex**, and **Antigravity** session on your Mac. Spawn in parallel, ship in parallel.
+One local dashboard for every **Claude Code**, **Codex**, **Cursor**, and **Antigravity** session on your Mac. Spawn in parallel, ship in parallel.
 
 ![Claude Command Center demo](docs/images/demo.png)
 
@@ -29,9 +29,9 @@ Try the read-only demo first: [ccc.amirfish.ai/demo](https://ccc.amirfish.ai/dem
   Your browser doesn't support inline video. <a href="https://github.com/amirfish1/claude-command-center/releases/download/v4.3.2.2/May-23-v4-CCC-v5.mp4">Download the demo</a> or watch the GIF above.
 </video>
 
-CCC latches onto every Claude Code, Codex, and Antigravity session on your Mac — terminal sessions, headless processes, and sessions you spawned from the dashboard. It treats each agent's on-disk state as the source of truth, so nothing slips through. Spawn the next task while the first is still building. Switch between projects without losing context. Ship multiple things at once.
+CCC latches onto every Claude Code, Codex, Cursor, and Antigravity session on your Mac — terminal sessions, headless processes, and sessions you spawned from the dashboard. It treats each agent's on-disk state as the source of truth, so nothing slips through. Spawn the next task while the first is still building. Switch between projects without losing context. Ship multiple things at once.
 
-See the [engine support matrix](#engine-support) below for what's first-class vs. partial per engine — spawn works across all three, transcript ingestion and UX parity vary.
+See the [engine support matrix](#engine-support) below for what's first-class vs. partial per engine — spawn works across all supported engines, transcript ingestion and UX parity vary.
 
 ## Recent
 
@@ -165,19 +165,20 @@ the UI uses for the kanban.
 
 ## Engine support
 
-CCC was built around Claude Code first; Codex and Antigravity support followed. Spawn-from-dashboard works for all three. The rest varies:
+CCC was built around Claude Code first; Codex, Cursor, and Antigravity support followed. Spawn-from-dashboard works for all four. The rest varies:
 
 | Engine        | Spawn (headless from UI) | Resume (terminal inject / headless resume) | Transcript ingestion | Per-session model picker |
 |---------------|--------------------------|--------------------------------------------|----------------------|--------------------------|
 | Claude Code   | yes                      | yes (both)                                 | yes — first-class JSONL (`~/.claude/projects/*.jsonl`) | yes — UI picker, incl. 1M-context toggle |
 | Codex         | yes                      | yes (both)                                 | partial — Codex JSONL parsed, broader parity tracked in [#57](https://github.com/amirfish1/claude-command-center/issues/57) | yes — UI picker via per-session override; default from `CCC_CODEX_MODEL` |
+| Cursor        | yes — headless via `cursor-agent` | yes — follow-ups route through `cursor-agent --resume` | partial — Cursor agent transcripts parsed from `~/.cursor/projects/` | yes — UI/default model picker; default from `CCC_CURSOR_MODEL` |
 | Antigravity   | yes — headless via `agy` print mode | yes — follow-ups route through AGY CLI or the running app's language-server RPC | yes — JSONL transcripts from `~/.gemini/antigravity/brain/` | auto-detected from transcript metadata |
 
 If you'd like to see an engine bumped from "partial" to first-class, open an issue — it's mostly adapter work, the ingestion layer is engine-agnostic.
 
 ## Features
 
-- **Multi-engine orchestration**: spawn, resume, and review **Claude Code**, **Codex**, and **Antigravity** sessions from one dashboard. See the [engine support matrix](#engine-support) for per-engine parity.
+- **Multi-engine orchestration**: spawn, resume, and review **Claude Code**, **Codex**, **Cursor**, and **Antigravity** sessions from one dashboard. See the [engine support matrix](#engine-support) for per-engine parity.
 - **Kanban** across every session, with drag-drop between columns,
   rubber-band multi-select, and per-column tinting.
 - **Split conversations**: drag any sidebar session onto the right or
@@ -218,7 +219,7 @@ plain HTTP. On startup the server copies the skill to
 instance without hardcoding a port.
 
 Spawn calls pass `repo_path` (or `cwd`) plus optional
-`engine: "claude" | "codex" | "antigravity"` to `/api/sessions/spawn`;
+`engine: "claude" | "codex" | "cursor" | "antigravity"` to `/api/sessions/spawn`;
 omitted engine/model values use the server-side defaults from the dashboard.
 Legacy `engine: "gemini"` maps to Antigravity. Successful spawns return
 `spawn_id`, `engine`, `repo_path`, `cwd`, and `session_id` when the native
@@ -271,6 +272,8 @@ For more depth: [`docs/architecture.md`](docs/architecture.md),
 |---|---|---|
 | `PORT` | `8090` | HTTP port |
 | `CCC_CLAUDE_BIN` | *(auto)* | Absolute path to the Claude Code CLI when a launchd service cannot see your shell PATH. Set it before `./run.sh --install-service` to bake it into the agent. |
+| `CCC_CURSOR_BIN` | *(auto)* | Absolute path to `cursor-agent` if it is not on the service PATH. |
+| `CCC_CURSOR_MODEL` | `composer-2.5-fast` | Default model for Cursor spawns/resumes when no dashboard or API model override is set. |
 | `CCC_BIND_HOST` | `127.0.0.1` | Interface to bind. Set to `0.0.0.0` to expose on the LAN. **No auth, see [`SECURITY.md`](SECURITY.md)** |
 | `CCC_ALLOWED_ORIGIN` | *(empty)* | Comma-separated origins (e.g. `http://my-mac.tailnet.ts.net:8090`) added to the same-origin POST allowlist. Use with `CCC_BIND_HOST=0.0.0.0` to reach the UI from another device on a trusted network (Tailscale / VPN). **No auth, see [`SECURITY.md`](SECURITY.md)** |
 | `CCC_TRUST_TAILNET` | *(off)* | When set (`1`/`true`/`yes`/`on`), CCC shells out to `tailscale status --json` at startup and adds the local node's MagicDNS hostname + Tailscale IPs to the allowlist automatically. Same trust caveat as `CCC_ALLOWED_ORIGIN`. |
@@ -284,12 +287,13 @@ The `CCC_BIND_HOST`, `CCC_ALLOWED_ORIGIN`, and `CCC_TRUST_TAILNET` knobs can als
 ## Roadmap
 
 **Shipped**
-- Kanban over all live + dormant Claude Code, Codex, and Antigravity sessions
+- Kanban over all live + dormant Claude Code, Codex, Cursor, and Antigravity sessions
 - GitHub issue → session → verify → close pipeline
 - Headless spawn with stdin-pipe follow-up
 - Resume-on-demand
 - Auto-fix-deploy (Vercel)
 - AI title regeneration
+- Cursor — session cards, transcript ingestion, headless spawn/resume via `cursor-agent`
 - Antigravity (Google DeepMind) — full session view, transcript ingestion, headless resume via AGY CLI or app RPC
 
 **Not yet**

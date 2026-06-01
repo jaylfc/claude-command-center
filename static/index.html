@@ -35,7 +35,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-<title>Command Center for Claude, Codex, and Anti-Gravity</title>
+<title>Command Center for Claude, Codex, Cursor, and Anti-Gravity</title>
 <link rel="stylesheet" href="/static/app.css">
 <style>
   body.hide-gh-issues .is-github-issue {
@@ -319,7 +319,7 @@
       <div class="sidebar-header-brand">
         <div class="sh-title-row">
           <img class="sh-app-icon" src="/static/icon.svg" alt="" aria-hidden="true">
-          <a class="sh-title-link" href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Command Center for Claude, Codex, and Anti-Gravity — open the README on GitHub"><span class="sh-title-main">Command Center</span><span class="sh-title-sub">for Claude, Codex, and Anti-Gravity</span></a>
+          <a class="sh-title-link" href="https://github.com/amirfish1/claude-command-center" target="_blank" rel="noopener" title="Command Center for Claude, Codex, Cursor, and Anti-Gravity — open the README on GitHub"><span class="sh-title-main">Command Center</span><span class="sh-title-sub">for Claude, Codex, Cursor, and Anti-Gravity</span></a>
           <span class="sh-version" id="cccVersionLabel" title="Installed Command Center version"></span>
         </div>
         <span class="sh-meta-row">
@@ -648,9 +648,10 @@
                    the Esc button (mutually exclusive — Esc only appears for live
                    sessions, this only for `__new__`). updateInputBar() toggles
                    visibility. -->
-              <select id="convInputEngineSelect" class="engine-select" title="Engine that starts this new session — claude, codex, or antigravity" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+              <select id="convInputEngineSelect" class="engine-select" title="Engine that starts this new session — claude, codex, cursor, or antigravity" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
                 <option value="claude">claude</option>
                 <option value="codex">codex</option>
+                <option value="cursor">cursor</option>
                 <option value="antigravity">antigravity</option>
               </select>
               <select id="convInputModelSelect" class="model-select" style="display:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
@@ -672,6 +673,11 @@
                   <path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
                   <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
                   <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+                </svg>
+              </button>
+              <button class="steer-btn" id="convSteerBtn" title="Steer running Codex turn now" aria-label="Steer running Codex turn">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M13 2 4 14h7l-1 8 10-13h-7l1-7Z"></path>
                 </svg>
               </button>
               <button class="send-btn" id="convSendBtn" title="Send to terminal" aria-label="Send to terminal">
@@ -700,9 +706,10 @@
         <input type="text" class="kpt-search" id="kptSearch" placeholder="Search sessions...">
         <button id="kptRefreshBtn" title="Refresh data" aria-label="Refresh data">&#8634;</button>
         <input type="text" class="kpt-new-session" id="kptNewSession" placeholder="New session prompt...">
-        <select id="kptToolbarEngineSelect" title="Engine that starts the new session — claude, codex, or antigravity" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
+        <select id="kptToolbarEngineSelect" title="Engine that starts the new session — claude, codex, cursor, or antigravity" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:12px;">
           <option value="claude">claude</option>
           <option value="codex">codex</option>
+          <option value="cursor">cursor</option>
           <option value="antigravity">antigravity</option>
         </select>
         <button id="kptRunBtn" title="Run new session" aria-label="Run new session">Run</button>
@@ -974,6 +981,7 @@
           <select id="spawnDefaultsEngine" class="bug-input">
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
+            <option value="cursor">Cursor</option>
             <option value="antigravity">Antigravity</option>
           </select>
         </div>
