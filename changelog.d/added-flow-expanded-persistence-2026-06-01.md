@@ -1,0 +1,1 @@
+Flow board now remembers whether you had it expanded (full-screen) and restores that state on the next page load. Persisted via `localStorage['ccc-flow-expanded']`. The toggle (chevron in the flow toolbar) writes the new state on every click; reload picks it up at init time and applies it as soon as the flow view renders.

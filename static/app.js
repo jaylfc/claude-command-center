@@ -5777,6 +5777,9 @@
     if (Number.isFinite(savedZoom)) flowZoom = Math.max(FLOW_ZOOM_MIN, Math.min(FLOW_ZOOM_MAX, savedZoom));
   } catch (_) {}
   let flowExpanded = false;
+  try {
+    if (localStorage.getItem('ccc-flow-expanded') === '1') flowExpanded = true;
+  } catch (_) {}
   let flowGestureStartZoom = 1;
   let flowDraftSessions = [];
   try {
@@ -6023,6 +6026,7 @@
 
   function setFlowExpanded(expanded) {
     flowExpanded = !!expanded;
+    try { localStorage.setItem('ccc-flow-expanded', flowExpanded ? '1' : '0'); } catch (_) {}
     const board = document.getElementById('flowBoard');
     if (board) {
       board.classList.toggle('is-expanded', flowExpanded && isFlowView());
@@ -23110,6 +23114,7 @@
 
   async function annOpenUxFixesQueue(ann, closeFn, errEl) {
     if (!ann) return;
+    if (typeof showOpToast === 'function') showOpToast('Sending annotation to UX fixes queue…', 'info');
     try {
       const res = await fetch('/api/annotations/ux-fixes-queue', {
         method: 'POST',

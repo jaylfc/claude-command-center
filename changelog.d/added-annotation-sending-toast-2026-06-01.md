@@ -1,0 +1,1 @@
+"Add to UX fixes queue" in the annotation editor now fires an immediate "Sending annotation to UX fixes queue…" toast at click time, so you don't have to wait for the network round-trip to see that something happened. The existing success/error toast still follows once the request lands.
