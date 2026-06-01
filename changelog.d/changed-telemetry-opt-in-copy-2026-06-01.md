@@ -1,0 +1,1 @@
+Telemetry opt-in banner: punchier copy that names the 5 fields up front ("version, OS, engines you have") and the explicit-not list ("Zero paths, prompts, or content"). Primary button is now "Send daily ping" instead of "Enable" so the action is obvious. Aims to lift the dismal opt-in conversion (1-of-7 DMG downloads since 2026-05-22).
