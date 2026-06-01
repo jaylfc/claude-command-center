@@ -25018,8 +25018,17 @@
           $chatFindInput.setSelectionRange(len, len);
         } catch (_) { /* defensive */ }
       };
+      // WebKit moves focus to the matched element on a later tick than
+      // rAF — likely after the layout-commit phase. Stack three restore
+      // attempts so we catch whichever frame the focus shift lands on:
+      //   queueMicrotask : immediate-next task (catches sync moves)
+      //   requestAnimationFrame : next paint (catches reflow moves)
+      //   setTimeout 60ms : after WebKit's deferred commit-phase work
+      // Each call is no-op if focus is already on the input. Total
+      // overhead is ~3 focus calls per find — trivial.
       queueMicrotask(restore);
       requestAnimationFrame(restore);
+      setTimeout(restore, 60);
     }
     $chatFindInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
