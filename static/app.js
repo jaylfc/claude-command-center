@@ -25001,16 +25001,31 @@
         window.find(text, false, backward, true, false, false, false);
       }
     }
+    // Restore focus to the find input AFTER WebKit's layout settles —
+    // window.find() moves focus to the matched DOM element on a later
+    // tick (post-reflow), so a synchronous .focus() right after doFind
+    // beats the focus move and loses. Schedule the restore on a
+    // microtask + the next animation frame so we land after the
+    // WebKit focus shift. If selection was inside the input, also
+    // collapse it to the caret so the user's next keystroke replaces
+    // nothing.
+    function refocusFindInputAfterMatch() {
+      const restore = () => {
+        if (document.activeElement === $chatFindInput) return;
+        try {
+          const len = $chatFindInput.value.length;
+          $chatFindInput.focus({ preventScroll: true });
+          $chatFindInput.setSelectionRange(len, len);
+        } catch (_) { /* defensive */ }
+      };
+      queueMicrotask(restore);
+      requestAnimationFrame(restore);
+    }
     $chatFindInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') {
         e.preventDefault();
         doFind(e.shiftKey);
-        // window.find() moves focus to the match, so any subsequent
-        // keystrokes would land outside the input. Snap focus back so
-        // the user can keep typing/cycling without re-clicking the
-        // find bar — this was the "input loses focus after one char"
-        // bug. Same restore on the live-find input handler below.
-        $chatFindInput.focus();
+        refocusFindInputAfterMatch();
       }
       if (e.key === 'ArrowDown') {
         // Down arrow cycles forward through matches. The browser's
@@ -25020,12 +25035,12 @@
         // which is why up "wasn't cyclical".
         e.preventDefault();
         doFind(false);
-        $chatFindInput.focus();
+        refocusFindInputAfterMatch();
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         doFind(true);
-        $chatFindInput.focus();
+        refocusFindInputAfterMatch();
       }
       if (e.key === 'Escape') {
         document.getElementById('chatFindModal').style.display = 'none';
@@ -25044,10 +25059,7 @@
       }
       _lastFind = text;
       doFind(false);
-      // window.find moves browser focus to the matched element, which
-      // is the root cause of the "type one char and the input loses
-      // focus" bug. Restore focus so live-find feels live.
-      $chatFindInput.focus();
+      refocusFindInputAfterMatch();
     });
     if ($chatFindNext) $chatFindNext.addEventListener('click', () => doFind(false));
     if ($chatFindPrev) $chatFindPrev.addEventListener('click', () => doFind(true));
