@@ -4016,11 +4016,50 @@
     // the bidi algorithm but doesn't flip text-align — only an actual
     // `dir` attribute does, and `dir="auto"` makes the browser detect
     // per element instead of inheriting from <html>. Skip tags we
-    // never want to flip (pre/code stay LTR via CSS).
+    // never want to flip (pre/code stay LTR via CSS). A MutationObserver
+    // below also tags blocks post-insertion as a belt-and-suspenders for
+    // any markdown that bypasses this regex.
     return out.join('').replace(
       /<(p|li|blockquote|h[1-6]|td|th|dt|dd)(\s|>)/g,
       '<$1 dir="auto"$2'
     );
+  }
+
+  // RTL belt-and-suspenders: walk every .assistant-text / .user-msg and
+  // every text-bearing block descendant, setting dir="auto" if missing.
+  // The renderMarkdown regex above handles the standard render path; this
+  // observer catches anything inserted by alternate paths or rendered
+  // before the regex landed. `dir="auto"` lets the browser compute each
+  // element's direction from its first strong directional character so
+  // Hebrew/Arabic paragraphs actually right-align (text-align: start
+  // resolves based on the element's `direction` property, not CSS
+  // `unicode-bidi: plaintext` alone).
+  const RTL_BLOCK_TAGS = 'p,li,blockquote,h1,h2,h3,h4,h5,h6,td,th,dt,dd';
+  function tagBlocksForRtl(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    const containers = [];
+    if (root.matches && root.matches('.assistant-text,.user-msg,.gc-message-body,.gc-chat-doc')) {
+      containers.push(root);
+    }
+    root.querySelectorAll('.assistant-text,.user-msg,.gc-message-body,.gc-chat-doc').forEach(el => containers.push(el));
+    containers.forEach(el => {
+      if (!el.hasAttribute('dir')) el.setAttribute('dir', 'auto');
+      el.querySelectorAll(RTL_BLOCK_TAGS).forEach(child => {
+        if (!child.hasAttribute('dir')) child.setAttribute('dir', 'auto');
+      });
+    });
+  }
+  if (window.MutationObserver) {
+    const _rtlObserver = new MutationObserver(records => {
+      for (const rec of records) {
+        rec.addedNodes.forEach(n => {
+          if (n.nodeType === 1) tagBlocksForRtl(n);
+        });
+      }
+    });
+    _rtlObserver.observe(document.body, { childList: true, subtree: true });
+    // Tag whatever is already in the DOM at script-load time.
+    tagBlocksForRtl(document.body);
   }
 
   // ── Fenced-code-block rendering + tokenizer ─────────────────────────────
