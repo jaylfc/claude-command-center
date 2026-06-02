@@ -3334,8 +3334,12 @@
     return null;
   }
 
-  let _ttsRate = 1.0;
+  // Fixed playback rate per user request — neither too slow (1x feels
+  // sleepy) nor jarring (1.5x missed words). 1.25x is the sweet spot.
+  const _TTS_RATE = 1.25;
   let _ttsLastCharIndex = 0;
+  let _ttsPaused = false;
+  let _ttsBoundUtteranceText = '';
 
   async function stopTextToSpeech() {
     clearTtsHighlight();
@@ -3344,10 +3348,20 @@
     }
     _ttsUtterance = null;
     _ttsTextMapping = [];
-    _ttsRate = 1.0;
     _ttsLastCharIndex = 0;
+    _ttsPaused = false;
+    _ttsBoundUtteranceText = '';
     setTtsButtonsBusy(false);
     setTtsButtonsState(false, false);
+  }
+
+  // Reset TTS state whenever the active conversation grows — a fresh
+  // turn should "rearm" the button so the next click reads the NEW
+  // message, not resumes the prior one mid-sentence.
+  function resetTtsOnNewTurn() {
+    if (_ttsActive || _ttsPaused || _ttsUtterance) {
+      stopTextToSpeech();
+    }
   }
 
   async function readLastMessageAloud(paneId) {
@@ -3356,72 +3370,71 @@
       return;
     }
 
-    let textToSpeak = null;
-    let mappingToUse = null;
-
-    if (_ttsActive) {
-      if (_ttsRate === 1.0) {
-        _ttsRate = 1.5;
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
-        
-        textToSpeak = _ttsUtterance.text.substring(_ttsLastCharIndex);
-        mappingToUse = _ttsTextMapping.filter(m => m.end > _ttsLastCharIndex).map(m => {
-          let newStart = m.start - _ttsLastCharIndex;
-          let newNodeOffset = m.nodeOffsetStart;
-          if (newStart < 0) {
-            newNodeOffset += Math.abs(newStart);
-            newStart = 0;
-          }
-          return {
-            node: m.node,
-            start: newStart,
-            end: m.end - _ttsLastCharIndex,
-            nodeOffsetStart: newNodeOffset
-          };
-        });
-      } else {
-        await stopTextToSpeech();
-        return;
-      }
-    } else {
-      _ttsRate = 1.0;
-      _ttsLastCharIndex = 0;
-      paneId = paneId || activePaneId();
-      const data = selectedConversationTtsData(paneId) || lastMessageTtsData(paneId);
-      
-      if (!data || !data.text.trim()) {
-        setTtsButtonsState(false, true);
-        showOpToast('No message to read yet.', 'error');
-        return;
-      }
-      textToSpeak = data.text;
-      mappingToUse = data.mapping;
+    // Play/pause toggle: button cycles play → pause → play → ... on the
+    // SAME utterance. Reset happens automatically when a new turn lands
+    // (see resetTtsOnNewTurn). No rate cycling any more — always 1.25x.
+    if (_ttsActive && !_ttsPaused) {
+      try { window.speechSynthesis.pause(); } catch (_) {}
+      _ttsPaused = true;
+      ttsButtons().forEach(btn => {
+        if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
+          btn.classList.add('paused');
+          btn.title = 'Resume reading (1.25x)';
+          btn.setAttribute('aria-label', 'Resume reading');
+        }
+      });
+      return;
     }
-    
+    if (_ttsPaused && _ttsUtterance) {
+      try { window.speechSynthesis.resume(); } catch (_) {}
+      _ttsPaused = false;
+      ttsButtons().forEach(btn => {
+        if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
+          btn.classList.remove('paused');
+          btn.title = 'Pause reading';
+          btn.setAttribute('aria-label', 'Pause reading');
+        }
+      });
+      return;
+    }
+
+    _ttsLastCharIndex = 0;
+    _ttsPaused = false;
     paneId = paneId || activePaneId();
+    const data = selectedConversationTtsData(paneId) || lastMessageTtsData(paneId);
+    if (!data || !data.text.trim()) {
+      setTtsButtonsState(false, true);
+      showOpToast('No message to read yet.', 'error');
+      return;
+    }
+    const textToSpeak = data.text;
+    const mappingToUse = data.mapping;
+
     setActivePaneById(paneId);
     setTtsButtonsBusy(true);
-    
+
     _ttsTextMapping = mappingToUse;
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     _ttsUtterance = utterance;
-    _ttsUtterance.rate = _ttsRate;
-    
+    _ttsBoundUtteranceText = textToSpeak;
+    _ttsUtterance.rate = _TTS_RATE;
+
     _ttsUtterance.onstart = () => {
       if (_ttsUtterance !== utterance) return;
       setTtsButtonsState(true, false, paneId);
       setTtsButtonsBusy(false);
       ttsButtons().forEach(btn => {
         if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
-          btn.title = _ttsRate === 1.0 ? 'Reading at 1.0x (Click for 1.5x)' : 'Reading at 1.5x (Click to Stop)';
+          btn.classList.remove('paused');
+          btn.title = 'Pause reading';
         }
       });
     };
-    
+
     _ttsUtterance.onend = () => {
       if (_ttsUtterance === utterance) stopTextToSpeech();
     };
-    
+
     _ttsUtterance.onerror = (e) => {
       if (_ttsUtterance !== utterance) return;
       console.error("TTS Error:", e);
@@ -3431,7 +3444,7 @@
         setTtsButtonsState(false, true);
       }
     };
-    
+
     _ttsUtterance.onboundary = (e) => {
       if (_ttsUtterance !== utterance) return;
       if (e.name === 'word') {
@@ -3439,7 +3452,7 @@
         highlightTtsWord(e.charIndex, e.charLength);
       }
     };
-    
+
     window.speechSynthesis.speak(_ttsUtterance);
   }
 
@@ -18507,6 +18520,21 @@
     // newly-streamed events don't yank them back down. 80px tolerance is
     // generous enough to absorb typical line-height jitter.
     const wasAtBottom = isConversationAtBottom($view);
+    // Detect a NEW assistant turn arriving (one whose JSONL line isn't
+    // already rendered). If found, reset TTS so the play/pause button
+    // re-arms to read the new message on next click instead of resuming
+    // the prior message mid-sentence.
+    if (typeof resetTtsOnNewTurn === 'function') {
+      for (const ev of events) {
+        if (ev.type !== 'assistant' && ev.type !== 'result') continue;
+        if (ev.line != null) {
+          const escLineCheck = (window.CSS && CSS.escape) ? CSS.escape(String(ev.line)) : String(ev.line);
+          if ($view.querySelector('.event[data-jsonl-line="' + escLineCheck + '"]')) continue;
+        }
+        resetTtsOnNewTurn();
+        break;
+      }
+    }
     for (const ev of events) {
       if (ev.line != null) {
         const escLine = (window.CSS && CSS.escape) ? CSS.escape(String(ev.line)) : String(ev.line);
