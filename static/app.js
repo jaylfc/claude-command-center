@@ -11823,8 +11823,18 @@
       try { return localStorage.getItem(_folderGroupStorageKey(section, key)) === '1'; }
       catch (_) { return false; }
     };
-    const _folderGroupHeaderHtml = (section, folder, count, hue, orphan, collapseKey, extraAttrs = '') => {
+    const _folderGroupHeaderHtml = (section, folder, count, hue, orphan, collapseKey, extraAttrs = '', repoPath = '') => {
       const collapsed = _isFolderGroupCollapsed(section, collapseKey);
+      // "Push all" ship control — conversation list only, and only when we
+      // know the repo's real path. Status text is hydrated client-side after
+      // render (see _hydrateShipControls / _refreshShipStatus).
+      const ship = (section === 'inprogress' && repoPath)
+        ? '<span class="conv-folder-ship" data-ship-repo="' + escapeHtml(repoPath) + '">'
+            + '<span class="conv-folder-ship-status" data-role="ship-status"></span>'
+            + '<button type="button" class="conv-folder-ship-btn" data-role="ship-push-all"'
+            + ' title="Commit dormant work, pull --rebase, push (no force)">Push all</button>'
+          + '</span>'
+        : '';
       return '<div class="conv-folder-group-header" style="--chip-hue:' + hue + ';"'
         + ' role="button" tabindex="0" data-role="folder-group-toggle"'
         + ' data-collapse-key="' + escapeHtml(_folderGroupStorageKey(section, collapseKey)) + '"'
@@ -11832,6 +11842,7 @@
         + '<span class="conv-folder-group-arrow">' + (collapsed ? '▸' : '▾') + '</span>'
         + '<span class="conv-folder-group-chip' + orphan + '">' + escapeHtml(folder) + '</span>'
         + '<span class="conv-folder-group-count">' + count + '</span>'
+        + ship
         + '</div>';
     };
     const _GH_ISSUE_PREVIEW_LIMIT = 5;
@@ -12086,7 +12097,7 @@
         const headerAttrs = ' data-folder-path="' + escapeHtml(dropPath) + '"'
           + ' data-folder-label="' + escapeHtml(folder) + '"';
         return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
-          + _folderGroupHeaderHtml('inprogress', folder, cards.length, hue, orphan, collapseKey, headerAttrs)
+          + _folderGroupHeaderHtml('inprogress', folder, cards.length, hue, orphan, collapseKey, headerAttrs, dropPath)
           + cards.map(c => _renderRow(c, { suppressFolderChip: true })).join('')
           + '</div>';
       };
@@ -12917,6 +12928,22 @@
         toggleFolderGroup(ev);
       });
     });
+    // "Push all" ship controls in folder headers (conv list only).
+    $convList.querySelectorAll('.conv-folder-ship').forEach(box => {
+      const repo = box.getAttribute('data-ship-repo') || '';
+      if (!repo) return;
+      // Don't let clicks/keys on the control toggle the folder collapse.
+      box.addEventListener('click', (ev) => ev.stopPropagation());
+      box.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') ev.stopPropagation();
+      });
+      const btn = box.querySelector('[data-role="ship-push-all"]');
+      if (btn) btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        _startShipPushAll(repo);
+      });
+      _refreshShipStatus(repo);
+    });
     $convList.querySelectorAll('.conv-item').forEach(el => {
       if (el.dataset.role === 'archived-gc-row' || !el.dataset.id) return;
       el.addEventListener('mouseenter', () => {
@@ -13354,11 +13381,16 @@
   }
 
   function isCccMacApp() {
-    return window.__CCC_MAC_APP__ === true;
+    if (window.__CCC_MAC_APP__ === true) return true;
+    const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    if (ua.indexOf('CCC-macOS') !== -1) return true;
+    const bridge = window.webkit
+      && window.webkit.messageHandlers
+      && window.webkit.messageHandlers.cccNative;
+    return !!(bridge && typeof bridge.postMessage === 'function');
   }
 
   function tryOpenNativeMacPopout(url) {
-    if (!isCccMacApp()) return false;
     const bridge = window.webkit
       && window.webkit.messageHandlers
       && window.webkit.messageHandlers.cccNative;
@@ -13389,22 +13421,42 @@
       return true;
     }
     const url = conversationPopoutUrl(convId, repoPathForConversationPopout(convId, repoPath));
-    if (tryOpenNativeMacPopout(url)) return true;
     const name = 'ccc-conversation-' + String(convId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48);
     const width = 920;
     const height = 900;
     const features = 'popup=yes,width=' + width + ',height=' + height
       + ',menubar=no,toolbar=no,location=no,status=no,scrollbars=yes,resizable=yes'
       + popoutPositionFeature(anchor, width, height);
+    if (isCccMacApp()) {
+      const popup = window.open(url, name, features);
+      if (popup) {
+        try { popup.focus(); } catch (_) {}
+        showOpToast('Conversation opened in a new window');
+        return true;
+      }
+      if (tryOpenNativeMacPopout(url)) return true;
+      fetch('/api/open-browser', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url })
+      }).then(r => r.json()).then(data => {
+        if (data.ok) {
+          showOpToast(data.via === 'ccc-app'
+            ? 'Conversation opened in a new window'
+            : 'Conversation opened in external browser');
+        } else {
+          showOpToast('Could not open a new Command Center window', 'error');
+        }
+      }).catch(() => {
+        showOpToast('Could not open a new Command Center window', 'error');
+      });
+      return false;
+    }
     const popup = window.open(url, name, features);
     if (popup) {
       try { popup.focus(); } catch (_) {}
-      showOpToast(isCccMacApp() ? 'Conversation opened in a new window' : 'Conversation opened in a pop-up');
+      showOpToast('Conversation opened in a pop-up');
       return true;
-    }
-    if (isCccMacApp()) {
-      showOpToast('Could not open a new Command Center window', 'error');
-      return false;
     }
     fetch('/api/open-browser', {
       method: 'POST',
@@ -20212,6 +20264,125 @@
     return Math.floor(s / 86400) + 'd ago';
   }
 
+  // ── Repo "Push all" ship flow ──
+  // Each conv-list folder header carries a ship control. Status is hydrated
+  // after render and, while a ship runs, polled every few seconds.
+  const _shipPollTimers = {};   // repo_path -> intervalId
+
+  function _shipBox(repo) {
+    const sel = (window.CSS && CSS.escape) ? CSS.escape(repo) : repo.replace(/"/g, '\\"');
+    return document.querySelector('.conv-folder-ship[data-ship-repo="' + sel + '"]');
+  }
+
+  const _SHIP_PHASE_LABELS = {
+    starting: 'Starting…', nudging: 'Nudging…', waiting_commits: 'Waiting commits…',
+    pulling: 'Pulling…', pushing: 'Pushing…', deploying: 'Deploying…',
+  };
+
+  function _renderShipStatus(box, data) {
+    if (!box) return;
+    const statusEl = box.querySelector('[data-role="ship-status"]');
+    const btn = box.querySelector('[data-role="ship-push-all"]');
+    if (!statusEl) return;
+    const job = data && data.job;
+    if (job && job.running) {
+      statusEl.className = 'conv-folder-ship-status is-busy';
+      statusEl.textContent = _SHIP_PHASE_LABELS[job.phase] || job.phase || 'Working…';
+      statusEl.title = job.message || '';
+      if (btn) btn.disabled = true;
+      return;
+    }
+    if (btn) btn.disabled = false;
+    let cls = 'conv-folder-ship-status', txt = '', title = '';
+    const phase = job && job.phase;
+    if (phase === 'error' || phase === 'stalled' || phase === 'deploy_error') {
+      cls += ' is-error';
+      txt = phase === 'stalled' ? 'Stalled' : (phase === 'deploy_error' ? 'Deploy failed' : 'Failed');
+      title = (job && job.message) || '';
+    } else if (data && data.dirty === true) {
+      cls += ' is-dirty';
+      txt = 'dirty';
+      title = 'Uncommitted changes in this repo';
+    } else if (data && data.last_ship_at) {
+      cls += ' is-ok';
+      const verb = phase === 'deployed' ? 'Deployed' : 'Pushed';
+      txt = verb + ' · ' + timeAgo(data.last_ship_at * 1000);
+      title = (job && job.message) || (data.last_ship_sha ? ('sha ' + data.last_ship_sha) : '');
+    } else if (data && data.dirty === false) {
+      cls += ' is-clean';
+      txt = 'clean';
+    }
+    statusEl.className = cls;
+    statusEl.textContent = txt;
+    statusEl.title = title;
+  }
+
+  async function _refreshShipStatus(repo, box) {
+    if (!repo) return null;
+    box = box || _shipBox(repo);
+    if (!box) return null;
+    try {
+      const res = await fetch('/api/repo/ship/status?repo_path=' + encodeURIComponent(repo));
+      const data = await res.json().catch(() => ({}));
+      _renderShipStatus(_shipBox(repo) || box, data);
+      return data;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function _startShipPolling(repo) {
+    if (_shipPollTimers[repo]) return;
+    const tick = async () => {
+      const data = await _refreshShipStatus(repo);
+      const running = data && data.job && data.job.running;
+      if (!running) {
+        clearInterval(_shipPollTimers[repo]);
+        delete _shipPollTimers[repo];
+      }
+    };
+    _shipPollTimers[repo] = setInterval(tick, 3000);
+  }
+
+  async function _startShipPushAll(repo) {
+    if (!repo) return;
+    const box = _shipBox(repo);
+    const statusEl = box && box.querySelector('[data-role="ship-status"]');
+    const btn = box && box.querySelector('[data-role="ship-push-all"]');
+    if (btn) btn.disabled = true;
+    if (statusEl) {
+      statusEl.className = 'conv-folder-ship-status is-busy';
+      statusEl.textContent = 'Starting…';
+      statusEl.title = '';
+    }
+    try {
+      const res = await fetch('/api/repo/ship', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo_path: repo }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (statusEl) {
+          statusEl.className = 'conv-folder-ship-status is-error';
+          statusEl.textContent = 'Failed';
+          statusEl.title = data.error || data.message || ('HTTP ' + res.status);
+        }
+        if (btn) btn.disabled = false;
+        return;
+      }
+    } catch (e) {
+      if (statusEl) {
+        statusEl.className = 'conv-folder-ship-status is-error';
+        statusEl.textContent = 'Failed';
+        statusEl.title = String(e);
+      }
+      if (btn) btn.disabled = false;
+      return;
+    }
+    _startShipPolling(repo);
+  }
+
   // ── Localhost / Next.js dev server pill ──
   const $localhostPill = document.getElementById('localhostPill');
   const $localhostDot = document.getElementById('localhostDot');
@@ -23917,6 +24088,9 @@
   const $annotationScreenBtn = document.getElementById('annotationScreenBtn');
   const $annotationNotesBtn = document.getElementById('annotationNotesBtn');
   let annotationState = null;
+  let annTabCaptureStream = null;
+  let annTabCapturePending = null;
+  let annTabCaptureLastError = null;
 
   function annCssEscape(value) {
     const s = String(value == null ? '' : value);
@@ -24072,9 +24246,13 @@
     const chromeY = Math.max(0, (outerH - window.innerHeight) - borderX);
     const sx = typeof window.screenX === 'number' ? window.screenX : (window.screenLeft || 0);
     const sy = typeof window.screenY === 'number' ? window.screenY : (window.screenTop || 0);
+    const vv = window.visualViewport;
+    const vvLeft = vv && typeof vv.offsetLeft === 'number' ? vv.offsetLeft : 0;
+    const vvTop = vv && typeof vv.offsetTop === 'number' ? vv.offsetTop : 0;
+    const dpr = window.devicePixelRatio || 1;
     return {
-      x: Math.round(sx + borderX + rect.x),
-      y: Math.round(sy + chromeY + rect.y),
+      x: Math.round(sx + borderX + rect.x + vvLeft),
+      y: Math.round(sy + chromeY + rect.y + vvTop),
       width: Math.round(rect.width),
       height: Math.round(rect.height),
       estimated: true,
@@ -24082,7 +24260,129 @@
       window_screen_y: sy,
       outer_width: outerW,
       outer_height: outerH,
+      chrome_border_x: borderX,
+      chrome_offset_y: chromeY,
+      device_pixel_ratio: dpr,
     };
+  }
+
+  function annReleaseTabCaptureStream() {
+    annTabCapturePending = null;
+    annTabCaptureLastError = null;
+    if (!annTabCaptureStream) return;
+    try {
+      annTabCaptureStream.getTracks().forEach((track) => track.stop());
+    } catch (_) {}
+    annTabCaptureStream = null;
+  }
+
+  function annTabCaptureSupported() {
+    // WKWebView in the .app shell does not expose a working getDisplayMedia picker.
+    if (typeof isCccMacApp === 'function' && isCccMacApp()) return false;
+    return !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function');
+  }
+
+  /** Start getDisplayMedia synchronously (must run inside a user-gesture handler). */
+  function annBeginTabCaptureRequest() {
+    if (!annTabCaptureSupported()) return null;
+    if (annTabCaptureStream) {
+      const tracks = annTabCaptureStream.getVideoTracks();
+      if (tracks.length && tracks[0].readyState === 'live') {
+        return Promise.resolve(annTabCaptureStream);
+      }
+      annReleaseTabCaptureStream();
+    }
+    if (annTabCapturePending) return annTabCapturePending;
+    annTabCaptureLastError = null;
+    const request = navigator.mediaDevices.getDisplayMedia({
+      video: {
+        displaySurface: 'browser',
+        width: { ideal: window.innerWidth },
+        height: { ideal: window.innerHeight },
+      },
+      audio: false,
+      preferCurrentTab: true,
+      selfBrowserSurface: 'include',
+    });
+    annTabCapturePending = request
+      .then((stream) => {
+        annTabCapturePending = null;
+        const track = stream.getVideoTracks()[0];
+        if (!track) {
+          stream.getTracks().forEach((t) => t.stop());
+          return null;
+        }
+        track.addEventListener('ended', annReleaseTabCaptureStream);
+        annTabCaptureStream = stream;
+        return stream;
+      })
+      .catch((err) => {
+        annTabCapturePending = null;
+        annTabCaptureLastError = err;
+        return null;
+      });
+    return annTabCapturePending;
+  }
+
+  async function annAcquireTabCaptureStream() {
+    const pending = annBeginTabCaptureRequest();
+    if (!pending) return null;
+    return pending;
+  }
+
+  async function annCaptureTabRegionB64(rect) {
+    if (!rect || rect.width < 2 || rect.height < 2) return null;
+    const pending = annBeginTabCaptureRequest();
+    const stream = pending ? await pending : null;
+    if (!stream) return null;
+    const track = stream.getVideoTracks()[0];
+    if (!track || track.readyState !== 'live') return null;
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    try {
+      await video.play();
+      await new Promise((resolve) => {
+        if (typeof video.requestVideoFrameCallback === 'function') {
+          video.requestVideoFrameCallback(() => resolve());
+        } else if (video.readyState >= 2) {
+          resolve();
+        } else {
+          video.addEventListener('loadeddata', () => resolve(), { once: true });
+          setTimeout(resolve, 200);
+        }
+      });
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return null;
+      const scaleX = vw / window.innerWidth;
+      const scaleY = vh / window.innerHeight;
+      const sx = Math.max(0, Math.round(rect.x * scaleX));
+      const sy = Math.max(0, Math.round(rect.y * scaleY));
+      const sw = Math.max(1, Math.min(vw - sx, Math.round(rect.width * scaleX)));
+      const sh = Math.max(1, Math.min(vh - sy, Math.round(rect.height * scaleY)));
+      const canvas = document.createElement('canvas');
+      canvas.width = sw;
+      canvas.height = sh;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+      const dataUrl = canvas.toDataURL('image/png');
+      const comma = dataUrl.indexOf(',');
+      return comma >= 0 ? dataUrl.slice(comma + 1) : null;
+    } catch (_) {
+      return null;
+    } finally {
+      video.srcObject = null;
+    }
+  }
+
+  async function annCaptureRegionB64(rect, element) {
+    const dom = await annCaptureDomRegionB64(rect, element);
+    if (dom) return dom;
+    if (annTabCaptureSupported()) return annCaptureTabRegionB64(rect);
+    return null;
   }
 
   // Walk up the DOM until we find an ancestor at least ~1.8x the area of
@@ -24090,24 +24390,30 @@
   // context to recognize where the element sits — a tight 14×14 swatch on
   // its own is meaningless. Cap at 4 levels and clamp to the viewport with
   // a small visual padding so the parent's border is visible.
-  function annContextRect(element, rect) {
-    if (!element || !rect) return rect;
+  function annContextElement(element, rect) {
+    if (!element || !rect) return element || null;
     const elArea = Math.max(1, rect.width * rect.height);
     let node = element.parentElement;
-    let chosen = null;
+    let chosenEl = null;
     let depth = 0;
     while (node && node !== document.body && depth < 4) {
       const pr = node.getBoundingClientRect();
       const prArea = pr.width * pr.height;
       if (prArea >= Math.max(elArea * 1.8, elArea + 4000)) {
-        chosen = pr;
+        chosenEl = node;
         break;
       }
       node = node.parentElement;
       depth++;
     }
-    if (!chosen && element.parentElement) chosen = element.parentElement.getBoundingClientRect();
-    if (!chosen) return rect;
+    return chosenEl || element.parentElement || element;
+  }
+
+  function annContextRect(element, rect) {
+    if (!element || !rect) return rect;
+    const chosenEl = annContextElement(element, rect);
+    if (!chosenEl || !chosenEl.getBoundingClientRect) return rect;
+    const chosen = chosenEl.getBoundingClientRect();
     const pad = 8;
     const x = Math.max(0, Math.floor(chosen.left - pad));
     const y = Math.max(0, Math.floor(chosen.top - pad));
@@ -24116,24 +24422,107 @@
     return { x, y, width, height };
   }
 
-  function annBuildPayload(note) {
+  function annInlineCloneStyles(src, dst) {
+    if (!src || !dst || src.nodeType !== 1 || dst.nodeType !== 1) return;
+    try {
+      const cs = getComputedStyle(src);
+      let cssText = '';
+      for (let i = 0; i < cs.length; i++) {
+        const prop = cs[i];
+        cssText += prop + ':' + cs.getPropertyValue(prop) + ';';
+      }
+      dst.setAttribute('style', cssText);
+    } catch (_) {}
+    const srcKids = src.children;
+    const dstKids = dst.children;
+    for (let i = 0; i < srcKids.length && i < dstKids.length; i++) {
+      annInlineCloneStyles(srcKids[i], dstKids[i]);
+    }
+  }
+
+  function annCaptureDomRegionB64(rect, element) {
+    if (!rect || rect.width < 2 || rect.height < 2) return Promise.resolve(null);
+    const root = annContextElement(element, rect) || element;
+    if (!root || !root.cloneNode || !root.getBoundingClientRect) return Promise.resolve(null);
+    const w = Math.max(1, Math.round(rect.width));
+    const h = Math.max(1, Math.round(rect.height));
+    if (w * h > 6_000_000) return Promise.resolve(null);
+    const scale = window.devicePixelRatio || 1;
+    const rootRect = root.getBoundingClientRect();
+    const offsetX = rect.x - rootRect.left;
+    const offsetY = rect.y - rootRect.top;
+    const clone = root.cloneNode(true);
+    annInlineCloneStyles(root, clone);
+    const xhtmlNs = 'http://www.w3.org/1999/xhtml';
+    const svgNs = 'http://www.w3.org/2000/svg';
+    const wrap = document.createElementNS(xhtmlNs, 'div');
+    wrap.setAttribute('xmlns', xhtmlNs);
+    const bg = getComputedStyle(root).backgroundColor || getComputedStyle(document.body).backgroundColor || '#0d1117';
+    wrap.style.cssText = [
+      'margin:0',
+      'padding:0',
+      'background:' + bg,
+      'width:' + Math.ceil(root.scrollWidth) + 'px',
+      'height:' + Math.ceil(root.scrollHeight) + 'px',
+      'transform:translate(' + (-offsetX) + 'px,' + (-offsetY) + 'px)',
+      'transform-origin:top left',
+    ].join(';');
+    wrap.appendChild(clone);
+    const fo = document.createElementNS(svgNs, 'foreignObject');
+    fo.setAttribute('width', String(w));
+    fo.setAttribute('height', String(h));
+    fo.appendChild(wrap);
+    const svg = document.createElementNS(svgNs, 'svg');
+    svg.setAttribute('xmlns', svgNs);
+    svg.setAttribute('width', String(w));
+    svg.setAttribute('height', String(h));
+    svg.appendChild(fo);
+    const svgText = new XMLSerializer().serializeToString(svg);
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(w * scale);
+          canvas.height = Math.round(h * scale);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) { resolve(null); return; }
+          ctx.scale(scale, scale);
+          ctx.drawImage(img, 0, 0, w, h);
+          const parts = canvas.toDataURL('image/png').split(',');
+          resolve(parts[1] || null);
+        } catch (_) {
+          resolve(null);
+        }
+      };
+      img.onerror = () => resolve(null);
+      img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgText);
+    });
+  }
+
+  function annBuildPayload(note, screenshotB64) {
     const rect = annotationState.rect;
     const element = annotationState.element;
     // Use the element's tight rect for selector / positioning data, but
     // capture the screenshot over a wider context rect so the reader can
     // see where the element lives in the page.
     const contextRect = annContextRect(element, rect);
-    return {
+    const screen = annEstimateScreenRect(contextRect);
+    const payload = {
       note,
       url: window.location.href,
       title: document.title || '',
       session_id: (typeof currentSession !== 'undefined' && currentSession && currentSession.id) || '',
       repo_path: (typeof selectedRepoPath === 'function' && selectedRepoPath()) || '',
       rect,
-      screen: annEstimateScreenRect(contextRect),
+      viewport_crop: contextRect,
+      device_pixel_ratio: screen.device_pixel_ratio || (window.devicePixelRatio || 1),
+      screen,
       element: annElementSummary(element),
       capture_screen: true,
     };
+    if (screenshotB64) payload.screenshot_b64 = screenshotB64;
+    return payload;
   }
 
   function annNextPaint() {
@@ -24146,6 +24535,7 @@
     document.removeEventListener('keydown', annHandleKeydown, true);
     if ($annotationStartBtn) $annotationStartBtn.classList.remove('active');
     annotationState = null;
+    annReleaseTabCaptureStream();
   }
 
   function annPositionEditor(editor, rect) {
@@ -24212,6 +24602,17 @@
       }
       if (typeof closeFn === 'function') closeFn();
       showOpToast(data.action === 'spawned' ? 'UX fixes queue session created' : 'Annotation sent to UX fixes queue', 'success');
+      // When a NEW session was spawned, force-pull the sessions list so
+      // the new row appears in the conv sidebar immediately — don't wait
+      // for the next poll cycle. Also schedule a few tighter polls so a
+      // session created just after the immediate refresh window still
+      // surfaces fast.
+      if (data.action === 'spawned' && typeof refreshConversationList === 'function') {
+        try { refreshConversationList(); } catch (_) {}
+        setTimeout(refreshConversationList, 600);
+        setTimeout(refreshConversationList, 1500);
+        setTimeout(refreshConversationList, 3000);
+      }
       try {
         if (typeof refreshArchiveData === 'function') {
           await refreshArchiveData({ force: true });
@@ -24239,8 +24640,10 @@
       '<div class="ann-editor-title">Annotation</div>' +
       '<textarea class="ann-editor-note" rows="4" placeholder="Write a note for Claude…"></textarea>' +
       '<div class="ann-editor-meta">' + escapeHtml(summary.selector || summary.tag || 'selected area') + '</div>' +
+      '<div class="ann-editor-shot-hint" hidden></div>' +
       '<div class="ann-editor-error" hidden></div>' +
       '<div class="ann-editor-actions">' +
+        '<button type="button" class="ann-btn" data-ann-enable-shot hidden>Allow screenshot</button>' +
         '<button type="button" class="ann-btn" data-ann-cancel>Cancel</button>' +
         '<button type="button" class="ann-btn" data-ann-open-session>Open new session</button>' +
         '<button type="button" class="ann-btn ann-queue-btn" data-ann-ux-queue>Add to UX fixes queue</button>' +
@@ -24255,7 +24658,57 @@
     const cancelBtn = editor.querySelector('[data-ann-cancel]');
     const openSessionBtn = editor.querySelector('[data-ann-open-session]');
     const uxQueueBtn = editor.querySelector('[data-ann-ux-queue]');
+    const enableShotBtn = editor.querySelector('[data-ann-enable-shot]');
+    const shotHintEl = editor.querySelector('.ann-editor-shot-hint');
     let savedAnnotation = null;
+    const annRefreshScreenshotUi = () => {
+      const macApp = typeof isCccMacApp === 'function' && isCccMacApp();
+      const supported = annTabCaptureSupported();
+      const live = !!(annTabCaptureStream
+        && annTabCaptureStream.getVideoTracks()[0]
+        && annTabCaptureStream.getVideoTracks()[0].readyState === 'live');
+      if (shotHintEl) {
+        if (macApp) {
+          shotHintEl.textContent = 'Screenshots use macOS Screen Recording — grant it to Claude Command Center in System Settings → Privacy.';
+          shotHintEl.hidden = false;
+        } else if (supported && !live) {
+          shotHintEl.textContent = 'Click “Allow screenshot” and choose this tab in the browser prompt.';
+          shotHintEl.hidden = false;
+        } else if (supported && live) {
+          shotHintEl.textContent = 'Screenshot capture is enabled for this annotation.';
+          shotHintEl.hidden = false;
+        } else {
+          shotHintEl.hidden = true;
+        }
+      }
+      if (enableShotBtn) {
+        enableShotBtn.hidden = !supported || live;
+      }
+    };
+    annRefreshScreenshotUi();
+    if (enableShotBtn) {
+      enableShotBtn.addEventListener('click', () => {
+        const pending = annBeginTabCaptureRequest();
+        if (!pending) {
+          errEl.textContent = 'Tab capture is not available here — use Screen Recording for the CCC server instead.';
+          errEl.hidden = false;
+          return;
+        }
+        pending.then((stream) => {
+          annRefreshScreenshotUi();
+          if (stream) {
+            errEl.hidden = true;
+            showOpToast('Screenshot capture enabled', 'success');
+          } else {
+            const denied = annTabCaptureLastError && annTabCaptureLastError.name === 'NotAllowedError';
+            errEl.textContent = denied
+              ? 'Tab capture was blocked — allow it in the browser prompt and choose this tab.'
+              : 'Tab capture failed — try again.';
+            errEl.hidden = false;
+          }
+        });
+      });
+    }
     const copySaved = async () => {
       if (!savedAnnotation) return;
       try {
@@ -24280,15 +24733,30 @@
       if (openSessionBtn) openSessionBtn.disabled = true;
       if (uxQueueBtn) uxQueueBtn.disabled = true;
       saveBtn.textContent = busyLabel || 'Saving…';
+      let payload = null;
       if (annotationState && annotationState.overlay) {
+        const contextRect = annContextRect(annotationState.element, annotationState.rect);
+        const captureElement = annotationState.element;
+        // getDisplayMedia must be requested before the first await or the browser
+        // will not show the tab-sharing prompt (user activation expires).
+        let tabCapturePromise = null;
+        if (annTabCaptureSupported()) {
+          tabCapturePromise = annCaptureTabRegionB64(contextRect);
+        }
         annotationState.overlay.classList.add('ann-capturing');
         await annNextPaint();
+        let screenshotB64 = await annCaptureDomRegionB64(contextRect, captureElement);
+        if (!screenshotB64 && tabCapturePromise) screenshotB64 = await tabCapturePromise;
+        payload = annBuildPayload(note, screenshotB64);
+        annotationState.overlay.classList.remove('ann-capturing');
+      } else {
+        payload = annBuildPayload(note, null);
       }
       try {
         const res = await fetch('/api/annotations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(annBuildPayload(note)),
+          body: JSON.stringify(payload),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
@@ -24299,7 +24767,13 @@
         if (uxQueueBtn) uxQueueBtn.disabled = false;
         saveBtn.disabled = false;
         saveBtn.textContent = 'Copy';
-        showOpToast('Annotation saved', 'success');
+        if (savedAnnotation && savedAnnotation.screenshot_path) {
+          showOpToast('Annotation saved with screenshot', 'success');
+        } else {
+          const warn = (data && data.screenshot_warning)
+            || 'No screenshot — choose “This Tab” when prompted, or grant Screen Recording to the CCC server in System Settings.';
+          showOpToast('Annotation saved (no screenshot): ' + warn, 'error');
+        }
         return savedAnnotation;
       } catch (err) {
         errEl.textContent = 'Save failed: ' + ((err && err.message) || 'unknown');
@@ -24309,10 +24783,6 @@
         if (uxQueueBtn) uxQueueBtn.disabled = false;
         saveBtn.textContent = 'Save';
         return null;
-      } finally {
-        if (annotationState && annotationState.overlay) {
-          annotationState.overlay.classList.remove('ann-capturing');
-        }
       }
     };
     const save = async () => {
@@ -24379,6 +24849,8 @@
     annotationState.rect = clicked ? annSelectionRectForElement(target, e.clientX, e.clientY) : raw;
     annUpdateSelection(annotationState.rect);
     if (annotationState.hoverLabelEl) annotationState.hoverLabelEl.hidden = true;
+    // Fire the tab-capture prompt while the click gesture is still active.
+    annBeginTabCaptureRequest();
     annShowEditor();
   }
 
