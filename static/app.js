@@ -14184,6 +14184,27 @@
     pane.classList.toggle('has-pane-title', !!(category || title));
     const header = pane.querySelector('[data-role="pane-header"]');
     if (header) header.title = [category, title].filter(Boolean).join(' - ');
+    // Conversation size badge — surfaces how big the JSONL is so the
+    // user can correlate "this took a while to load" with sheer size
+    // (often >5 MB sessions). Created lazily; cleared when row is null
+    // or size unknown.
+    const titlebar = pane.querySelector('[data-role="pane-titlebar"]');
+    if (titlebar) {
+      let sizeEl = titlebar.querySelector('[data-role="pane-size"]');
+      const rawSize = row && typeof row.size === 'number' ? row.size : 0;
+      if (rawSize > 0) {
+        if (!sizeEl) {
+          sizeEl = document.createElement('span');
+          sizeEl.className = 'conv-pane-size';
+          sizeEl.setAttribute('data-role', 'pane-size');
+          titlebar.appendChild(sizeEl);
+        }
+        sizeEl.textContent = formatSize(rawSize);
+        sizeEl.title = rawSize.toLocaleString() + ' bytes — JSONL transcript size';
+      } else if (sizeEl) {
+        sizeEl.remove();
+      }
+    }
   }
 
   if (CONV_POPOUT_MODE && CONV_POPOUT_TARGET) {

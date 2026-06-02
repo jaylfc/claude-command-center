@@ -1054,6 +1054,21 @@
     font-size: 12px;
     font-weight: 650;
   }
+  /* JSONL transcript size badge next to the pane title. Helps the user
+     correlate slow first-paint with conversation size. */
+  .conv-pane-size {
+    flex: 0 0 auto;
+    margin-left: 8px;
+    padding: 2px 6px;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+    font-size: 10px;
+    color: var(--text-muted, var(--text-2));
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
+    border-radius: 4px;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
   .conv-split[data-orientation="vertical"] .conv-pane.is-active,
   .conv-split[data-orientation="horizontal"] .conv-pane.is-active {
     box-shadow: inset 0 0 0 1px var(--accent, #4ea1ff);
