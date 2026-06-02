@@ -11356,13 +11356,20 @@
       const sessionIconHtml = '<span class="conv-session-icon ' + iconType + ' ' + stateClass + '" title="' + escapeAttr(iconTitle) + '" aria-hidden="true">'
           + svgMarkup
           + '</span>';
-      // Prefer "last interacted" (the user's last UI action) over "last
-      // event" (which includes Claude's autonomous responses) so the row
-      // time mirrors the user's mental model: when did *I* last touch this?
-      // Overridden below to "now" when the agent is actively running — an
-      // 11h-old user message is a misleading clock when the session is
-      // mid-Grep right now.
-      let rel = relativeTime(c.last_interacted || c.modified);
+      // Row time should reflect ANY activity on the session: user UI
+      // action (`last_interacted`), CCC inject (touched optimistically
+      // via markSessionSending), or agent JSONL writes (`modified` =
+      // mtime). The previous `last_interacted || modified` short-circuit
+      // showed a stale user-action time even when the agent was actively
+      // writing events — user reported seeing "41m" on a row whose
+      // agent had been responding seconds ago. Take the max instead so
+      // whichever signal is freshest wins. Overridden to "now" further
+      // down when `_isAgentRunning` so live work always reads "now".
+      const _relTs = Math.max(
+        Number(c.last_interacted || 0),
+        Number(c.modified || 0)
+      );
+      let rel = relativeTime(_relTs || c.last_interacted || c.modified);
       const active = currentConversation === c.id ? ' active' : '';
 
       // Session signals: additive context chips followed by exactly one
