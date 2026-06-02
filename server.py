@@ -24949,7 +24949,108 @@ def _ship_commit_scope(path):
     return top or "repo"
 
 
-def _ship_review_verdict(repo_path, path):
+def _ship_age_human(ts_unix):
+    """Compact relative age ('3h', '2d', '5m', 'just now') for a unix ts.
+
+    Used only for human-facing log/owner labels, so coarse buckets are fine —
+    we never compute anything off this string."""
+    try:
+        delta = max(0.0, time.time() - float(ts_unix))
+    except (TypeError, ValueError):
+        return "?"
+    if delta < 90:
+        return "just now"
+    if delta < 3600:
+        return f"{int(delta // 60)}m"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h"
+    return f"{int(delta // 86400)}d"
+
+
+def _ship_index_attribution(repo_path, path, since="21d", _cache=None):
+    """Best-effort: who last touched this file, from the local conversation
+    index (~/.claude-index/index.db via the in-process reader).
+
+    Returns {session_id, branch, ts_unix, age, owner} for the most-recent
+    non-current-session match, or None.
+
+    PRINCIPLE — the index AUGMENTS, never overrides, git's safety call. This is
+    a soft attribution/liveness signal mined from chat history, not a fact about
+    the repo's object graph. It can be stale, wrong, or missing entirely (no
+    index built yet). So every failure mode — missing index, query error, any
+    exception — collapses silently to None and the caller falls back to
+    git-only. A bad index lookup must never be load-bearing.
+
+    Runs inside the ship daemon thread, so it must also be cheap and
+    non-hanging: a single lexical (semantic=False) FTS lookup keyed on the
+    file's basename, scoped to this repo's cwd, bounded to recent history.
+    `_cache` (a dict) memoises per ship-run so the same path isn't re-queried.
+    """
+    if _cache is not None and path in _cache:
+        return _cache[path]
+
+    def _remember(val):
+        if _cache is not None:
+            _cache[path] = val
+        return val
+
+    try:
+        base = path.rstrip("/").rsplit("/", 1)[-1]
+        if not base:
+            return _remember(None)
+        # Repo basename is a cheaper, more-portable cwd filter than the full
+        # absolute path (sessions may live in sibling worktrees / symlinks).
+        try:
+            repo_name = Path(repo_path).name or repo_path
+        except (OSError, ValueError):
+            repo_name = repo_path
+        res = search_conversation_history(
+            query=base, limit=8, cwd_like=repo_name,
+            since=since, semantic=False,
+        )
+        # {"error": ...} (index missing / FTS rejected the query) → no attribution.
+        if not isinstance(res, dict) or res.get("error"):
+            return _remember(None)
+        rows = res.get("results") or []
+        if not rows:
+            return _remember(None)
+        # The current CCC session shouldn't attribute work to itself.
+        cur = globals().get("CCC_SESSION_ID") or os.environ.get("CCC_SESSION_ID") or ""
+        best = None
+        for r in rows:
+            try:
+                sid = r.get("session_id")
+                if not sid or sid == cur:
+                    continue
+                ts = float(r.get("ts_unix") or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if best is None or ts > best[0]:
+                best = (ts, sid, r.get("git_branch"))
+        if best is None:
+            return _remember(None)
+        ts, sid, branch = best
+        try:
+            names = _load_session_name_overrides()
+        except Exception:
+            names = {}
+        try:
+            owner = _ship_session_label(sid, names)
+        except Exception:
+            owner = (sid or "")[:8]
+        return _remember({
+            "session_id": sid,
+            "branch": branch,
+            "ts_unix": ts,
+            "age": _ship_age_human(ts),
+            "owner": owner,
+        })
+    except Exception:
+        # Any unexpected failure → git-only. The index is never load-bearing.
+        return _remember(None)
+
+
+def _ship_review_verdict(repo_path, path, _attr_cache=None):
     """Deterministic per-file verdict from the git graph (no LLM, no spawn):
 
       restore — working copy is byte-identical to a committed version
@@ -24957,11 +25058,32 @@ def _ship_review_verdict(repo_path, path):
                 duplicate it and conflict when that PR merges)
       commit  — genuine main-only work (latest commit touching it is in main,
                 or it's a brand-new file on no branch)
+
+    The git graph is the SAFETY AUTHORITY: `verdict` is decided purely from it.
+    The conversation index (_ship_index_attribution) only layers an
+    attribution/liveness hint on top — it may add an optional `owner`/`owner_age`
+    and enrich the human-readable `why`, but it NEVER changes `verdict`. (git
+    can't see that a feature branch is dead; the index can hint it — but a wrong
+    index call must not be able to flip a safety call.)
     """
+    # Attribution is computed once and only consulted to ENRICH the result —
+    # never to choose `verdict`. Defensive by construction: returns None on any
+    # failure, so the verdict logic below is identical with or without an index.
+    attr = _ship_index_attribution(repo_path, path, _cache=_attr_cache)
+
+    def _with_owner(v):
+        # Attach the authoring session (by name) + its age when the index knew.
+        # `restore` verdicts skip this: the file is byte-identical to a commit,
+        # so there's no live work to hand back to anyone.
+        if attr and v.get("verdict") != "restore":
+            v["owner"] = attr["owner"]
+            v["owner_age"] = attr["age"]
+        return v
+
     rc, sha, _ = _git(["log", "-1", "--all", "--format=%H", "--", path], repo_path, timeout=8)
     sha = (sha or "").strip()
     if rc != 0 or not sha:
-        return {"verdict": "commit", "why": "new file — not on any branch"}
+        return _with_owner({"verdict": "commit", "why": "new file — not on any branch"})
     rc2, diff, _ = _git(["diff", sha, "--", path], repo_path, timeout=8)
     if rc2 == 0 and not diff.strip():
         ref = _ship_safe_restore_ref(repo_path, path) or sha[:8]
@@ -24975,9 +25097,18 @@ def _ship_review_verdict(repo_path, path):
             if b and "HEAD" not in b and "main" not in b:
                 ref = b
                 break
-        return {"verdict": "leave",
-                "why": f"base on unmerged {ref or sha[:8]} — let that branch/PR land it"}
-    return {"verdict": "commit", "why": f"main-only edit since {sha[:8]}"}
+        why = f"base on unmerged {ref or sha[:8]} — let that branch/PR land it"
+        # Liveness caveat: git proves the base is on an unmerged branch, but it
+        # CANNOT see whether that branch is still alive or quietly abandoned.
+        # If the index shows its author hasn't touched the file recently, flag
+        # it so the human verifies before trusting the PR will land it. We still
+        # say `leave` — the index can only add a "verify" nudge, not flip a
+        # safety verdict, because a stale/wrong index hint would otherwise risk
+        # duplicating a PR's work into main.
+        if attr:
+            why += f" (owned by {attr['owner']}, last active {attr['age']} ago — verify before relying on PR)"
+        return _with_owner({"verdict": "leave", "why": why})
+    return _with_owner({"verdict": "commit", "why": f"main-only edit since {sha[:8]}"})
 
 
 def _run_ship_flow(repo_path, branch):
@@ -25012,6 +25143,10 @@ def _run_ship_flow(repo_path, branch):
                 _ship_log(repo_path, "worktree clean after triage ✓", "ok")
         if dirty:
             candidates = _ship_candidate_sessions(repo_path)
+            # Per-run attribution memo: a single ship run may consult the index
+            # for the same path in both the nudge-targeting log below AND the
+            # later per-file verdict pass — query it at most once each.
+            attr_cache = {}
             try:
                 names = _load_session_name_overrides()
             except Exception:
@@ -25019,6 +25154,34 @@ def _run_ship_flow(repo_path, branch):
 
             def _label(sid):
                 return _ship_session_label(sid, names)
+
+            # Attribution-aware targeting (informational only). For each dirty
+            # path, ask the conversation index who last touched it. When that
+            # author is identifiable but NOT in the live candidate set, surface
+            # it as an action rather than silently nudging everyone — this cuts
+            # over-nudging. We deliberately DO NOT change who gets nudged: the
+            # live candidates are still nudged exactly as before. The index only
+            # adds targeting context to the log (and can be wrong/missing, so it
+            # must never gate the nudge itself).
+            try:
+                live_set = set(candidates)
+                seen_owners = set()
+                for _, dp in (_ship_porcelain_paths(repo_path) or []):
+                    if _ship_is_junk(dp):
+                        continue
+                    a = _ship_index_attribution(repo_path, dp, _cache=attr_cache)
+                    if not a:
+                        continue
+                    osid = a.get("session_id")
+                    if osid and osid not in live_set and osid not in seen_owners:
+                        seen_owners.add(osid)
+                        _ship_log(repo_path,
+                                  f"owned by {a['owner']} (last active {a['age']} ago) — "
+                                  "not live, surfacing as action",
+                                  "info")
+            except Exception:
+                # Attribution is a nicety; never let it break the nudge flow.
+                pass
 
             # Idempotent per-session: skip a session that already answered and
             # hasn't written anything since — another session's edits never
@@ -25125,7 +25288,9 @@ def _run_ship_flow(repo_path, branch):
                 review_actions = []
                 v_counts = {"commit": 0, "restore": 0, "leave": 0}
                 for i, p in enumerate(review):
-                    v = _ship_review_verdict(repo_path, p)
+                    # Reuse the per-run attribution memo built during the
+                    # nudge-targeting pass above so a path isn't re-queried.
+                    v = _ship_review_verdict(repo_path, p, _attr_cache=attr_cache)
                     verdict, why = v["verdict"], v["why"]
                     v_counts[verdict] = v_counts.get(verdict, 0) + 1
                     base = p.rstrip("/").rsplit("/", 1)[-1]

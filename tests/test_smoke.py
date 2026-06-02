@@ -4,6 +4,7 @@ Anything Morning-specific lives in `tests/test_morning.py` which is
 gitignored alongside the Morning plugin itself; CI never sees it.
 """
 import importlib
+import inspect
 import fcntl
 import json
 import os
@@ -92,6 +93,28 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("/api/repo/ship", app_js)
         self.assertIn("_startShipPushAll", app_js)
         self.assertIn(".conv-folder-ship", app_css)
+
+    def test_ship_index_attribution_is_wired_and_degrades(self):
+        """The conversation-index attribution layer is defined, the verdict +
+        ship-flow consult it, and a missing/erroring index degrades silently to
+        git-only (None) — never raises. No real index is touched: we monkeypatch
+        search_conversation_history to mimic the index-missing/error contract."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        # Helper exists and is referenced by both consumers (source-level — we
+        # don't run the daemon flow, just prove the wiring).
+        self.assertTrue(hasattr(server, "_ship_index_attribution"))
+        self.assertIn("_ship_index_attribution", inspect.getsource(server._ship_review_verdict))
+        self.assertIn("_ship_index_attribution", inspect.getsource(server._run_ship_flow))
+        # Index missing → {"error": ...} contract → None, no raise.
+        with mock.patch.object(server, "search_conversation_history",
+                               return_value={"error": "no index", "results": []}):
+            self.assertIsNone(server._ship_index_attribution("/tmp/repo", "static/app.js"))
+        # The reader raising → still None (never load-bearing).
+        with mock.patch.object(server, "search_conversation_history",
+                               side_effect=RuntimeError("boom")):
+            self.assertIsNone(server._ship_index_attribution("/tmp/repo", "static/app.js"))
 
     def test_claude_append_prompt_discourages_blocking_recursive_grep(self):
         for mod in ("server", "morning", "morning_store"):
