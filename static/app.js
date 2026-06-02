@@ -6007,9 +6007,21 @@
   let _sidebarRenderPendingAfterDrag = false;
   let _sidebarRenderAfterDragRaf = 0;
   function isSidebarDragInProgress() {
-    return _sidebarDragInProgress || !!document.querySelector(
+    // Self-heal: the boolean can get stuck true when a dragstart fires but
+    // dragend / drop never does (mid-drag Escape, browser-cancelled drag,
+    // removed source element). That used to leave every renderSidebar
+    // deferred indefinitely — surfaced as "convSearch stopped working":
+    // user types, _scheduleConvSearchRender fires, renderSidebar bails on
+    // the stuck flag, list never filters. If the boolean says we're
+    // dragging but no DOM element actually carries a .dragging class,
+    // clear it.
+    const domHasDragging = !!document.querySelector(
       '.flow-node.dragging,.kanban-card.dragging,.kanban-column-header.dragging-header,.conv-item.dragging'
     );
+    if (_sidebarDragInProgress && !domHasDragging) {
+      _sidebarDragInProgress = false;
+    }
+    return _sidebarDragInProgress || domHasDragging;
   }
   function beginSidebarDrag() {
     _sidebarDragInProgress = true;
