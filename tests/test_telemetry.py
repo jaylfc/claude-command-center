@@ -197,6 +197,8 @@ class TestPayloadShape(TelemetryTestBase):
                                return_value={"available": False}), \
              mock.patch.object(self.server, "_resolve_gemini_bin",
                                return_value={"available": True}), \
+             mock.patch.object(self.server, "_resolve_cursor_bin",
+                               return_value={"available": False}), \
              mock.patch.object(self.server, "_resolve_antigravity_bin",
                                return_value={"available": True}):
             payload = self.server._build_telemetry_payload()
