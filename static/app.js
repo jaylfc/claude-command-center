@@ -1698,7 +1698,13 @@
   // timeout. Each entry: { ts, timer }.
   const _sendingSessions = new Map();
   const _optimisticSessionTouches = new Map();
-  const _SENDING_TIMEOUT_MS = 60000;
+  // Window during which an injected/sent message keeps the row marked as
+  // WIP optimistically. Real sidecar data should land within seconds for
+  // Claude Code / Codex; but UX-fixes-queue and similar inject paths
+  // sometimes take minutes before the next sidecar tick (the agent runs
+  // a long tool chain before emitting). 5min covers ~95% of agent turns
+  // without sticking the chip for hours when something truly hangs.
+  const _SENDING_TIMEOUT_MS = 5 * 60 * 1000;
   const _PENDING_SEND_ECHO_MAX_MS = _SENDING_TIMEOUT_MS + 15000;
   function _sessionRowMatches(c, sid) {
     if (!c || !sid) return false;
@@ -11396,13 +11402,23 @@
       // QUESTION / APPROVE? chip with no pulse. Conflating them made
       // idle sessions blocked on the human read as "the agent is still
       // doing something", which is the bug the user kept reporting.
+      // Optimistic-sending counts as agent-running for the WIP chip.
+      // Without this, an injected session (e.g. UX-fixes-queue receive)
+      // showed "Sending…" briefly in the live-tool slot but the
+      // lifecycle chip stayed on whatever was there before (read-only /
+      // no-edits / pushed) and the user saw NO indication that work was
+      // currently happening. The optimistic flag is set by
+      // markSessionSending on send/inject and auto-clears after
+      // _SENDING_TIMEOUT_MS — long enough to bridge most agent turns.
+      const _isOptimisticallySending = sidVal && sessionIsOptimisticallySending(sidVal);
       const _isAgentRunning = !!c.pending_spawn
         || _hasLivePendingTool
         || _codexOpenTurn
         || _geminiOpenTurn
         || _cursorOpenTurn
         || _antigravityOpenTurn
-        || _claudeWipFromSidecar;
+        || _claudeWipFromSidecar
+        || _isOptimisticallySending;
       if (_isAgentRunning) {
         rel = c.sidecar_ts ? relativeTime(c.sidecar_ts) : 'now';
       }
