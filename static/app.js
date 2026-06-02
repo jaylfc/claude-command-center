@@ -19158,10 +19158,23 @@
         $view.appendChild(_optimistic);
       }
     }
-    // Files-from-conversation pill: the sticky header may have just
-    // been created (above) or may already exist. Fire-and-forget; the
-    // pill stays hidden if the conversation has no qualifying files.
-    if (events.length > 0 && wasAtBottom) {
+    // When a compact-resume event just landed, scroll the boundary
+    // INTO VIEW (top of the resume card) instead of the very bottom.
+    // The collapsed card sits at the top of the user's gaze; the
+    // pre-compact history is above and the post-resume conversation
+    // (currently nothing) is below. Without this, scrollToEnd left
+    // the user looking at "yesterday's last message" with the compact
+    // boundary far below the fold — reading as "the log went back a
+    // day" even though the new boundary was already rendered.
+    const _newCompactCard = $view.querySelector('.compact-resume-event:last-child');
+    const _hasNewCompactEvent = events.some(e => {
+      if (!e || e.type !== 'user_text') return false;
+      return /^This session is being continued from a previous conversation that ran out of context\b/.test(e.text || '');
+    });
+    if (_hasNewCompactEvent && _newCompactCard && typeof _newCompactCard.scrollIntoView === 'function') {
+      _newCompactCard.scrollIntoView({ block: 'start', behavior: 'auto' });
+      updateConversationEndAffordance($view);
+    } else if (events.length > 0 && wasAtBottom) {
       scrollConversationToEnd($view);
     } else {
       updateConversationEndAffordance($view);
