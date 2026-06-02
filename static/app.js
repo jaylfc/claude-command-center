@@ -13999,11 +13999,35 @@
     }
     btn._convTargetView = view;
     btn.addEventListener('click', () => {
+      view._pinnedToBottom = true;
       scrollConversationToEnd(btn._convTargetView || view, 'smooth');
     });
     view._convEndButton = btn;
     view._convEndAffordanceAttached = true;
-    view.addEventListener('scroll', () => updateConversationEndAffordance(view), { passive: true });
+    // Pin-to-bottom: true means the user wants to follow new content.
+    // Initialized true so a brand-new pane auto-scrolls; user scrolling
+    // away from the bottom flips it off, scrolling back flips it on.
+    view._pinnedToBottom = true;
+    view.addEventListener('scroll', () => {
+      view._pinnedToBottom = isConversationAtBottom(view);
+      updateConversationEndAffordance(view);
+    }, { passive: true });
+    // Auto-advance: any content mutation (SSE event append, streaming
+    // bubble grow, re-render, etc.) re-scrolls to the bottom if the user
+    // was pinned. The previous wasAtBottom-at-call-site pattern missed
+    // mutations from paths that didn't explicitly capture a snapshot;
+    // this catches all of them.
+    if (window.MutationObserver && !view._convPinObserver) {
+      const pinObserver = new MutationObserver(() => {
+        if (view._pinnedToBottom) {
+          scrollConversationToEnd(view);
+        } else {
+          updateConversationEndAffordance(view);
+        }
+      });
+      pinObserver.observe(view, { childList: true, subtree: true, characterData: true });
+      view._convPinObserver = pinObserver;
+    }
     updateConversationEndAffordance(view);
   }
 
