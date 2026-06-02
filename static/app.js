@@ -2547,7 +2547,9 @@
         $convInput.placeholder = live ? 'Send to Cursor terminal...' : 'Resume Cursor and send...';
       } else if (isAntigravity) {
         $convTtyLabel.textContent = liveStatus.live ? (liveStatus.tty || 'antigravity') : 'antigravity';
-        $convInput.placeholder = antigravityInputPlaceholder(currentSession);
+        $convInput.placeholder = antigravityCanSendNow
+          ? antigravityInputPlaceholder(currentSession)
+          : 'Type a follow-up — Antigravity will open with this prompt…';
       } else if (live) {
         $convTtyLabel.textContent = liveStatus.tty;
         $convInput.placeholder = 'Send to terminal...';
@@ -2555,14 +2557,26 @@
         $convTtyLabel.textContent = 'dormant';
         $convInput.placeholder = 'Resume and send…';
       }
+      // Antigravity sessions always accept input — the server's
+      // resume_session_antigravity() routes to CLI headless / running
+      // app / a fresh app launch with the prompt prefilled, in priority
+      // order. Previously we readOnly'd the input when both
+      // can_headless_resume and can_app_resume were false, leaving the
+      // user with a dead input bar and no way to type a follow-up.
       const canSend = !isAntigravity || antigravityCanSendNow;
       if ($convInput) {
-        $convInput.readOnly = !canSend;
-        $convInput.classList.toggle('is-readonly', !canSend);
+        const blockTyping = !canSend && !isAntigravity;
+        $convInput.readOnly = blockTyping;
+        $convInput.classList.toggle('is-readonly', blockTyping);
       }
       if ($convSendBtn) {
-        $convSendBtn.disabled = !canSend;
-        $convSendBtn.title = canSend ? 'Send' : 'Open Antigravity to continue this app session';
+        const blockSend = !canSend && !isAntigravity;
+        $convSendBtn.disabled = blockSend;
+        $convSendBtn.title = blockSend
+          ? 'Open Antigravity to continue this app session'
+          : (isAntigravity && !antigravityCanSendNow
+              ? 'Send — opens Antigravity with this prompt'
+              : 'Send');
       }
       if ($convSteerBtn) {
         const canSteer = canSend && isCodex && hasSession && !isNewSession && !isBacklogIssue;
@@ -5516,6 +5530,9 @@
   // ── Attention panel (top-of-kanban "what needs me") ─────────────────────
   let _nyaShowAll = false;
   async function loadAttentionList() {
+    // A live "Push all" log feed temporarily owns this panel (see
+    // _renderShipLogPanel). Don't clobber it until the user dismisses.
+    if (_shipLogActive) return;
     const $list = document.getElementById('attentionList');
     const $count = document.getElementById('attentionCount');
     const $seeAll = document.getElementById('attentionSeeAllBtn');
@@ -15983,12 +16000,16 @@
           // accumulate in one element so the bubble reads naturally.
           let last = slot.lastElementChild;
           if (last && last.classList.contains('stream-block-text')) {
-            last.textContent += b.text || '';
+            const raw = (last.dataset.raw || '') + (b.text || '');
+            last.dataset.raw = raw;
+            last.innerHTML = renderMarkdown(raw);
           } else {
             const div = document.createElement('div');
-            div.className = 'stream-block-text';
+            div.className = 'stream-block-text assistant-text';
             div.dataset.renderTs = nowStamp();
-            div.textContent = b.text || '';
+            const raw = b.text || '';
+            div.dataset.raw = raw;
+            div.innerHTML = renderMarkdown(raw);
             slot.appendChild(div);
           }
         } else if (b.type === 'tool_use') {
@@ -20266,12 +20287,68 @@
 
   // ── Repo "Push all" ship flow ──
   // Each conv-list folder header carries a ship control. Status is hydrated
-  // after render and, while a ship runs, polled every few seconds.
+  // after render and, while a ship runs, polled every few seconds. While a
+  // ship is live (or just finished, until dismissed) its step log takes over
+  // the "Needs your attention" panel as a terminal-style feed.
   const _shipPollTimers = {};   // repo_path -> intervalId
+  let _shipLogRepo = null;      // repo whose log currently owns the NYA panel
+  let _shipLogActive = false;   // true while the log feed owns the NYA panel
 
   function _shipBox(repo) {
     const sel = (window.CSS && CSS.escape) ? CSS.escape(repo) : repo.replace(/"/g, '\\"');
     return document.querySelector('.conv-folder-ship[data-ship-repo="' + sel + '"]');
+  }
+
+  const _SHIP_DONE_PHASES = ['pushed', 'deployed', 'error', 'stalled', 'deploy_error'];
+
+  function _shipDismissLog() {
+    _shipLogActive = false;
+    _shipLogRepo = null;
+    const $panel = document.getElementById('attentionPanel');
+    if ($panel) {
+      try {
+        if (localStorage.getItem('ccc-attention-collapsed') !== '0') $panel.classList.add('collapsed');
+      } catch (_) {}
+    }
+    if (typeof loadAttentionList === 'function') loadAttentionList();
+  }
+
+  function _renderShipLogPanel(repo, data) {
+    const $panel = document.getElementById('attentionPanel');
+    const $list = document.getElementById('attentionList');
+    const $count = document.getElementById('attentionCount');
+    const job = data && data.job;
+    if (!$panel || !$list || !job) return;
+    _shipLogActive = true;
+    _shipLogRepo = repo;
+    $panel.classList.remove('collapsed');   // surface it; restored on dismiss
+    const phase = job.phase || '';
+    const done = !job.running;
+    const phaseCls = job.running ? 'is-busy'
+      : (['error', 'stalled', 'deploy_error'].indexOf(phase) >= 0 ? 'is-error' : 'is-ok');
+    const lines = (job.log || []).map(e => {
+      const d = new Date((e.t || 0) * 1000);
+      const ts = [d.getHours(), d.getMinutes(), d.getSeconds()]
+        .map(n => String(n).padStart(2, '0')).join(':');
+      return '<div class="ship-log-line ' + escapeHtml(e.level || 'info') + '">'
+        + '<span class="ship-log-ts">' + ts + '</span>'
+        + '<span class="ship-log-txt">' + escapeHtml(e.text || '') + '</span></div>';
+    }).join('');
+    $list.innerHTML =
+      '<div class="ship-log">'
+      + '<div class="ship-log-head">'
+        + (job.running ? '<span class="ship-log-spin"></span>' : '')
+        + '<span class="ship-log-title">Push all · ' + escapeHtml(repo.split('/').pop()) + '</span>'
+        + '<span class="ship-log-phase ' + phaseCls + '">' + escapeHtml(phase) + '</span>'
+        + (done ? '<button type="button" class="ship-log-dismiss" data-role="ship-log-dismiss">✕ close</button>' : '')
+      + '</div>'
+      + '<div class="ship-log-body" id="shipLogBody">' + (lines || '<div class="ship-log-line info"><span class="ship-log-txt">…</span></div>') + '</div>'
+      + '</div>';
+    if ($count) $count.textContent = '';
+    const body = document.getElementById('shipLogBody');
+    if (body) body.scrollTop = body.scrollHeight;
+    const dz = $list.querySelector('[data-role="ship-log-dismiss"]');
+    if (dz) dz.addEventListener('click', (e) => { e.stopPropagation(); _shipDismissLog(); });
   }
 
   const _SHIP_PHASE_LABELS = {
@@ -20325,6 +20402,12 @@
       const res = await fetch('/api/repo/ship/status?repo_path=' + encodeURIComponent(repo));
       const data = await res.json().catch(() => ({}));
       _renderShipStatus(_shipBox(repo) || box, data);
+      // Drive the live log panel when this repo is shipping, or keep it
+      // updated if it already owns the panel (until the user dismisses it).
+      if (data && data.job && (data.job.running || _shipLogRepo === repo)) {
+        _renderShipLogPanel(repo, data);
+        if (data.job.running) _startShipPolling(repo);
+      }
       return data;
     } catch (_) {
       return null;
@@ -20380,6 +20463,9 @@
       if (btn) btn.disabled = false;
       return;
     }
+    // Take over the attention panel with the live log immediately.
+    _shipLogRepo = repo;
+    await _refreshShipStatus(repo);
     _startShipPolling(repo);
   }
 
@@ -23475,9 +23561,15 @@
     // Exposed on the element so sendToSplitTerminal can re-run it after clearing value.
     $cpInput.__cpRefresh = function () {
       const hasText = ($cpInput.value || '').trim().length > 0;
-      const canSend = !(currentSession.source === 'antigravity' && !antigravityCanSend(currentSession));
-      $cpSendBtn.disabled = !hasText || !currentSession.id || !canSend;
-      $cpSendBtn.title = canSend ? 'Send' : 'Open Antigravity to continue this app session';
+      // Antigravity always accepts follow-ups — the server picks
+      // CLI-headless / running app / fresh app launch with the prompt
+      // prefilled. Don't gate send on antigravityCanSend any more.
+      const isAGY = currentSession.source === 'antigravity';
+      const agyCanSendNow = !isAGY || antigravityCanSend(currentSession);
+      $cpSendBtn.disabled = !hasText || !currentSession.id;
+      $cpSendBtn.title = isAGY && !agyCanSendNow
+        ? 'Send — opens Antigravity with this prompt'
+        : 'Send';
     };
     $cpSendBtn.addEventListener('click', sendToSplitTerminal);
     $cpInput.addEventListener('input', () => {
