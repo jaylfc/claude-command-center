@@ -3384,6 +3384,84 @@
       0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
     transform: translateY(1px);
   }
+  /* ── Compact-resume card ──────────────────────────────────────────
+     The user_text following a /compact run is a multi-page wall of
+     prose Claude wrote to "remember" the prior conversation. Wrap it
+     in a collapsible card so the active chat isn't drowned by it.   */
+  .compact-resume-card {
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border) 65%);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 5%, var(--surface) 95%);
+    padding: 0;
+    margin: 4px 0;
+    overflow: hidden;
+  }
+  .compact-resume-toggle {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    background: transparent;
+    border: 0; border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    color: var(--text);
+    font-size: 12px; font-weight: 600; text-align: left;
+    cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .compact-resume-toggle:hover {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .compact-resume-icon {
+    color: var(--accent); font-size: 11px;
+    display: inline-block; width: 12px;
+  }
+  .compact-resume-label { flex: 1; color: var(--accent); }
+  .compact-resume-hint {
+    font-size: 10px; font-weight: 400;
+    color: var(--text-muted, var(--text-2));
+    text-transform: none; letter-spacing: 0;
+  }
+  .compact-resume-intro {
+    padding: 10px 14px;
+    font-size: 13px; line-height: 1.5;
+    color: var(--text-2, var(--text));
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
+  }
+  .compact-resume-card[data-collapsed="1"] .compact-resume-body { display: none; }
+  .compact-resume-body {
+    padding: 12px 14px 14px;
+    font-size: 13px; line-height: 1.55;
+    max-height: 460px; overflow-y: auto;
+  }
+  .compact-resume-body h1,
+  .compact-resume-body h2,
+  .compact-resume-body h3 {
+    font-size: 13px; font-weight: 700;
+    margin: 10px 0 4px;
+  }
+
+  /* Compact-in-progress banner shown while /compact is running. */
+  .compact-in-progress-banner {
+    display: flex; align-items: center; gap: 10px;
+    margin: 10px 0;
+    padding: 10px 12px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 50%, var(--border) 50%);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 7%, var(--surface) 93%);
+    font-size: 13px; line-height: 1.45;
+    color: var(--text);
+  }
+  .compact-banner-text strong { color: var(--accent); margin-right: 4px; }
+  .compact-banner-spinner {
+    flex: 0 0 auto;
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-top-color: var(--accent);
+    animation: ccc-compact-spin 0.9s linear infinite;
+  }
+  @keyframes ccc-compact-spin {
+    to { transform: rotate(360deg); }
+  }
+
   .conv-input-bar .tts-btn.speaking.paused {
     /* Paused but still active — calmer color so the button reads as
        "click to resume" instead of "still speaking". */

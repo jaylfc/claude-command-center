@@ -3115,6 +3115,7 @@
           setTimeout(refreshConversationList, 3500);
         } else if (compactCommand) {
           showOpToast('Compact requested. Waiting for Claude to write the compact boundary.');
+          showCompactInProgressBanner(sid);
           scheduleCompactUsageRefresh(sid);
         }
       } else {
@@ -3827,6 +3828,91 @@
     if (!root) return '';
     const el = root.getElementsByTagName(tagName)[0];
     return el ? normalizeTaskNotificationField(el.textContent || '') : '';
+  }
+
+  // Detect the user_text emitted by Claude Code after a successful
+  // /compact run — a long resume-summary block that always opens with
+  // "This session is being continued from a previous conversation
+  // that ran out of context." and is followed by numbered sections.
+  // Returns { intro, body } when matched, or null otherwise.
+  function parseCompactResumeBlock(text) {
+    const src = String(text || '');
+    if (!/^This session is being continued from a previous conversation that ran out of context\b/.test(src)) {
+      return null;
+    }
+    const firstParaEnd = src.indexOf('\n\n');
+    const intro = (firstParaEnd > 0 ? src.slice(0, firstParaEnd) : src).trim();
+    const body = (firstParaEnd > 0 ? src.slice(firstParaEnd + 2) : '').trim();
+    return { intro, body };
+  }
+
+  // Persistent in-progress banner shown while /compact is running.
+  // Claude takes 1-3 minutes to write the compact boundary; users
+  // previously had no visible signal that anything was happening (just
+  // a toast that disappeared after 3 seconds). The banner mounts into
+  // the active pane's conv view and clears when the compact-resume
+  // user_text event lands (see renderConversationEvents below).
+  function showCompactInProgressBanner(sid) {
+    const $view = typeof getConvView === 'function' ? getConvView() : document.getElementById('conversationsView');
+    if (!$view) return;
+    let banner = $view.querySelector('.compact-in-progress-banner');
+    if (banner) return;
+    banner = document.createElement('div');
+    banner.className = 'compact-in-progress-banner';
+    if (sid) banner.dataset.sid = sid;
+    banner.innerHTML = '<span class="compact-banner-spinner" aria-hidden="true"></span>'
+      + '<span class="compact-banner-text">'
+      +   '<strong>Compacting conversation context…</strong>'
+      +   ' Claude is summarizing the prior turns. This usually takes 1-3 minutes.'
+      + '</span>';
+    $view.appendChild(banner);
+    if (typeof scrollConversationToEnd === 'function') {
+      scrollConversationToEnd($view);
+    }
+  }
+  function clearCompactInProgressBanner(view) {
+    const views = view ? [view] : (typeof conversationScrollViews === 'function'
+      ? conversationScrollViews()
+      : [document.getElementById('conversationsView')].filter(Boolean));
+    for (const v of views) {
+      if (!v) continue;
+      v.querySelectorAll('.compact-in-progress-banner').forEach(el => el.remove());
+    }
+  }
+
+  // Delegated toggle for compact-resume cards — one listener handles
+  // every card past, present, and future without per-render wiring.
+  document.addEventListener('click', (ev) => {
+    const toggle = ev.target && ev.target.closest && ev.target.closest('.compact-resume-toggle');
+    if (!toggle) return;
+    const card = toggle.closest('.compact-resume-card');
+    if (!card) return;
+    ev.preventDefault();
+    const wasCollapsed = card.dataset.collapsed === '1';
+    card.dataset.collapsed = wasCollapsed ? '0' : '1';
+    toggle.setAttribute('aria-expanded', wasCollapsed ? 'true' : 'false');
+    const iconEl = toggle.querySelector('.compact-resume-icon');
+    if (iconEl) iconEl.textContent = wasCollapsed ? '▾' : '▸';
+    const hintEl = toggle.querySelector('.compact-resume-hint');
+    if (hintEl) hintEl.textContent = wasCollapsed ? 'click to collapse' : 'click to expand';
+  });
+
+  function renderCompactResumeCard(text) {
+    const parsed = parseCompactResumeBlock(text);
+    if (!parsed) return null;
+    const introHtml = escapeHtml(parsed.intro);
+    const bodyHtml = parsed.body
+      ? renderMarkdown(parsed.body)
+      : '<em class="compact-resume-empty">(no detail captured)</em>';
+    return '<div class="compact-resume-card" data-collapsed="1">'
+      + '<button type="button" class="compact-resume-toggle" aria-expanded="false">'
+      +   '<span class="compact-resume-icon">▸</span>'
+      +   '<span class="compact-resume-label">Resumed from /compact summary</span>'
+      +   '<span class="compact-resume-hint">click to expand</span>'
+      + '</button>'
+      + '<div class="compact-resume-intro">' + introHtml + '</div>'
+      + '<div class="compact-resume-body">' + bodyHtml + '</div>'
+      + '</div>';
   }
 
   function parseTaskNotificationBlock(text) {
@@ -18784,11 +18870,26 @@
         const cleanedText = cleanIssuePrompt(ev.text || '');
         const notification = parseTaskNotificationBlock(cleanedText);
         if (notification) div.classList.add('task-notification-event');
+        // Collapse /compact-resume blocks into a styled card — they're
+        // multi-page walls of text that drown the actual conversation.
+        // The card shows just the intro line + a click-to-expand toggle;
+        // the full body renders inside (still readable, just out of the
+        // way until requested). Also tears down the compact-in-progress
+        // banner the send handler put up: the boundary just arrived.
+        const compactCardHtml = renderCompactResumeCard(cleanedText);
+        if (compactCardHtml) {
+          div.classList.add('compact-resume-event');
+          if (typeof clearCompactInProgressBanner === 'function') {
+            clearCompactInProgressBanner($view);
+          }
+        }
         // data-raw-text preserves the original prose so _dynAskApply can pin
         // the same wording in the "Earlier ask" sticky — reading textContent
         // back would lose any pasted-image path that's been replaced with <img>.
         const textHtml = notification
           ? renderTaskNotificationBlock(notification, cleanedText, true)
+          : compactCardHtml
+          ? '<div class="user-msg" dir="auto" data-raw-text="' + escapeAttr(cleanedText) + '">' + compactCardHtml + '</div>'
           : cleanedText
           ? '<div class="user-msg" dir="auto" data-raw-text="' + escapeAttr(cleanedText) + '">' + linkifyPastedImages(escapeHtml(cleanedText)) + '</div>'
           : '';
