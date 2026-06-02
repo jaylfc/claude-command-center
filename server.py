@@ -3197,10 +3197,15 @@ def _rehydrate_archive_cached_rows(rows):
             if override:
                 row["display_name"] = override
                 row["name_overridden"] = True
-            elif (row.get("source") or "interactive") == "interactive":
-                row["display_name"] = None
-                row["name_overridden"] = False
             else:
+                # Keep whatever display_name the parser already derived
+                # (which, for dormant sessions, includes any custom-title
+                # event the user wrote via `/rename` in Claude Code OR the
+                # rename_session() write-through to the JSONL). Previously
+                # we set display_name=None for interactive sessions without
+                # a side-car override — that wiped the JSONL-derived rename
+                # on every fetch and the client fell back to the AI title.
+                # Don't lose user intent recorded in the JSONL.
                 row["name_overridden"] = False
 
             row["archived"] = sid in archived_set
