@@ -143,20 +143,26 @@ open_when_ready() {
 }
 
 ask_install_service() {
+  # Default to YES on interactive terminals: most users want CCC to keep
+  # running after they close this Terminal window, and the alternative
+  # (foreground server tied to Terminal) is a frequent "where did CCC go"
+  # source for DMG users. Non-interactive runs (CI, headless curl|bash
+  # without a TTY) stay in foreground — auto-installing services without
+  # the user watching would be surprising.
   if [ ! -t 1 ] || [ ! -c /dev/tty ]; then
     return 1
   fi
 
   local choice
-  printf 'install: Would you like to install CCC as a system service so it runs automatically in the background? [y/N] '
+  printf 'install: Install CCC as a background service so it keeps running after this Terminal closes? [Y/n] '
   if read -r choice < /dev/tty; then
     case "$choice" in
-      [yY][eE][sS]|[yY])
-        return 0
+      [nN][oO]|[nN])
+        return 1
         ;;
     esac
   fi
-  return 1
+  return 0
 }
 
 launch_server() {
