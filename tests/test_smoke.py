@@ -254,6 +254,12 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("Add to UX fixes queue", app_js)
         self.assertIn("Session ID: ", app_js)
         self.assertIn("persistAnnotation", app_js)
+        self.assertIn("annCaptureRegionB64", app_js)
+        self.assertIn("annBeginTabCaptureRequest", app_js)
+        self.assertIn("annCaptureDomRegionB64", app_js)
+        self.assertIn("data-ann-enable-shot", app_js)
+        server_py = pathlib.Path(PROJECT_ROOT, "server.py").read_text(encoding="utf-8")
+        self.assertIn("screenshot_warning", server_py)
         self.assertNotIn("other tool", app_js.lower())
 
     def test_sidebar_refresh_defers_while_dragging(self):
@@ -4685,6 +4691,88 @@ class TestSessionUsageDedup(unittest.TestCase):
         # Three distinct events, none deduped (no shared id to dedupe by).
         self.assertEqual(result["total_input_tokens"], 30)
         self.assertEqual(result["total_output_tokens"], 60)
+
+
+class TestCodexEsc(unittest.TestCase):
+    def setUp(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        self.server = importlib.import_module("server")
+
+    def test_interrupt_codex_session_sends_sigint(self):
+        with mock.patch.object(self.server, "_is_codex_session", return_value=True), \
+             mock.patch.object(self.server, "find_session_cwd", return_value="/tmp"), \
+             mock.patch.object(self.server, "session_live_status") as mock_status, \
+             mock.patch.object(self.server.os, "kill") as mock_kill:
+
+            mock_status.return_value = {
+                "live": True,
+                "pid": 12345,
+                "tty": None,
+                "terminal_app": None,
+            }
+
+            res = self.server._interrupt_session("some-codex-session-id")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["via"], "spawn-sigint")
+            self.assertEqual(res["pid"], 12345)
+            mock_kill.assert_called_once_with(12345, self.server.signal.SIGINT)
+
+    def test_interrupt_non_live_codex_session(self):
+        with mock.patch.object(self.server, "_is_codex_session", return_value=True), \
+             mock.patch.object(self.server, "find_session_cwd", return_value="/tmp"), \
+             mock.patch.object(self.server, "session_live_status") as mock_status:
+
+            mock_status.return_value = {
+                "live": False,
+                "pid": None,
+                "tty": None,
+                "terminal_app": None,
+            }
+
+            res = self.server._interrupt_session("some-codex-session-id")
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["error"], "Codex session is not live — nothing to interrupt")
+
+    def test_codex_liveness_fallback_to_spawned_sessions(self):
+        with mock.patch.object(self.server, "_is_codex_session", return_value=True), \
+             mock.patch.object(self.server, "find_session_cwd", return_value="/tmp"), \
+             mock.patch.object(self.server, "_resolve_codex_rollout_path", return_value=None), \
+             mock.patch.object(self.server, "_spawn_registry_has_session", return_value=False), \
+             mock.patch.object(self.server, "_live_spawn_registry_entry_for_session", return_value=None), \
+             mock.patch.object(self.server, "_find_live_spawn_entry_for_session") as mock_find_spawn, \
+             mock.patch.object(self.server, "_process_tty", return_value=None), \
+             mock.patch.object(self.server, "_proc_cwd", return_value="/tmp"), \
+             mock.patch.object(self.server, "_proc_ancestor_terminal", return_value=(None, None)):
+
+            mock_find_spawn.return_value = {
+                "pid": 12345,
+                "engine": "codex",
+                "cwd": "/tmp",
+            }
+
+            res = self.server.session_live_status("some-codex-session-id", "/tmp")
+            self.assertTrue(res["live"])
+            self.assertEqual(res["pid"], 12345)
+            mock_find_spawn.assert_called_once_with("some-codex-session-id")
+
+    def test_live_engine_session_ids_includes_memory_spawns(self):
+        fake_spawn = {
+            "pid": 12345,
+            "engine": "codex",
+            "log": "/tmp/spawn-codex-foo.log",
+            "session_id": None,
+        }
+        with mock.patch.object(self.server, "_spawned_sessions", [fake_spawn]), \
+             mock.patch.object(self.server, "_poll_spawn_entry", return_value=None), \
+             mock.patch.object(self.server, "_extract_codex_thread_id_from_log", return_value="dynamic-codex-sid"), \
+             mock.patch.object(self.server, "find_live_codex_processes", return_value=[]), \
+             mock.patch.object(self.server, "find_live_gemini_processes", return_value=[]), \
+             mock.patch.object(self.server, "find_live_cursor_processes", return_value=[]):
+            
+            self.server._engine_live_sids_cache = {"ts": 0.0, "sids": frozenset()}
+            sids = self.server._live_engine_session_ids()
+            self.assertIn("dynamic-codex-sid", sids)
 
 
 if __name__ == "__main__":
