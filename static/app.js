@@ -6679,7 +6679,9 @@
       chips.push('<span class="flow-chip pushed" title="Pushed to remote">pushed</span>');
     } else if (c.has_commit) {
       chips.push('<span class="flow-chip committed" title="Has commits, not pushed">committed</span>');
-    } else if (c.has_edit === false) {
+    } else if (c.has_edit === false && Number(c.subagent_count || 0) === 0) {
+      // Don't show "no edits" when subagents ran — they likely edited
+      // things even though the parent JSONL has no Edit tool_use.
       chips.push('<span class="flow-chip no-edits" title="No file edits in this session">no edits</span>');
     }
     // Numeric counter chip when server exposes one. commit_count is
@@ -9582,6 +9584,13 @@
     if (c.verified || c.archived) return false;
     if (c.source === 'backlog') return false;
     if (hasReadOnlyWork(c)) return false;
+    // Sessions that spawn subagents (Task tool) delegate edits to the
+    // subagent JSONLs — the parent JSONL has no Edit/Write/NotebookEdit
+    // tool_use, so c.has_edit stays false even when many edits actually
+    // happened. Don't claim "no edits" when subagents ran; their work
+    // counts. Same applies if the row carries direct edit indicators
+    // (commit / push / PR), which already short-circuit above.
+    if (Number(c.subagent_count || 0) > 0) return false;
     return !c.has_edit;
   }
 
