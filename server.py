@@ -22295,16 +22295,29 @@ def _group_chat_latest_message_snapshot(chat_path: str) -> str:
 
 
 def _group_chat_inject_text(chat_path: str, topic: str, mode: str, sid: str) -> str:
-    """Build the /group-chat injection, with a latest-post context hint."""
+    """Build the /group-chat injection with a tiny latest-post pointer.
+
+    Previously inlined up to ~2KB of the last message body, which the
+    agent then re-reads from the chat file anyway — pure token waste at
+    every nudge. Now we send only the heading line (author + timestamp)
+    as a "there's a new message; here's whose" pointer. The agent reads
+    the chat file for actual content.
+    """
     safe_topic = (topic or "").replace('"', '\\"')
     text = f'/group-chat chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
     snapshot = _group_chat_latest_message_snapshot(chat_path)
     if snapshot:
-        text += (
-            "\n\n"
-            "CCC latest chat snapshot (advisory; read the chat file before posting):\n"
-            f"{snapshot}"
-        )
+        # Keep just the first line — the `## <ts> — <author>` heading —
+        # so the agent knows what just landed without re-injecting its
+        # body on every nudge.
+        heading = snapshot.split("\n", 1)[0].strip()
+        if heading:
+            text += (
+                "\n\n"
+                "CCC pointer: a new post just landed — "
+                f"{heading}\n"
+                "Read the chat file before posting; the body is there."
+            )
     return text
 
 
@@ -22673,14 +22686,50 @@ def _group_chat_nudge(path, chat_uuid="", target_sid=""):
         reminder_key = f"{len(matches)}:{last_match.group(0).strip()}"
         last = authors[-1]
         if last == "Human":
-            # Find the most recent non-Human author before this turn.
+            # Find the most recent non-Human author before this turn —
+            # used as a fallback target if the Human's message doesn't
+            # explicitly address anyone by mention.
             prior = next((a for a in reversed(authors[:-1]) if a != "Human"), None)
             if prior:
                 last_hash = prior.lower()
                 for sid in session_ids:
                     if sid.lower().startswith(last_hash):
                         only_sid = sid
+                        addressed_sids.add(sid)
                         break
+            # Also scan the Human's message body for @mentions /
+            # short-id references — when the user wrote "Maya and Jordan,
+            # can you both…" we want to wake both, not just the prior
+            # writer. Extract the body between the Human heading and
+            # the next heading (or end of file).
+            try:
+                human_body_start = last_match.end()
+                next_heading = author_pat.search(content, human_body_start)
+                human_body = content[human_body_start:next_heading.start() if next_heading else None]
+                # Strip system blockquotes so a `> _ts — system: pinged
+                # <agent>...` line doesn't get parsed as the human
+                # addressing that agent.
+                human_body = re.sub(r'^>\s*_[^\n]*system:[^\n]*\n?', '', human_body, flags=re.MULTILINE)
+                # Match @<8hex> or @<displayName> against the name_map.
+                mentioned_hashes = {h.lower() for h in re.findall(r'@?([0-9a-fA-F]{8})\b', human_body)}
+                # Also match @<name> by display name (case-insensitive).
+                lower_body = human_body.lower()
+                for sid, dname in name_map.items():
+                    if not dname:
+                        continue
+                    needle = '@' + str(dname).lower()
+                    if needle in lower_body:
+                        addressed_sids.add(sid)
+                for sid in session_ids:
+                    if sid[:8].lower() in mentioned_hashes:
+                        addressed_sids.add(sid)
+            except Exception:
+                pass
+            # If we have ANY addressed participants (prior writer or
+            # explicit mentions), only_sid becomes redundant — the
+            # ping-loop below honors addressed_sids.
+            if addressed_sids:
+                only_sid = None
         else:
             last_hash = last.lower()
             for sid in session_ids:
@@ -22694,9 +22743,18 @@ def _group_chat_nudge(path, chat_uuid="", target_sid=""):
     pinged_labels = []
     target_sids = []
     for sid in session_ids:
-        # only_sid wins when set — Human just replied and we want to
-        # nudge only the specific agent the reply is most likely for.
-        if only_sid is not None and sid != only_sid:
+        # addressed_sids wins when populated — Human just replied and
+        # explicitly named one or more participants (by mention or by
+        # implicit "last writer" association). Ping all of them, skip
+        # everyone else.
+        if addressed_sids:
+            if sid not in addressed_sids:
+                results.append({"session_id": sid, "ok": True, "skipped": "not addressed"})
+                continue
+        elif only_sid is not None and sid != only_sid:
+            # Legacy single-target path (only fires when addressed_sids
+            # is empty AND we still found a prior writer). Kept as a
+            # fallback for defensive parity.
             results.append({"session_id": sid, "ok": True, "skipped": "not addressed"})
             continue
         if sid == exclude_sid:
