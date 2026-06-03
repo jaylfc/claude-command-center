@@ -5475,8 +5475,8 @@ PENDING_INPUTS_FILE = COMMAND_CENTER_STATE_DIR / "pending-inputs.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 11
-_CONV_META_COMPAT_SCHEMA_VERSIONS = {11}
+_CONV_META_SCHEMA_VERSION = 12
+_CONV_META_COMPAT_SCHEMA_VERSIONS = {12}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -5693,14 +5693,22 @@ def _extract_tail_meta(path):
               activity status (working/waiting/idle).
 
     Uses string pre-filters to skip the vast majority of lines without
-    JSON-parsing them. Cached by mtime.
+    JSON-parsing them. Cached by (st_mtime_ns, st_size) — plain st_mtime
+    is 1-second-resolution, so two writes inside the same wall second
+    keep returning the stale snapshot. The context-pct badge in the
+    sidebar (latest_input_tokens / live_context_percent) was visibly
+    stuck on the prior turn's value for users typing fast. Size is part
+    of the key so a same-second truncate-and-overwrite (mtime unchanged,
+    size different) still invalidates.
     """
     try:
-        mtime = path.stat().st_mtime
+        st = path.stat()
+        cache_key = (st.st_mtime_ns, st.st_size)
+        mtime = st.st_mtime
     except OSError:
         return {}
     cached = _conv_meta_cache.get(str(path))
-    if cached and cached.get("mtime") == mtime:
+    if cached and cached.get("cache_key") == cache_key:
         return cached
     meta = {
         "mtime": mtime,
@@ -6020,6 +6028,7 @@ def _extract_tail_meta(path):
             }
             for tid in last_ids if tid in _subagent_by_id
         ]
+    meta["cache_key"] = cache_key
     global _conv_meta_cache_dirty
     with _conv_meta_cache_lock:
         _conv_meta_cache[str(path)] = meta
