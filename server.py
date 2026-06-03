@@ -3138,6 +3138,12 @@ def find_all_conversations(
             # custom-title updates; those should not make an old session look
             # active again in the archive list.
             row_mtime = tail_meta.get("last_meaningful_ts") or stat.st_mtime
+            model = tail_meta.get("model") or ""
+            latest_tok = tail_meta.get("latest_input_tokens") or 0
+            if "[1m]" in model.lower() or latest_tok > 200_000:
+                ctx_limit = 1_000_000
+            else:
+                ctx_limit = 200_000
             out.append({
                 "session_id": session_id,
                 "source": "interactive",
@@ -3199,6 +3205,15 @@ def find_all_conversations(
                 # the subtitle in archive can see it. Currently hidden via
                 # _hideAskHtml flag in the UI shaper.
                 "last_assistant_text": tail_meta.get("last_assistant_text") or "",
+                # Context % badge — same fields as find_conversations so
+                # archive rows can render sidebar usage without opening the
+                # session pane.
+                "model": model,
+                "latest_input_tokens": latest_tok,
+                "live_context_tokens": tail_meta.get("live_context_tokens") or 0,
+                "live_context_limit": tail_meta.get("live_context_limit") or 0,
+                "live_context_percent": tail_meta.get("live_context_percent") or 0,
+                "context_limit": ctx_limit,
                 # Sidecar overlay — only meaningful when is_live; cold
                 # rows get safe defaults that suppress the live pill.
                 **sidecar_fields,
@@ -3294,7 +3309,7 @@ def find_all_conversations(
     return out
 
 
-_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 3
+_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 4
 _ARCHIVE_RESPONSE_CACHE_FILE = COMMAND_CENTER_STATE_DIR / "archive-conversations-cache.json"
 # The all-repos archive payload can be several MB on machines with years of
 # agent history. Refreshing it every 30 seconds keeps the Python server in a
@@ -18615,6 +18630,14 @@ def _antigravity_cli_conversation_path(session_id):
     sid = str(session_id).strip()
     if not _SESSION_UUID_RE.match(sid):
         return None
+    # AGY writes one of two state file formats: `.pb` (older, what
+    # spawn_session_antigravity typically seeds) and `.db` (newer, what
+    # AGY rebuilds from the brain transcript on the first orphan resume).
+    # Either one flags the session as headless-resumable.
+    for suffix in (".pb", ".db"):
+        candidate = ANTIGRAVITY_CLI_CONVERSATIONS / f"{sid}{suffix}"
+        if candidate.is_file():
+            return candidate
     return ANTIGRAVITY_CLI_CONVERSATIONS / f"{sid}.pb"
 
 
@@ -19719,6 +19742,7 @@ def find_antigravity_conversations(
             _wt_worktree_label = folder_label[_wt_idx + 4:]
             folder_label = folder_label[:_wt_idx]
         branch = tail.get("tail_branch") or _git_branch_for_cwd(effective_cwd)
+        ag_latest, ag_limit = _antigravity_list_context_usage(sid, is_live=is_live)
         out.append({
             "id": sid,
             "session_id": sid,
@@ -19782,6 +19806,8 @@ def find_antigravity_conversations(
             "needs_approval_message": "",
             "model": tail.get("model") or cli_meta.get("model") or spawn_info.get("model") or "",
             "reasoning_effort": "",
+            "latest_input_tokens": ag_latest,
+            "context_limit": ag_limit,
         })
     # Synthesize stub rows for live AGY spawns whose JSONL transcript hasn't
     # materialized on disk yet. AGY allocates the conversation uuid up front
@@ -20189,6 +20215,37 @@ def _extract_antigravity_usage(session_id):
         "engine": "antigravity",
         "override": _get_session_override(session_id),
     }
+
+
+_antigravity_list_usage_cache = {}
+_antigravity_list_usage_cache_lock = threading.Lock()
+
+
+def _antigravity_list_context_usage(session_id, *, is_live=False):
+    """Context % for archive/list rows. Trajectory RPC is live-only + cached."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return 0, 1_000_000
+    now = time.time()
+    with _antigravity_list_usage_cache_lock:
+        cached = _antigravity_list_usage_cache.get(sid)
+        if cached and now - cached.get("ts", 0) < 30:
+            return cached.get("latest_input_tokens", 0), cached.get("context_limit", 1_000_000)
+    if not is_live:
+        return 0, 1_000_000
+    try:
+        usage = _extract_antigravity_usage(sid)
+        latest = int(usage.get("latest_input_tokens") or 0)
+        limit = int(usage.get("context_limit") or 1_000_000) or 1_000_000
+    except Exception:
+        latest, limit = 0, 1_000_000
+    with _antigravity_list_usage_cache_lock:
+        _antigravity_list_usage_cache[sid] = {
+            "ts": now,
+            "latest_input_tokens": latest,
+            "context_limit": limit,
+        }
+    return latest, limit
 
 
 def _extract_antigravity_timeline(session_id):
