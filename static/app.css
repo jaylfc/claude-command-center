@@ -5426,6 +5426,50 @@
   .conversations-view:has(.conv-live-tool-strip) .conv-sticky-header {
     top: var(--live-strip-offset, 24px);
   }
+
+  /* ── Relayed-question blocking modal ──────────────────────────────
+     Reuses the .upd-overlay / .upd-dialog shell and the .cl-question-*
+     visual language (see app.js showRelayedQuestionModal). Pops when the
+     open conversation's session has a pending relayed AskUserQuestion. */
+  .ccc-question-dialog { width: min(540px, 94vw); max-height: 86vh; overflow: auto; }
+  .ccc-question-modal .ccc-q-blocks {
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  .ccc-question-modal .ccc-q-block {
+    padding: 10px 12px;
+    border-left: 3px solid rgba(88,166,255,0.55);
+    border-radius: 4px;
+    background: rgba(88,166,255,0.08);
+  }
+  .ccc-question-modal .ccc-q-multi-hint {
+    color: var(--text-muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    margin: 4px 0 2px;
+  }
+  .ccc-question-modal .ccc-q-options { margin-top: 8px; }
+  .ccc-question-modal .ccc-q-option.is-selected {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+    border-radius: 4px;
+  }
+  .ccc-question-modal .ccc-q-option.is-selected .cl-question-option-label {
+    color: var(--accent);
+  }
+  .ccc-question-modal .cl-question-options li {
+    transition: border-color 0.12s ease-out, background 0.12s ease-out;
+  }
+  .ccc-question-modal .cl-question-options li:hover {
+    border-color: rgba(88,166,255,0.55);
+    background: rgba(88,166,255,0.14);
+  }
+  .ccc-question-modal .ccc-q-custom { margin-top: 9px; }
+  .ccc-question-modal .ccc-q-dismiss {
+    margin-right: auto; font-size: 12px;
+    color: var(--text-muted); background: transparent; border-color: transparent;
+  }
+  .ccc-question-modal .ccc-q-dismiss:hover {
+    color: var(--text); background: var(--surface-2);
+  }
+
   .kanban-approve-deny {
     display: flex; gap: 4px; margin-top: 4px;
   }

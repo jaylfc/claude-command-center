@@ -1134,6 +1134,19 @@
     return out;
   }
 
+  // Token/context fields for sidebar row % badge — must survive archive shaping.
+  function _contextFieldsFromRow(c) {
+    if (!c) return {};
+    return {
+      engine: c.engine || 'claude',
+      latest_input_tokens: c.latest_input_tokens || 0,
+      live_context_tokens: c.live_context_tokens || 0,
+      live_context_limit: c.live_context_limit || 0,
+      live_context_percent: c.live_context_percent || 0,
+      context_limit: c.context_limit || 0,
+    };
+  }
+
   function _rememberLiveOverlay(sessionId, fields) {
     if (!sessionId || !fields) return;
     const prev = _sessionLiveOverlay.get(sessionId) || {};
@@ -1804,6 +1817,265 @@
     updateInputBar();
     updateLiveToolStrip();
     if (typeof updateSplitToolbar === 'function') updateSplitToolbar();
+    syncRelayedQuestionModal();
+  }
+
+  // ── Relayed-question blocking modal ───────────────────────────────
+  // Headless Claude Code sessions can't answer AskUserQuestion on their
+  // own; a PreToolUse hook blocks the session and parks the question
+  // server-side. When the *currently open* conversation's session has a
+  // pending relayed question, pop a blocking modal so the user answers
+  // it from the dashboard. Driven entirely off the existing live-status
+  // poll: syncRelayedQuestionModal() runs at the tail of every
+  // refreshLiveStatus() pass.
+  let _relayedQuestionState = {
+    sessionId: null,     // session the open modal belongs to
+    nonce: null,         // server nonce for the open question batch
+    fetching: false,     // GET /api/question in flight
+    submitting: false,   // POST /api/answer-question in flight
+    questions: null,     // questions array currently rendered
+    selections: null,    // per-question state: { picked:Set<int>, custom:string }
+  };
+
+  function _relayedQuestionModalEl() {
+    return document.getElementById('cccQuestionModal');
+  }
+
+  function closeRelayedQuestionModal() {
+    const modal = _relayedQuestionModalEl();
+    if (modal) modal.remove();
+    _relayedQuestionState = {
+      sessionId: null, nonce: null, fetching: false,
+      submitting: false, questions: null, selections: null,
+    };
+  }
+
+  // Called each poll tick. Decides whether to fetch/show/close the modal
+  // based on the open session's question_waiting flag.
+  function syncRelayedQuestionModal() {
+    const sid = currentSession && currentSession.id;
+    // No open session, or this session is no longer waiting → close any
+    // modal we have open (someone answered, or it timed out server-side).
+    if (!sid || !liveStatus.questionWaiting) {
+      if (_relayedQuestionModalEl() || _relayedQuestionState.sessionId) {
+        closeRelayedQuestionModal();
+      }
+      return;
+    }
+    // Already showing the modal for this session — leave it be; the user
+    // is mid-answer and we don't want to clobber their selections.
+    if (_relayedQuestionState.sessionId === sid && _relayedQuestionModalEl()) return;
+    // Avoid stacking fetches.
+    if (_relayedQuestionState.fetching) return;
+    _relayedQuestionState.fetching = true;
+    const fetchedFor = sid;
+    fetch('/api/question?' + new URLSearchParams({ session_id: sid }).toString())
+      .then(function (res) { return res.json().catch(function () { return {}; }); })
+      .then(function (data) {
+        _relayedQuestionState.fetching = false;
+        // Open session changed out from under us while fetching — bail.
+        if (!currentSession || currentSession.id !== fetchedFor) return;
+        if (!data || !data.ok || !data.pending) {
+          // Nothing pending after all — tear down a stale modal if present.
+          if (_relayedQuestionModalEl()) closeRelayedQuestionModal();
+          return;
+        }
+        const questions = Array.isArray(data.questions) ? data.questions : [];
+        if (!questions.length) return;
+        showRelayedQuestionModal(fetchedFor, data.nonce || null, questions);
+      })
+      .catch(function () { _relayedQuestionState.fetching = false; });
+  }
+
+  function showRelayedQuestionModal(sessionId, nonce, questions) {
+    // If a modal for the same session+nonce is already open, don't rebuild.
+    if (_relayedQuestionState.sessionId === sessionId
+      && _relayedQuestionState.nonce === nonce
+      && _relayedQuestionModalEl()) return;
+    closeRelayedQuestionModal();
+    _relayedQuestionState.sessionId = sessionId;
+    _relayedQuestionState.nonce = nonce;
+    _relayedQuestionState.questions = questions;
+    _relayedQuestionState.selections = questions.map(function () {
+      return { picked: new Set(), custom: '' };
+    });
+
+    const modal = document.createElement('div');
+    modal.id = 'cccQuestionModal';
+    modal.className = 'upd-overlay ccc-question-modal open';
+
+    const blocksHtml = questions.map(function (q, qi) {
+      const multi = !!q.multiSelect;
+      const headerHtml = q.header
+        ? '<div class="cl-question-header">' + escapeHtml(q.header) + '</div>'
+        : '';
+      const questionHtml = q.question
+        ? '<div class="cl-question-text">' + escapeHtml(q.question) + '</div>'
+        : '';
+      const opts = Array.isArray(q.options) ? q.options : [];
+      const optsHtml = opts.map(function (opt, oi) {
+        return '<li>'
+          + '<button type="button" class="cl-question-option-btn ccc-q-option"'
+          + ' data-ccc-q="' + qi + '" data-ccc-opt="' + oi + '">'
+          + '<span class="cl-question-option-label">' + escapeHtml(opt.label || '') + '</span>'
+          + (opt.description ? '<span class="cl-question-option-desc">' + escapeHtml(opt.description) + '</span>' : '')
+          + '</button>'
+          + '</li>';
+      }).join('');
+      return '<div class="ccc-q-block" data-ccc-q-block="' + qi + '">'
+        + headerHtml
+        + questionHtml
+        + (multi ? '<div class="ccc-q-multi-hint">Select all that apply</div>' : '')
+        + (optsHtml ? '<ul class="cl-question-options ccc-q-options">' + optsHtml + '</ul>' : '')
+        + '<input type="text" class="ccc-q-custom bug-input" data-ccc-q="' + qi + '"'
+        + ' placeholder="Other / type your own…" autocomplete="off">'
+        + '</div>';
+    }).join('');
+
+    modal.innerHTML =
+      '<div class="upd-backdrop"></div>' +
+      '<div class="upd-dialog ccc-question-dialog" role="dialog" aria-modal="true">' +
+        '<div class="upd-title">Session is asking a question</div>' +
+        '<div class="ccc-q-blocks">' + blocksHtml + '</div>' +
+        '<div class="upd-error ccc-q-error"></div>' +
+        '<div class="upd-actions ccc-q-actions">' +
+          '<button type="button" class="upd-btn ccc-q-dismiss">Answer in terminal</button>' +
+          '<button type="button" class="upd-btn upd-primary ccc-q-send" disabled>Send answer</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+
+    const sendBtn = modal.querySelector('.ccc-q-send');
+    const dismissBtn = modal.querySelector('.ccc-q-dismiss');
+    const errEl = modal.querySelector('.ccc-q-error');
+
+    function refreshSendEnabled() {
+      const sel = _relayedQuestionState.selections;
+      const ready = sel && sel.every(function (s) {
+        return s.picked.size > 0 || (s.custom && s.custom.trim().length > 0);
+      });
+      sendBtn.disabled = !ready || _relayedQuestionState.submitting;
+    }
+
+    // Option clicks: single-select replaces, multi-select toggles. Picking
+    // an option clears any typed custom text for that question (and vice
+    // versa) so the two answer modes don't conflict at submit time.
+    modal.querySelectorAll('.ccc-q-option').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const qi = parseInt(btn.getAttribute('data-ccc-q'), 10);
+        const oi = parseInt(btn.getAttribute('data-ccc-opt'), 10);
+        const q = _relayedQuestionState.questions[qi];
+        const sel = _relayedQuestionState.selections[qi];
+        const multi = !!(q && q.multiSelect);
+        if (multi) {
+          if (sel.picked.has(oi)) sel.picked.delete(oi);
+          else sel.picked.add(oi);
+        } else {
+          if (sel.picked.has(oi)) sel.picked.clear();
+          else { sel.picked.clear(); sel.picked.add(oi); }
+        }
+        // Clear conflicting custom text + its input.
+        sel.custom = '';
+        const customInput = modal.querySelector('.ccc-q-custom[data-ccc-q="' + qi + '"]');
+        if (customInput) customInput.value = '';
+        // Repaint selected state for this block.
+        modal.querySelectorAll('.ccc-q-option[data-ccc-q="' + qi + '"]').forEach(function (b) {
+          const boi = parseInt(b.getAttribute('data-ccc-opt'), 10);
+          b.classList.toggle('is-selected', sel.picked.has(boi));
+        });
+        refreshSendEnabled();
+      });
+    });
+
+    modal.querySelectorAll('.ccc-q-custom').forEach(function (input) {
+      input.addEventListener('input', function () {
+        const qi = parseInt(input.getAttribute('data-ccc-q'), 10);
+        const sel = _relayedQuestionState.selections[qi];
+        sel.custom = input.value;
+        if (sel.custom.trim()) {
+          // Typing a custom answer clears option picks for this question.
+          sel.picked.clear();
+          modal.querySelectorAll('.ccc-q-option[data-ccc-q="' + qi + '"]').forEach(function (b) {
+            b.classList.remove('is-selected');
+          });
+        }
+        refreshSendEnabled();
+      });
+    });
+
+    dismissBtn.addEventListener('click', function () {
+      // Subtle escape hatch: closes the overlay but the session stays
+      // blocked server-side until it times out. Does NOT answer.
+      closeRelayedQuestionModal();
+    });
+
+    sendBtn.addEventListener('click', function () {
+      submitRelayedQuestionAnswers(modal, sendBtn, errEl, refreshSendEnabled);
+    });
+
+    refreshSendEnabled();
+  }
+
+  function submitRelayedQuestionAnswers(modal, sendBtn, errEl, refreshSendEnabled) {
+    if (_relayedQuestionState.submitting) return;
+    const sessionId = _relayedQuestionState.sessionId;
+    const questions = _relayedQuestionState.questions || [];
+    const sel = _relayedQuestionState.selections || [];
+    // Build answers aligned to question order.
+    const answers = questions.map(function (q, qi) {
+      const s = sel[qi] || { picked: new Set(), custom: '' };
+      const opts = Array.isArray(q.options) ? q.options : [];
+      const custom = (s.custom || '').trim();
+      const picked = Array.from(s.picked);
+      if (picked.length) {
+        if (q.multiSelect || picked.length > 1) {
+          // Multi-select (or several picks): join chosen labels, index -1.
+          const labels = picked
+            .sort(function (a, b) { return a - b; })
+            .map(function (i) { return (opts[i] && opts[i].label) || ''; })
+            .filter(Boolean);
+          return { index: -1, text: labels.join(', ') };
+        }
+        return { index: picked[0], text: '' };
+      }
+      // Free-text / custom answer.
+      return { index: -1, text: custom };
+    });
+
+    _relayedQuestionState.submitting = true;
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Sending…';
+    errEl.classList.remove('visible');
+
+    fetch('/api/answer-question', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, answers: answers }),
+    })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          if (!res.ok && !data.error) data.error = 'HTTP ' + res.status;
+          return data;
+        });
+      })
+      .then(function (data) {
+        _relayedQuestionState.submitting = false;
+        if (data && data.ok) {
+          closeRelayedQuestionModal();
+          return;
+        }
+        sendBtn.textContent = 'Send answer';
+        errEl.textContent = (data && data.error) ? data.error : 'Could not send answer.';
+        errEl.classList.add('visible');
+        if (typeof refreshSendEnabled === 'function') refreshSendEnabled();
+      })
+      .catch(function () {
+        _relayedQuestionState.submitting = false;
+        sendBtn.textContent = 'Send answer';
+        errEl.textContent = 'Network error — could not send answer.';
+        errEl.classList.add('visible');
+        if (typeof refreshSendEnabled === 'function') refreshSendEnabled();
+      });
   }
 
   function startLiveStatusPolling() {
@@ -23201,7 +23473,7 @@
     const shaped = rows.map(c => {
       if (c.source === 'backlog') {
         const folderOrphan = !c.folder_path;
-        return Object.assign({}, c, {
+        return Object.assign({}, c, _contextFieldsFromRow(c), {
           id: c.id || c.session_id,
           session_id: c.session_id || c.id,
           first_message: c.first_message || '',
@@ -23256,7 +23528,7 @@
         });
       }
       const folderOrphan = (c.folder_path === c.slug);
-      return {
+      return Object.assign(_contextFieldsFromRow(c), {
         id: c.session_id,
         session_id: c.session_id,
         first_message: c.first_message,
@@ -23341,7 +23613,7 @@
         pinned_repo: !!c.pinned_repo,
         pinned: !!c.pinned,
         pin_rank: Number.isFinite(Number(c.pin_rank)) ? Number(c.pin_rank) : null,
-      };
+      });
     }).map(_applyLiveOverlayToRow);
 
     // History-augmentation: badge + snippet for archive entries that the
