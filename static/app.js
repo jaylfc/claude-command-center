@@ -22514,35 +22514,65 @@
     }
     const chatId = chat.uuid || chat.id || '';
     const topic = chat.topic || 'Group chat';
-    // Count every active orchestration, not just the one we link to, so the
-    // pill makes the token-burn surface obvious: N loops are running right now.
     const now = Date.now();
     const activeCount = (_gcActiveChats || []).filter(c => gcShouldShowActivePill(c, now)).length;
     const label = $activeGroupChatPill.querySelector('.active-group-chat-label');
-    if (label) {
-      label.textContent = activeCount > 1
-        ? activeCount + ' Active Group chats'
-        : 'Active Group chat';
-    }
-    $activeGroupChatPill.hidden = false;
-    if (chatId) $activeGroupChatPill.dataset.chatId = chatId;
-    // Recency hint on the label and tooltip — disambiguates "happening
-    // RIGHT NOW" from "happened a few minutes ago and still in window".
-    const _freshAt = Math.max(
-      gcTriggerMs(chat),
+    // Surface the actual trigger reason on the pill itself (annotation:
+    // "what is it that triggered RIGHT NOW — put it on the UI even if
+    // the pill becomes long"). Pick the freshest of nudge / trigger /
+    // file-activity timestamps and label accordingly. Truncate target
+    // names so a 5-agent chat doesn't run off the screen.
+    const _nudgeMs = gcEpochMs(chat.orchestrator_last_nudge_at)
+      || gcEpochMs(chat.last_reminder_at);
+    const _triggerMs = gcEpochMs(chat.orchestrator_last_trigger_at);
+    const _activityMs = Math.max(
       gcEpochMs(chat.last_activity),
       gcEpochMs(chat.last_mtime)
     );
+    const _freshAt = Math.max(_nudgeMs, _triggerMs, _activityMs);
+    let _reason = '';
+    if (_freshAt > 0) {
+      const targets = (chat.orchestrator_last_reminder_targets || [])
+        .filter(t => t && String(t).trim())
+        .map(t => String(t));
+      const targetStr = targets.length
+        ? (targets.length <= 3
+            ? targets.join(', ')
+            : targets.slice(0, 2).join(', ') + ' +' + (targets.length - 2))
+        : '';
+      if (_freshAt === _nudgeMs && targetStr) {
+        _reason = 'nudged ' + targetStr;
+      } else if (_freshAt === _triggerMs) {
+        _reason = targetStr ? 'auto-pinged ' + targetStr : 'auto-pinged';
+      } else if (_freshAt === _activityMs) {
+        _reason = 'new message';
+      }
+    }
     const _ageMin = _freshAt > 0 ? Math.max(0, Math.round((now - _freshAt) / 60000)) : null;
     const _ageHint = _ageMin == null
       ? ''
-      : (_ageMin === 0 ? ' · just now' : ' · ' + _ageMin + 'm ago');
-    if (label) label.textContent += _ageHint;
-    $activeGroupChatPill.title = (activeCount > 1
-      ? activeCount + ' active group-chat orchestrations are looping (tokens in use). Latest: ' + topic
-      : 'Active group-chat orchestration: ' + topic)
-      + (_freshAt > 0 ? ' — last activity ' + new Date(_freshAt).toLocaleTimeString() : '')
-      + '. Click to open the latest active chat.';
+      : (_ageMin === 0 ? 'just now' : _ageMin + 'm ago');
+    // Build label: "<topic> · <reason> · <age>" (single) or
+    // "N chats — <topic> · <reason> · <age>" (multiple). Reason/age
+    // get filtered out cleanly if either is missing.
+    const segments = [];
+    if (activeCount > 1) segments.push(activeCount + ' chats — ' + topic);
+    else segments.push(topic);
+    if (_reason) segments.push(_reason);
+    if (_ageHint) segments.push(_ageHint);
+    if (label) label.textContent = segments.join(' · ');
+    $activeGroupChatPill.hidden = false;
+    if (chatId) $activeGroupChatPill.dataset.chatId = chatId;
+    // Tooltip keeps the verbose breakdown for hover.
+    const _tipLines = [
+      activeCount > 1
+        ? activeCount + ' active group-chat orchestrations are looping (tokens in use). Latest: ' + topic
+        : 'Active group-chat orchestration: ' + topic,
+    ];
+    if (_reason) _tipLines.push('Latest trigger: ' + _reason);
+    if (_freshAt > 0) _tipLines.push('At ' + new Date(_freshAt).toLocaleTimeString());
+    _tipLines.push('Click to open the latest active chat.');
+    $activeGroupChatPill.title = _tipLines.join(' · ');
   }
 
   function markActiveGroupChatTrigger(chatPath, chatId, topic, mode) {
@@ -23433,8 +23463,7 @@
     // message content. If a session in the archive matched the indexer
     // for this same query, include it here even if the substring filter
     // rejected it. Decorations (badge + snippet) are applied below in the
-    // post-shape pass. Synthetic rows for sessions outside archiveRows
-    // are handled in non-archive list mode only for now.
+    // post-shape pass.
     if (q && _historyState.query === q && _historyState.map.size) {
       const seen = new Set(rows.map(c => c.session_id || c.id));
       const extra = [];
@@ -23443,6 +23472,28 @@
         if (!seen.has(sid) && _historyState.map.has(sid)) extra.push(c);
       }
       if (extra.length) rows = rows.concat(extra);
+    }
+    // OR-union with repo-name matches: when the query looks like a repo,
+    // surface that repo's latest sessions even if titles don't match.
+    if (q && _historyState.query === q) {
+      const repoRows = Array.isArray(_historyState.repoRows) ? _historyState.repoRows : [];
+      if (repoRows.length) {
+        const repoIds = repoRows.map(r => r.session_id || r.id).filter(Boolean);
+        const repoIdSet = new Set(repoIds);
+        const bySid = new Map();
+        for (const c of byFolder) {
+          const sid = c.session_id || c.id;
+          if (sid) bySid.set(sid, c);
+        }
+        const repoSurfaced = [];
+        for (const repoRow of repoRows) {
+          const sid = repoRow.session_id || repoRow.id;
+          if (!sid) continue;
+          repoSurfaced.push(bySid.get(sid) || repoRow);
+        }
+        const rest = rows.filter(c => !repoIdSet.has(c.session_id || c.id));
+        rows = repoSurfaced.concat(rest);
+      }
     }
 
     const hasGc = _gcActiveChats && _gcActiveChats.length > 0;
@@ -23637,6 +23688,24 @@
           // single-line; re-enable it for matched rows so the snippet
           // line has somewhere to render.
           s._hideAskHtml = true;
+        }
+      }
+    }
+    if (q && _historyState.query === q) {
+      const repoRows = Array.isArray(_historyState.repoRows) ? _historyState.repoRows : [];
+      if (repoRows.length) {
+        const repoBySid = new Map();
+        for (const r of repoRows) {
+          const sid = r.session_id || r.id;
+          if (sid) repoBySid.set(sid, r);
+        }
+        for (const s of shaped) {
+          const sid = s.session_id || s.id;
+          if (sid && repoBySid.has(sid)) {
+            const match = repoBySid.get(sid);
+            s._repoSearchMatch = true;
+            s._repoSearchLabel = match._repoSearchLabel || '';
+          }
         }
       }
     }
