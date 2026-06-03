@@ -9519,9 +9519,14 @@
       html += `<button type="button" class="gco-power-btn gco-enable" data-gc-enable data-gc-path="${escapeAttr(chatPath)}" data-gc-id="${escapeAttr(chatId)}">▶ Enable orchestration</button>`;
     } else if (_gcActiveNow) {
       html += '<div class="gco-active-status is-active"><span class="gco-active-dot"></span> Running — waking participants on a timer.</div>';
-      html += `<div class="gco-row"><span class="gco-label">Auto-nudge:</span> <span class="gco-val">checks every ${_gcPoll}s, nudges ≤ every ${_gcNudge}s</span></div>`;
-      const _gcLastNudge = data.orchestrator_last_nudge_at ? timeAgo(data.orchestrator_last_nudge_at * 1000) : 'not yet';
-      html += `<div class="gco-row"><span class="gco-label">Last nudge:</span> <span class="gco-val">${escapeHtml(_gcLastNudge)}</span></div>`;
+      const _gcLastNudge = data.orchestrator_last_nudge_at
+        ? timeAgo(data.orchestrator_last_nudge_at * 1000)
+        : 'not yet';
+      const _gcLastNudgeAbs = data.orchestrator_last_nudge_at
+        ? new Date(data.orchestrator_last_nudge_at * 1000).toLocaleString()
+        : '';
+      html += `<div class="gco-row"><span class="gco-label">Auto-nudge:</span> <span class="gco-val">checks every ${_gcPoll}s, nudges ≤ every ${_gcNudge}s · <strong>last: ${escapeHtml(_gcLastNudge)}</strong></span></div>`;
+      html += `<div class="gco-row"><span class="gco-label">Last nudge:</span> <span class="gco-val" title="${escapeAttr(_gcLastNudgeAbs)}">${escapeHtml(_gcLastNudge)}</span></div>`;
       const _gcTargets = (data.orchestrator_last_reminder_targets || []).map(renderNameHtml);
       if (_gcTargets.length) {
         html += `<div class="gco-row"><span class="gco-label">Last targets:</span> <span class="gco-val">${_gcTargets.join(', ')}</span></div>`;

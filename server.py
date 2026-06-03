@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "4.5.2"
+__version__ = "4.6.0"
 
 import ast
 import base64
@@ -22313,8 +22313,15 @@ def _group_chat_read(path, chat_uuid=""):
         else:
             status = "closed"
 
-        last_nudge_at = active_entry.get("last_nudge") or 0
-        last_reminder_at = meta.get("last_reminder_at") or 0
+        # Take the freshest of (in-memory last_nudge, persisted
+        # last_reminder_at) so the "Last nudge: X ago" row stays
+        # accurate across server restarts AND across manual targeted
+        # nudges that bump the sidecar but skip the watcher's
+        # _active_coordinations entry.
+        in_mem_nudge = active_entry.get("last_nudge") or 0
+        persisted_nudge = meta.get("last_reminder_at") or 0
+        last_nudge_at = max(in_mem_nudge, persisted_nudge)
+        last_reminder_at = persisted_nudge
         last_activity = active_entry.get("last_activity") or 0
 
         waiting = _group_chat_compute_waiting(real_path, sids, nm)
@@ -22759,6 +22766,24 @@ def _group_chat_nudge(path, chat_uuid="", target_sid=""):
         text = _group_chat_inject_text(real_path, topic, mode, target_sid)
         r = _inject_text_into_session(target_sid, text)
         results.append({"session_id": target_sid, "ok": bool(r.get("ok")), "error": r.get("error", "")})
+        # Reflect the manual nudge in the orchestrator panel: bump
+        # both the in-memory last_nudge (used by the auto-nudge watcher
+        # debounce) AND the sidecar last_reminder_at + targets so the
+        # "Last nudge: X ago" row updates immediately and survives a
+        # server restart.
+        if r.get("ok"):
+            with _coord_lock:
+                entry = _active_coordinations.get(real_path)
+                if entry is not None:
+                    entry["last_nudge"] = time.time()
+            try:
+                _update_group_chat_sidecar(
+                    real_path,
+                    last_reminder_at=time.time(),
+                    last_reminder_targets=[target_sid[:8]],
+                )
+            except Exception:
+                pass
         return {"ok": True, "results": results, "targeted": True}
     try:
         with open(real_path, "r", encoding="utf-8") as fh:
