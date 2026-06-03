@@ -28220,11 +28220,20 @@ def _normalize_spawn_event(ev):
                 blocks.append({"type": "thinking"})
         if not blocks:
             return None
-        return {
+        # Claude Code stream-json sets `parent_tool_use_id` on assistant
+        # events emitted by a Task-tool subagent — pass it through so the
+        # client can render those bubbles distinctly (label "subagent",
+        # different border) instead of letting them masquerade as the
+        # parent's own mid-turn content.
+        out = {
             "type": "assistant_block",
             "message_id": msg.get("id", ""),
             "blocks": blocks,
         }
+        ptui = ev.get("parent_tool_use_id") or msg.get("parent_tool_use_id")
+        if ptui:
+            out["parent_tool_use_id"] = ptui
+        return out
     if t == "result":
         return {
             "type": "result",

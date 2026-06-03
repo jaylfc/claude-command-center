@@ -16850,9 +16850,10 @@
     }
   }
 
-  function ensureStreamingBubble(msgId, paneId) {
+  function ensureStreamingBubble(msgId, paneId, opts) {
     const $view = paneId ? getConvViewForPane(paneId) : getConvView();
     if (!$view) return null;
+    const isSubagent = !!(opts && opts.parentToolUseId);
     // Hand-off short-circuit: if the JSONL renderer already painted this
     // message (formatted, with markdown / tool detail / result output), skip
     // the low-fidelity bubble entirely.
@@ -16884,12 +16885,14 @@
     }
     if (!node) {
       node = document.createElement('div');
-      node.className = 'stream-bubble';
+      node.className = 'stream-bubble' + (isSubagent ? ' stream-bubble-subagent' : '');
       if (msgId) node.dataset.msgId = msgId;
+      if (isSubagent) node.dataset.parentToolUseId = opts.parentToolUseId;
+      const label = isSubagent ? 'subagent' : 'streaming';
       node.innerHTML =
         '<div class="stream-bubble-header">'
         + '<span class="live-badge-dot"></span>'
-        + '<span>streaming</span>'
+        + '<span>' + label + '</span>'
         + '</div>'
         + '<div class="stream-bubble-blocks"></div>';
       $view.appendChild(node);
@@ -16923,7 +16926,9 @@
         continue;
       }
       if (ev.type !== 'assistant_block') continue;
-      const slot = ensureStreamingBubble(ev.message_id, paneId);
+      const slot = ensureStreamingBubble(ev.message_id, paneId, {
+        parentToolUseId: ev.parent_tool_use_id || '',
+      });
       if (!slot) continue;
       _streamingMsgId = ev.message_id || _streamingMsgId;
       for (const b of (ev.blocks || [])) {

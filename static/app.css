@@ -2315,6 +2315,26 @@
     opacity: 0.8;
     transition: opacity 0.4s ease-out;
   }
+  /* Subagent (Task tool) variant. Visually nested under the parent's
+   * stream — different border tint (purple), left indent, smaller
+   * footprint — so the user can tell at a glance "this is a subagent
+   * doing work" vs the parent agent's main turn. Without this they all
+   * look identical and the conv reads as one frantic stream-of-
+   * consciousness. */
+  .stream-bubble-subagent {
+    margin-left: 16px;
+    margin-right: -13px;
+    background: rgba(165,127,238,0.05);
+    border-color: rgba(165,127,238,0.35);
+    border-left-width: 3px;
+    border-left-style: solid;
+  }
+  .stream-bubble-subagent .stream-bubble-header {
+    color: var(--purple, #a57fee);
+  }
+  .stream-bubble-subagent .live-badge-dot {
+    background: var(--purple, #a57fee);
+  }
   /* Live dot — sits to the left of the per-row timestamp on .conv-item
    * rows whose session is currently live (sidecar marker exists). Distinct
    * from the live-tool pill in the title row; this just signals "this row
