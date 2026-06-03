@@ -15222,9 +15222,31 @@ def _parse_codex_event(ev, line_num, token_usage=None):
         }
     if ptype == "function_call_output":
         output = payload.get("output") or ""
+        images = []
+        if isinstance(output, list):
+            # Structured output (e.g. screenshots). Inlining the base64 here
+            # balloons the payload to tens of MB and stalls the open, so pull
+            # images out as lazy (line, idx) refs — same scheme the claude
+            # parser uses — and /api/conv-image fetches them on demand.
+            parts = []
+            for item in output:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    it = item.get("type")
+                    url = item.get("image_url") or ""
+                    if it == "input_image" and isinstance(url, str) and url.startswith("data:") and "base64," in url:
+                        mt = url[5:].split(";", 1)[0] or "image/png"
+                        images.append({"kind": "base64", "media_type": mt,
+                                       "line": line_num, "idx": len(images)})
+                    elif isinstance(item.get("text"), str):
+                        parts.append(item["text"])
+            output = "\n".join(parts)
+        if not isinstance(output, str):
+            output = str(output)
         if len(output) > 800:
             output = output[:800] + "\n..."
-        return {
+        result = {
             "line": line_num,
             "ts": ts,
             "type": "tool_result",
@@ -15232,6 +15254,9 @@ def _parse_codex_event(ev, line_num, token_usage=None):
             "tool_use_id": payload.get("call_id", ""),
             "is_error": False,
         }
+        if images:
+            result["images"] = images
+        return result
     return None
 
 
@@ -30993,6 +31018,22 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             content = msg.get("content", "") if isinstance(msg, dict) else ""
             imgs = [im for im in _extract_images_from_content(content)
                     if im.get("kind") == "base64"]
+            if not imgs:
+                # Codex: function_call_output.payload.output is a list that may
+                # carry input_image data URLs. The codex parser emits (line, idx)
+                # refs instead of inlining them; re-extract the Nth here.
+                payload = ev.get("payload") if isinstance(ev, dict) else None
+                out = payload.get("output") if isinstance(payload, dict) else None
+                if isinstance(out, list):
+                    for item in out:
+                        if not isinstance(item, dict):
+                            continue
+                        url = item.get("image_url") or ""
+                        if (item.get("type") == "input_image" and isinstance(url, str)
+                                and "base64," in url):
+                            mt = (url[5:].split(";", 1)[0] if url.startswith("data:") else "") or "image/png"
+                            imgs.append({"kind": "base64", "media_type": mt,
+                                         "data": url.split("base64,", 1)[1]})
             if idx >= len(imgs):
                 self.send_json({"error": "not found"}, 404)
                 return
