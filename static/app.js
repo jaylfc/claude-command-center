@@ -18380,11 +18380,10 @@
 
     const r = btn.getBoundingClientRect();
     const popW = pop.getBoundingClientRect().width || 280;
-    const popH = pop.getBoundingClientRect().height || 180;
     let left = r.left;
     if (left + popW > window.innerWidth - 8) left = window.innerWidth - popW - 8;
     pop.style.left = Math.max(8, left) + 'px';
-    pop.style.top = (r.top - popH - 8) + 'px';
+    pop.style.bottom = (window.innerHeight - r.top + 8) + 'px';
 
     _planUsagePopEl = pop;
 
@@ -18406,8 +18405,6 @@
         if (!_planUsagePopEl || _planUsagePopEl !== pop) return;
         if (!data.ok) {
           pop.innerHTML = '<div class="pu-error">' + escapeHtml(data.error || 'Failed to load usage') + '</div>';
-          const newH = pop.getBoundingClientRect().height;
-          pop.style.top = (r.top - newH - 8) + 'px';
           return;
         }
 
@@ -18504,9 +18501,6 @@
 
         pop.innerHTML = html;
 
-        const newH = pop.getBoundingClientRect().height;
-        pop.style.top = (r.top - newH - 8) + 'px';
-
         const ctxToggle = pop.querySelector('#puContextToggle');
         if (ctxToggle) {
           ctxToggle.addEventListener('click', (ev) => {
@@ -18522,10 +18516,8 @@
         }
       })
       .catch(err => {
-        if (!_plan_usage_popEl || _plan_usage_popEl !== pop) return;
+        if (!_planUsagePopEl || _planUsagePopEl !== pop) return;
         pop.innerHTML = '<div class="pu-error">Error connecting to server</div>';
-        const newH = pop.getBoundingClientRect().height;
-        pop.style.top = (r.top - newH - 8) + 'px';
       });
   }
 

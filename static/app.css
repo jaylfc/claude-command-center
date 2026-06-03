@@ -1857,6 +1857,7 @@
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 8px; padding: 12px;
     min-width: 280px;
+    max-height: 380px; overflow-y: auto;
     box-shadow: 0 8px 24px rgba(0,0,0,0.35);
     display: none; flex-direction: column; gap: 10px;
     font-size: 13px;

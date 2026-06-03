@@ -1,0 +1,1 @@
+- Fixed a layout reflow issue where the plan usage popover was cut off by using bottom-anchored positioning and restricting its max-height.
