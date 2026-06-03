@@ -22701,57 +22701,59 @@ def _group_chat_nudge(path, chat_uuid="", target_sid=""):
         last_match = matches[-1]
         reminder_key = f"{len(matches)}:{last_match.group(0).strip()}"
         last = authors[-1]
-        if last == "Human":
-            # Find the most recent non-Human author before this turn —
-            # used as a fallback target if the Human's message doesn't
-            # explicitly address anyone by mention.
+        # Always capture the writer's own sid so the nudge loop can
+        # skip them (no-self-nudge). Applies to both Human and agent
+        # last-authors.
+        if last != "Human":
+            last_hash = last.lower()
+            for sid in session_ids:
+                if sid.lower().startswith(last_hash):
+                    exclude_sid = sid
+                    break
+        # Scan the LAST author's body for @mentions / short-id refs —
+        # this is engine-agnostic. Both Human posts AND agent posts can
+        # address specific participants ("Maya and Jordan, can you
+        # both…", "@Maya let's verify that"). When found, ping ONLY
+        # those addressees instead of everyone.
+        try:
+            body_start = last_match.end()
+            next_heading = author_pat.search(content, body_start)
+            body = content[body_start:next_heading.start() if next_heading else None]
+            # Strip system blockquotes so a `> _ts — system: pinged
+            # <agent>` line doesn't get parsed as the author
+            # addressing that agent.
+            body = re.sub(r'^>\s*_[^\n]*system:[^\n]*\n?', '', body, flags=re.MULTILINE)
+            mentioned_hashes = {h.lower() for h in re.findall(r'@?([0-9a-fA-F]{8})\b', body)}
+            lower_body = body.lower()
+            for sid, dname in name_map.items():
+                if not dname:
+                    continue
+                needle = '@' + str(dname).lower()
+                if needle in lower_body:
+                    addressed_sids.add(sid)
+            for sid in session_ids:
+                if sid[:8].lower() in mentioned_hashes:
+                    addressed_sids.add(sid)
+        except Exception:
+            pass
+        # Human-as-author fallback: when the human's message doesn't
+        # explicitly address anyone, pick the most recent prior agent
+        # writer (their reply is almost always for that specific agent).
+        # Agent-as-author with no mentions falls through to the existing
+        # ping-everyone-but-the-writer behavior (exclude_sid was set
+        # above, no addressed_sids → no only_sid → loop pings the rest).
+        if last == "Human" and not addressed_sids:
             prior = next((a for a in reversed(authors[:-1]) if a != "Human"), None)
             if prior:
                 last_hash = prior.lower()
                 for sid in session_ids:
                     if sid.lower().startswith(last_hash):
                         only_sid = sid
-                        addressed_sids.add(sid)
                         break
-            # Also scan the Human's message body for @mentions /
-            # short-id references — when the user wrote "Maya and Jordan,
-            # can you both…" we want to wake both, not just the prior
-            # writer. Extract the body between the Human heading and
-            # the next heading (or end of file).
-            try:
-                human_body_start = last_match.end()
-                next_heading = author_pat.search(content, human_body_start)
-                human_body = content[human_body_start:next_heading.start() if next_heading else None]
-                # Strip system blockquotes so a `> _ts — system: pinged
-                # <agent>...` line doesn't get parsed as the human
-                # addressing that agent.
-                human_body = re.sub(r'^>\s*_[^\n]*system:[^\n]*\n?', '', human_body, flags=re.MULTILINE)
-                # Match @<8hex> or @<displayName> against the name_map.
-                mentioned_hashes = {h.lower() for h in re.findall(r'@?([0-9a-fA-F]{8})\b', human_body)}
-                # Also match @<name> by display name (case-insensitive).
-                lower_body = human_body.lower()
-                for sid, dname in name_map.items():
-                    if not dname:
-                        continue
-                    needle = '@' + str(dname).lower()
-                    if needle in lower_body:
-                        addressed_sids.add(sid)
-                for sid in session_ids:
-                    if sid[:8].lower() in mentioned_hashes:
-                        addressed_sids.add(sid)
-            except Exception:
-                pass
-            # If we have ANY addressed participants (prior writer or
-            # explicit mentions), only_sid becomes redundant — the
-            # ping-loop below honors addressed_sids.
-            if addressed_sids:
-                only_sid = None
-        else:
-            last_hash = last.lower()
-            for sid in session_ids:
-                if sid.lower().startswith(last_hash):
-                    exclude_sid = sid
-                    break
+        # Never address the writer themselves — a self-mention is
+        # always a false positive (signature, quoted text, etc.).
+        if exclude_sid:
+            addressed_sids.discard(exclude_sid)
     except OSError:
         pass
 
