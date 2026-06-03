@@ -17263,13 +17263,19 @@ def _cursor_tool_detail(block):
     return ""
 
 
+_cursor_tail_resume = {}  # path -> {offset, pos, pending_tool, meta, meta_version}
+
+
 def _extract_cursor_tail_meta(path):
     try:
         path = Path(path)
-        mtime = path.stat().st_mtime
+        st = path.stat()
     except (OSError, TypeError, ValueError):
         return {}
-    cached = _conv_meta_cache.get(str(path))
+    mtime = st.st_mtime
+    size = st.st_size
+    spath = str(path)
+    cached = _conv_meta_cache.get(spath)
     if (
         cached
         and cached.get("mtime") == mtime
@@ -17278,39 +17284,64 @@ def _extract_cursor_tail_meta(path):
     ):
         return cached
 
-    meta = {
-        "engine": "cursor",
-        "meta_version": _CURSOR_META_VERSION,
-        "mtime": mtime,
-        "first_message": None,
-        "last_meaningful_ts": 0,
-        "last_prompt": None,
-        "last_assistant_text": None,
-        "last_event_type": None,
-        "pending_tool": None,
-        "pending_file": None,
-        "has_edit": False,
-        "has_commit": False,
-        "has_push": False,
-        "last_edit_pos": 0,
-        "last_commit_pos": 0,
-        "last_push_pos": 0,
-        "tail_pr_number": None,
-        "tail_pr_url": None,
-        "tail_branch": None,
-        "tail_worktree_path": None,
-        "has_external_cd": False,
-        "cwd": _cursor_cwd_from_transcript_path(path),
-        "model": None,
-    }
+    # Incremental resume from the last byte offset — cursor transcripts are
+    # append-only JSONL, so a live session's growing file is parsed only over
+    # its newly-appended lines instead of from the top each poll. See
+    # _codex_tail_resume for the rationale.
+    with _conv_meta_cache_lock:
+        resume = _cursor_tail_resume.get(spath)
+    if (
+        resume
+        and resume.get("meta_version") == _CURSOR_META_VERSION
+        and size >= resume.get("offset", 0)
+    ):
+        meta = resume["meta"]
+        pending_tool = resume["pending_tool"]
+        pos = resume["pos"]
+        start_offset = resume["offset"]
+    else:
+        meta = {
+            "engine": "cursor",
+            "meta_version": _CURSOR_META_VERSION,
+            "mtime": mtime,
+            "first_message": None,
+            "last_meaningful_ts": 0,
+            "last_prompt": None,
+            "last_assistant_text": None,
+            "last_event_type": None,
+            "pending_tool": None,
+            "pending_file": None,
+            "has_edit": False,
+            "has_commit": False,
+            "has_push": False,
+            "last_edit_pos": 0,
+            "last_commit_pos": 0,
+            "last_push_pos": 0,
+            "tail_pr_number": None,
+            "tail_pr_url": None,
+            "tail_branch": None,
+            "tail_worktree_path": None,
+            "has_external_cd": False,
+            "cwd": _cursor_cwd_from_transcript_path(path),
+            "model": None,
+        }
+        pending_tool = False
+        pos = 0
+        start_offset = 0
     pr_url_re = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d{1,7})")
-    pending_tool = False
-    pos = 0
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
+        with open(path, "rb") as f:
+            if start_offset:
+                f.seek(start_offset)
+            while True:
+                raw = f.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    break
+                start_offset += len(raw)
                 pos += 1
-                line = line.strip()
+                line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
                 try:
@@ -17384,13 +17415,22 @@ def _extract_cursor_tail_meta(path):
                             meta["tail_worktree_path"] = signals["worktree_path"]
                         if signals.get("worktree_branch"):
                             meta["tail_branch"] = signals["worktree_branch"]
+            end_offset = start_offset
     except OSError:
         return {}
 
+    meta["mtime"] = mtime
     if not meta.get("last_meaningful_ts"):
         meta["last_meaningful_ts"] = mtime
     with _conv_meta_cache_lock:
-        _conv_meta_cache[str(path)] = meta
+        _conv_meta_cache[spath] = meta
+        _cursor_tail_resume[spath] = {
+            "meta_version": _CURSOR_META_VERSION,
+            "offset": end_offset,
+            "pos": pos,
+            "pending_tool": pending_tool,
+            "meta": meta,
+        }
         global _conv_meta_cache_dirty
         _conv_meta_cache_dirty = True
     return meta
@@ -18860,6 +18900,9 @@ def _antigravity_event_path_candidates(ev):
     return candidates
 
 
+_antigravity_tail_resume = {}  # path -> {offset, pos, pending_tool, cwd_candidates, meta, meta_version}
+
+
 def _extract_antigravity_tail_meta(path_or_session_id):
     path = Path(path_or_session_id) if isinstance(path_or_session_id, (str, Path)) else None
     if path and not path.is_file():
@@ -18867,10 +18910,13 @@ def _extract_antigravity_tail_meta(path_or_session_id):
     if not path:
         return {}
     try:
-        mtime = path.stat().st_mtime
+        st = path.stat()
     except OSError:
         return {}
-    cached = _conv_meta_cache.get(str(path))
+    mtime = st.st_mtime
+    size = st.st_size
+    spath = str(path)
+    cached = _conv_meta_cache.get(spath)
     if (
         cached
         and cached.get("mtime") == mtime
@@ -18879,40 +18925,64 @@ def _extract_antigravity_tail_meta(path_or_session_id):
     ):
         return cached
 
-    meta = {
-        "engine": "antigravity",
-        "meta_version": _ANTIGRAVITY_META_VERSION,
-        "mtime": mtime,
-        "first_message": None,
-        "last_prompt": None,
-        "last_assistant_text": None,
-        "last_event_type": None,
-        "last_meaningful_ts": 0,
-        "pending_tool": None,
-        "pending_file": None,
-        "has_edit": False,
-        "has_commit": False,
-        "has_push": False,
-        "last_edit_pos": 0,
-        "last_commit_pos": 0,
-        "last_push_pos": 0,
-        "tail_pr_number": None,
-        "tail_pr_url": None,
-        "tail_branch": None,
-        "tail_worktree_path": None,
-        "has_external_cd": False,
-        "cwd": None,
-        "model": None,
-    }
+    # Incremental resume from the last byte offset — antigravity transcripts
+    # are append-only JSONL. See _codex_tail_resume for the rationale.
+    with _conv_meta_cache_lock:
+        resume = _antigravity_tail_resume.get(spath)
+    if (
+        resume
+        and resume.get("meta_version") == _ANTIGRAVITY_META_VERSION
+        and size >= resume.get("offset", 0)
+    ):
+        meta = resume["meta"]
+        cwd_candidates = resume["cwd_candidates"]
+        pending_tool = resume["pending_tool"]
+        pos = resume["pos"]
+        start_offset = resume["offset"]
+    else:
+        meta = {
+            "engine": "antigravity",
+            "meta_version": _ANTIGRAVITY_META_VERSION,
+            "mtime": mtime,
+            "first_message": None,
+            "last_prompt": None,
+            "last_assistant_text": None,
+            "last_event_type": None,
+            "last_meaningful_ts": 0,
+            "pending_tool": None,
+            "pending_file": None,
+            "has_edit": False,
+            "has_commit": False,
+            "has_push": False,
+            "last_edit_pos": 0,
+            "last_commit_pos": 0,
+            "last_push_pos": 0,
+            "tail_pr_number": None,
+            "tail_pr_url": None,
+            "tail_branch": None,
+            "tail_worktree_path": None,
+            "has_external_cd": False,
+            "cwd": None,
+            "model": None,
+        }
+        cwd_candidates = []
+        pending_tool = False
+        pos = 0
+        start_offset = 0
     pr_url_re = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d{1,7})")
-    cwd_candidates = []
-    pending_tool = False
-    pos = 0
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
+        with open(path, "rb") as f:
+            if start_offset:
+                f.seek(start_offset)
+            while True:
+                raw = f.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    break
+                start_offset += len(raw)
                 pos += 1
-                line = line.strip()
+                line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
                 try:
@@ -18995,15 +19065,25 @@ def _extract_antigravity_tail_meta(path_or_session_id):
                     if pr_url_re.search(content):
                         meta.update(_extract_codex_summary_signals(content, pr_url_re))
                 meta["last_event_type"] = "result"
+            end_offset = start_offset
     except OSError:
         return {}
 
+    meta["mtime"] = mtime
     meta["cwd"] = meta.get("cwd") or _antigravity_infer_cwd_from_candidates(cwd_candidates)
     if not meta.get("last_meaningful_ts"):
         meta["last_meaningful_ts"] = mtime
     global _conv_meta_cache_dirty
     with _conv_meta_cache_lock:
-        _conv_meta_cache[str(path)] = meta
+        _conv_meta_cache[spath] = meta
+        _antigravity_tail_resume[spath] = {
+            "meta_version": _ANTIGRAVITY_META_VERSION,
+            "offset": end_offset,
+            "pos": pos,
+            "pending_tool": pending_tool,
+            "cwd_candidates": cwd_candidates,
+            "meta": meta,
+        }
         _conv_meta_cache_dirty = True
     return meta
 
