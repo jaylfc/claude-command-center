@@ -9498,6 +9498,42 @@ body:has(.gc-reader) .pwa-install-banner {
   gap: 4px;
   position: relative;
 }
+/* @ autocomplete menu for the group-chat input box. */
+.gc-mention-menu {
+  position: fixed;
+  z-index: 9998;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  min-width: 200px;
+}
+.gc-mention-item {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0; border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.gc-mention-item:hover,
+.gc-mention-item.selected {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.gc-mention-item-name { font-weight: 600; }
+.gc-mention-item-id {
+  font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted, var(--text-2));
+}
+
 .gco-nudge-btn {
   align-self: flex-start;
   margin-top: 4px;

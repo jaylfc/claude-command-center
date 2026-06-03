@@ -8748,6 +8748,143 @@
   let _gcLastMtime = null;
   let _gcPollFailCount = 0;
   let _gcLastNudgeTime = 0;
+  // Latest participant name_map from the reader poll — used for @
+  // autocomplete in the group-chat input box.
+  let _gcReaderNameMap = {};
+
+  // ── Group-chat @ autocomplete ─────────────────────────────────────
+  // Floating menu of participant names anchored under the input. Opens
+  // when the caret is right after an @, filters as the user keeps
+  // typing, commits on Enter/Tab/click, dismisses on Esc or moving
+  // away from the @-token.
+  let _gcMentionMenuEl = null;
+  let _gcMentionItems = [];
+  let _gcMentionIndex = 0;
+  let _gcMentionInput = null;
+  let _gcMentionTokenStart = -1;
+  function _gcMentionClose() {
+    if (_gcMentionMenuEl) {
+      _gcMentionMenuEl.remove();
+      _gcMentionMenuEl = null;
+    }
+    _gcMentionItems = [];
+    _gcMentionIndex = 0;
+    _gcMentionInput = null;
+    _gcMentionTokenStart = -1;
+  }
+  function _gcMentionParticipants() {
+    return Object.entries(_gcReaderNameMap || {})
+      .filter(([sid, name]) => sid && name)
+      .map(([sid, name]) => ({ sid, name, short: String(sid).slice(0, 8) }));
+  }
+  function _gcMentionDetectToken(input) {
+    if (!input) return null;
+    const pos = input.selectionStart == null ? input.value.length : input.selectionStart;
+    const upto = input.value.slice(0, pos);
+    // Find the most recent '@' that's at a word boundary (start of
+    // string OR after whitespace) and hasn't been followed by a space.
+    const m = upto.match(/(^|[\s\n])@([\w-]*)$/);
+    if (!m) return null;
+    return {
+      start: pos - m[2].length - 1,   // index of the '@'
+      query: m[2].toLowerCase(),
+    };
+  }
+  function _gcMentionRefresh(input) {
+    const token = _gcMentionDetectToken(input);
+    if (!token) { _gcMentionClose(); return; }
+    const all = _gcMentionParticipants();
+    if (!all.length) { _gcMentionClose(); return; }
+    const q = token.query;
+    const matches = all.filter(p =>
+      !q || p.name.toLowerCase().startsWith(q) || p.short.startsWith(q) || p.name.toLowerCase().includes(q)
+    ).slice(0, 8);
+    if (!matches.length) { _gcMentionClose(); return; }
+    _gcMentionInput = input;
+    _gcMentionTokenStart = token.start;
+    _gcMentionItems = matches;
+    if (_gcMentionIndex >= matches.length) _gcMentionIndex = 0;
+    if (!_gcMentionMenuEl) {
+      _gcMentionMenuEl = document.createElement('div');
+      _gcMentionMenuEl.className = 'gc-mention-menu';
+      _gcMentionMenuEl.addEventListener('mousedown', ev => ev.preventDefault());
+      document.body.appendChild(_gcMentionMenuEl);
+    }
+    _gcMentionMenuEl.innerHTML = matches.map((p, idx) => (
+      '<button type="button" class="gc-mention-item' + (idx === _gcMentionIndex ? ' selected' : '') + '" data-idx="' + idx + '">'
+      +   '<span class="gc-mention-item-name">' + escapeHtml(p.name) + '</span>'
+      +   '<span class="gc-mention-item-id">' + escapeHtml(p.short) + '</span>'
+      + '</button>'
+    )).join('');
+    _gcMentionMenuEl.querySelectorAll('.gc-mention-item').forEach(btn => {
+      btn.addEventListener('mouseenter', () => {
+        _gcMentionIndex = parseInt(btn.dataset.idx || '0', 10);
+        _gcMentionRefresh(input);
+      });
+      btn.addEventListener('click', () => _gcMentionCommit());
+    });
+    const rect = input.getBoundingClientRect();
+    _gcMentionMenuEl.style.left = Math.max(8, rect.left) + 'px';
+    _gcMentionMenuEl.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
+    _gcMentionMenuEl.style.minWidth = Math.min(280, rect.width) + 'px';
+  }
+  function _gcMentionCommit() {
+    if (!_gcMentionInput || !_gcMentionItems.length || _gcMentionTokenStart < 0) {
+      _gcMentionClose();
+      return;
+    }
+    const item = _gcMentionItems[_gcMentionIndex] || _gcMentionItems[0];
+    const pos = _gcMentionInput.selectionStart == null
+      ? _gcMentionInput.value.length
+      : _gcMentionInput.selectionStart;
+    const before = _gcMentionInput.value.slice(0, _gcMentionTokenStart);
+    const after = _gcMentionInput.value.slice(pos);
+    const insert = '@' + item.name + ' ';
+    _gcMentionInput.value = before + insert + after;
+    const newCaret = before.length + insert.length;
+    try { _gcMentionInput.setSelectionRange(newCaret, newCaret); } catch (_) {}
+    _gcMentionInput.dispatchEvent(new Event('input', { bubbles: true }));
+    _gcMentionClose();
+    _gcMentionInput && _gcMentionInput.focus();
+  }
+  function _gcMentionMenuHandleKeydown(ev) {
+    if (!_gcMentionMenuEl) return false;
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      _gcMentionIndex = (_gcMentionIndex + 1) % _gcMentionItems.length;
+      _gcMentionRefresh(_gcMentionInput);
+      return true;
+    }
+    if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      _gcMentionIndex = (_gcMentionIndex - 1 + _gcMentionItems.length) % _gcMentionItems.length;
+      _gcMentionRefresh(_gcMentionInput);
+      return true;
+    }
+    if (ev.key === 'Enter' || ev.key === 'Tab') {
+      ev.preventDefault();
+      _gcMentionCommit();
+      return true;
+    }
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      _gcMentionClose();
+      return true;
+    }
+    return false;
+  }
+  function wireGcMentionAutocomplete(input) {
+    if (!input || input._gcMentionWired) return;
+    input._gcMentionWired = true;
+    input.addEventListener('input', () => _gcMentionRefresh(input));
+    input.addEventListener('keyup', ev => {
+      // Caret moved via arrow keys without changing text — re-check.
+      if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight' || ev.key === 'Home' || ev.key === 'End') {
+        _gcMentionRefresh(input);
+      }
+    });
+    input.addEventListener('blur', () => setTimeout(_gcMentionClose, 120));
+  }
   // Reader is rendered INTO #conversationsView (not replacing the pane),
   // so the surrounding #convInputBar / #convInputContext element refs
   // captured at boot stay live. We only hide those bars while the reader
@@ -8996,9 +9133,14 @@
         });
       }
       if (gcHumanInput) {
+        wireGcMentionAutocomplete(gcHumanInput);
         // Mirror the convo input: Enter sends, Shift+Enter inserts a
         // newline. Same convention as Claude Desktop / Slack / Omnara.
         gcHumanInput.addEventListener('keydown', ev => {
+          // Mention menu intercepts ArrowUp/Down/Enter/Tab/Escape when
+          // open — let it handle navigation before falling through to
+          // the send-on-Enter behavior.
+          if (_gcMentionMenuHandleKeydown(ev)) return;
           if (ev.key === 'Enter' && !ev.shiftKey) {
             ev.preventDefault();
             sendHumanGcPost();
@@ -9521,6 +9663,7 @@
         body.innerHTML = renderGroupChatMarkdown(_gcExpandHashIds(data.content));
         if (data.name_map) {
           replaceParticipantMentions(body, data.name_map);
+          _gcReaderNameMap = data.name_map || {};
         }
         updateOrchestratorPanel(data, data.content);
 
