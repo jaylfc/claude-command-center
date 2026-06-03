@@ -11369,14 +11369,78 @@ def _conv_parse_jsonl_mtime(conversation_id, repo_path=None):
     return (0, 0)
 
 
-def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=True):
+_CONV_TAIL_DEFAULT = 150  # lines pulled for the initial tail window on open
+
+
+def _parse_conversation_windowed(conversation_id, filepath, tail, before):
+    """Parse only a window of a conversation JSONL instead of the whole file.
+
+    Two modes (claude transcripts only — the parser is stateless per line):
+      tail=N            -> the last N lines (initial open of a long file)
+      before=L (+ tail) -> the N lines immediately before line L ("load earlier")
+
+    The full file is still *read* (cheap — a 22MB read is ~14ms), but json.loads
+    + the per-event parser run only on the windowed lines, which is where the
+    cost is. Returns the normal {events,last_line} plus `first_line` and
+    `truncated_before` so the UI knows whether earlier history remains.
+    """
+    window = tail if tail else _CONV_TAIL_DEFAULT
+    buf = collections.deque(maxlen=window)
+    total = 0
+    try:
+        with open(filepath, "r") as f:
+            for line in f:
+                total += 1
+                if before is not None and total >= before:
+                    # still need to keep counting for last_line
+                    continue
+                buf.append((total, line))
+    except FileNotFoundError:
+        return {"events": [], "last_line": 0, "first_line": 0, "truncated_before": False}
+
+    events = []
+    for ln, line in buf:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        parsed = _parse_conversation_event(ev, ln)
+        if parsed:
+            events.append(parsed)
+
+    first_line = events[0]["line"] if events else (buf[0][0] if buf else total)
+    result = {
+        "events": events,
+        "last_line": total,
+        "first_line": first_line,
+        "truncated_before": first_line > 1,
+    }
+    if before is None:
+        # The live tail also carries any optimistic queued events, same as the
+        # full-parse path; an earlier-history window must not.
+        out = list(events)
+        out.extend(_get_queued_events_for_session(conversation_id))
+        result["events"] = out
+    return result
+
+
+def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=True,
+                       tail=None, before=None):
     """Parse a conversation JSONL file into structured events.
 
     `use_cache=True` (default) checks the in-memory parse cache keyed on the
     JSONL's mtime — see _CONV_PARSE_CACHE. Set False for callers that need a
     guaranteed re-parse.
+
+    `tail`/`before` request a windowed parse (last N lines / the window before
+    a line) instead of the whole file — see _parse_conversation_windowed. Only
+    honored for claude transcripts (stateless parser); other engines full-parse.
     """
-    if use_cache:
+    windowed = bool(tail) or (before is not None)
+    if use_cache and not windowed:
         mtime = _conv_parse_jsonl_mtime(conversation_id, repo_path=repo_path)
         if mtime[0] > 0:
             key = (conversation_id, int(after_line), mtime)
@@ -11403,6 +11467,11 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
         stub = _registry_only_conversation_stub(conversation_id, after_line=after_line)
         if stub is not None:
             return stub
+    # Windowed open: only the claude parser is stateless per line, so only it
+    # can correctly parse a slice. Other engines (codex token-usage state, etc.)
+    # fall through to the full parse below.
+    if windowed and parser is _parse_conversation_event and Path(filepath).is_file():
+        return _parse_conversation_windowed(conversation_id, filepath, tail, before)
     events = []
     line_num = 0
     is_codex = parser is _parse_codex_event
@@ -22553,6 +22622,11 @@ def _group_chat_nudge(path, chat_uuid="", target_sid=""):
     #   "## <ts> — Human" (human posts via the reader's input bar)
     exclude_sid = None
     only_sid = None
+    # When the Human's last message addresses multiple participants
+    # (by @mention or by short-id reference), we want to ping ALL of
+    # them — not just the most recent prior writer. The single
+    # `only_sid` was wrong for "Maya and Jordan, can you both…" cases.
+    addressed_sids = set()
     reminder_key = ""
     # Targeted nudge from the UI — bypass the last-writer auto-select
     # entirely. The user explicitly picked which participant to wake.
@@ -30730,11 +30804,20 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             conv_id = path.split("/")[-1]
             qs = urllib.parse.parse_qs(parsed.query)
             after_line = int(qs.get("after", ["0"])[0])
+            # Windowed open: ?tail=N loads only the last N lines (fast first
+            # open of a long file); ?before=L loads the earlier window. These
+            # bypass the baked-bytes cache (keyed on after_line); a windowed
+            # parse is already cheap.
+            _tail_raw = (qs.get("tail", [""])[0] or "")
+            tail = int(_tail_raw) if _tail_raw.isdigit() else None
+            _before_raw = (qs.get("before", [""])[0] or "")
+            before = int(_before_raw) if _before_raw.isdigit() else None
+            windowed = bool(tail) or (before is not None)
             # Look for a fully-baked response (JSON-encoded body + matching
             # gzip variant) in the conv-bytes cache. On a hit we skip
             # parse_conversation, json.dumps, AND gzip — the click→render
             # path collapses to a hashmap lookup + socket write.
-            cached_bytes = _conv_response_bytes_get(conv_id, after_line)
+            cached_bytes = None if windowed else _conv_response_bytes_get(conv_id, after_line)
             if cached_bytes is not None:
                 accept = self.headers.get("Accept-Encoding", "") or ""
                 want_gzip = "gzip" in accept.lower()
@@ -30752,7 +30835,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 return
-            result = parse_conversation(conv_id, after_line)
+            result = parse_conversation(conv_id, after_line, tail=tail, before=before)
             raw = json.dumps(result).encode()
             gz = None
             if len(raw) >= self._GZIP_MIN_BYTES:
@@ -30760,7 +30843,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     gz = gzip.compress(raw, compresslevel=5)
                 except Exception:
                     gz = None
-            _conv_response_bytes_put(conv_id, after_line, raw, gz)
+            if not windowed:
+                _conv_response_bytes_put(conv_id, after_line, raw, gz)
             accept = self.headers.get("Accept-Encoding", "") or ""
             want_gzip = "gzip" in accept.lower()
             body = gz if (want_gzip and gz) else raw
