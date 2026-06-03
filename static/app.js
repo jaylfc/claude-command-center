@@ -706,10 +706,22 @@
       // (`<command-name>/foo</command-name> <command-message>foo</command-message>
       // <command-args>bar</command-args>`). Collapse to `/foo bar` so the
       // sticky-header earlier-ask slot doesn't show raw XML-like tags.
+      // Also handle the missing-args variant: when the user runs a bare
+      // command like `/compact` (no args), the `<command-args>` tag is
+      // omitted entirely. The strict-three-tag regex below didn't match
+      // and the bare command got stripped by the catch-all, leaving an
+      // EMPTY user_text — which read as "lots of text lost between
+      // yesterday's last message and today's compact". Match either
+      // shape so the typed command stays visible as a tiny user event.
       .replace(
-        /<command-name>([^<]*)<\/command-name>\s*<command-message>[^<]*<\/command-message>\s*<command-args>([^<]*)<\/command-args>/g,
+        /<command-name>([^<]*)<\/command-name>\s*<command-message>[^<]*<\/command-message>(?:\s*<command-args>([^<]*)<\/command-args>)?/g,
         (_, name, args) => (name + (args ? ' ' + args : '')).trim()
       )
+      // Drop the local-command-caveat / stdout wrappers Claude Code adds
+      // around slash-command output — they're verbose plumbing the user
+      // doesn't need to read inline. Keep their inner text (if any), but
+      // strip the wrapping tags.
+      .replace(/<local-command-(?:caveat|stdout)>[\s\S]*?<\/local-command-(?:caveat|stdout)>/g, '')
       .replace(/<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/g, '')
       .trim();
   }
