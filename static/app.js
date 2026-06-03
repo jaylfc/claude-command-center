@@ -1246,6 +1246,11 @@
   function allLaunchChoiceMenus() { return [$launchChoiceMenuConv, document.getElementById('cpLaunchChoiceMenu')].filter(Boolean); }
   function allDesktopButtons() { return []; }
 
+  // True when the conv row has a "fast" resume path flagged
+  // (can_headless_resume OR can_app_resume). Used only to pick contextual
+  // placeholder/tooltip copy — NOT to gate sending. The server always has
+  // a fallback path (CLI headless w/ brain-transcript rehydrate) for AGY
+  // sessions, so the send handlers themselves never bail on this.
   function antigravityCanSend(session) {
     return !session
       || session.source !== 'antigravity'
@@ -1256,7 +1261,7 @@
   function antigravityInputPlaceholder(session) {
     if (session && session.can_headless_resume === true) return 'Resume Antigravity headlessly and send...';
     if (session && session.can_app_resume === true) return 'Send to running Antigravity app...';
-    return 'Open Antigravity to continue this app session...';
+    return 'Resume Antigravity headlessly (orphan rehydrate)...';
   }
 
   function launchTargetsForCurrentSession() {
@@ -3169,10 +3174,6 @@
     if (!sid) return;
     if (injectMode === 'steer' && currentSession.source !== 'codex') {
       showOpToast('Steer is only available for Codex sessions.', 'error');
-      return;
-    }
-    if (currentSession.source === 'antigravity' && !antigravityCanSend(currentSession)) {
-      if ($input) $input.blur();
       return;
     }
     const compactCommand = /^\/compact(?:\s|$)/i.test(text);
@@ -12198,12 +12199,12 @@
         ? '<div class="conv-history-snippet">' + c._historySnippet + '</div>'
         : '';
 
-      const hasClaudeOverride = (c.engine || 'claude') === 'claude';
-      const override = hasClaudeOverride ? _getCtxLimitOverride() : 0;
-      const limit = override || c.live_context_limit || c.context_limit || 200000;
-      const displayTokens = c.latest_input_tokens || c.live_context_tokens || 0;
-      const pct = Math.round((displayTokens / limit) * 100);
-      let pctBadgeHtml = '<span class="conv-pct-badge" style="font-size: 10px; opacity: 0.75; font-weight: 600; margin-right: 4px; padding: 1px 4px; background: var(--surface-2); border-radius: 3px; font-family: monospace;" title="' + displayTokens.toLocaleString() + ' / ' + limit.toLocaleString() + ' tokens">' + pct + '%</span>';
+      const ctxPct = _convRowContextPct(c);
+      let pctBadgeHtml = '';
+      if (ctxPct) {
+        const tip = ctxPct.source + ' ' + ctxPct.displayTokens.toLocaleString() + ' / ' + ctxPct.limit.toLocaleString() + ' tokens';
+        pctBadgeHtml = '<span class="conv-pct-badge" style="font-size: 10px; opacity: 0.75; font-weight: 600; margin-right: 4px; padding: 1px 4px; background: var(--surface-2); border-radius: 3px; font-family: monospace; color: var(--accent);" title="' + escapeAttr(tip) + '">' + ctxPct.pct + '%</span>';
+      }
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
@@ -18114,6 +18115,24 @@
   function _getCtxLimitOverride() {
     const v = parseInt(localStorage.getItem('ccc-context-limit') || '0', 10);
     return v === 1_000_000 || v === 200_000 ? v : 0;
+  }
+
+  // Context % for sidebar rows — mirrors the conv-pane usage pill math.
+  function _convRowContextPct(c) {
+    const engine = c.engine || 'claude';
+    const override = engine === 'claude' ? _getCtxLimitOverride() : 0;
+    const latest = Number(c.latest_input_tokens || 0);
+    const liveTokens = Number(c.live_context_tokens || 0);
+    const liveLimit = Number(c.live_context_limit || 0);
+    const hasLiveContext = engine === 'claude' && liveTokens > 0;
+    const limit = override || (hasLiveContext ? liveLimit : 0) || Number(c.context_limit || 0) || 200000;
+    const displayTokens = latest || (hasLiveContext ? liveTokens : 0);
+    if (!displayTokens) return null;
+    const livePct = Number(c.live_context_percent || 0);
+    const calcPct = Math.round((displayTokens / limit) * 100);
+    const pct = (hasLiveContext && livePct) ? livePct : calcPct;
+    const source = hasLiveContext && !latest ? '/ctx' : 'calc';
+    return { pct, displayTokens, limit, source };
   }
 
   function renderSessionUsageIntoStrip() {
@@ -24583,10 +24602,6 @@
       const text = ($cpInput.value || '').trim();
       const sid = currentSession.id;
       if (!text || !sid) return;
-      if (currentSession.source === 'antigravity' && !antigravityCanSend(currentSession)) {
-        $cpInput.blur();
-        return;
-      }
       hideSlashCommandMenu();
       $cpSendBtn.disabled = true;
       const flashRed = () => {
