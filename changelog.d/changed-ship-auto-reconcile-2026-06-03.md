@@ -1,0 +1,1 @@
+- Push all now auto-reconciles a diverged branch in an isolated throwaway worktree (cherry-pick local commits onto origin, push, fast-forward the shared clone) and only hands off to a manual reconcile when there's a real conflict; loose root-level scratch files (e.g. snapshot.png) are no longer misclassified as app/deploy review.

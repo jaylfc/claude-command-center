@@ -25999,19 +25999,59 @@ def _ship_triage_restore(repo_path):
     return {"restored": restored, "junk": junk, "remaining": remaining}
 
 
+# Loose scratch that lands at the repo root and is plainly NOT deployable code:
+# media/screenshot output, archives, scratch data dumps. The motivating case is a
+# Puppeteer snapshot script + its PNG (snapshot.js / snapshot.png) dropped at the
+# top of the tree — those are one-off dev scratch, not prod/deploy code, yet the
+# old default labeled them "review" and parked Push all on pure noise. We only
+# loosen the ROOT-LEVEL default (no '/' in the path); anything under a source
+# directory (apps/, packages/, …) keeps the conservative "review" verdict.
+_SHIP_SCRATCH_EXTS = (
+    # media / screenshot output
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
+    ".mp4", ".mov", ".webm", ".pdf",
+    # scratch data dumps / archives
+    ".log", ".tmp", ".bak", ".csv", ".zip", ".tar", ".gz",
+)
+# Obvious scratch-script name stems (a top-level `snapshot.js`, `scratch.py`,
+# `tmp.ts`, etc.). These are dev one-offs when they sit loose at the root, never
+# part of the build. Anything matching a real prod-config basename is excluded
+# below before we get here, so a root `next.config.js` still routes to "review".
+_SHIP_SCRATCH_STEMS = ("snapshot", "scratch", "tmp", "temp", "test", "debug", "scrap", "playground")
+
+
 def _ship_classify_remaining(path):
     """'infra' = safe to bulk-commit (docs/config/scripts, near-zero blast
     radius). 'review' = app/deploy code that ships to prod on push — eyeball
-    the diff first. Unknown defaults to 'review' (conservative)."""
+    the diff first.
+
+    Default for unknown paths is 'review' (conservative) — EXCEPT for loose
+    repo-root scratch (see _SHIP_SCRATCH_* above): a root-level media/archive
+    file or an obvious scratch script is low blast radius and shouldn't park
+    Push all as if it were deploy code."""
     if path.startswith(("apps/", "packages/")):
         return "review"
     base = path.rsplit("/", 1)[-1]
+    # Known prod config basenames stay "review" wherever they sit, incl. root.
     if base in ("next.config.js", "vercel.json", "package.json", "package-lock.json"):
         return "review"
     if path.startswith(("docs/", ".claude/", "scripts/")):
         return "infra"
     if base in (".gitignore", "CLAUDE.md", "AGENTS.md", "README.md") or base.endswith(".md"):
         return "infra"
+    # Repo-root-only loosening: a file with no '/' in its path is at the top of
+    # the tree, where deploy code rarely lives loose. If it's media/archive
+    # output or an obvious scratch script, treat as 'infra' (low blast radius)
+    # instead of parking Push all. e.g. snapshot.js / snapshot.png.
+    if "/" not in path:
+        lower = base.lower()
+        stem = lower.rsplit(".", 1)[0]
+        if lower.endswith(_SHIP_SCRATCH_EXTS):
+            return "infra"
+        if stem in _SHIP_SCRATCH_STEMS or any(
+            stem.startswith(s) for s in _SHIP_SCRATCH_STEMS
+        ):
+            return "infra"
     return "review"
 
 
@@ -26190,6 +26230,205 @@ def _ship_review_verdict(repo_path, path, _attr_cache=None):
     return _with_owner({"verdict": "commit", "why": f"main-only edit since {sha[:8]}"})
 
 
+def _ship_post_push_deploy(repo_path, branch, sha):
+    """After a successful push, record the ship and (if the repo is wired to
+    Vercel) poll the production deploy to a terminal state. Ends with a terminal
+    _ship_update on every path.
+
+    Factored out of _ship_integrate so the diverged-reconcile path can reuse the
+    exact same deploy-poll tail after it pushes from the isolated worktree —
+    there is one source of truth for "what happens after origin/{branch} moves."
+    """
+    _record_repo_ship(repo_path, sha, branch)
+
+    if not _resolve_vercel_project(repo_path):
+        _ship_update(repo_path, "pushed", f"Pushed {sha[:7]} to {branch}.",
+                     running=False, sha=sha[:12])
+        return
+
+    _ship_update(repo_path, "deploying",
+                 "Pushed. Waiting for Vercel production deploy…", sha=sha[:12])
+    target = sha[:7] if sha else ""
+    last_state = None
+    deadline = time.time() + SHIP_DEPLOY_WAIT_CAP
+    while time.time() < deadline:
+        status = vercel_deploy_status(repo_path)
+        state = (status.get("state") or "").upper()
+        is_ours = (not target) or status.get("commit_sha") == target
+        if state and state != last_state:
+            tag = "" if is_ours else " (prev deploy)"
+            _ship_log(repo_path, f"vercel: {state}{tag}", "info")
+            last_state = state
+        if state == "READY" and is_ours:
+            _ship_update(repo_path, "deployed", "Successfully deployed.",
+                         running=False, sha=sha[:12], deploy=status)
+            return
+        if state == "ERROR" and is_ours:
+            _ship_update(repo_path, "deploy_error",
+                         "Pushed, but Vercel deploy failed.",
+                         running=False, sha=sha[:12], deploy=status)
+            return
+        time.sleep(SHIP_DEPLOY_POLL_INTERVAL)
+    _ship_update(repo_path, "pushed",
+                 "Pushed. Deploy still building — check Vercel.",
+                 running=False, sha=sha[:12])
+
+
+def _ship_diverged_handoff(repo_path, branch, ahead, behind):
+    """Terminal 'diverged' hand-off: tell the user to reconcile manually from a
+    clean worktree. This is the fallback whenever auto-reconcile can't safely
+    finish (real conflict, rejected push, unexpected error). Centralized so the
+    auto-reconcile path and the original guard emit identical guidance."""
+    _ship_update(repo_path, "diverged",
+                 f"Diverged: ahead {ahead}, behind {behind}. Refusing to rebase "
+                 "a shared clone in place — a mid-rebase conflict would break "
+                 "every session here. Reconcile from a clean worktree off "
+                 f"origin/{branch} (cherry-pick the {ahead} local commit(s)), then push.",
+                 running=False)
+
+
+def _ship_reconcile_diverged(repo_path, branch, ahead, behind):
+    """Auto-reconcile a diverged branch WITHOUT touching the shared clone's
+    working tree or rewriting its history in place.
+
+    Strategy (every conflict-prone step happens in a disposable worktree):
+      1. Snapshot the shared clone's HEAD sha NOW, before anything moves.
+      2. `git worktree add --detach <tmpdir> origin/{branch}` under the system
+         temp dir (NEVER inside the repo) — a throwaway checkout at the remote
+         tip. The shared clone stays on `main`, untouched.
+      3. Replay the local-only commits (origin/{branch}..HEAD) onto that tip via
+         cherry-pick, in order.
+      4. CONFLICT → abort, tear down the worktree, fall back to the manual
+         hand-off. We never auto-resolve conflicts; a human reconciles those.
+      5. Clean replay → push the reconciled history from the worktree to
+         origin/{branch}. Rejected push (someone else pushed meanwhile) → tear
+         down, fall back to hand-off and let the next run retry.
+      6. Push OK → fast-forward the shared clone to the new origin/{branch}. The
+         shared HEAD is now an ancestor of the reconciled tip, so the ff is safe
+         and rewrites nothing. If the ff somehow fails we still report success
+         (origin moved — that's what "ship" means).
+      7. finally: remove the temp worktree and best-effort delete the temp ref,
+         so a worktree is never leaked even on an exception.
+
+    SAFETY: the shared clone is only ever read (rev-parse) and, at the very end,
+    fast-forwarded — its working tree is never modified mid-flight and its
+    history is never rewritten in place. ALL the risky work lives in the
+    disposable worktree, and on ANY doubt (conflict, rejected push, error) we
+    fall back to the manual hand-off rather than risk corrupting a shared clone.
+    Honors this repo's CLAUDE.md git hygiene (never branch/mutate the shared
+    clone; the worktree is the isolation boundary)."""
+    # Snapshot the local tip BEFORE anything moves — this is the set of commits
+    # we must replay. Reading HEAD never mutates the shared clone.
+    rc, head_sha, _ = _git(["rev-parse", "HEAD"], repo_path)
+    head_sha = (head_sha or "").strip()
+    if rc != 0 or not head_sha:
+        _ship_log(repo_path, "could not read HEAD — handing off", "warn")
+        _ship_diverged_handoff(repo_path, branch, ahead, behind)
+        return
+
+    # The exact local-only commits to replay, oldest-first.
+    rc, rl, _ = _git(["rev-list", "--reverse", f"origin/{branch}..{head_sha}"], repo_path)
+    commits = [c.strip() for c in (rl or "").splitlines() if c.strip()] if rc == 0 else []
+    if rc != 0 or not commits:
+        # Nothing local to replay (or we couldn't compute it) — not a case we can
+        # safely auto-reconcile; hand off.
+        _ship_log(repo_path, "could not compute local commits to replay — handing off", "warn")
+        _ship_diverged_handoff(repo_path, branch, ahead, behind)
+        return
+
+    # Disposable worktree under the SYSTEM temp dir — never inside the repo, so
+    # we can't accidentally pollute or commit it.
+    tmpdir = tempfile.mkdtemp(prefix="ccc-ship-reconcile-")
+    tmp_branch = None
+    worktree_added = False
+    try:
+        _ship_update(repo_path, "pulling",
+                     f"Diverged (ahead {ahead}/behind {behind}) — reconciling in "
+                     "isolated worktree…")
+        # Detached checkout at the remote tip. --detach keeps us off any named
+        # branch so we never collide with a branch checked out elsewhere.
+        rc, out, err = _git(
+            ["worktree", "add", "--detach", tmpdir, f"origin/{branch}"],
+            repo_path, timeout=60)
+        if rc != 0:
+            _ship_log(repo_path,
+                      f"worktree add failed ({err or out.strip() or rc}) — handing off", "warn")
+            _ship_diverged_handoff(repo_path, branch, ahead, behind)
+            return
+        worktree_added = True
+
+        # Replay local commits onto origin/{branch}, in order. -C points git at
+        # the worktree; the shared clone is never the cwd of these operations.
+        _ship_log(repo_path,
+                  f"cherry-picking {len(commits)} local commit(s) onto origin/{branch}", "info")
+        rc, out, err = _git(
+            ["-C", tmpdir, "cherry-pick", *commits], repo_path, timeout=180)
+        if rc != 0:
+            # A conflict (or any cherry-pick failure) — abort cleanly and hand
+            # off. We deliberately do NOT try to auto-resolve; a human owns
+            # conflict resolution.
+            _ship_log(repo_path,
+                      "conflict during reconcile — handing off for manual worktree reconcile",
+                      "warn")
+            _git(["-C", tmpdir, "cherry-pick", "--abort"], repo_path, timeout=30)
+            _ship_diverged_handoff(repo_path, branch, ahead, behind)
+            return
+
+        # Push the reconciled history. HEAD here is origin/{branch} + replayed
+        # commits; pushing it updates the remote branch.
+        _ship_update(repo_path, "pushing",
+                     f"$ git push origin HEAD:{branch} (reconciled {len(commits)} commit(s))")
+        rc, out, err = _git(
+            ["-C", tmpdir, "push", "origin", f"HEAD:refs/heads/{branch}"],
+            repo_path, timeout=120)
+        if rc != 0:
+            # Non-fast-forward (someone pushed again) or other push failure —
+            # do NOT force. Hand off; the next run re-fetches and retries.
+            _ship_log(repo_path,
+                      f"reconciled push rejected ({err or out.strip() or rc}) — handing off",
+                      "warn")
+            _ship_diverged_handoff(repo_path, branch, ahead, behind)
+            return
+
+        rc, new_sha, _ = _git(["-C", tmpdir, "rev-parse", "HEAD"], repo_path)
+        new_sha = (new_sha or "").strip()
+        _ship_log(repo_path, f"reconciled history pushed to origin/{branch}", "ok")
+
+        # Bring the shared clone up to date with a SAFE fast-forward. After the
+        # reconciled push, the shared clone's tip is an ancestor of the new
+        # origin/{branch}, so this ff rewrites nothing. If it somehow fails we
+        # still report success — origin already moved, which is the ship.
+        _git(["fetch", "origin", branch], repo_path, timeout=60)
+        rc, out, err = _git(["merge", "--ff-only", f"origin/{branch}"], repo_path, timeout=60)
+        if rc != 0:
+            _ship_log(repo_path,
+                      f"shared clone ff after reconcile failed ({err or out.strip() or rc}) — "
+                      "origin is updated; resolve the local clone manually", "warn")
+        else:
+            _ship_log(repo_path, "fast-forwarded shared clone to reconciled tip", "ok")
+
+        # Same deploy-poll tail as a normal push.
+        _ship_post_push_deploy(repo_path, branch, new_sha or head_sha)
+    except Exception as e:
+        _ship_log(repo_path, f"reconcile crashed: {e} — handing off", "warn")
+        _ship_diverged_handoff(repo_path, branch, ahead, behind)
+    finally:
+        # Always tear down the disposable worktree so it's never leaked, then
+        # best-effort delete the temp ref and the tmpdir. force is fine: the
+        # worktree is throwaway by construction.
+        if worktree_added:
+            _git(["worktree", "remove", "--force", tmpdir], repo_path, timeout=30)
+        if tmp_branch:
+            _git(["branch", "-D", tmp_branch], repo_path, timeout=15)
+        # Prune any dangling worktree admin entry and remove the dir if git left
+        # anything behind.
+        _git(["worktree", "prune"], repo_path, timeout=15)
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def _ship_integrate(repo_path, branch):
     """Fetch + fast-forward + push (then optional Vercel deploy poll).
 
@@ -26200,9 +26439,11 @@ def _ship_integrate(repo_path, branch):
 
     Never `rebase` a shared clone in place: a mid-rebase conflict leaves every
     session's checkout broken. Fetch, then only fast-forward. If the branch has
-    diverged (local ahead AND behind), refuse and hand off to a clean-worktree
-    reconcile. Runs to a terminal _ship_update on every path (own try/except so
-    it's safe to launch in its own thread)."""
+    diverged (local ahead AND behind), attempt an automated reconcile in an
+    ISOLATED throwaway worktree (_ship_reconcile_diverged) — which falls back to
+    the manual clean-worktree hand-off on any conflict/rejection/error. Runs to a
+    terminal _ship_update on every path (own try/except so it's safe to launch in
+    its own thread)."""
     try:
         _ship_update(repo_path, "pulling", f"$ git fetch origin {branch}")
         rc, _, err = _git(["fetch", "origin", branch], repo_path, timeout=60)
@@ -26215,12 +26456,11 @@ def _ship_integrate(repo_path, branch):
         behind = int((behind_s or "0").strip() or 0) if rc_b == 0 else 0
         _ship_log(repo_path, f"local {branch}: ahead {ahead}, behind {behind}", "info")
         if ahead and behind:
-            _ship_update(repo_path, "diverged",
-                         f"Diverged: ahead {ahead}, behind {behind}. Refusing to rebase "
-                         "a shared clone in place — a mid-rebase conflict would break "
-                         "every session here. Reconcile from a clean worktree off "
-                         f"origin/{branch} (cherry-pick the {ahead} local commit(s)), then push.",
-                         running=False)
+            # Diverged: instead of bailing, try to reconcile automatically in a
+            # disposable worktree. _ship_reconcile_diverged is terminal on every
+            # path (it falls back to the manual hand-off on any conflict /
+            # rejected push / error), so we return right after.
+            _ship_reconcile_diverged(repo_path, branch, ahead, behind)
             return
         if behind:
             rc, out, err = _git(["merge", "--ff-only", f"origin/{branch}"], repo_path, timeout=60)
@@ -26243,39 +26483,9 @@ def _ship_integrate(repo_path, branch):
 
         rc, sha, _ = _git(["rev-parse", "HEAD"], repo_path)
         sha = (sha or "").strip()
-        _record_repo_ship(repo_path, sha, branch)
-
-        if not _resolve_vercel_project(repo_path):
-            _ship_update(repo_path, "pushed", f"Pushed {sha[:7]} to {branch}.",
-                         running=False, sha=sha[:12])
-            return
-
-        _ship_update(repo_path, "deploying",
-                     "Pushed. Waiting for Vercel production deploy…", sha=sha[:12])
-        target = sha[:7] if sha else ""
-        last_state = None
-        deadline = time.time() + SHIP_DEPLOY_WAIT_CAP
-        while time.time() < deadline:
-            status = vercel_deploy_status(repo_path)
-            state = (status.get("state") or "").upper()
-            is_ours = (not target) or status.get("commit_sha") == target
-            if state and state != last_state:
-                tag = "" if is_ours else " (prev deploy)"
-                _ship_log(repo_path, f"vercel: {state}{tag}", "info")
-                last_state = state
-            if state == "READY" and is_ours:
-                _ship_update(repo_path, "deployed", "Successfully deployed.",
-                             running=False, sha=sha[:12], deploy=status)
-                return
-            if state == "ERROR" and is_ours:
-                _ship_update(repo_path, "deploy_error",
-                             "Pushed, but Vercel deploy failed.",
-                             running=False, sha=sha[:12], deploy=status)
-                return
-            time.sleep(SHIP_DEPLOY_POLL_INTERVAL)
-        _ship_update(repo_path, "pushed",
-                     "Pushed. Deploy still building — check Vercel.",
-                     running=False, sha=sha[:12])
+        # Record the ship + run the shared deploy-poll tail (also reused by the
+        # diverged-reconcile path).
+        _ship_post_push_deploy(repo_path, branch, sha)
     except Exception as e:
         _ship_update(repo_path, "error", f"integrate crashed: {e}", running=False)
 

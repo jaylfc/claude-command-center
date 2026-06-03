@@ -103,6 +103,22 @@ class TestServerImports(unittest.TestCase):
         # integrate step is a standalone helper shared by the flow + the action
         # handler (the "I clicked skip and nothing happened" fix).
         self.assertTrue(hasattr(server, "_ship_integrate"))
+        # A diverged branch is auto-reconciled in an ISOLATED throwaway worktree
+        # (cherry-pick local commits onto origin → push → ff the shared clone),
+        # falling back to the manual hand-off only on a real conflict. The
+        # reconcile helper exists and _ship_integrate dispatches to it on the
+        # diverged branch. String-level only — no real git/worktree runs here.
+        self.assertTrue(hasattr(server, "_ship_reconcile_diverged"))
+        self.assertIn("_ship_reconcile_diverged",
+                      inspect.getsource(server._ship_integrate))
+        # Loose repo-root scratch (a Puppeteer snapshot.js + its snapshot.png
+        # output) is dev one-off noise, not app/deploy code — it must NOT park
+        # Push all as "review". Anything under a source dir still does.
+        self.assertNotEqual(server._ship_classify_remaining("snapshot.png"), "review")
+        self.assertNotEqual(server._ship_classify_remaining("snapshot.js"), "review")
+        self.assertEqual(server._ship_classify_remaining("snapshot.png"), "infra")
+        self.assertEqual(server._ship_classify_remaining("snapshot.js"), "infra")
+        self.assertEqual(server._ship_classify_remaining("apps/x/page.tsx"), "review")
 
     def test_ship_index_attribution_is_wired_and_degrades(self):
         """The conversation-index attribution layer is defined, the verdict +
