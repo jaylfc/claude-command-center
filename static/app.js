@@ -16760,6 +16760,22 @@
     document.head.appendChild(st);
   }
 
+  // Line# of the .event nearest the top of the viewport, so we can restore the
+  // reader's position after a re-render that adds content above it.
+  function _topVisibleEventLine($view) {
+    const top = $view.scrollTop;
+    for (const el of $view.querySelectorAll('.event[data-jsonl-line]')) {
+      if (el.offsetTop + el.offsetHeight > top) return el.dataset.jsonlLine;
+    }
+    return null;
+  }
+  function _scrollToEventLine($view, line) {
+    if (line == null) return;
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(String(line)) : String(line);
+    const el = $view.querySelector('.event[data-jsonl-line="' + esc + '"]');
+    if (el) $view.scrollTop = el.offsetTop;
+  }
+
   function _insertLoadEarlierBanner($view, id, paneId) {
     if (!$view || $view.querySelector('.conv-load-earlier')) return;
     _ensureLoadEarlierStyle();
@@ -16767,13 +16783,32 @@
     banner.type = 'button';
     banner.className = 'conv-load-earlier';
     banner.textContent = '↑ Load earlier messages';
-    banner.addEventListener('click', () => {
+    let loading = false;
+    async function loadEarlier() {
+      if (loading) return;
+      loading = true;
       const pane = paneByPaneId(paneId);
-      if (pane) { pane.wantFull = true; pane.lastLine = 0; }
+      if (!pane || pane.conversationId !== id) { loading = false; return; }
+      // Anchor to where the reader is, so loading history above doesn't move it.
+      const anchorLine = _topVisibleEventLine($view);
+      pane.wantFull = true; pane.lastLine = 0;
       banner.textContent = 'Loading earlier messages…';
       banner.disabled = true;
-      fetchConversationEvents(paneId);
-    });
+      try {
+        await fetchConversationEvents(paneId);
+        _scrollToEventLine($view, anchorLine);
+      } finally {
+        loading = false;
+      }
+    }
+    banner.addEventListener('click', loadEarlier);
+    // Auto-load once the banner scrolls into view (scroll up → history fills in).
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) { io.disconnect(); loadEarlier(); }
+      }, { root: $view, threshold: 0.05 });
+      io.observe(banner);
+    }
     $view.insertBefore(banner, $view.firstChild);
   }
 
