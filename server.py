@@ -31709,7 +31709,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 in_repo_sandbox = any(rp == root or root in rp.parents for root in allowed_roots)
             except Exception:
                 pass
-            if not (in_legacy_paste_dir or in_state_paste_dir or in_repo_sandbox):
+            try:
+                resolved.relative_to(ANNOTATION_SCREENSHOT_DIR.resolve())
+                in_annotation_dir = True
+            except ValueError:
+                in_annotation_dir = False
+            if not (in_legacy_paste_dir or in_state_paste_dir or in_repo_sandbox or in_annotation_dir):
                 self.send_json({"error": "forbidden"}, 403)
                 return
             if not resolved.is_file():

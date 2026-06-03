@@ -4109,6 +4109,11 @@
   // The server's /api/pasted-image route performs the real path sandboxing.
   const PASTED_IMG_RE = /(?:file:\/\/)?(\/[^\s<>"']*?\/\.claude\/(?:command-center\/)?pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))/gi;
   const PASTED_IMG_MD_LINK_RE = /!?\[[^\]\n]*\]\((?:file:\/\/)?(\/[^\s<>"')]*?\/\.claude\/(?:command-center\/)?pasted-images\/paste-[\w.-]+?\.(?:png|jpe?g|gif|webp))(?:\s+(?:&quot;[^&]*&quot;|'[^']*'))?\)/gi;
+  // Annotation screenshots forwarded via the ux-fixes-queue land in user
+  // messages as absolute paths like /Users/<u>/.claude/command-center/
+  // annotation-screenshots/ann-YYYYMMDD-HHMMSS-XXXXXX.png — render them
+  // inline so the user can see what they annotated without leaving the chat.
+  const ANNOTATION_IMG_RE = /(?:file:\/\/)?(\/[^\s<>"']*?\/\.claude\/command-center\/annotation-screenshots\/[\w.-]+?\.(?:png|jpe?g|gif|webp))/gi;
   function pastedImageTag(path) {
     const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
     return '<img class="msg-image pasted-image-inline" src="/api/pasted-image?path='
@@ -4120,7 +4125,8 @@
     if (!escapedHtml) return escapedHtml;
     return String(escapedHtml)
       .replace(PASTED_IMG_MD_LINK_RE, (_m, path) => pastedImageTag(path))
-      .replace(PASTED_IMG_RE, (_m, path) => pastedImageTag(path));
+      .replace(PASTED_IMG_RE, (_m, path) => pastedImageTag(path))
+      .replace(ANNOTATION_IMG_RE, (_m, path) => pastedImageTag(path));
   }
 
   function renderImageDescriptors(images) {
