@@ -25583,7 +25583,17 @@
       enableShotBtn.addEventListener('click', () => {
         const pending = annBeginTabCaptureRequest();
         if (!pending) {
-          errEl.textContent = 'Tab capture is not available here — use Screen Recording for the CCC server instead.';
+          // The WebKit-based native CCC app doesn't expose
+          // getDisplayMedia (the browser tab-capture API), so the
+          // in-page "Allow screenshot" path can't work here. Direct
+          // the user to the topbar "Screen" button instead — that
+          // uses the macOS native `screencapture` picker, which works
+          // whenever Screen Recording is granted to Claude Command
+          // Center in System Settings → Privacy → Screen Recording.
+          errEl.innerHTML = 'In-page tab capture is not available in this app shell. '
+            + 'Use the <strong>Screen</strong> button at the top right instead — '
+            + 'it triggers the macOS area screenshot picker (granted via '
+            + '<em>System Settings → Privacy → Screen Recording → Claude Command Center</em>).';
           errEl.hidden = false;
           return;
         }
