@@ -16819,19 +16819,31 @@
       _streamingBubbleLingerTimer = null;
     }
     const linger = opts && typeof opts.lingerMs === 'number' ? opts.lingerMs : 0;
+    // Multi-bubble safe: when subagents are running concurrently with the
+    // parent, multiple .stream-bubble nodes can be in the DOM. Clear ALL of
+    // them — the JSONL renderer takes over rendering completed messages via
+    // its per-msg_id handoff path (see renderConversationEvents).
+    const allBubbles = () => {
+      const seen = new Set();
+      document.querySelectorAll('.stream-bubble').forEach(n => seen.add(n));
+      if (_streamingBubble) seen.add(_streamingBubble);
+      return Array.from(seen);
+    };
     const doRemove = () => {
-      if (_streamingBubble && _streamingBubble.parentNode) {
-        _streamingBubble.parentNode.removeChild(_streamingBubble);
+      for (const n of allBubbles()) {
+        if (n.parentNode) n.parentNode.removeChild(n);
       }
       _streamingBubble = null;
       _streamingMsgId = null;
       _streamingBubbleLingerTimer = null;
     };
-    if (linger > 0 && _streamingBubble) {
-      // Mark the bubble as "settled" so the dashed border + pulsing dot
+    if (linger > 0) {
+      // Mark the bubbles as "settled" so the dashed border + pulsing dot
       // stop animating during the linger — visually distinct from the
       // active streaming state.
-      _streamingBubble.classList.add('stream-bubble-settled');
+      for (const n of allBubbles()) {
+        n.classList.add('stream-bubble-settled');
+      }
       _streamingBubbleLingerTimer = setTimeout(doRemove, linger);
     } else {
       doRemove();
@@ -16850,13 +16862,28 @@
         return null;
       }
     }
-    // New message id → reset (the JSONL renderer is responsible for
-    // persisting whatever the previous message produced).
-    if (_streamingBubble && _streamingMsgId && msgId && _streamingMsgId !== msgId) {
-      clearStreamingBubble();
+    // Multi-bubble safe: when a subagent (Task tool) is running concurrently
+    // with the parent agent, the spawn stream interleaves assistant_block
+    // events from BOTH agents with different message_ids. Previously we
+    // kept a singleton bubble and CLEARED it on every msg_id change —
+    // that wiped the parent's mid-turn content the moment the subagent
+    // emitted its first block (user-visible "messages clobbered"). Now
+    // each msg_id gets its own bubble; the singleton _streamingBubble
+    // still tracks the most recent bubble for the linger/clear-all paths,
+    // but bubble lookup is by-msg-id in the DOM so existing bubbles
+    // survive new sibling msg_ids landing.
+    let node = null;
+    if (msgId) {
+      const escIdLookup = (window.CSS && CSS.escape) ? CSS.escape(msgId) : msgId;
+      node = $view.querySelector('.stream-bubble[data-msg-id="' + escIdLookup + '"]');
+    } else if (_streamingBubble && !_streamingBubble.dataset.msgId) {
+      // No msg_id yet: reuse the most recent un-keyed bubble so consecutive
+      // pre-id blocks accumulate, mirroring the prior singleton behavior
+      // for the first events of a turn.
+      node = _streamingBubble;
     }
-    if (!_streamingBubble) {
-      const node = document.createElement('div');
+    if (!node) {
+      node = document.createElement('div');
       node.className = 'stream-bubble';
       if (msgId) node.dataset.msgId = msgId;
       node.innerHTML =
@@ -16866,18 +16893,18 @@
         + '</div>'
         + '<div class="stream-bubble-blocks"></div>';
       $view.appendChild(node);
-      _streamingBubble = node;
-      _streamingMsgId = msgId || null;
-    } else if (msgId && !_streamingBubble.dataset.msgId) {
+    } else if (msgId && !node.dataset.msgId) {
       // First spawn event sometimes lacks a message_id; backfill so the
       // JSONL hand-off can find this bubble when it arrives.
-      _streamingBubble.dataset.msgId = msgId;
+      node.dataset.msgId = msgId;
     }
+    _streamingBubble = node;
+    _streamingMsgId = msgId || _streamingMsgId;
     // Re-anchor to the bottom in case JSONL events were appended after us.
-    if (_streamingBubble.parentNode === $view && _streamingBubble !== $view.lastElementChild) {
-      $view.appendChild(_streamingBubble);
+    if (node.parentNode === $view && node !== $view.lastElementChild) {
+      $view.appendChild(node);
     }
-    return _streamingBubble.querySelector('.stream-bubble-blocks');
+    return node.querySelector('.stream-bubble-blocks');
   }
 
   function handleSpawnEvents(events, paneId, convId) {
