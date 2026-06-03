@@ -2294,14 +2294,27 @@ def _live_engine_session_ids():
 
 
 def _archive_session_is_live(session_id):
-    """A session is "live" if any sidecar marker exists for it, OR a non-Claude
-    engine CLI (codex/gemini/cursor) is running it. Claude sidecars are written
-    by Claude Code's hooks and removed when sessions end; other engines don't
-    write sidecars, so we additionally consult the live-process scan — without
-    this, codex/gemini rows never showed the live glow even while Thinking."""
+    """A session is "live" if any sidecar marker exists for it (Claude only),
+    OR a non-Claude engine CLI (codex/gemini/cursor/antigravity) is running it.
+
+    Claude sidecars are written by Claude Code's hooks. The hook can run
+    with a non-Claude session id in scope (e.g. a Claude hook firing a
+    `git commit --trailer "Co-authored-by: Cursor"` on behalf of a Cursor
+    agent) — that writes a Claude-format sidecar keyed under a Cursor sid,
+    polluting liveness detection. The cursor row then falsely lights up
+    WIP "Shell" forever. Defense: non-Claude engines NEVER trust the
+    Claude sidecar — their liveness comes solely from the live-process
+    scan.
+    """
     if not session_id:
         return False
-    if SIDECAR_STATE_DIR.is_dir():
+    is_non_claude_engine = (
+        _is_codex_session(session_id)
+        or _is_cursor_session(session_id)
+        or _is_gemini_session(session_id)
+        or _is_antigravity_session(session_id)
+    )
+    if not is_non_claude_engine and SIDECAR_STATE_DIR.is_dir():
         try:
             for suffix in (".json", "_writes", "_in_flight.json", "_needs_approval.json"):
                 if (SIDECAR_STATE_DIR / f"{session_id}{suffix}").exists():
