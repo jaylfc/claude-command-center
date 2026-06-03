@@ -2571,6 +2571,14 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     color: var(--accent);
   }
+  .conv-pct-badge.is-warn {
+    color: #FBCA04;
+    background: rgba(251, 202, 4, 0.15);
+  }
+  .conv-pct-badge.is-danger {
+    color: var(--red);
+    background: rgba(248, 81, 73, 0.16);
+  }
   /* Semantic match — slightly different hue + label to make it visible
      when results came via the vector path (vs lexical BM25). */
   .conv-history-badge.is-semantic {

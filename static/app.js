@@ -12492,7 +12492,8 @@
       let pctBadgeHtml = '';
       if (ctxPct) {
         const tip = ctxPct.source + ' ' + ctxPct.displayTokens.toLocaleString() + ' / ' + ctxPct.limit.toLocaleString() + ' tokens';
-        pctBadgeHtml = '<span class="conv-pct-badge" title="' + escapeAttr(tip) + '">' + ctxPct.pct + '%</span>';
+        const pctLevel = ctxPct.pct > 60 ? ' is-danger' : (ctxPct.pct > 30 ? ' is-warn' : '');
+        pctBadgeHtml = '<span class="conv-pct-badge' + pctLevel + '" title="' + escapeAttr(tip) + '">' + ctxPct.pct + '%</span>';
       }
       const branchSlotHtml = pctBadgeHtml + worktreeBadgeHtml + branch;
       const rowMetaHtml = (rowSizeHtml || liveToolHtml || signals || branchSlotHtml)
