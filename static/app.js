@@ -62,6 +62,7 @@
     peer:           { ms: null,  label: 'peer',    surface: 'Sidebar — repo/peer picker',                  desc: 'Peer-session registry (picker open).' },
     codexLog:       { ms: null,  label: 'codex',   surface: 'Open conversation pane — codex log',          desc: 'Codex session log (open codex convo only).' },
     archiveProgress:{ ms: 250,   label: 'archive', surface: 'Sidebar — archive loading bar',               desc: 'Archive load progress bar (transient, self-clears).' },
+    cccHealth:      { ms: 5000,  label: 'health',  surface: 'Sidebar — bottom-left CCC health bar',         desc: 'CCC self-health: server CPU%, live-activity build latency, recent errors.' },
   };
   // Per-trigger runtime stats for the strip: last-fired epoch + total ticks.
   const _pollerStats = {};
@@ -126,6 +127,52 @@
     if (m < 60) return m + 'm';
     return Math.floor(m / 60) + 'h';
   }
+  // Poll /api/health (server-side metrics) and paint the three condensed
+  // health metrics in the footer with healthy/warning/critical coloring.
+  // Gated like every other poller so it pauses while typing / when killed.
+  function _renderHealth(host, h) {
+    function _set(k, txt, cls, title) {
+      const m = host.querySelector('.ccchealth-metric[data-k="' + k + '"]');
+      if (!m) return;
+      m.classList.remove('ccchealth-ok', 'ccchealth-warn', 'ccchealth-crit');
+      if (cls) m.classList.add(cls);
+      const v = m.querySelector('.ccchealth-val');
+      if (v) v.textContent = txt;
+      if (title) m.title = title;
+    }
+    // CPU%: this daemon's own process. >60% warn, >120% crit (multi-core).
+    const cpu = (h && typeof h.cpu === 'number') ? h.cpu : null;
+    if (cpu == null) _set('cpu', 'cpu —', '', 'Server CPU% unavailable');
+    else _set('cpu', 'cpu ' + cpu.toFixed(0) + '%',
+      cpu >= 120 ? 'ccchealth-crit' : (cpu >= 60 ? 'ccchealth-warn' : 'ccchealth-ok'),
+      'CCC daemon process CPU: ' + cpu.toFixed(1) + '% (pid ' + (h.pid || '?') + ')');
+    // Build latency: avg ms of the real live-activity build. >200 warn, >500 crit.
+    const b = (h && h.build_ms) || {};
+    const avg = (typeof b.avg === 'number') ? b.avg : null;
+    if (avg == null) _set('build', 'build —', '', 'No live-activity builds recorded yet');
+    else _set('build', 'build ' + Math.round(avg) + 'ms',
+      avg >= 500 ? 'ccchealth-crit' : (avg >= 200 ? 'ccchealth-warn' : 'ccchealth-ok'),
+      'live-activity build: avg ' + avg + 'ms, last ' + (b.last == null ? '—' : b.last + 'ms') +
+      ' over ' + (b.count || 0) + ' real builds');
+    // Recent errors: in-process count over the trailing window. >0 warn, >=5 crit.
+    const errs = (h && typeof h.recent_errors === 'number') ? h.recent_errors : null;
+    const win = (h && h.error_window_min) || 15;
+    if (errs == null) _set('err', 'err —', '', 'Error count unavailable');
+    else _set('err', 'err ' + errs,
+      errs >= 5 ? 'ccchealth-crit' : (errs > 0 ? 'ccchealth-warn' : 'ccchealth-ok'),
+      errs + ' server error(s) in the last ' + win + ' min' +
+      (h.uptime_s != null ? ' · uptime ' + _agoStr(h.uptime_s * 1000) : ''));
+  }
+  function _startHealthPoll(host) {
+    const tick = _gated('cccHealth', function () {
+      return fetch('/api/health', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((h) => { if (h) _renderHealth(host, h); })
+        .catch(() => {});
+    });
+    tick();
+    setInterval(tick, 5000);
+  }
   function _initPollerStrip() {
     const footer = document.querySelector('.sidebar-footer');
     if (!footer) { setTimeout(_initPollerStrip, 400); return; }
@@ -136,8 +183,25 @@
       const st = document.createElement('style');
       st.id = '__pollerStripStyle';
       st.textContent =
+        // Outer wrap holds the condensed health metrics + the collapsible
+        // trigger strip. The trigger chips now live behind a toggle so the
+        // footer leads with CCC's own health (CPU / build latency / errors).
+        '#pollerWrap{display:flex;gap:8px;align-items:center;flex:1 1 auto;min-width:0;padding:0 6px;}' +
+        '#cccHealth{display:flex;gap:7px;align-items:center;flex:0 0 auto;' +
+        'font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;}' +
+        '.ccchealth-metric{display:inline-flex;align-items:center;gap:3px;white-space:nowrap;' +
+        'color:var(--text-secondary,#9aa);}' +
+        '.ccchealth-dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto;background:#3fb950;}' +
+        '.ccchealth-ok{color:#3fb950;} .ccchealth-warn{color:#d29922;} .ccchealth-crit{color:#f85149;}' +
+        '.ccchealth-ok .ccchealth-dot{background:#3fb950;} .ccchealth-warn .ccchealth-dot{background:#d29922;}' +
+        '.ccchealth-crit .ccchealth-dot{background:#f85149;}' +
+        '#pollerToggle{flex:0 0 auto;cursor:pointer;user-select:none;' +
+        'font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text-secondary,#9aa);' +
+        'padding:2px 6px;border-radius:5px;border:1px solid transparent;white-space:nowrap;}' +
+        '#pollerToggle:hover{background:var(--hover-bg,rgba(127,127,127,.14));}' +
         '#pollerStrip{display:flex;gap:5px;align-items:center;flex:1 1 auto;min-width:0;' +
-        'overflow-x:auto;overflow-y:hidden;scrollbar-width:none;padding:0 6px;}' +
+        'overflow-x:auto;overflow-y:hidden;scrollbar-width:none;padding:0;}' +
+        '#pollerStrip[hidden]{display:none;}' +
         '#pollerStrip::-webkit-scrollbar{display:none;}' +
         '.pstrip-chip{display:inline-flex;align-items:center;gap:4px;flex:0 0 auto;cursor:pointer;' +
         'font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text-secondary,#9aa);' +
@@ -155,6 +219,9 @@
         '.pstrip-ago{opacity:.7;}';
       document.head.appendChild(st);
     }
+    // Wrapper: [ health metrics ] [ ⚡N toggle ] [ collapsible trigger strip ].
+    const wrap = document.createElement('div');
+    wrap.id = 'pollerWrap';
     const strip = document.createElement('div');
     strip.id = 'pollerStrip';
     strip.title = 'Periodic triggers — blink = fired, number = time since last fire. Click to toggle.';
@@ -174,10 +241,42 @@
       chips[name] = chip;
       strip.appendChild(chip);
     });
+    // CCC self-health cluster (CPU / build latency / recent errors) leads the
+    // footer; the trigger strip is collapsed behind a toggle to make room.
+    const health = document.createElement('div');
+    health.id = 'cccHealth';
+    health.title = 'CCC daemon health — server CPU%, live-activity build latency, recent errors. Polls /api/health.';
+    health.innerHTML =
+      '<span class="ccchealth-metric" data-k="cpu"><span class="ccchealth-dot"></span><span class="ccchealth-val">cpu —</span></span>' +
+      '<span class="ccchealth-metric" data-k="build"><span class="ccchealth-dot"></span><span class="ccchealth-val">build —</span></span>' +
+      '<span class="ccchealth-metric" data-k="err"><span class="ccchealth-dot"></span><span class="ccchealth-val">err —</span></span>';
+    const toggle = document.createElement('div');
+    toggle.id = 'pollerToggle';
+    const _triggerCount = Object.keys(_POLLER_META).length;
+    // Trigger strip starts collapsed; the toggle preserves full access.
+    let _stripOpen = false;
+    try { _stripOpen = localStorage.getItem('ccc-triggers-open') === '1'; } catch (_) {}
+    function _applyToggle() {
+      strip.hidden = !_stripOpen;
+      toggle.textContent = (_stripOpen ? '▾ ' : '⚡ ') + _triggerCount + ' triggers';
+      toggle.title = (_stripOpen ? 'Hide' : 'Show') + ' the ' + _triggerCount +
+        ' periodic-trigger chips (cadence + last-fire + on/off toggles).';
+    }
+    toggle.onclick = () => {
+      _stripOpen = !_stripOpen;
+      try { localStorage.setItem('ccc-triggers-open', _stripOpen ? '1' : '0'); } catch (_) {}
+      _applyToggle();
+      if (_stripOpen && window.__refreshPollerStrip) window.__refreshPollerStrip();
+    };
+    _applyToggle();
+    wrap.appendChild(health);
+    wrap.appendChild(toggle);
+    wrap.appendChild(strip);
     // Insert just after the active-group-chat pill, before the spacer, so it
     // fills the footer's empty middle and the gear stays pinned right.
     const spacer = footer.querySelector('.sidebar-footer-spacer');
-    if (spacer) footer.insertBefore(strip, spacer); else footer.appendChild(strip);
+    if (spacer) footer.insertBefore(wrap, spacer); else footer.appendChild(wrap);
+    _startHealthPoll(health);
 
     function _refreshStripState() {
       const now = Date.now();

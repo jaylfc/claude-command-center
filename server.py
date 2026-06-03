@@ -19,6 +19,7 @@ import fcntl
 import gzip
 import html
 import hashlib
+import collections
 import http.server
 import json
 import os
@@ -2348,6 +2349,106 @@ _LIVE_ACTIVITY_SNAPSHOT_TTL = 1.5
 _live_activity_snapshot = {"ts": 0.0, "data": None}
 _live_activity_snapshot_lock = threading.Lock()
 
+# ── CCC self-health metrics ─────────────────────────────────────────────────
+# Three cheap, in-process signals surfaced in the dashboard's bottom-left bar so
+# the daemon's own health is glanceable: this process's CPU%, the wall-clock cost
+# of the hot live-activity build, and a rolling count of recent server errors.
+# Everything here is O(1) per update and reads nothing off disk on the hot path.
+_SERVER_START_TS = time.time()
+
+# Rolling wall-clock duration (ms) of the REAL (uncached) live-activity build.
+# Cache hits aren't recorded — we only want the cost of actual work, which is the
+# truest signal for the hottest endpoint. Bounded deque so memory is constant.
+_live_build_ms = collections.deque(maxlen=30)
+_live_build_lock = threading.Lock()
+
+
+def _record_live_build_ms(ms):
+    with _live_build_lock:
+        _live_build_ms.append(float(ms))
+
+
+def _live_build_stats():
+    """{'last', 'avg', 'count'} ms over the last N real builds (None if idle)."""
+    with _live_build_lock:
+        vals = list(_live_build_ms)
+    if not vals:
+        return {"last": None, "avg": None, "count": 0}
+    return {
+        "last": round(vals[-1], 1),
+        "avg": round(sum(vals) / len(vals), 1),
+        "count": len(vals),
+    }
+
+# Rolling timestamps of recent server-side errors (500s / handler exceptions).
+# A bounded ring of epoch seconds; the count is computed over a trailing window
+# at read time, so we never scan service.err.log on the hot path.
+_recent_error_ts = collections.deque(maxlen=200)
+_recent_error_lock = threading.Lock()
+_RECENT_ERROR_WINDOW_S = 15 * 60  # 15 min
+
+
+def _record_server_error():
+    """Bump the in-process error counter. Call wherever the server handles/logs
+    a real error (500 response, handler traceback). Cheap and lock-guarded."""
+    with _recent_error_lock:
+        _recent_error_ts.append(time.time())
+
+
+def _recent_error_count(window_s=_RECENT_ERROR_WINDOW_S):
+    cutoff = time.time() - window_s
+    with _recent_error_lock:
+        return sum(1 for t in _recent_error_ts if t >= cutoff)
+
+# Server CPU% sampled the same way Activity Monitor reports it: `ps -p <pid>`.
+# Cached for a few seconds because the dashboard polls health frequently and a
+# subprocess per poll would be exactly the kind of cost we're trying to avoid.
+_server_cpu_cache = {"ts": 0.0, "pct": None}
+_server_cpu_lock = threading.Lock()
+_SERVER_CPU_TTL = 5.0
+
+
+def _server_cpu_pct():
+    """This daemon's own process CPU%, via `ps -p <pid> -o %cpu=`. Cached for
+    _SERVER_CPU_TTL so frequent polls share one cheap sample. Returns float or
+    None if ps is unavailable."""
+    now = time.time()
+    cache = _server_cpu_cache
+    if cache["pct"] is not None and now - cache["ts"] < _SERVER_CPU_TTL:
+        return cache["pct"]
+    with _server_cpu_lock:
+        now = time.time()
+        if cache["pct"] is not None and now - cache["ts"] < _SERVER_CPU_TTL:
+            return cache["pct"]
+        pct = None
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(os.getpid()), "-o", "%cpu="],
+                capture_output=True, text=True, timeout=2,
+            )
+            raw = (out.stdout or "").strip()
+            if raw:
+                pct = round(float(raw.split()[0]), 1)
+        except Exception:
+            pct = None
+        cache["pct"] = pct
+        cache["ts"] = now
+        return pct
+
+
+def build_ccc_health():
+    """Snapshot of CCC's own health for the dashboard bottom-left bar:
+    cpu (process %), live-build latency (last/avg ms), recent error count,
+    and uptime. All cheap / cached — safe to poll."""
+    return {
+        "cpu": _server_cpu_pct(),
+        "build_ms": _live_build_stats(),
+        "recent_errors": _recent_error_count(),
+        "error_window_min": _RECENT_ERROR_WINDOW_S // 60,
+        "uptime_s": round(time.time() - _SERVER_START_TS),
+        "pid": os.getpid(),
+    }
+
 
 def build_live_sessions_activity():
     """Map session_id → live-work fields for every currently-live session.
@@ -2363,7 +2464,11 @@ def build_live_sessions_activity():
         now = time.time()
         if snap["data"] is not None and now - snap["ts"] < _LIVE_ACTIVITY_SNAPSHOT_TTL:
             return snap["data"]
+        # Time the REAL build — this is the truest health signal for the hot
+        # path, and the only place an actual (non-cached) build happens.
+        _t0 = time.perf_counter()
         data = _build_live_sessions_activity_uncached()
+        _record_live_build_ms((time.perf_counter() - _t0) * 1000.0)
         snap["data"] = data
         snap["ts"] = time.time()
         return data
@@ -30939,6 +31044,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # Used by the setup banner so first-time users see exactly what's
             # missing instead of an empty UI with no explanation.
             self.send_json(_run_healthcheck())
+        elif path == "/api/health":
+            # CCC's OWN health (not the dependency check above): process CPU%,
+            # live-activity build latency, and a rolling recent-error count.
+            # Polled by the dashboard's bottom-left bar. Intentionally cheap.
+            self.send_json(build_ccc_health())
         elif path == "/api/version":
             self.send_json({
                 "version": __version__,
@@ -34067,6 +34177,10 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_json(self, data, status=200, etag=False):
+        # Any 5xx is a real server-side error — feed the in-process health
+        # counter the dashboard's bottom-left bar reads. Cheap, no disk scan.
+        if status >= 500:
+            _record_server_error()
         body_str = json.dumps(data)
         etag_val = None
         if etag:
@@ -34109,6 +34223,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             super().handle_one_request()
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
+        except Exception:
+            # A genuine handler crash (not a client disconnect) — count it for
+            # the health bar, then re-raise so the stdlib logs the traceback.
+            _record_server_error()
+            raise
         finally:
             # Threshold-gated slow-request log. Fast requests stay silent;
             # only the hot endpoints surface, e.g.:
