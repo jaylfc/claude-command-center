@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.0] - 2026-06-03
+
+### Performance
+A focused pass on the things that made the dashboard feel heavy. Net: the
+daemon idles instead of pinning a core, and opening anything is fast.
+
+- **The dashboard no longer pins a CPU core.** `/api/sessions/live-activity` —
+  polled continuously by every open dashboard (browser tab + desktop app) —
+  recomputed the entire live-session snapshot on every request, and slow builds
+  made clients fire new polls before old ones finished, piling up into GIL
+  contention that held a core at ~124%. The endpoint is now coalesced
+  (single-flight + 1.5s TTL), so concurrent/rapid polls share one build. Steady
+  state drops to idle.
+- **Group-chat opens are ~40× faster** (~1485ms → ~35ms for a 6-participant
+  chat). Each participant re-read and JSON-parsed the *entire* Gemini chat store
+  and re-ran `ps` process scans; the Gemini `sessionId` is now cached by
+  `(path, mtime)` and the `ps`-backed liveness scans share a 3s single-flight
+  cache.
+- **Long conversations open near-instantly.** Opening a chat used to parse the
+  whole transcript (a 22MB / 6,600-line session took ~320ms). It now loads only
+  the most-recent messages (windowed parse, ~17ms) and shows a "Load earlier"
+  affordance that auto-loads history as you scroll up, preserving your scroll
+  position. Applies to Claude, Codex, Cursor, and Antigravity transcripts.
+- **Codex sessions with screenshots open instantly.** Codex tool output that
+  embeds images was inlining multi-megabyte base64 blobs — a 54MB session served
+  a 40MB payload that took ~1.8s just to gzip. Images are now lazy-loaded on
+  demand via `/api/conv-image` (the scheme the Claude parser already used),
+  collapsing the payload ~1000× (40MB → 0.04MB) and the open to ~177ms.
+- **Live-session activity tracking is incremental.** The per-session tail
+  extractors (Codex/Cursor/Antigravity) re-read the full rollout on every poll;
+  they now resume from a saved byte offset and parse only newly-appended lines.
+  Per-session engine detection is memoised (it was re-scanning the Gemini store).
+- **History search no longer crashes under concurrent use.** The cached
+  read-only SQLite connection was shared across worker threads without
+  serialization, throwing `sqlite3.InterfaceError` in bursts; access is now
+  serialized.
+- **New: CCC self-health in the footer** — server CPU, live-activity build
+  latency, and recent error count, via a new `/api/health` endpoint.
+
 ### Added
 - Screenshots in the bug-report modal — an "Add screenshot" button opens
   the macOS area-selector (`screencapture -i`) so the user draws a
