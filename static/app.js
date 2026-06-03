@@ -15972,6 +15972,19 @@
     if (_ica) _ica.remove();
     const $view = getConvView();
     $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Loading...</div>';
+    // Reset per-Task subagent tabs — they belong to the previous conv.
+    // The strip stays in the DOM (sibling of $view) and updates on next
+    // tab event; clear its state + hide it now to avoid showing stale tabs.
+    if ($view._tabState) {
+      for (const tid of Object.keys($view._tabState.tasks || {})) {
+        const t = $view._tabState.tasks[tid];
+        if (t.closeTimer) clearTimeout(t.closeTimer);
+      }
+      $view._tabState = null;
+    }
+    const _strip = $view.parentNode && $view.parentNode.querySelector('.conv-tab-strip');
+    if (_strip) { _strip.hidden = true; _strip.innerHTML = ''; }
+    $view.dataset.activeTab = 'master';
     const loadToken = ++conversationPaneLoadToken;
     conversationPaneLoading = true;
     const finishConversationPaneLoad = () => {
@@ -16813,6 +16826,166 @@
 
   let _streamingBubbleLingerTimer = null;
 
+  // ── Per-Task subagent tabs ─────────────────────────────────────────────
+  // When a Task tool spawns a subagent, its assistant_block events arrive
+  // through the spawn stream with `parent_tool_use_id` set. We isolate each
+  // Task's stream in its own tab inside the conv pane so the user can read
+  // master and subagent work separately. Auto-close: 30s after the
+  // subagent's last block, if the user has switched away from that tab,
+  // the tab closes (events stay in the DOM until next conv switch).
+  //
+  // State is per-pane on the conv-view DOM element (._tabState). Reset on
+  // conv switch happens naturally because $view.innerHTML is rewritten.
+  const SUBAGENT_TAB_AUTOCLOSE_MS = 30 * 1000;
+  function _convPaneTabState(view) {
+    if (!view) return null;
+    if (!view._tabState) {
+      view._tabState = {
+        active: 'master',
+        tasks: {},  // taskId -> { label, lastSeen, closeTimer, completed }
+        taskInfo: {},  // tool_use id -> {description, name} from Task tool_use seed
+      };
+    }
+    return view._tabState;
+  }
+  function _convPaneTabStrip(view) {
+    if (!view) return null;
+    const pane = view.closest('.conv-pane');
+    if (!pane) return null;
+    let strip = pane.querySelector('.conv-tab-strip');
+    if (!strip) {
+      strip = document.createElement('div');
+      strip.className = 'conv-tab-strip';
+      strip.hidden = true;
+      view.parentNode.insertBefore(strip, view);
+      strip.addEventListener('click', (ev) => {
+        const closeBtn = ev.target && ev.target.closest && ev.target.closest('.conv-tab-close');
+        if (closeBtn) {
+          ev.stopPropagation();
+          const taskId = closeBtn.dataset.taskId;
+          if (taskId) _convPaneCloseSubagentTab(view, taskId);
+          return;
+        }
+        const tab = ev.target && ev.target.closest && ev.target.closest('.conv-tab');
+        if (tab && tab.dataset.tab) _convPaneActivateTab(view, tab.dataset.tab);
+      });
+    }
+    return strip;
+  }
+  function _convPaneRenderTabStrip(view) {
+    const strip = _convPaneTabStrip(view);
+    const state = _convPaneTabState(view);
+    if (!strip || !state) return;
+    const taskIds = Object.keys(state.tasks);
+    if (!taskIds.length) {
+      strip.hidden = true;
+      strip.innerHTML = '';
+      return;
+    }
+    let html = '<button class="conv-tab' + (state.active === 'master' ? ' is-active' : '') + '" data-tab="master">Master</button>';
+    for (const tid of taskIds) {
+      const t = state.tasks[tid];
+      const tabKey = 'task-' + tid;
+      const activeCls = state.active === tabKey ? ' is-active' : '';
+      const completedCls = t.completed ? ' is-completed' : '';
+      html += '<button class="conv-tab' + activeCls + completedCls + '" data-tab="' + escapeAttr(tabKey) + '" title="' + escapeAttr(t.label || 'Task') + '">'
+        + '<span class="conv-tab-label">' + escapeHtml(t.label || 'Task') + '</span>'
+        + '<span class="conv-tab-close" data-task-id="' + escapeAttr(tid) + '" title="Close tab">&times;</span>'
+        + '</button>';
+    }
+    strip.innerHTML = html;
+    strip.hidden = false;
+  }
+  function _convPaneApplyActiveTab(view) {
+    const state = _convPaneTabState(view);
+    if (!state) return;
+    view.dataset.activeTab = state.active;
+    for (const el of view.children) {
+      const t = el.dataset && el.dataset.tab;
+      if (!t) continue;  // untagged elements (sticky header, banners) always visible
+      el.style.display = (t === state.active) ? '' : 'none';
+    }
+  }
+  function _convPaneActivateTab(view, tabKey) {
+    const state = _convPaneTabState(view);
+    if (!state) return;
+    if (state.active === tabKey) return;
+    state.active = tabKey;
+    _convPaneRenderTabStrip(view);
+    _convPaneApplyActiveTab(view);
+    // Switching AWAY from a completed task arms its auto-close.
+    for (const tid of Object.keys(state.tasks)) {
+      const t = state.tasks[tid];
+      if (!t.completed) continue;
+      const tabKeyT = 'task-' + tid;
+      if (state.active !== tabKeyT && !t.closeTimer) {
+        t.closeTimer = setTimeout(() => _convPaneCloseSubagentTab(view, tid), 5 * 1000);
+      }
+    }
+  }
+  function _convPaneEnsureSubagentTab(view, parentToolUseId) {
+    const state = _convPaneTabState(view);
+    if (!state) return null;
+    if (!state.tasks[parentToolUseId]) {
+      const seed = state.taskInfo[parentToolUseId] || {};
+      const label = (seed.description || 'Task ' + String(parentToolUseId).slice(-6)).slice(0, 28);
+      state.tasks[parentToolUseId] = {
+        label,
+        lastSeen: Date.now(),
+        closeTimer: null,
+        completed: false,
+      };
+      _convPaneRenderTabStrip(view);
+    } else {
+      state.tasks[parentToolUseId].lastSeen = Date.now();
+      if (state.tasks[parentToolUseId].closeTimer) {
+        clearTimeout(state.tasks[parentToolUseId].closeTimer);
+        state.tasks[parentToolUseId].closeTimer = null;
+      }
+    }
+    return state.tasks[parentToolUseId];
+  }
+  function _convPaneCloseSubagentTab(view, parentToolUseId) {
+    const state = _convPaneTabState(view);
+    if (!state || !state.tasks[parentToolUseId]) return;
+    if (state.tasks[parentToolUseId].closeTimer) {
+      clearTimeout(state.tasks[parentToolUseId].closeTimer);
+    }
+    delete state.tasks[parentToolUseId];
+    // Hide the bubbles for that task — they stay in the DOM but aren't rendered.
+    const escId = (window.CSS && CSS.escape) ? CSS.escape('task-' + parentToolUseId) : 'task-' + parentToolUseId;
+    view.querySelectorAll('[data-tab="' + escId + '"]').forEach(n => { n.style.display = 'none'; });
+    if (state.active === 'task-' + parentToolUseId) {
+      state.active = 'master';
+    }
+    _convPaneRenderTabStrip(view);
+    _convPaneApplyActiveTab(view);
+  }
+  function _convPaneMarkTaskCompleted(view, parentToolUseId) {
+    const state = _convPaneTabState(view);
+    if (!state || !state.tasks[parentToolUseId]) return;
+    state.tasks[parentToolUseId].completed = true;
+    // If user is not viewing this tab, arm auto-close immediately.
+    const tabKey = 'task-' + parentToolUseId;
+    if (state.active !== tabKey && !state.tasks[parentToolUseId].closeTimer) {
+      state.tasks[parentToolUseId].closeTimer = setTimeout(
+        () => _convPaneCloseSubagentTab(view, parentToolUseId),
+        SUBAGENT_TAB_AUTOCLOSE_MS,
+      );
+    }
+    _convPaneRenderTabStrip(view);
+  }
+  function _convPaneSeedTaskInfo(view, toolUseId, info) {
+    const state = _convPaneTabState(view);
+    if (!state) return;
+    state.taskInfo[toolUseId] = info || {};
+    // If the tab already exists with a placeholder label, upgrade it.
+    if (state.tasks[toolUseId] && info && info.description) {
+      state.tasks[toolUseId].label = info.description.slice(0, 28);
+      _convPaneRenderTabStrip(view);
+    }
+  }
+
   function clearStreamingBubble(opts) {
     if (_streamingBubbleLingerTimer) {
       clearTimeout(_streamingBubbleLingerTimer);
@@ -16887,7 +17060,13 @@
       node = document.createElement('div');
       node.className = 'stream-bubble' + (isSubagent ? ' stream-bubble-subagent' : '');
       if (msgId) node.dataset.msgId = msgId;
-      if (isSubagent) node.dataset.parentToolUseId = opts.parentToolUseId;
+      if (isSubagent) {
+        node.dataset.parentToolUseId = opts.parentToolUseId;
+        // Route this bubble into its subagent tab. Create the tab if
+        // missing; per-tab visibility is enforced by _convPaneApplyActiveTab.
+        node.dataset.tab = 'task-' + opts.parentToolUseId;
+        _convPaneEnsureSubagentTab($view, opts.parentToolUseId);
+      }
       const label = isSubagent ? 'subagent' : 'streaming';
       node.innerHTML =
         '<div class="stream-bubble-header">'
@@ -16896,6 +17075,7 @@
         + '</div>'
         + '<div class="stream-bubble-blocks"></div>';
       $view.appendChild(node);
+      _convPaneApplyActiveTab($view);
     } else if (msgId && !node.dataset.msgId) {
       // First spawn event sometimes lacks a message_id; backfill so the
       // JSONL hand-off can find this bubble when it arrives.
@@ -16906,6 +17086,11 @@
     // Re-anchor to the bottom in case JSONL events were appended after us.
     if (node.parentNode === $view && node !== $view.lastElementChild) {
       $view.appendChild(node);
+    }
+    // Subagent activity bumps the lastSeen timestamp so a flurry of blocks
+    // doesn't trip the auto-close watchdog mid-stream.
+    if (isSubagent) {
+      _convPaneEnsureSubagentTab($view, opts.parentToolUseId);
     }
     return node.querySelector('.stream-bubble-blocks');
   }
@@ -16959,6 +17144,15 @@
             + escapeHtml(toolName) + '</span>'
             + '<span style="opacity:0.8;">' + escapeHtml(summary) + '</span>';
           slot.appendChild(div);
+          // If this is a Task tool_use from the master (no parent_tool_use_id
+          // on the event), seed the subagent tab label so the tab gets a
+          // meaningful name when its first block arrives.
+          if (b.name === 'Task' && b.id && !ev.parent_tool_use_id && $view) {
+            _convPaneSeedTaskInfo($view, b.id, {
+              description: b.summary || 'Task',
+              name: b.name,
+            });
+          }
         } else if (b.type === 'thinking') {
           // Don't bother rendering empty thinking blocks — they appear
           // as the first block of every assistant turn and are noisy.
@@ -20052,6 +20246,17 @@
         let hasNonTool = false;
         for (const b of ev.blocks) {
           if (b.kind === 'tool_use') {
+            // Seed the subagent-tab label when a Task tool_use lands in
+            // the parent JSONL — gives the tab a real name (description
+            // or subagent_type) instead of the fallback "Task <id>".
+            if (b.name === 'Task' && b.id && $view) {
+              const _info = (b.detail && (b.detail.description || b.detail.prompt))
+                || (typeof b.detail === 'string' ? b.detail : '');
+              _convPaneSeedTaskInfo($view, b.id, {
+                description: typeof _info === 'string' ? _info : (_info && _info.description) || '',
+                name: 'Task',
+              });
+            }
             const baseName = toolDisplayName(b.name);
             const displayName = baseName === 'AskUserQuestion' ? 'Question' : baseName;
             const source = toolBlockSource(b);
@@ -20157,6 +20362,15 @@
           + tsSpan(ev.ts)
           + '<div class="stats">' + statsHtml + '</div>';
       } else if (ev.type === 'tool_result') {
+        // If this result closes out a Task delegate (its tool_use_id matches
+        // an active subagent tab), mark the tab completed so the auto-close
+        // watchdog can fire when the user navigates away.
+        if (ev.tool_use_id && $view) {
+          const _state = $view._tabState;
+          if (_state && _state.tasks && _state.tasks[ev.tool_use_id]) {
+            _convPaneMarkTaskCompleted($view, ev.tool_use_id);
+          }
+        }
         // Inline the result text under the most recent tool_call in the
         // current group. If we can't find one, drop the marker silently —
         // empty .event.tool_result rows are hidden by CSS anyway.

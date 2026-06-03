@@ -2335,6 +2335,63 @@
   .stream-bubble-subagent .live-badge-dot {
     background: var(--purple, #a57fee);
   }
+  /* Per-Task subagent tab strip. Lives above .conversations-view inside
+   * each .conv-pane. Only shown when at least one subagent tab exists.
+   * Master tab is always present once the strip appears. */
+  .conv-tab-strip {
+    display: flex; flex-direction: row; flex-wrap: wrap;
+    gap: 4px; padding: 6px 12px 0; margin: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary, transparent);
+    font-size: 12px;
+  }
+  .conv-tab-strip[hidden] { display: none; }
+  .conv-tab {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    background: rgba(255,255,255,0.03);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1.4;
+    max-width: 200px;
+    user-select: none;
+  }
+  .conv-tab:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+  .conv-tab.is-active {
+    color: var(--text);
+    background: var(--bg, #0d1117);
+    border-color: var(--accent, #58a6ff);
+    border-bottom-color: var(--bg, #0d1117);
+    margin-bottom: -1px;
+  }
+  .conv-tab[data-tab^="task-"].is-active {
+    border-color: var(--purple, #a57fee);
+    color: var(--purple, #a57fee);
+  }
+  .conv-tab.is-completed .conv-tab-label::after {
+    content: ' ✓';
+    color: var(--green, #3fb950);
+    opacity: 0.8;
+  }
+  .conv-tab-label {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 160px;
+  }
+  .conv-tab-close {
+    display: inline-block;
+    margin-left: 2px;
+    padding: 0 4px;
+    opacity: 0.4;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .conv-tab[data-tab="master"] .conv-tab-close { display: none; }
+  .conv-tab-close:hover { opacity: 1; background: rgba(255,255,255,0.1); }
   /* Live dot — sits to the left of the per-row timestamp on .conv-item
    * rows whose session is currently live (sidecar marker exists). Distinct
    * from the live-tool pill in the title row; this just signals "this row
