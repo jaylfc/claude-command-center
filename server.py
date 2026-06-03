@@ -5624,6 +5624,9 @@ def _extract_tail_meta(path):
         "pending_file": None,     # file path from pending tool
         "last_assistant_text": None,  # last text block from an assistant message (the "outcome")
         "model": None,
+        "latest_input_tokens": 0,
+        "live_context_tokens": 0,
+        "live_context_limit": 0,
         # Issue number detected from Bash/commit content — covers sessions where the
         # issue wasn't in the spawn prompt (e.g. Claude ran `gh issue create` mid-session).
         "tail_issue_number": None,
@@ -5755,6 +5758,13 @@ def _extract_tail_meta(path):
                     msg = _safe_parse_message(ev.get("message", {}))
                     if msg.get("model"):
                         meta["model"] = msg.get("model")
+                    u = msg.get("usage") or {}
+                    if isinstance(u, dict):
+                        ti = u.get("input_tokens") or 0
+                        tcw = u.get("cache_creation_input_tokens") or 0
+                        tcr = u.get("cache_read_input_tokens") or 0
+                        if ti or tcw or tcr:
+                            meta["latest_input_tokens"] = ti + tcw + tcr
                     content = msg.get("content", [])
                     if not isinstance(content, list):
                         content = []
@@ -5843,6 +5853,17 @@ def _extract_tail_meta(path):
                     if last_tool_name:
                         meta["pending_tool"] = last_tool_name
                         meta["pending_file"] = last_tool_file
+                elif t == "system":
+                    subtype = ev.get("subtype") or ""
+                    if subtype == "compact_boundary":
+                        meta_cb = ev.get("compactMetadata") or {}
+                        post_tokens = _codex_int(meta_cb.get("postTokens"))
+                        meta["latest_input_tokens"] = post_tokens
+                    elif subtype == "local_command":
+                        parsed_context = _local_command_context_usage(ev)
+                        if parsed_context:
+                            meta["live_context_tokens"] = parsed_context["tokens"]
+                            meta["live_context_limit"] = parsed_context["limit"]
                 # Tool results land as a user-role event; scan for PR URLs
                 # when we're matching a `gh pr create` we already saw, and
                 # flip any Task tool_result we're tracking from in-flight
@@ -10410,6 +10431,13 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
         except Exception:
             pass
 
+        model = tail_meta.get("model") or ""
+        latest_tok = tail_meta.get("latest_input_tokens") or 0
+        if "[1m]" in model.lower() or latest_tok > 200_000:
+            limit = 1_000_000
+        else:
+            limit = 200_000
+
         conversations.append({
             "id": conv_id,
             "session_id": sid,
@@ -10420,6 +10448,10 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             "first_message": (first_message or "")[:200],
             "display_name": display_name,
             "ai_title": (tail_meta.get("ai_title") or None),
+            "latest_input_tokens": latest_tok,
+            "live_context_tokens": tail_meta.get("live_context_tokens") or 0,
+            "live_context_limit": tail_meta.get("live_context_limit") or 0,
+            "context_limit": limit,
             "spawn_named": spawn_named,
             "name_overridden": name_overridden,
             "last_prompt": (tail_meta.get("last_prompt") or "")[:200],

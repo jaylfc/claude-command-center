@@ -12198,6 +12198,16 @@
         ? '<div class="conv-history-snippet">' + c._historySnippet + '</div>'
         : '';
 
+      let pctBadgeHtml = '';
+      const hasClaudeOverride = (c.engine || 'claude') === 'claude';
+      const override = hasClaudeOverride ? _getCtxLimitOverride() : 0;
+      const limit = override || c.live_context_limit || c.context_limit || 200000;
+      const displayTokens = c.latest_input_tokens || c.live_context_tokens || 0;
+      if (displayTokens > 0) {
+        const pct = Math.round((displayTokens / limit) * 100);
+        pctBadgeHtml = '<span class="conv-pct-badge" style="font-size: 10px; opacity: 0.75; font-weight: 600; margin-right: 4px; padding: 1px 4px; background: var(--surface-2); border-radius: 3px; font-family: monospace;">' + pct + '%</span>';
+      }
+
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
       return '<div class="conv-item' + active + groupedRowClass + (isCodexRow ? ' is-codex' : '') + (isGeminiRow ? ' is-gemini' : '') + (isCursorRow ? ' is-cursor' : '') + (isAntigravityRow ? ' is-antigravity' : '') + (c.pinned ? ' is-pinned' : '') + (c.pinned_repo ? ' is-repo-pinned' : '') + (c._historyMatch ? ' is-history-match' : '') + (_historyIsSemantic ? ' is-semantic-match' : '') + ((c.backlog_type === 'github' || isGithubPrRow) ? ' is-github-issue' : '') + '" draggable="true" data-id="' + c.id + '" data-session-id="' + escapeHtml(c.session_id || c.id) + '" data-repo-path="' + rowRepoAttr + '">'
@@ -12207,6 +12217,7 @@
             + sessionIconHtml
             + leftFolderChipHtml
             + titleFolderChipHtml
+            + pctBadgeHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
             + historyBadgeHtml
             + repoBadgeHtml
