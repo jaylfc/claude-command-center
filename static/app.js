@@ -5729,7 +5729,24 @@
       if (CONV_POPOUT_MODE) {
         maybeSelectPopoutConversation();
       } else {
-        restoreLastConversation();
+        // If the most recent thing the user was on was a group-chat
+        // reader, re-open IT — otherwise fall through to the regular
+        // conversation restore. Decided by the unified ccc-last-view
+        // marker stamped on every reader open and every conv select.
+        let _reopenedGc = false;
+        try {
+          const raw = localStorage.getItem('ccc-last-view');
+          const view = raw ? JSON.parse(raw) : null;
+          if (view && view.type === 'gc' && (view.path || view.id)
+              && typeof openGroupChatReader === 'function') {
+            openGroupChatReader(view.path || '', view.topic || '', view.mode || 'topic',
+              !!view.includeHuman, view.id || '');
+            _reopenedGc = true;
+          }
+        } catch (_) {}
+        if (!_reopenedGc) {
+          restoreLastConversation();
+        }
       }
     } catch (err) {
       _convListRenderSig = null;
@@ -8985,27 +9002,31 @@
       html += '<div class="gc-chat-preamble">' + renderMarkdown(preamble) + '</div>';
     }
 
-    // Side assignment — chat-style alignment so consecutive messages
-    // from different speakers visibly stagger. "Human" always lands
-    // on the right (iMessage convention for "me"). Agents get a
-    // stable side index 0..2 (left / center / right-of-agent-band)
-    // based on first-seen order so each agent stays on its own side
-    // throughout the chat.
+    // Side assignment — chat-style alignment, cards flush to the
+    // transcript edges. Human always lands on the right (iMessage
+    // convention for "me"). Agents alternate left / right by
+    // first-seen order — same column for the lifetime of the chat —
+    // so the visual rhythm is two clear edge-anchored stacks. Per-
+    // agent color (via data-speaker-color) keeps multiple agents on
+    // the same side distinguishable.
     const _speakerToSide = new Map();
+    const _speakerToColor = new Map();
     let _nextAgentSlot = 0;
     const _sideForSpeaker = (speakerLabel) => {
       const isHuman = /\bHuman\b/i.test(speakerLabel);
-      if (isHuman) return 'right';
+      if (isHuman) {
+        _speakerToColor.set(speakerLabel, 'green');
+        return 'right';
+      }
       if (_speakerToSide.has(speakerLabel)) return _speakerToSide.get(speakerLabel);
-      // Cycle agents through left → center → right-agent → left → …
-      // Three slots reads as enough variety without losing the
-      // "two columns of conversation" feel.
-      const slots = ['left', 'center', 'right-agent'];
-      const side = slots[_nextAgentSlot % slots.length];
+      const side = (_nextAgentSlot % 2 === 0) ? 'left' : 'right-agent';
+      const colorPalette = ['accent', 'purple', 'orange', 'cyan', 'red', 'yellow'];
+      _speakerToColor.set(speakerLabel, colorPalette[_nextAgentSlot % colorPalette.length]);
       _nextAgentSlot += 1;
       _speakerToSide.set(speakerLabel, side);
       return side;
     };
+    const _colorForSpeaker = (speakerLabel) => _speakerToColor.get(speakerLabel) || 'accent';
 
     for (let i = 0; i < matches.length; i++) {
       const match = matches[i];
@@ -9028,8 +9049,9 @@
       // System messages stay full-width so the lifecycle log doesn't
       // get squeezed into one side; participant messages stagger.
       const side = isSystem ? 'full' : _sideForSpeaker(speaker);
+      const color = isSystem ? 'muted' : _colorForSpeaker(speaker);
 
-      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + '" data-speaker-side="' + side + '">'
+      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + '" data-speaker-side="' + side + '" data-speaker-color="' + color + '">'
         + '<div class="gc-message-meta">'
           + '<span class="gc-message-speaker">' + escapeHtml(speaker) + '</span>'
           + (when ? '<span class="gc-message-time">' + gcTimeChip(when) + '</span>' : '')
@@ -9064,6 +9086,23 @@
     _gcLastMtime = null;
     _gcPollFailCount = 0;
     _gcLastNudgeTime = 0;
+    // Persist enough state to restore this exact reader on the next
+    // page load — so a hard refresh while reading a group chat lands
+    // back in the same chat instead of falling back to the last
+    // session row. boot uses `ccc-last-view` to decide which one to
+    // restore (gc OR conv).
+    try {
+      const payload = {
+        type: 'gc',
+        path: chatPath || '',
+        id: chatId || '',
+        topic: topic || '',
+        mode: mode || 'topic',
+        includeHuman: !!includeHuman,
+        at: Date.now(),
+      };
+      localStorage.setItem('ccc-last-view', JSON.stringify(payload));
+    } catch (_) {}
     currentConversation = null;
     if (typeof ffcUpdateSidebar === 'function') ffcUpdateSidebar(null);
     if (typeof syncActivePaneChrome === 'function') syncActivePaneChrome(null);
@@ -15522,6 +15561,13 @@
       if (id && !CONV_POPOUT_MODE) {
         localStorage.setItem(getLastConvKey(), id);
         localStorage.setItem('ccc-last-conv', id);
+        // Also stamp the unified last-view marker so a hard refresh
+        // picks whichever was most recent — group chat or conversation.
+        localStorage.setItem('ccc-last-view', JSON.stringify({
+          type: 'conv',
+          id,
+          at: Date.now(),
+        }));
       }
     } catch (_) {}
     pane.restored = true;
