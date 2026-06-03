@@ -3222,7 +3222,7 @@ def find_all_conversations(
     return out
 
 
-_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 2
+_ARCHIVE_RESPONSE_CACHE_SCHEMA_VERSION = 3
 _ARCHIVE_RESPONSE_CACHE_FILE = COMMAND_CENTER_STATE_DIR / "archive-conversations-cache.json"
 # The all-repos archive payload can be several MB on machines with years of
 # agent history. Refreshing it every 30 seconds keeps the Python server in a
@@ -5375,8 +5375,8 @@ PENDING_INPUTS_FILE = COMMAND_CENTER_STATE_DIR / "pending-inputs.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 10
-_CONV_META_COMPAT_SCHEMA_VERSIONS = {10}
+_CONV_META_SCHEMA_VERSION = 11
+_CONV_META_COMPAT_SCHEMA_VERSIONS = {11}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -5627,6 +5627,7 @@ def _extract_tail_meta(path):
         "latest_input_tokens": 0,
         "live_context_tokens": 0,
         "live_context_limit": 0,
+        "live_context_percent": 0,
         # Issue number detected from Bash/commit content — covers sessions where the
         # issue wasn't in the spawn prompt (e.g. Claude ran `gh issue create` mid-session).
         "tail_issue_number": None,
@@ -5865,6 +5866,7 @@ def _extract_tail_meta(path):
                         if parsed_context:
                             meta["live_context_tokens"] = parsed_context["tokens"]
                             meta["live_context_limit"] = parsed_context["limit"]
+                            meta["live_context_percent"] = parsed_context["percent"]
                 # Tool results land as a user-role event; scan for PR URLs
                 # when we're matching a `gh pr create` we already saw, and
                 # flip any Task tool_result we're tracking from in-flight
@@ -10452,6 +10454,7 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             "latest_input_tokens": latest_tok,
             "live_context_tokens": tail_meta.get("live_context_tokens") or 0,
             "live_context_limit": tail_meta.get("live_context_limit") or 0,
+            "live_context_percent": tail_meta.get("live_context_percent") or 0,
             "context_limit": limit,
             "spawn_named": spawn_named,
             "name_overridden": name_overridden,
@@ -20821,12 +20824,25 @@ def _resume_session_antigravity_app(session_id, text):
 
 
 def resume_session_antigravity(session_id, text):
-    """Resume an Antigravity conversation through AGY CLI or the running app."""
+    """Resume an Antigravity conversation through AGY CLI or the running app.
+
+    Routing:
+      1. If the AGY CLI has a `.pb` for this sid → CLI print-mode resume
+         (the original interactive-CLI session being continued headlessly).
+      2. Else if the AGY app has a conversation file for this sid → app
+         RPC resume (the user is in Antigravity.app and we inject via
+         the language-server RPC).
+      3. Else → CLI print-mode anyway with --conversation <sid> -p <text>.
+         AGY rehydrates from the brain transcript on disk; previously
+         orphaned transcripts (no .pb, no app file) were dead — now they
+         get the new turn appended via headless print.
+    """
     text = _strip_ccc_session_state_instruction(text)
     if not session_id or not text:
         return {"ok": False, "error": "missing session_id or text"}
     cli_conversation = _antigravity_cli_conversation_path(session_id)
-    if not cli_conversation or not cli_conversation.is_file():
+    has_cli_pb = bool(cli_conversation and cli_conversation.is_file())
+    if not has_cli_pb and _antigravity_app_conversation_path(session_id):
         return _resume_session_antigravity_app(session_id, text)
     resolved = _resolve_antigravity_bin()
     if not resolved["available"]:

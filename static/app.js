@@ -2680,7 +2680,7 @@
         $convTtyLabel.textContent = liveStatus.live ? (liveStatus.tty || 'antigravity') : 'antigravity';
         $convInput.placeholder = antigravityCanSendNow
           ? antigravityInputPlaceholder(currentSession)
-          : 'Type a follow-up — Antigravity will open with this prompt…';
+          : 'Type a follow-up — Antigravity will resume headless…';
       } else if (live) {
         $convTtyLabel.textContent = liveStatus.tty;
         $convInput.placeholder = 'Send to terminal...';
@@ -2706,7 +2706,7 @@
         $convSendBtn.title = blockSend
           ? 'Open Antigravity to continue this app session'
           : (isAntigravity && !antigravityCanSendNow
-              ? 'Send — opens Antigravity with this prompt'
+              ? 'Send — runs AGY headless on this session'
               : 'Send');
       }
       if ($convSteerBtn) {
@@ -12198,15 +12198,12 @@
         ? '<div class="conv-history-snippet">' + c._historySnippet + '</div>'
         : '';
 
-      let pctBadgeHtml = '';
       const hasClaudeOverride = (c.engine || 'claude') === 'claude';
       const override = hasClaudeOverride ? _getCtxLimitOverride() : 0;
       const limit = override || c.live_context_limit || c.context_limit || 200000;
       const displayTokens = c.latest_input_tokens || c.live_context_tokens || 0;
-      if (displayTokens > 0) {
-        const pct = Math.round((displayTokens / limit) * 100);
-        pctBadgeHtml = '<span class="conv-pct-badge" style="font-size: 10px; opacity: 0.75; font-weight: 600; margin-right: 4px; padding: 1px 4px; background: var(--surface-2); border-radius: 3px; font-family: monospace;">' + pct + '%</span>';
-      }
+      const pct = Math.round((displayTokens / limit) * 100);
+      let pctBadgeHtml = '<span class="conv-pct-badge" style="font-size: 10px; opacity: 0.75; font-weight: 600; margin-right: 4px; padding: 1px 4px; background: var(--surface-2); border-radius: 3px; font-family: monospace;" title="' + displayTokens.toLocaleString() + ' / ' + limit.toLocaleString() + ' tokens">' + pct + '%</span>';
 
       const groupedRowClass = opts.suppressFolderChip ? ' is-grouped-row' : '';
       const rowRepoAttr = escapeAttr(rowRepoPath(c) || '');
@@ -24705,7 +24702,7 @@
       const agyCanSendNow = !isAGY || antigravityCanSend(currentSession);
       $cpSendBtn.disabled = !hasText || !currentSession.id;
       $cpSendBtn.title = isAGY && !agyCanSendNow
-        ? 'Send — opens Antigravity with this prompt'
+        ? 'Send — runs AGY headless on this session'
         : 'Send';
     };
     $cpSendBtn.addEventListener('click', sendToSplitTerminal);
