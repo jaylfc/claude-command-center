@@ -1320,9 +1320,42 @@ def extract_session_slash_commands(session_id):
     return result
 
 
+# Per-session engine cache. A session's engine is immutable, but the detection
+# fallback is expensive — _is_gemini_session JSON-parses every Gemini chat on
+# disk, so for a Claude session (no match) it scans the whole Gemini store.
+# This ran per-session on every live-activity poll AND per-participant on every
+# group-chat open. Memoise: a non-"claude" result is definitive (an engine
+# store exists) and cached forever; "claude" may be premature for a just-spawned
+# non-Claude session whose store appears a beat later, so it's cached with a
+# short TTL and re-checked.
+_ENGINE_DETECT_CACHE = {}            # sid -> (engine, expiry_ts or None)
+_ENGINE_DETECT_TTL = 30.0
+_engine_detect_lock = threading.Lock()
+
+
 def _detect_session_engine(session_id):
     """Best-effort: non-Claude engines are detected by their per-engine session
-    stores; everything else is treated as `claude`."""
+    stores; everything else is treated as `claude`. Memoised — see
+    _ENGINE_DETECT_CACHE."""
+    if not session_id:
+        return "claude"
+    now = time.time()
+    with _engine_detect_lock:
+        hit = _ENGINE_DETECT_CACHE.get(session_id)
+        if hit is not None:
+            engine, expiry = hit
+            if expiry is None or now < expiry:
+                return engine
+    engine = _detect_session_engine_uncached(session_id)
+    with _engine_detect_lock:
+        _ENGINE_DETECT_CACHE[session_id] = (
+            engine,
+            None if engine != "claude" else now + _ENGINE_DETECT_TTL,
+        )
+    return engine
+
+
+def _detect_session_engine_uncached(session_id):
     if not session_id:
         return "claude"
     for s in _spawned_sessions:
