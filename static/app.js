@@ -24312,12 +24312,33 @@
         if (immediateBlobUrl) try { URL.revokeObjectURL(immediateBlobUrl); } catch (_) {}
       }
     });
-    // Clear thumbnails when the input itself is cleared (post-send).
-    // The send paths already do `el.value = ''` so an 'input' event
-    // fires; observe that and clean up if value went empty.
+    // Clear thumbnails when the input is cleared. Send paths call
+    // `el.value = ''` via direct assignment, which does NOT fire an
+    // input event — so the listener alone wouldn't catch the post-send
+    // clear and the thumbnails would linger. Hook the value setter so
+    // EVERY assignment (whether from user input, programmatic clear,
+    // or autoresize callsite) triggers thumb cleanup when the new
+    // value is empty.
     el.addEventListener('input', () => {
       if (!el.value || !el.value.trim()) _clearPastedImageThumbs(el);
     });
+    try {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set && desc.get && !el._imgPasteValueHook) {
+        el._imgPasteValueHook = true;
+        const origGet = desc.get;
+        const origSet = desc.set;
+        Object.defineProperty(el, 'value', {
+          configurable: true,
+          get() { return origGet.call(this); },
+          set(v) {
+            origSet.call(this, v);
+            if (!v || !String(v).trim()) _clearPastedImageThumbs(el);
+          },
+        });
+      }
+    } catch (_) { /* defensive — keep paste working even if the hook fails */ }
   }
   [document.getElementById('nsmBody'),
    document.getElementById('kptNewSession'), document.getElementById('cpInput'),
