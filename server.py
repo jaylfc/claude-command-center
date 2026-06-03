@@ -14329,12 +14329,22 @@ def _codex_cwd_matches_repo(cwd, repo_path, git_top_cache):
         return False
 
 
+# Per-file resume state for incremental codex tail parsing: path -> {offset,
+# pos, pending_calls, meta, meta_version}. In-memory only (NOT persisted with
+# _conv_meta_cache) — after a restart the first poll does one full parse and
+# rebuilds it. Guarded by _conv_meta_cache_lock.
+_codex_tail_resume = {}
+
+
 def _extract_codex_tail_meta(path):
     try:
-        mtime = path.stat().st_mtime
+        st = path.stat()
     except OSError:
         return {}
-    cached = _conv_meta_cache.get(str(path))
+    mtime = st.st_mtime
+    size = st.st_size
+    spath = str(path)
+    cached = _conv_meta_cache.get(spath)
     if (
         cached
         and cached.get("mtime") == mtime
@@ -14343,40 +14353,70 @@ def _extract_codex_tail_meta(path):
     ):
         return cached
 
-    meta = {
-        "engine": "codex",
-        "meta_version": _CODEX_META_VERSION,
-        "mtime": mtime,
-        "first_message": None,
-        "last_meaningful_ts": 0,
-        "last_prompt": None,
-        "last_assistant_text": None,
-        "last_event_type": None,
-        "pending_tool": None,
-        "pending_file": None,
-        "pending_tool_ts": 0,
-        "has_edit": False,
-        "has_commit": False,
-        "has_push": False,
-        "last_edit_pos": 0,
-        "last_commit_pos": 0,
-        "last_push_pos": 0,
-        "tail_pr_number": None,
-        "tail_pr_url": None,
-        "tail_branch": None,
-        "tail_worktree_path": None,
-        "has_external_cd": False,
-        "cwd": None,
-        "model": None,
-    }
+    # Incremental resume. Rollout JSONL is append-only, so rather than
+    # re-parsing the whole (often multi-MB) file on every poll — the mtime
+    # cache above *always* misses for a live, actively-appending session, which
+    # is exactly the session live-activity polls — carry forward the prior
+    # parse state and read only the bytes appended since the last call.
+    with _conv_meta_cache_lock:
+        resume = _codex_tail_resume.get(spath)
+    if (
+        resume
+        and resume.get("meta_version") == _CODEX_META_VERSION
+        and size >= resume.get("offset", 0)
+    ):
+        meta = resume["meta"]
+        pending_calls = resume["pending_calls"]
+        pos = resume["pos"]
+        start_offset = resume["offset"]
+    else:
+        meta = {
+            "engine": "codex",
+            "meta_version": _CODEX_META_VERSION,
+            "mtime": mtime,
+            "first_message": None,
+            "last_meaningful_ts": 0,
+            "last_prompt": None,
+            "last_assistant_text": None,
+            "last_event_type": None,
+            "pending_tool": None,
+            "pending_file": None,
+            "pending_tool_ts": 0,
+            "has_edit": False,
+            "has_commit": False,
+            "has_push": False,
+            "last_edit_pos": 0,
+            "last_commit_pos": 0,
+            "last_push_pos": 0,
+            "tail_pr_number": None,
+            "tail_pr_url": None,
+            "tail_branch": None,
+            "tail_worktree_path": None,
+            "has_external_cd": False,
+            "cwd": None,
+            "model": None,
+        }
+        pending_calls = {}
+        pos = 0
+        start_offset = 0
     pr_url_re = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/pull/(\d{1,7})")
-    pending_calls = {}
-    pos = 0
+    # Binary + readline() so f.tell()/offset accounting stays exact (text-mode
+    # iteration buffers ahead and corrupts the resume offset).
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
+        with open(path, "rb") as f:
+            if start_offset:
+                f.seek(start_offset)
+            while True:
+                raw = f.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    # Partial trailing line — writer is mid-append. Leave the
+                    # offset before it so the next poll re-reads it complete.
+                    break
+                start_offset += len(raw)
                 pos += 1
-                line = line.strip()
+                line = raw.decode("utf-8", "replace").strip()
                 if not line:
                     continue
                 try:
@@ -14485,13 +14525,22 @@ def _extract_codex_tail_meta(path):
                     meta["last_event_type"] = "assistant"
                     if ts_epoch:
                         meta["last_meaningful_ts"] = ts_epoch
+            end_offset = start_offset
     except OSError:
         return {}
 
+    meta["mtime"] = mtime
     if not meta.get("last_meaningful_ts"):
         meta["last_meaningful_ts"] = mtime
     with _conv_meta_cache_lock:
-        _conv_meta_cache[str(path)] = meta
+        _conv_meta_cache[spath] = meta
+        _codex_tail_resume[spath] = {
+            "meta_version": _CODEX_META_VERSION,
+            "offset": end_offset,
+            "pos": pos,
+            "pending_calls": pending_calls,
+            "meta": meta,
+        }
         global _conv_meta_cache_dirty
         _conv_meta_cache_dirty = True
     return meta
