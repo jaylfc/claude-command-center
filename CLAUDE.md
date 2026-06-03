@@ -22,6 +22,62 @@ Subject line under ~70 chars. Body (wrapped at ~80) explains the why, not the wh
 
 Co-author tag from the trailer is fine but not mandatory.
 
+## Git commits (shared `main`, parallel sessions)
+
+Multiple sessions share one checkout on `main`. **Commit small and often** so
+pushing (or **Push all** in the CCC UI) does not require hunting other sessions.
+A commit is **only** git in that turn — no extra ceremony bundled in.
+
+### Tiers — pick one per commit
+
+| Tier | When | Do | Do not |
+|------|------|-----|--------|
+| **A — lean / WIP** | Slice done, still iterating, or before idle | `git commit --only <paths> -m "type(scope): subject"` | `changelog.d/` in same turn; edit `CHANGELOG.md`; version bump; push |
+| **B — slice done** | User-visible fix/feature complete | Same as A; add a `changelog.d/` snippet (same or next commit) | Hand-edit `CHANGELOG.md`; release scripts |
+| **C — release** | Cutting `vX.Y.Z` | `./scripts/cut-release.sh` (rollup, version bump, tag) | Ad-hoc version bumps on random commits |
+
+Default to **Tier A** unless the user asked for changelog or release work.
+
+### Lean commit (Tier A)
+
+Use the **`/lean-commit`** slash command or:
+
+```bash
+git commit --only path/to/changed path/to/other -m "fix(ui): short subject"
+```
+
+- **When:** slice done, or pausing / going idle — **not** after every assistant turn.
+- **One command, then stop** — no `changelog.d/`, no push unless the user said
+  push/ship/Push all.
+- Candidate path list (noise filtered): `scripts/lean-commit.sh`
+
+### Push
+
+- **Do not push** unless the user says push/ship/Push all (or you are the
+  designated integrator and the tree is clean).
+- If the tree is dirty with others' work, commit **your** paths only and stop.
+
+### CHANGELOG (`changelog.d/`)
+
+- **Tier A:** do not add or edit `changelog.d/` in the same turn as the code commit.
+- **Tier B:** drop one small file in `changelog.d/` per user-visible change (see
+  `changelog.d/README.md`). Never edit `CHANGELOG.md` directly — release rolls
+  snippets up.
+
+### Multi-Agent Git Hygiene
+
+Multiple agent sessions can share one working tree on this machine. The shared
+clone stays on `main`.
+
+1. **Never branch in the shared clone** unless the user asked. Use
+   `git worktree add` for branch-isolated work.
+2. **Never** `git add -A`, `git add .`, or `git commit -a`.
+3. **Commit with `--only <paths>`** — the index is shared; plain `git commit -m`
+   can sweep in sibling sessions' staged work.
+
+- **NEVER** run `git checkout -- .`, `git restore .`, `git clean -f`, or
+  `git reset --hard` without asking first.
+
 ## CHANGELOG
 
 Follows [Keep a Changelog](https://keepachangelog.com). Every user-visible change drops a small markdown file in `changelog.d/` instead of editing `CHANGELOG.md` directly — that way two parallel sessions don't collide on the `[Unreleased]` section.

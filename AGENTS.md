@@ -22,6 +22,24 @@ Subject line under ~70 chars. Body (wrapped at ~80) explains the why, not the wh
 
 Co-author tag from the trailer is fine but not mandatory.
 
+## Git commits (shared `main`, parallel sessions)
+
+Multiple sessions share one checkout on `main`. **Commit small and often** so
+pushing (or **Push all** in the CCC UI) does not require hunting other sessions.
+
+| Tier | When | Do | Do not |
+|------|------|-----|--------|
+| **A — lean** | Slice done or before idle | `git commit --only <paths> -m "type(scope): subject"` | `changelog.d/`, version bump, push in same turn |
+| **B — done** | User-visible slice complete | Tier A + `changelog.d/` snippet | Edit `CHANGELOG.md` by hand |
+| **C — release** | Shipping `vX.Y.Z` | `./scripts/cut-release.sh` | Random version bumps |
+
+**`/lean-commit`** — slash command; see `.claude/commands/lean-commit.md`. Helper:
+`scripts/lean-commit.sh` (lists candidate paths, noise filtered).
+
+Never `git add -A` / `git commit -a`. Never push unless the user said
+push/ship/Push all. Full rules: `CLAUDE.md` § Git commits and
+`.claude/rules/git-and-commits.md`.
+
 ## CHANGELOG
 
 Follows [Keep a Changelog](https://keepachangelog.com). Every user-visible change drops a small markdown file in `changelog.d/` instead of editing `CHANGELOG.md` directly — that way two parallel sessions don't collide on the `[Unreleased]` section.

@@ -33,10 +33,20 @@ venv/
 # macOS DMG installer artifacts (built by scripts/build-dmg.sh, shipped via GitHub release assets)
 /ccc-v*.dmg
 
-# Local logs or state that might end up in-tree.
-# Whole `.claude/` dir is per-machine — settings, session logs, pasted
-# images, locks, agent worktree scratch — none of it belongs in git.
-/.claude/
+# .claude — per-machine except shared commands/rules (see .claude/commands/)
+.claude/logs/
+.claude/settings.json
+.claude/settings.local.json
+.claude/settings.*.bak
+.claude/worktrees/
+.claude/pasted-images/
+.claude/annotations/
+.claude/snapshots/
+.claude/screenshots/
+.claude/scheduled_tasks.lock
+.claude/.cozempic-init.lock
+# Runtime cache (tests / server); never commit
+/cache/
 *.log
 
 # Coordination file for parallel Claude Code sessions sharing this clone.
