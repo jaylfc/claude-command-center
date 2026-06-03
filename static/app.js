@@ -16927,20 +16927,25 @@
     return el;
   }
 
-  // Line# of the .event nearest the top of the viewport, so we can restore the
-  // reader's position after a re-render that adds content above it.
-  function _topVisibleEventLine($view) {
+  // The .event nearest the top of the viewport plus its exact offset within
+  // it (`delta` = how far its top sits above the viewport edge), so the reader's
+  // position is restored precisely after a re-render adds content above it.
+  function _topVisibleAnchor($view) {
     const top = $view.scrollTop;
     for (const el of $view.querySelectorAll('.event[data-jsonl-line]')) {
-      if (el.offsetTop + el.offsetHeight > top) return el.dataset.jsonlLine;
+      if (el.offsetTop + el.offsetHeight > top) {
+        return { line: el.dataset.jsonlLine, delta: el.offsetTop - top };
+      }
     }
     return null;
   }
-  function _scrollToEventLine($view, line) {
-    if (line == null) return;
-    const esc = (window.CSS && CSS.escape) ? CSS.escape(String(line)) : String(line);
+  function _restoreAnchor($view, anchor) {
+    if (!anchor || anchor.line == null) return;
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(String(anchor.line)) : String(anchor.line);
     const el = $view.querySelector('.event[data-jsonl-line="' + esc + '"]');
-    if (el) $view.scrollTop = el.offsetTop;
+    // Subtract the original delta so the anchor sits exactly where it did
+    // before, not pinned to the very top (which lands a few lines too high).
+    if (el) $view.scrollTop = el.offsetTop - (anchor.delta || 0);
   }
 
   function _insertLoadEarlierBanner($view, id, paneId) {
@@ -16957,7 +16962,7 @@
       const pane = paneByPaneId(paneId);
       if (!pane || pane.conversationId !== id) { loading = false; return; }
       // Anchor to where the reader is, so loading history above doesn't move it.
-      const anchorLine = _topVisibleEventLine($view);
+      const anchor = _topVisibleAnchor($view);
       pane.wantFull = true; pane.lastLine = 0;
       banner.textContent = 'Loading earlier messages…';
       banner.disabled = true;
@@ -16970,7 +16975,7 @@
         // content can stay blank until a real scroll event fires (a browser
         // quirk the user hit — "black screen until I move the scroll").
         requestAnimationFrame(() => {
-          _scrollToEventLine($view, anchorLine);
+          _restoreAnchor($view, anchor);
           requestAnimationFrame(() => {
             $view.scrollTop += 1; $view.scrollTop -= 1;
             try { $view.dispatchEvent(new Event('scroll')); } catch (_) {}
