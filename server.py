@@ -11372,10 +11372,10 @@ def _conv_parse_jsonl_mtime(conversation_id, repo_path=None):
 _CONV_TAIL_DEFAULT = 150  # lines pulled for the initial tail window on open
 
 
-def _parse_conversation_windowed(conversation_id, filepath, tail, before):
+def _parse_conversation_windowed(conversation_id, filepath, tail, before, parser=None):
     """Parse only a window of a conversation JSONL instead of the whole file.
 
-    Two modes (claude transcripts only — the parser is stateless per line):
+    Two modes:
       tail=N            -> the last N lines (initial open of a long file)
       before=L (+ tail) -> the N lines immediately before line L ("load earlier")
 
@@ -11383,7 +11383,14 @@ def _parse_conversation_windowed(conversation_id, filepath, tail, before):
     + the per-event parser run only on the windowed lines, which is where the
     cost is. Returns the normal {events,last_line} plus `first_line` and
     `truncated_before` so the UI knows whether earlier history remains.
+
+    Claude (stateless) and codex are supported. Codex carries a running token
+    usage across lines; we accumulate it from usage events *within the window*,
+    so it reflects the most recent usage seen in the slice (the context-% pill
+    self-corrects on the next turn) rather than the whole file.
     """
+    parser = parser or _parse_conversation_event
+    is_codex = parser is _parse_codex_event
     window = tail if tail else _CONV_TAIL_DEFAULT
     buf = collections.deque(maxlen=window)
     total = 0
@@ -11399,6 +11406,7 @@ def _parse_conversation_windowed(conversation_id, filepath, tail, before):
         return {"events": [], "last_line": 0, "first_line": 0, "truncated_before": False}
 
     events = []
+    codex_token_usage = None
     for ln, line in buf:
         line = line.strip()
         if not line:
@@ -11407,7 +11415,14 @@ def _parse_conversation_windowed(conversation_id, filepath, tail, before):
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
-        parsed = _parse_conversation_event(ev, ln)
+        if is_codex:
+            usage = _codex_token_usage_from_event(ev)
+            if usage:
+                codex_token_usage = usage
+                continue
+            parsed = parser(ev, ln, codex_token_usage)
+        else:
+            parsed = parser(ev, ln)
         if parsed:
             events.append(parsed)
 
@@ -11467,11 +11482,12 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
         stub = _registry_only_conversation_stub(conversation_id, after_line=after_line)
         if stub is not None:
             return stub
-    # Windowed open: only the claude parser is stateless per line, so only it
-    # can correctly parse a slice. Other engines (codex token-usage state, etc.)
-    # fall through to the full parse below.
-    if windowed and parser is _parse_conversation_event and Path(filepath).is_file():
-        return _parse_conversation_windowed(conversation_id, filepath, tail, before)
+    # Windowed open: claude (stateless) and codex (token-usage accumulated
+    # within the window) can parse a slice correctly. Gemini/antigravity use
+    # whole-file parsers above and fall through to the full parse below.
+    if windowed and parser in (_parse_conversation_event, _parse_codex_event) \
+            and Path(filepath).is_file():
+        return _parse_conversation_windowed(conversation_id, filepath, tail, before, parser)
     events = []
     line_num = 0
     is_codex = parser is _parse_codex_event
