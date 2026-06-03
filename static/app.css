@@ -2552,7 +2552,7 @@
   /* Worktree-origin badge: shown when a session came from a sibling
      worktree dir (e.g. claude-command-center-wt-gemini). */
   .conv-wt-badge {
-    display: inline-block; margin-left: 6px; padding: 1px 5px;
+    display: inline-block; margin-left: 0; padding: 1px 5px;
     font-size: 9px; font-weight: 500; line-height: 1.4;
     color: rgba(100, 210, 180, 0.9);
     background: rgba(100, 210, 180, 0.10);
@@ -2561,6 +2561,15 @@
     vertical-align: middle;
     max-width: 120px; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* Context-window % — sits in .conv-branch-slot just left of wt-/branch. */
+  .conv-pct-badge {
+    display: inline-flex; align-items: center; flex: 0 0 auto;
+    font-size: 10px; opacity: 0.85; font-weight: 600;
+    padding: 1px 4px; line-height: 1.4;
+    background: var(--surface-2); border-radius: 3px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--accent);
   }
   /* Semantic match — slightly different hue + label to make it visible
      when results came via the vector path (vs lexical BM25). */
@@ -2738,6 +2747,7 @@
   .conv-item .conv-branch-slot,
   .conv-item .conv-engine-slot {
     overflow: hidden;
+    gap: 4px;
   }
   .conv-item .conv-status-slot { justify-content: flex-end; }
   .conv-item .conv-branch-slot { justify-content: flex-end; }
@@ -7724,6 +7734,13 @@
   color: var(--accent);
   border: 1px solid rgba(88, 166, 255, 0.35);
   font-weight: 600; letter-spacing: 0.3px;
+}
+.conv-signal.in-group-chat.is-icon-only {
+  padding: 1px 4px;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1;
 }
 
 /* Archived group chat rows — interleaved with regular archived sessions. */

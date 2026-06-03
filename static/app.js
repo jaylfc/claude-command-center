@@ -23593,8 +23593,8 @@
         ai_title: c.ai_title || null,
         name_overridden: !!c.name_overridden,
         last_assistant_text: '',
-        modified: c.mtime,
-        last_interacted: c.mtime,
+        modified: c.mtime || c.modified || 0,
+        last_interacted: c.mtime || c.modified || c.last_interacted || 0,
         size: c.size || 0,
         // Round 2: live flag + state pills, all derived server-side
         // from sidecar / git status / JSONL events with mtime-based
