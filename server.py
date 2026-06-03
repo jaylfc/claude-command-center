@@ -22193,6 +22193,59 @@ def list_spawned_sessions():
     return result
 
 
+def _group_chat_normalize_whitespace(real_path):
+    """Collapse runs of blank lines inside / between group-chat posts.
+
+    Agents writing to the chat via the Edit tool routinely leave dozens
+    of trailing blank lines at the end of their post (most-extreme
+    observed: 230+ blank lines under a 9-line post). The reader UI hides
+    them but every other agent re-reading the .md file pays tokens for
+    each blank — wasted context.
+
+    Algorithm: walk lines; for each post body (between `## ` headers)
+    strip trailing blank lines, then guarantee exactly one blank line
+    between the body and the next `## ` header. Idempotent — no-op when
+    the file is already clean. Returns True if the file was rewritten.
+
+    Caller's responsibility to bump the sidecar baseline mtime so the
+    group-chat watcher doesn't treat the normalize-write as participant
+    activity (which would feed a re-nudge loop).
+    """
+    try:
+        with open(real_path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return False
+    lines = content.split("\n")
+    cleaned = []
+    body = []
+
+    def flush_body():
+        while body and body[-1].strip() == "":
+            body.pop()
+        cleaned.extend(body)
+        body.clear()
+
+    for line in lines:
+        if line.startswith("## "):
+            flush_body()
+            if cleaned and cleaned[-1].strip() != "":
+                cleaned.append("")
+            cleaned.append(line)
+        else:
+            body.append(line)
+    flush_body()
+    new_content = "\n".join(cleaned).rstrip() + "\n"
+    if new_content == content:
+        return False
+    try:
+        with open(real_path, "w", encoding="utf-8") as fh:
+            fh.write(new_content)
+        return True
+    except OSError:
+        return False
+
+
 def _group_chat_post(path, text, chat_uuid=""):
     """Append a human entry to a group-chat file."""
     real_path = _resolve_group_chat_ref(path, chat_uuid)
@@ -22209,6 +22262,9 @@ def _group_chat_post(path, text, chat_uuid=""):
     try:
         with open(real_path, "a", encoding="utf-8") as fh:
             fh.write(entry)
+        # Strip trailing blank lines that prior agent posts left behind
+        # so the file stays lean for the next round of agent reads.
+        _group_chat_normalize_whitespace(real_path)
         sidecar = _load_group_chat_sidecar(real_path)
         if not sidecar.get("archived"):
             _update_group_chat_sidecar(real_path, closed_at=None)
@@ -22226,6 +22282,13 @@ def _group_chat_read(path, chat_uuid=""):
         return None, "forbidden"
     try:
         _group_chat_update_header_if_changed(real_path)
+    except Exception:
+        pass
+    # Strip trailing-blank-line bloat that agents leave behind. Idempotent
+    # — no-op when the file is already clean, so cheap to run on every
+    # read. Keeps the file lean for the next round of agent re-reads.
+    try:
+        _group_chat_normalize_whitespace(real_path)
     except Exception:
         pass
     try:
