@@ -8985,6 +8985,28 @@
       html += '<div class="gc-chat-preamble">' + renderMarkdown(preamble) + '</div>';
     }
 
+    // Side assignment — chat-style alignment so consecutive messages
+    // from different speakers visibly stagger. "Human" always lands
+    // on the right (iMessage convention for "me"). Agents get a
+    // stable side index 0..2 (left / center / right-of-agent-band)
+    // based on first-seen order so each agent stays on its own side
+    // throughout the chat.
+    const _speakerToSide = new Map();
+    let _nextAgentSlot = 0;
+    const _sideForSpeaker = (speakerLabel) => {
+      const isHuman = /\bHuman\b/i.test(speakerLabel);
+      if (isHuman) return 'right';
+      if (_speakerToSide.has(speakerLabel)) return _speakerToSide.get(speakerLabel);
+      // Cycle agents through left → center → right-agent → left → …
+      // Three slots reads as enough variety without losing the
+      // "two columns of conversation" feel.
+      const slots = ['left', 'center', 'right-agent'];
+      const side = slots[_nextAgentSlot % slots.length];
+      _nextAgentSlot += 1;
+      _speakerToSide.set(speakerLabel, side);
+      return side;
+    };
+
     for (let i = 0; i < matches.length; i++) {
       const match = matches[i];
       const heading = (match[1] || '').trim();
@@ -9003,7 +9025,11 @@
         lastSpeaker = speaker;
       }
 
-      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + '">'
+      // System messages stay full-width so the lifecycle log doesn't
+      // get squeezed into one side; participant messages stagger.
+      const side = isSystem ? 'full' : _sideForSpeaker(speaker);
+
+      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + '" data-speaker-side="' + side + '">'
         + '<div class="gc-message-meta">'
           + '<span class="gc-message-speaker">' + escapeHtml(speaker) + '</span>'
           + (when ? '<span class="gc-message-time">' + gcTimeChip(when) + '</span>' : '')

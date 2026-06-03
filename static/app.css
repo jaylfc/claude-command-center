@@ -7165,7 +7165,51 @@
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  max-width: 82%;
 }
+/* Chat-style alignment — each speaker stays on its own side so the
+   conversation reads like a group thread, not a flat log.
+   Human always lands on the right (iMessage convention for "me").
+   Agents cycle through three slots: left, center, right-of-agent-band
+   so we visually distinguish 3+ participants without losing the
+   two-column feel. System messages stretch full-width.            */
+.gc-message[data-speaker-side="left"] {
+  margin-left: 0;
+  margin-right: auto;
+}
+.gc-message[data-speaker-side="center"] {
+  margin-left: auto;
+  margin-right: auto;
+}
+.gc-message[data-speaker-side="right-agent"] {
+  margin-left: auto;
+  margin-right: 6%;
+}
+.gc-message[data-speaker-side="right"] {
+  margin-left: auto;
+  margin-right: 0;
+}
+.gc-message[data-speaker-side="full"] {
+  max-width: 100%;
+}
+/* Tint the speaker header bar so each side reads as its own column
+   at a glance. Subtle — header keeps its dominant accent color but
+   leans warmer / cooler / muted per side. */
+.gc-message[data-speaker-side="right"] .gc-message-meta {
+  background: color-mix(in srgb, var(--green) 14%, var(--surface) 86%);
+  border-bottom-color: color-mix(in srgb, var(--green) 30%, transparent);
+}
+.gc-message[data-speaker-side="right"] .gc-message-speaker { color: var(--green); }
+.gc-message[data-speaker-side="center"] .gc-message-meta {
+  background: color-mix(in srgb, var(--purple) 12%, var(--surface) 88%);
+  border-bottom-color: color-mix(in srgb, var(--purple) 28%, transparent);
+}
+.gc-message[data-speaker-side="center"] .gc-message-speaker { color: var(--purple); }
+.gc-message[data-speaker-side="right-agent"] .gc-message-meta {
+  background: color-mix(in srgb, var(--orange) 12%, var(--surface) 88%);
+  border-bottom-color: color-mix(in srgb, var(--orange) 28%, transparent);
+}
+.gc-message[data-speaker-side="right-agent"] .gc-message-speaker { color: var(--orange); }
 /* Speaker meta is now a full-width header bar with a tinted background,
    so each message reads as a clearly-bounded card and the boundary
    between messages is obvious at a glance. */
