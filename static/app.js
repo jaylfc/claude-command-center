@@ -22832,10 +22832,13 @@
     const _nudgeMs = gcEpochMs(chat.orchestrator_last_nudge_at)
       || gcEpochMs(chat.last_reminder_at);
     const _triggerMs = gcEpochMs(chat.orchestrator_last_trigger_at);
-    const _activityMs = Math.max(
-      gcEpochMs(chat.last_activity),
-      gcEpochMs(chat.last_mtime)
-    );
+    // ONLY last_activity counts as a real "new message" signal.
+    // last_mtime is just the chat file's stat mtime, which the server bumps
+    // on metadata writes (name_map updates, polled sidecar writes, etc.)
+    // every poll cycle — that's not a message arrival, so using it here
+    // made the pill say "new message · just now" forever while the actual
+    // last message was minutes/hours old (user-annotated 4.5min stale).
+    const _activityMs = gcEpochMs(chat.last_activity);
     const _freshAt = Math.max(_nudgeMs, _triggerMs, _activityMs);
     let _reason = '';
     if (_freshAt > 0) {
