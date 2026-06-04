@@ -9424,6 +9424,16 @@
     // look like content "from another conversation" leaking in.
     try { if (typeof stopConvStream === 'function') stopConvStream(); } catch (_) {}
     try { if (typeof stopSpawnStream === 'function') stopSpawnStream(); } catch (_) {}
+    // Clear currentSession too: the 1s liveStatus poller keeps querying
+    // /api/session-status?session_id=<currentSession.id> and the
+    // updateLiveToolStrip tick appends a .conv-live-tool-inline node into
+    // the current $view (which is now the group-chat reader). User saw a
+    // "Bash command /bin/zsh -c source …" pill from their previous Claude
+    // session leak into the group chat view. Drop the id so the poller
+    // bails (refreshLiveStatus short-circuits on !currentSession.id) and
+    // any leftover live-tool node is cleaned up on the next idle tick.
+    try { if (typeof setCurrentSession === 'function') setCurrentSession(null, null, null, false, null); } catch (_) {}
+    document.querySelectorAll('.conv-live-tool-inline, .conv-live-tool-strip').forEach(n => n.remove());
 
     const view = document.getElementById('conversationsView');
     if (!view) return;
