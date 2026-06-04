@@ -573,6 +573,62 @@ class TestRepoContextHelpers(unittest.TestCase):
         with self.assertRaises(self.server.RepoContextError):
             self.server.resolve_repo_path(str(pathlib.Path(self.tmp_home, "no such repo")))
 
+    def test_find_conversations_honors_relocation_budget(self):
+        """A repo with many transcripts whose recorded cwd no longer exists
+        must NOT spend its entire budget walking the filesystem for every
+        dead worktree. With the per-request relocation budget in place (and
+        the on-disk cache cold), find_conversations() should return within
+        a few seconds even with hundreds of seeded sessions.
+
+        This is the perf guard for the BYM+Finie regression where 128
+        missing cwds + per-session os.walk burnt ~40s on every cold scan.
+        """
+        seed_count = 200
+        target_seconds = 3.0  # generous CI bound; warm calls return <2s
+        # Build a fake project dir matching the slug encoder.
+        slug = self.server._encode_project_slug(self.repo)
+        project_dir = pathlib.Path(self.tmp_home, ".claude", "projects", slug)
+        project_dir.mkdir(parents=True, exist_ok=True)
+        bogus_cwd = str(pathlib.Path(self.tmp_home, "deleted-worktrees", "no-such"))
+        # Each seeded JSONL records a cwd that doesn't exist on disk — the
+        # exact shape that used to trigger the expensive relocation walk.
+        for i in range(seed_count):
+            sid = f"00000000-0000-4000-8000-{i:012d}"
+            entry = {
+                "type": "user",
+                "sessionId": sid,
+                "cwd": bogus_cwd,
+                "timestamp": "2026-06-01T00:00:00.000Z",
+                "gitBranch": "main",
+                "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            }
+            (project_dir / f"{sid}.jsonl").write_text(
+                json.dumps(entry) + "\n",
+                encoding="utf-8",
+            )
+        # Tight budget so the test fails loudly if it ever regresses.
+        prev_budget = os.environ.get("CCC_CWD_RELOCATION_BUDGET_S")
+        os.environ["CCC_CWD_RELOCATION_BUDGET_S"] = "0.5"
+        try:
+            start = time.monotonic()
+            rows = self.server.find_conversations(
+                str(self.repo), include_old=True
+            )
+            elapsed = time.monotonic() - start
+        finally:
+            if prev_budget is None:
+                os.environ.pop("CCC_CWD_RELOCATION_BUDGET_S", None)
+            else:
+                os.environ["CCC_CWD_RELOCATION_BUDGET_S"] = prev_budget
+        self.assertGreater(
+            len(rows), 0,
+            "scan should still return rows even when relocation budget trips",
+        )
+        self.assertLess(
+            elapsed, target_seconds,
+            f"find_conversations took {elapsed:.2f}s for {seed_count} seeded sessions; budget is {target_seconds}s",
+        )
+
     def test_repo_path_plus_fallback_keeps_real_space_repo(self):
         """A repo with a real space in its name still resolves directly — the
         fallback only kicks in when the as-given path does not exist."""

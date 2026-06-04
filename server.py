@@ -5500,6 +5500,18 @@ def extract_session_id(path):
 # Cache of session_id -> cwd so we don't rescan ~/.claude/projects on every request
 _session_cwd_cache = {}
 _session_cwd_relocation_cache = {}
+_session_cwd_relocation_cache_dirty = False
+_session_cwd_relocation_cache_lock = threading.Lock()
+_CWD_RELOCATION_CACHE_FILE = (
+    Path.home() / ".claude" / "command-center" / "cwd-relocation-cache.json"
+)
+_CWD_RELOCATION_CACHE_SCHEMA = 1
+# Per-request budget for _relocate_missing_session_cwd's filesystem walks.
+# A single cold scan of a worktree-heavy repo (e.g. BYM+Finie with 128 missing
+# cwds) used to burn ~40s here. Once exceeded, individual relocations return
+# None and the row falls back to the recorded cwd; subsequent requests pick
+# up the slack as the cache fills.
+_relocation_budget = threading.local()
 _session_cwd_cache_mtime = 0
 
 SESSIONS_REGISTRY = Path.home() / ".claude" / "sessions"  # per-pid {sessionId, cwd, ...}
@@ -5567,6 +5579,108 @@ _CONV_META_COMPAT_SCHEMA_VERSIONS = {13}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
+
+
+def _load_cwd_relocation_cache():
+    """Persist cwd-relocation results across restarts.
+
+    `_relocate_missing_session_cwd` walks the filesystem when a session's
+    recorded cwd no longer exists (deleted worktree, moved repo). On a
+    worktree-heavy repo with many old sessions the walk can take ~40s per
+    cold scan. Persisting the result — positive AND negative — drops the
+    second-and-subsequent cold start to near-zero. Cache entries are
+    revalidated lazily in _relocate_missing_session_cwd.
+    """
+    if not _CWD_RELOCATION_CACHE_FILE.is_file():
+        return
+    try:
+        with _CWD_RELOCATION_CACHE_FILE.open("r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    if data.get("schema_version") != _CWD_RELOCATION_CACHE_SCHEMA:
+        return
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return
+    loaded = {}
+    for row in entries:
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("session_id")
+        raw = row.get("recorded_cwd")
+        if not sid or not isinstance(raw, str):
+            continue
+        target = row.get("resolved_cwd")
+        if target is not None and not isinstance(target, str):
+            continue
+        loaded[(sid, raw)] = target
+    with _session_cwd_relocation_cache_lock:
+        _session_cwd_relocation_cache.update(loaded)
+
+
+def _save_cwd_relocation_cache():
+    """Atomic write of _session_cwd_relocation_cache when dirty."""
+    global _session_cwd_relocation_cache_dirty
+    with _session_cwd_relocation_cache_lock:
+        if not _session_cwd_relocation_cache_dirty:
+            return
+        snapshot = {
+            "schema_version": _CWD_RELOCATION_CACHE_SCHEMA,
+            "entries": [
+                {
+                    "session_id": sid,
+                    "recorded_cwd": raw,
+                    "resolved_cwd": resolved,
+                }
+                for (sid, raw), resolved in _session_cwd_relocation_cache.items()
+            ],
+        }
+        _session_cwd_relocation_cache_dirty = False
+    try:
+        _CWD_RELOCATION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _CWD_RELOCATION_CACHE_FILE.with_suffix(".json.tmp")
+        with tmp.open("w") as f:
+            json.dump(snapshot, f)
+        tmp.replace(_CWD_RELOCATION_CACHE_FILE)
+    except OSError as e:
+        with _session_cwd_relocation_cache_lock:
+            _session_cwd_relocation_cache_dirty = True
+        print(f"  [cwd-relocation-cache] save failed: {e}")
+
+
+def _relocation_budget_begin(seconds=None):
+    """Open a per-request time budget for _relocate_missing_session_cwd.
+
+    On budget exhaustion, in-flight relocations short-circuit to None
+    (the row falls back to the recorded cwd verbatim); the cache is not
+    populated for skipped entries so a future request can still resolve
+    them. Defaults to 1.5s — high enough that one cold scan can resolve a
+    handful of missing cwds, low enough that no single request stalls.
+    """
+    if seconds is None:
+        try:
+            seconds = float(os.environ.get("CCC_CWD_RELOCATION_BUDGET_S", "1.5"))
+        except (TypeError, ValueError):
+            seconds = 1.5
+    _relocation_budget.deadline = time.monotonic() + max(0.0, seconds)
+    _relocation_budget.exhausted_count = 0
+
+
+def _relocation_budget_end():
+    _relocation_budget.deadline = None
+
+
+def _relocation_budget_exhausted():
+    deadline = getattr(_relocation_budget, "deadline", None)
+    if deadline is None:
+        return False
+    if time.monotonic() > deadline:
+        _relocation_budget.exhausted_count = getattr(_relocation_budget, "exhausted_count", 0) + 1
+        return True
+    return False
 
 
 def _load_conv_meta_cache():
@@ -8650,26 +8764,53 @@ def _relocate_missing_session_cwd(session_id, cwd):
     evidence: find a same-named directory under nearby project roots where
     those relative files now exist.
     """
+    global _session_cwd_relocation_cache_dirty
     raw = str(cwd or "").strip()
     if not session_id or not raw:
         return None
     cache_key = (session_id, raw)
     if cache_key in _session_cwd_relocation_cache:
-        return _session_cwd_relocation_cache[cache_key]
+        cached = _session_cwd_relocation_cache[cache_key]
+        # Negative cache: short-circuit. Positive cache: revalidate that
+        # the cached target still exists — if a worktree was deleted since
+        # the cache was written, drop it and fall through to a fresh walk.
+        if cached is None:
+            return None
+        try:
+            if Path(cached).is_dir():
+                return cached
+        except (OSError, ValueError, RuntimeError):
+            pass
+        with _session_cwd_relocation_cache_lock:
+            _session_cwd_relocation_cache.pop(cache_key, None)
+            _session_cwd_relocation_cache_dirty = True
 
     try:
         cwd_path = Path(raw).expanduser()
         if cwd_path.is_dir():
             result = str(cwd_path.resolve())
-            _session_cwd_relocation_cache[cache_key] = result
+            with _session_cwd_relocation_cache_lock:
+                _session_cwd_relocation_cache[cache_key] = result
+                _session_cwd_relocation_cache_dirty = True
             return result
     except (OSError, ValueError, RuntimeError):
-        _session_cwd_relocation_cache[cache_key] = None
+        with _session_cwd_relocation_cache_lock:
+            _session_cwd_relocation_cache[cache_key] = None
+            _session_cwd_relocation_cache_dirty = True
+        return None
+
+    # Past this point we're about to walk the filesystem. Honor the
+    # per-request budget so a single cold scan can't burn 40s on
+    # worktree-heavy repos. Do NOT cache the skip — let the next request
+    # try again so the cache fills progressively.
+    if _relocation_budget_exhausted():
         return None
 
     basename = cwd_path.name
     if not basename:
-        _session_cwd_relocation_cache[cache_key] = None
+        with _session_cwd_relocation_cache_lock:
+            _session_cwd_relocation_cache[cache_key] = None
+            _session_cwd_relocation_cache_dirty = True
         return None
 
     try:
@@ -8693,7 +8834,19 @@ def _relocate_missing_session_cwd(session_id, cwd):
     roots = _relocation_search_roots(session_id, raw)
     best = []
     candidate_seen = set()
+    # Per-root visit cap. Dialed down from 8000 → 2000: even with the
+    # per-request time budget guarding overall latency, a single root with
+    # 8000 dirs of unrelated content can stall this loop for seconds. 2000
+    # is enough to cover normal worktree layouts (BYM+Finie's worst case is
+    # ~150 dirs per root) while keeping pathological roots bounded.
+    try:
+        visit_cap = int(os.environ.get("CCC_CWD_RELOCATION_VISIT_CAP", "2000"))
+    except (TypeError, ValueError):
+        visit_cap = 2000
+    budget_hit = False
     for root in roots:
+        if budget_hit:
+            break
         visited = 0
         try:
             for dirpath, dirnames, _filenames in os.walk(root):
@@ -8702,7 +8855,10 @@ def _relocate_missing_session_cwd(session_id, cwd):
                     d for d in dirnames
                     if d not in _CWD_RELOCATION_PRUNE_DIRS and not d.startswith(".")
                 ]
-                if visited > 8000:
+                if visited > visit_cap:
+                    break
+                if _relocation_budget_exhausted():
+                    budget_hit = True
                     break
                 p = Path(dirpath)
                 if p.name != basename:
@@ -8726,8 +8882,14 @@ def _relocate_missing_session_cwd(session_id, cwd):
         except OSError:
             continue
 
+    # If the budget ran out mid-walk we may have an incomplete view; do not
+    # cache so the next request can resume.
+    if budget_hit and not best:
+        return None
     if not best:
-        _session_cwd_relocation_cache[cache_key] = None
+        with _session_cwd_relocation_cache_lock:
+            _session_cwd_relocation_cache[cache_key] = None
+            _session_cwd_relocation_cache_dirty = True
         return None
     best.sort(key=lambda item: (-item[0], item[1], str(item[2])))
     top_score = best[0][0]
@@ -8735,13 +8897,17 @@ def _relocate_missing_session_cwd(session_id, cwd):
     if len(top) > 1 and rel_paths:
         # Multiple equally-supported targets means the transcript evidence is
         # ambiguous; keep the historical cwd rather than guessing wrong.
-        _session_cwd_relocation_cache[cache_key] = None
+        with _session_cwd_relocation_cache_lock:
+            _session_cwd_relocation_cache[cache_key] = None
+            _session_cwd_relocation_cache_dirty = True
         return None
     try:
         result = str(top[0].resolve())
     except OSError:
         result = str(top[0])
-    _session_cwd_relocation_cache[cache_key] = result
+    with _session_cwd_relocation_cache_lock:
+        _session_cwd_relocation_cache[cache_key] = result
+        _session_cwd_relocation_cache_dirty = True
     return result
 
 
@@ -10350,11 +10516,22 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
     _skip_inference = _inflight_now > _FIND_CONVS_INFLIGHT_MAX
     _n_eff_skipped_concurrency = 0
     _n_eff_skipped_no_drift = 0
+    # Open a per-request budget for cwd-relocation filesystem walks (see
+    # _relocate_missing_session_cwd). Without this a worktree-heavy repo
+    # could spend ~40s walking the FS for deleted worktrees on cold cache.
+    _relocation_budget_begin()
 
     def _dec_inflight():
         global _FIND_CONVS_INFLIGHT
         with _FIND_CONVS_LOCK:
             _FIND_CONVS_INFLIGHT -= 1
+        _relocation_budget_end()
+        # Best-effort persist of newly-resolved cwd entries so the next
+        # cold start doesn't repay the walks. Never raise into the caller.
+        try:
+            _save_cwd_relocation_cache()
+        except Exception:
+            pass
 
     # Aggregate timers — gated on env var so prod stays silent.
     _PROFILE = os.environ.get("CCC_PROFILE_CONVS") == "1"
@@ -36636,6 +36813,7 @@ def main():
         name="ccc-cursor-sidebar-backfill",
     ).start()
     _load_conv_meta_cache()
+    _load_cwd_relocation_cache()
     try:
         _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
