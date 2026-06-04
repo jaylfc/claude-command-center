@@ -1,1 +1,0 @@
-Added a Codex steer action in the composer. Normal Send queues behind a running Codex turn; the steer button immediately pushes input into that active turn through Codex app-server `turn/steer` when supported.

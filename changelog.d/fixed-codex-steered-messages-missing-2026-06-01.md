@@ -1,1 +1,0 @@
-Fixed Codex steer/send replies disappearing from the conversation pane when the composer stayed focused. Stream batches were deferred during typing but the JSONL cursor still advanced, so steered answers never rendered.

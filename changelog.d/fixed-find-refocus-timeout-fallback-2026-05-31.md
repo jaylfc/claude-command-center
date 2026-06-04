@@ -1,1 +1,0 @@
-Add a `setTimeout(60)` fallback to the Cmd+F find input's focus-restore chain — microtask + requestAnimationFrame from `8a85660` weren't late enough in WebKit; focus shifted to the matched element on a later commit-phase tick. Triple-restore (microtask, rAF, 60ms) catches whichever frame the focus move lands on. Each restore no-ops if focus is already on the input.

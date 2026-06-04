@@ -1,1 +1,0 @@
-Answer AskUserQuestion from the dashboard. Headless sessions used to auto-decline questions instantly; now a blocking modal surfaces the question (and its options) in the UI and feeds your pick back to the agent so it continues with your answer.

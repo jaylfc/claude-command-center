@@ -1,1 +1,0 @@
-- Push all now attributes uncommitted files to their authoring session via the local conversation index (claude-index), showing the owner+age on each handoff action and reducing over-nudging; git remains the safety authority.

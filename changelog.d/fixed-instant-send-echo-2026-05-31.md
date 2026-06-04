@@ -1,1 +1,0 @@
-Fixed the message echo sometimes lagging after pressing Enter. The optimistic "sending" echo now paints immediately and synchronously, before any async work (stopping in-progress text-to-speech, the inject-input request) — previously a TTS teardown was awaited first, so sends during playback felt delayed.

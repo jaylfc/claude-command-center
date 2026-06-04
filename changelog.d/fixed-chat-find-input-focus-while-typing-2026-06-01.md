@@ -1,1 +1,0 @@
-Fixed Cmd+F find bar losing the typing caret in the Mac app. In-conversation search no longer uses `window.find()` (which moves focus into the transcript in WebKit); matches are highlighted with the CSS Highlight API and scrolled into view while the caret stays in the find field.

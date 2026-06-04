@@ -1,1 +1,0 @@
-Cmd+F find input now genuinely keeps focus while typing. The triple deferred restore (microtask + rAF + 60ms) still lost to WebKit's deferred focus shift in some cases. Added a 300ms `focusin` guard window after every `doFind`: any focus move off the input while the find modal is open snaps right back. Belt-and-suspenders with the existing restore chain.

@@ -1,1 +1,0 @@
-Fixed missing WIP and in-progress tool chips (e.g. Bash command) on conversation list rows while a session is active. Live sidecar data was dropped when the sidebar re-rendered from cached archive data, and HTTP 304 archive refreshes never re-applied live fields — the list now polls `/api/sessions/live-activity` every 5s and merges that overlay into each row render.

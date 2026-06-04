@@ -1,1 +1,0 @@
-Cmd+F find modal really keeps focus on the input now — the prior synchronous `.focus()` restore beat WebKit's async focus move to the matched element. Defer the restore via microtask + requestAnimationFrame so we land AFTER WebKit's reflow-time focus shift instead of before it.
