@@ -25752,6 +25752,22 @@
       mockup: '<div style="font-family:var(--mono,monospace);font-size:11px;line-height:1.6;color:#a6accd;padding:10px 12px;background:rgba(0,0,0,0.25);border-radius:6px;border-left:3px solid var(--green,#3dd68c);"><div>📁 ../repo-wt-ship-tmp/ &nbsp;<span style="color:#3dd68c;">[isolated worktree]</span></div><div>&nbsp;&nbsp;↳ git fetch origin &nbsp;<span style="opacity:0.6;">→ main is 3 commits ahead</span></div><div>&nbsp;&nbsp;↳ git rebase origin/main &nbsp;<span style="color:#3dd68c;">✓ clean</span></div><div>&nbsp;&nbsp;↳ filter .DS_Store / *.swp &nbsp;<span style="color:#3dd68c;">✓ 4 junk files dropped</span></div><div>&nbsp;&nbsp;↳ git push origin HEAD &nbsp;<span style="color:#3dd68c;">✓ landed</span></div><div style="margin-top:6px;color:var(--text-muted);">Your working tree was never touched.</div></div>'
     },
     {
+      id: 'performance-pass',
+      title: 'Performance Pass',
+      date: 'Jun 3, 2026',
+      tag: 'Performance',
+      desc: '<p>A focused pass on everything that made the dashboard feel heavy. Net: <strong>the daemon idles instead of pinning a CPU core</strong>, and opening anything is fast.</p><p>The continuously-polled live-activity endpoint is now coalesced (single-flight + TTL), so it stops holding a core at ~124%. <strong>Group-chat opens are ~40× faster</strong> (~1485ms → ~35ms), long conversations open near-instantly via a windowed transcript parse (~320ms → ~17ms) with a "Load earlier" affordance, and Codex sessions with screenshots stopped shipping multi-megabyte base64 blobs (~1000× smaller payloads).</p>',
+      mockup: '<div style="font-family:var(--mono,monospace);font-size:11px;line-height:1.7;color:#a6accd;padding:12px 14px;background:rgba(0,0,0,0.25);border-radius:6px;border-left:3px solid var(--green,#3dd68c);"><div style="display:flex;justify-content:space-between;gap:12px;"><span>CPU · idle dashboard</span><span><span style="color:#f85149;text-decoration:line-through;opacity:0.6;">124%</span> &nbsp;→&nbsp; <span style="color:#3dd68c;">~0%</span></span></div><div style="display:flex;justify-content:space-between;gap:12px;"><span>Group-chat open</span><span><span style="color:#f85149;text-decoration:line-through;opacity:0.6;">1485ms</span> &nbsp;→&nbsp; <span style="color:#3dd68c;">35ms</span></span></div><div style="display:flex;justify-content:space-between;gap:12px;"><span>Long conversation open</span><span><span style="color:#f85149;text-decoration:line-through;opacity:0.6;">320ms</span> &nbsp;→&nbsp; <span style="color:#3dd68c;">17ms</span></span></div><div style="display:flex;justify-content:space-between;gap:12px;"><span>Codex w/ screenshots</span><span><span style="color:#f85149;text-decoration:line-through;opacity:0.6;">40MB</span> &nbsp;→&nbsp; <span style="color:#3dd68c;">0.04MB</span></span></div></div>'
+    },
+    {
+      id: 'cursor-engine',
+      title: 'Cursor Agent Support',
+      date: 'Jun 1, 2026',
+      tag: 'Engine',
+      desc: '<p><strong>Cursor joins Claude, Codex, and Antigravity as a first-class engine.</strong> CCC discovers <code>cursor-agent</code> transcripts, spawns headless Cursor runs, resumes existing chats, and shows Cursor rows + logs in the dashboard with live indicators.</p><p>The integration is two-way: sessions CCC spawns also <strong>show up in the Cursor IDE\'s own agent view</strong> — CCC writes the workspace metadata under <code>~/.cursor/chats/</code> and backfills recent sessions on startup.</p>',
+      mockup: '<div style="font-family:var(--mono,monospace);font-size:11px;line-height:1.6;color:#a6accd;padding:12px 14px;background:rgba(0,0,0,0.25);border-radius:6px;border-left:3px solid var(--accent,#58a6ff);"><div style="color:var(--text);margin-bottom:6px;">▸ cursor-agent · <span style="color:var(--accent,#58a6ff);">refactor-auth</span> &nbsp;<span style="color:#3dd68c;">● live</span></div><div>$ cursor-agent -p "extract the token service"</div><div>&nbsp;&nbsp;↳ transcript discovered <span style="color:#3dd68c;">✓</span></div><div>&nbsp;&nbsp;↳ row + logs in dashboard <span style="color:#3dd68c;">✓</span></div><div>&nbsp;&nbsp;↳ visible in Cursor IDE agent view <span style="color:#3dd68c;">✓</span></div></div>'
+    },
+    {
       id: 'antigravity-engine',
       title: 'Antigravity Engine',
       date: 'May 21, 2026',
