@@ -5475,8 +5475,8 @@ PENDING_INPUTS_FILE = COMMAND_CENTER_STATE_DIR / "pending-inputs.json"
 _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
-_CONV_META_SCHEMA_VERSION = 12
-_CONV_META_COMPAT_SCHEMA_VERSIONS = {12}
+_CONV_META_SCHEMA_VERSION = 13
+_CONV_META_COMPAT_SCHEMA_VERSIONS = {13}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
 )
@@ -5969,6 +5969,16 @@ def _extract_tail_meta(path):
                         meta_cb = ev.get("compactMetadata") or {}
                         post_tokens = _codex_int(meta_cb.get("postTokens"))
                         meta["latest_input_tokens"] = post_tokens
+                        # /compact rewrites the JSONL much smaller, so the
+                        # live_context_* fields captured from a pre-compact
+                        # `/context` invocation no longer reflect reality.
+                        # Reset them so the badge falls back to the fresh
+                        # post-compact latest_input_tokens (calc path).
+                        # Next `/context` run will repopulate live_context_*
+                        # with the real new percentage.
+                        meta["live_context_tokens"] = 0
+                        meta["live_context_limit"] = 0
+                        meta["live_context_percent"] = 0
                     elif subtype == "local_command":
                         parsed_context = _local_command_context_usage(ev)
                         if parsed_context:
