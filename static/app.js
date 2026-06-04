@@ -25684,6 +25684,38 @@
 
   const WHATS_NEW_FEATURES = [
     {
+      id: 'subagent-tabs',
+      title: 'Subagent Tabs',
+      date: 'Jun 3, 2026',
+      tag: 'Visualization',
+      desc: '<p>When the parent agent dispatches a <strong>Task</strong> tool, the subagent\'s streaming work now lives in its own dedicated tab inside the conversation pane — labeled with the Task description, color-coded purple, and isolated from the master\'s flow.</p><p>One tab per subagent. Auto-closes 30s after the Task completes if you\'ve moved on. Multiple parallel Tasks no longer flood the master view; you read each agent\'s work in its own lane.</p>',
+      mockup: '<div style="display:flex;flex-direction:column;gap:0;border-radius:6px;overflow:hidden;border:1px solid var(--border);"><div style="display:flex;gap:4px;padding:6px 12px 0;background:rgba(255,255,255,0.02);border-bottom:1px solid var(--border);font-size:11px;"><div style="padding:4px 10px;border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;color:var(--text-muted);background:rgba(255,255,255,0.03);">Master</div><div style="padding:4px 10px;border:1px solid #a57fee;border-bottom:none;border-radius:6px 6px 0 0;color:#a57fee;background:var(--bg,#0d1117);margin-bottom:-1px;">explore repo <span style="opacity:0.4;margin-left:4px;">×</span></div><div style="padding:4px 10px;border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;color:var(--text-muted);background:rgba(255,255,255,0.03);">find tests ✓</div></div><div style="padding:12px;background:var(--bg,#0d1117);"><div style="border:1px dashed rgba(165,127,238,0.35);border-left:3px solid rgba(165,127,238,0.5);background:rgba(165,127,238,0.05);border-radius:6px;padding:8px 10px;margin-left:16px;"><div style="font-size:9px;letter-spacing:0.05em;text-transform:uppercase;color:#a57fee;font-weight:600;margin-bottom:4px;">● SUBAGENT</div><div style="font-size:11px;color:var(--text);">Scanning src/services/ — found 14 modules with cic-4 references…</div></div></div></div>'
+    },
+    {
+      id: 'question-relay',
+      title: 'Headless Question Relay',
+      date: 'Jun 3, 2026',
+      tag: 'Orchestration',
+      desc: '<p>When a headless Claude session calls <code>AskUserQuestion</code>, the question now <strong>pauses the agent and surfaces in the dashboard</strong> — no more silent auto-continuation of agent questions you never saw.</p><p>The session waits for your click on one of its options; your answer is injected back as the user response and the agent resumes. Solves the recurring "questions are being continued silently" pain point.</p>',
+      mockup: '<div style="border:1px solid var(--accent,#58a6ff);border-radius:8px;padding:14px;background:rgba(88,166,255,0.06);"><div style="font-size:10px;color:var(--accent,#58a6ff);font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">Agent question — strategy-session</div><div style="font-size:12px;color:var(--text);margin-bottom:10px;line-height:1.4;">Should I split the auth refactor into multiple PRs, or land it as one bundled change?</div><div style="display:flex;flex-direction:column;gap:4px;"><div style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:11px;color:var(--text);background:rgba(255,255,255,0.04);">One bundled PR <span style="color:var(--text-muted);margin-left:4px;">— smaller cognitive load for reviewer</span></div><div style="padding:6px 10px;border:1px solid var(--border);border-radius:4px;font-size:11px;color:var(--text-muted);">Split by module <span style="margin-left:4px;">— easier to revert individual pieces</span></div></div></div>'
+    },
+    {
+      id: 'antigravity-orphan-resume',
+      title: 'Antigravity Orphan Resume',
+      date: 'Jun 3, 2026',
+      tag: 'Engine',
+      desc: '<p>AGY sessions whose conversation state file went missing (no <code>.pb</code> in CLI conversations, no app conversation file) are no longer dead-on-arrival.</p><p>CCC now runs <code>agy --conversation &lt;sid&gt; -p</code> headless against the brain transcript on disk — AGY rehydrates the conversation from the transcript and appends your new turn. Sessions that were read-only forever are talkable again.</p>',
+      mockup: '<div class="mockup-agy-container"><div class="mockup-agy-header"><span class="mockup-agy-badge"><span class="mockup-agy-logo"></span><span>orphan-session (no .pb)</span></span><span class="mockup-agy-status"><span class="mockup-agy-pulse"></span><span>Resumed</span></span></div><div class="mockup-agy-code">$ agy --conversation e1253fe9-… -p "ping"\n→ rehydrate from brain transcript ✓\n→ new turn appended ✓\n→ .db state rebuilt ✓</div></div>'
+    },
+    {
+      id: 'ship-auto-reconcile',
+      title: 'Ship Auto-Reconcile',
+      date: 'Jun 3, 2026',
+      tag: 'Workflow',
+      desc: '<p>Shipping a branch that diverged from <code>main</code> no longer makes you hand-resolve in your working tree.</p><p>CCC spins up an isolated <code>git worktree</code>, fast-forwards or rebases your branch against the latest <code>main</code> there, runs your sanity checks, and pushes the result. Your working tree stays untouched the whole time. Adds editor/cache cruft auto-classification so junk files don\'t block the push.</p>',
+      mockup: '<div style="font-family:var(--mono,monospace);font-size:11px;line-height:1.6;color:#a6accd;padding:10px 12px;background:rgba(0,0,0,0.25);border-radius:6px;border-left:3px solid var(--green,#3dd68c);"><div>📁 ../repo-wt-ship-tmp/ &nbsp;<span style="color:#3dd68c;">[isolated worktree]</span></div><div>&nbsp;&nbsp;↳ git fetch origin &nbsp;<span style="opacity:0.6;">→ main is 3 commits ahead</span></div><div>&nbsp;&nbsp;↳ git rebase origin/main &nbsp;<span style="color:#3dd68c;">✓ clean</span></div><div>&nbsp;&nbsp;↳ filter .DS_Store / *.swp &nbsp;<span style="color:#3dd68c;">✓ 4 junk files dropped</span></div><div>&nbsp;&nbsp;↳ git push origin HEAD &nbsp;<span style="color:#3dd68c;">✓ landed</span></div><div style="margin-top:6px;color:var(--text-muted);">Your working tree was never touched.</div></div>'
+    },
+    {
       id: 'antigravity-engine',
       title: 'Antigravity Engine',
       date: 'May 21, 2026',

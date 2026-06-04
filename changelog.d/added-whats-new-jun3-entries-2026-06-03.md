@@ -1,0 +1,1 @@
+What's New carousel now highlights the four headline items shipped today: Subagent Tabs (visualization), Headless Question Relay (orchestration), Antigravity Orphan Resume (engine), and Ship Auto-Reconcile (workflow). Each entry has a description and a styled inline mockup so users opening the carousel on next launch see what's new without leaving the dashboard.
