@@ -23044,7 +23044,7 @@ def _group_chat_inject_text(chat_path: str, topic: str, mode: str, sid: str) -> 
     the chat file for actual content.
     """
     safe_topic = (topic or "").replace('"', '\\"')
-    text = f'/group-chat chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
+    text = f'/group-chat-checkin chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
     snapshot = _group_chat_latest_message_snapshot(chat_path)
     if snapshot:
         # Keep just the first line — the `## <ts> — <author>` heading —
@@ -36415,7 +36415,7 @@ def install_orchestration_skill():
         print("  [skill] install skipped (CCC_SKIP_SKILL_INSTALL=1)")
         return
     _install_skill("ccc-orchestration")
-    _install_skill("group-chat")
+    _install_skill("group-chat-checkin")
 
 
 def _raise_open_file_limit(min_soft=2048):
