@@ -4889,6 +4889,14 @@ class TestQuestionRelay(unittest.TestCase):
         self._write_request(sid)
         self.assertFalse(self.server._write_question_answer(sid, [])["ok"])
 
+    def test_hook_process_not_counted_as_active_tool_child(self):
+        # Regression: the blocking PreToolUse hook is a child process of the
+        # spawn; if treated as a running "Bash" tool it clobbers the
+        # AskUserQuestion sidecar and suppresses the answer modal.
+        self.assertTrue(self.server._is_ccc_hook_command(
+            "python3 /Users/x/.claude/command-center/hooks/pre-tool-use.py"))
+        self.assertFalse(self.server._is_ccc_hook_command("bash -c 'npm test'"))
+
 
 class TestQuestionRelayHook(unittest.TestCase):
     """The PreToolUse hook's answer-rendering logic (hooks/pre-tool-use.py)."""

@@ -15545,13 +15545,28 @@ def _session_status_is_busy(status):
     return (status.get("status") or "").lower() in _BUSY_SESSION_STATUSES
 
 
+_CCC_HOOK_SCRIPTS = ("pre-tool-use.py", "post-tool-use.py", "notification.py", "stop.py")
+
+
+def _is_ccc_hook_command(command):
+    """True if a child process is one of our own Claude Code hook scripts.
+
+    The PreToolUse hook blocks (in its own process group) while a relayed
+    AskUserQuestion waits for an answer. That hook is NOT a tool the agent is
+    running — counting it as one flips the sidecar to a phantom "Bash" command,
+    which masks the question and suppresses the answer modal.
+    """
+    return any(name in (command or "") for name in _CCC_HOOK_SCRIPTS)
+
+
 def _spawn_entry_active_tool_child(entry):
     """Return metadata for a transient child tool process under a spawned agent.
 
     Claude's long-lived MCP servers stay in the Claude process group. Bash/tool
     subprocesses are launched as their own process group, so a direct child with
     a different PGID is a strong signal that the session is still busy even when
-    the sidecar says "waiting".
+    the sidecar says "waiting". Our own hook processes are skipped — a blocked
+    question-relay hook is not a running tool.
     """
     try:
         parent_pid = int((entry or {}).get("pid") or 0)
@@ -15582,11 +15597,14 @@ def _spawn_entry_active_tool_child(entry):
             continue
         if ppid != parent_pid or pgid == parent_pid:
             continue
+        command = parts[4] if len(parts) > 4 else ""
+        if _is_ccc_hook_command(command):
+            continue
         return {
             "pid": pid,
             "pgid": pgid,
             "stat": parts[3],
-            "command": parts[4] if len(parts) > 4 else "",
+            "command": command,
         }
     return None
 
@@ -31690,6 +31708,30 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         status["sidecar_in_flight"] = True
                         status["active_child_pid"] = active_child.get("pid")
                         status["active_child_pgid"] = active_child.get("pgid")
+                # Authoritative AskUserQuestion signal: our PreToolUse hook
+                # writes a relay request file for exactly the window it blocks
+                # waiting for an answer. Trust it over the in-flight marker
+                # (transcript-flush timing) and over any misdetected child —
+                # this is what drives the answer modal.
+                relay_req = _read_question_request(sid) if sid else None
+                if relay_req and relay_req.get("questions"):
+                    q0 = relay_req["questions"][0]
+                    q0 = q0 if isinstance(q0, dict) else {}
+                    status["sidecar_tool"] = "AskUserQuestion"
+                    status["sidecar_status"] = "active"
+                    status["sidecar_in_flight"] = True
+                    status.pop("active_child_pid", None)
+                    status.pop("active_child_pgid", None)
+                    if not ask_payload:
+                        q_opts = [o for o in (q0.get("options") or []) if isinstance(o, dict)]
+                        ask_payload = {
+                            "header": q0.get("header") or "",
+                            "question": q0.get("question") or "",
+                            "preamble": "",
+                            "options": [o.get("label") for o in q_opts if o.get("label")],
+                            "option_details": q_opts,
+                            "summary": q0.get("question") or q0.get("header") or "",
+                        }
                 if status.get("sidecar_tool") == "AskUserQuestion":
                     ask_payload = _enrich_ask_payload_from_transcript(sid, ask_payload)
                     if ask_payload:
