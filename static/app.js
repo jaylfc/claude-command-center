@@ -16,7 +16,7 @@
   // open / during load and clear themselves, so there's nothing to gate.
   const _PAUSE_WHEN_HIDDEN = new Set([
     'liveStatus', 'liveToolStrip', 'sessionsList', 'gcActive', 'issues',
-    'vercelDeploy', 'localhost', 'worktreesBadge',
+    'vercelDeploy', 'localhost', 'worktreesBadge', 'archiveTimes',
   ]);
   function _pollerSkip(name) {
     return _pollerOff(name) || (_PAUSE_WHEN_HIDDEN.has(name) && document.hidden);
@@ -55,6 +55,7 @@
     liveStatus:     { ms: 5000,  label: 'status',  surface: 'Sidebar — conversation row status',           desc: 'Session statuses — the live row dots + state.' },
     issues:         { ms: 10000, label: 'issues',  surface: 'Sidebar — GitHub Issues section',             desc: 'GitHub issues for the active repo.' },
     sessionsList:   { ms: 60000, label: 'sessions',surface: 'Sidebar — session list',                      desc: 'Archive/session refresh (~3MB, stale-cache).' },
+    archiveTimes:   { ms: 90000, label: 'archive-t',surface: 'Sidebar — archive row times',                  desc: 'Refresh archive last_interacted/modified so row times stay live.' },
     gcActive:       { ms: 15000, label: 'gc-live', surface: 'Sidebar — active-group-chat footer pill',     desc: 'Active group-chat coordinations badge.' },
     vercelDeploy:   { ms: 15000, label: 'vercel',  surface: 'Top bar — Vercel deploy badge',               desc: 'Latest Vercel deploy status.' },
     localhost:      { ms: 15000, label: 'localhost',surface: 'Top bar — localhost pill',                   desc: 'Localhost dev-server reachability probe.' },
@@ -24160,6 +24161,28 @@
       }
       _firstSessionsLoaded.then(() => setArchiveMode());
     }
+    // Periodic archive refresh. archiveData carries last_interacted /
+    // modified / mtime for every session row, but used to only refresh
+    // on boot / folder change. Sessions whose JSONL kept getting
+    // written (or where Codex CLI runs intermittently) showed "1d" or
+    // older row times forever despite fresh on-disk activity, because
+    // refreshLiveSessionsActivity only patches sidecar fields — not
+    // the time fields. 90s cadence stays under the server's 5min
+    // _ARCHIVE_RESPONSE_CACHE_FRESH_TTL so most hits are cheap; the
+    // overlap means the user sees row time advance within ~90s of any
+    // real activity, even for non-live sessions.
+    setInterval(_gated('archiveTimes', () => {
+      if (document.hidden) return;
+      if (typeof refreshArchiveData !== 'function') return;
+      refreshArchiveData({ staleOk: true }).then(() => {
+        try {
+          if (typeof renderArchiveList === 'function') {
+            const $s = document.getElementById('convSearch');
+            renderArchiveList($s ? $s.value : '');
+          }
+        } catch (_) {}
+      }).catch(() => {});
+    }), 90 * 1000);
   })();
 
   // Set up the In Group Chat polling exactly once at boot. Used to be
