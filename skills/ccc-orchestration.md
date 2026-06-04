@@ -55,14 +55,23 @@ All operations (except List) use `curl -s -X POST "$CCC_URL<endpoint>" -H "Conte
   *Payload:* `{"session_id": "<uuid>", "text": "...", "timeout_ms": 60000}`. 
   *Returns:* `{"ok": true, "text": "reply"}`. On timeout, work continues (you can re-ask or notify user). Requires a real engine `session_id`, not only a pending `spawn_id`.
 
-### Group Chat Creation (UI-Only)
-There is no programmatic API (such as `/api/group-chat/create` or `/api/group-chat/add`) to create group chats or register participants by UUID. Chat creation must be done manually via the CCC UI:
+### Group Chat Operations
+You can manage group chats programmatically via the API endpoints or manually via the UI.
+
+- **Create Chat (POST):** `/api/group-chat/create`
+  *Payload:* `{"topic": "<title>", "session_ids": ["<uuid1>", "<uuid2>"], "include_human": true}`. `include_human` is optional and defaults to `true`.
+  *Returns:* `{"ok": true, "chat_path": "~/.claude/group-chats/slug-timestamp.md", "id": "<chat-uuid>", "uuid": "<chat-uuid>", "results": [...]}`.
+  This registers the participants in the chat's `name_map`, generates the `.md` and `.json` sidecar files, and injects the `/group-chat` command into the target sessions so they join automatically.
+- **Add Participant (POST):** `/api/group-chat/add`
+  *Payload:* `{"chat_id": "<chat-uuid>", "session_id": "<uuid>", "display_name": "<name>"}` (you can also pass `chat_path` instead of `chat_id`). `display_name` is optional.
+  *Returns:* `{"ok": true, "session_id": "<uuid>"}`.
+  This registers the new participant session in the chat's metadata and injects `/group-chat` into the session so it joins the live chat.
+
+*Manual UI Fallback:*
 1. Open the CCC UI in your browser at `http://127.0.0.1:8090`.
-2. Navigate to the **Chats** or **Group Chats** tab.
-3. Click **Create New Chat**.
-4. Enter the topic/title.
-5. Select or search for the participant sessions by UUID to invite them.
-6. Click **Create/Start**. This generates the `.md` chat file and its `.json` sidecar (setting up `name_map` and enabling CCC wakeups and participant re-injection).
+2. Navigate to the **Chats** or **Group Chats** tab and click **Create New Chat**.
+3. Enter the topic, search/select the participant sessions by UUID, and click **Create/Start**.
+
 
 ## 3. Strict Rules
 - **No one-shot tasks:** Use the built-in `Task` tool for quick delegation.

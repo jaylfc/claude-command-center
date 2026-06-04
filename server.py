@@ -34835,14 +34835,44 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "missing agent_id"})
             else:
                 self.send_json(pkood_kill(agent_id))
-        elif path == "/api/coordinate":
+        elif path in ("/api/coordinate", "/api/group-chat/create", "/api/group-chats/create"):
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
             try:
                 payload = json.loads(body) if body else {}
             except json.JSONDecodeError:
                 payload = {}
+            # If sessions_meta is missing, try to build it with short name mappings from session_ids
+            if "session_ids" in payload and "sessions_meta" not in payload:
+                sessions_meta = []
+                for sid in payload["session_ids"]:
+                    sessions_meta.append({"session_id": sid, "display_name": sid[:8]})
+                payload["sessions_meta"] = sessions_meta
             self.send_json(_coordinate_sessions(payload))
+        elif path in ("/api/group-chat/add", "/api/group-chats/add"):
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            chat_path = (payload.get("chat_path") or payload.get("path") or "").strip()
+            chat_uuid = (payload.get("chat_id") or payload.get("id") or payload.get("uuid") or "").strip()
+            session_id = (payload.get("session_id") or "").strip()
+            display_name = (payload.get("display_name") or "").strip()
+            if not display_name and session_id:
+                display_name = session_id[:8]
+            
+            if (not chat_path and not chat_uuid) or not session_id:
+                self.send_json({"ok": False, "error": "missing chat_id/chat_path or session_id"})
+                return
+            result = _group_chat_add_participant(chat_path, session_id, display_name, chat_uuid)
+            if result.get("error") == "forbidden":
+                self.send_json(result, 403)
+            elif result.get("error") == "not found":
+                self.send_json(result, 404)
+            else:
+                self.send_json(result)
         elif path == "/api/group-chat/post":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
