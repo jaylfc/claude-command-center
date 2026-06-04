@@ -26585,8 +26585,16 @@
     return 'Fix the following UX issue based on this annotation:\n\n' + annContextForClipboard(ann);
   }
 
-  async function annOpenUxFixesQueue(ann, closeFn, errEl) {
+  async function annOpenUxFixesQueue(ann, closeFn, _errEl) {
     if (!ann) return;
+    // Close the editor up front — the user clicked the button and
+    // doesn't need to stare at the modal while the fetch is in flight.
+    // The annotation is already persisted (persistAnnotation runs
+    // before we get here) so closing now doesn't lose it. Feedback —
+    // success OR failure — arrives via showOpToast a moment later.
+    if (typeof closeFn === 'function') {
+      try { closeFn(); } catch (_) {}
+    }
     if (typeof showOpToast === 'function') showOpToast('Sending annotation to UX fixes queue…', 'info');
     try {
       const res = await fetch('/api/annotations/ux-fixes-queue', {
@@ -26612,7 +26620,6 @@
       if (_targetSid && typeof markSessionSending === 'function') {
         markSessionSending(_targetSid);
       }
-      if (typeof closeFn === 'function') closeFn();
       showOpToast(data.action === 'spawned' ? 'UX fixes queue session created' : 'Annotation sent to UX fixes queue', 'success');
       // When a NEW session was spawned, force-pull the sessions list so
       // the new row appears in the conv sidebar immediately — don't wait
@@ -26633,12 +26640,9 @@
         }
       } catch (_) {}
     } catch (err) {
-      if (errEl) {
-        errEl.textContent = 'UX fixes queue failed: ' + ((err && err.message) || 'unknown');
-        errEl.hidden = false;
-      } else {
-        showOpToast('UX fixes queue failed: ' + ((err && err.message) || 'unknown'), 'error');
-      }
+      // Modal is already closed; the toast is the only feedback channel
+      // left. Use it for both transports (in-page editor + screen-cap).
+      showOpToast('UX fixes queue failed: ' + ((err && err.message) || 'unknown'), 'error');
     }
   }
 
