@@ -16479,7 +16479,7 @@ CURSOR_HOME = Path.home() / ".cursor"
 CURSOR_PROJECTS_ROOT = CURSOR_HOME / "projects"
 CURSOR_LOCAL_BIN = Path.home() / ".local" / "bin" / "cursor-agent"
 CURSOR_CONTEXT_LIMIT = 0
-_CURSOR_META_VERSION = 2
+_CURSOR_META_VERSION = 3
 CURSOR_APP_BUNDLE_CANDIDATES = (
     Path("/Applications/Cursor.app/Contents/Resources/app/bin/cursor-agent"),
     Path("/Applications/Cursor.app/Contents/Resources/cursor-agent"),
@@ -18089,6 +18089,7 @@ def _extract_cursor_tail_meta(path):
             "last_event_type": None,
             "pending_tool": None,
             "pending_file": None,
+            "pending_tool_ts": 0,
             "has_edit": False,
             "has_commit": False,
             "has_push": False,
@@ -18144,12 +18145,14 @@ def _extract_cursor_tail_meta(path):
                     meta["last_event_type"] = "user"
                     meta["pending_tool"] = None
                     meta["pending_file"] = None
+                    meta["pending_tool_ts"] = 0
                     pending_tool = False
                     continue
                 if role != "assistant":
                     if pending_tool:
                         meta["pending_tool"] = None
                         meta["pending_file"] = None
+                        meta["pending_tool_ts"] = 0
                         pending_tool = False
                     continue
                 text = _cursor_message_text(ev).strip()
@@ -18157,13 +18160,16 @@ def _extract_cursor_tail_meta(path):
                     meta["last_assistant_text"] = text
                     meta.update(_extract_codex_summary_signals(text, pr_url_re))
                 meta["last_event_type"] = "assistant"
+                saw_tool_use = False
                 for block in _cursor_content_blocks(ev):
                     if block.get("type") != "tool_use":
                         continue
+                    saw_tool_use = True
                     name = _cursor_tool_name(block)
                     detail = _cursor_tool_detail(block)
                     meta["pending_tool"] = name
                     meta["pending_file"] = detail[:80] if isinstance(detail, str) else None
+                    meta["pending_tool_ts"] = ts_epoch or meta.get("last_meaningful_ts") or mtime
                     pending_tool = True
                     lname = name.lower()
                     if lname in (
@@ -18193,6 +18199,13 @@ def _extract_cursor_tail_meta(path):
                             meta["tail_worktree_path"] = signals["worktree_path"]
                         if signals.get("worktree_branch"):
                             meta["tail_branch"] = signals["worktree_branch"]
+                # Cursor emits one JSONL line per tool call; a follow-up line
+                # with only assistant text means the turn finished.
+                if text and not saw_tool_use:
+                    meta["pending_tool"] = None
+                    meta["pending_file"] = None
+                    meta["pending_tool_ts"] = 0
+                    pending_tool = False
             end_offset = start_offset
     except OSError:
         return {}
