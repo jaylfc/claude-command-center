@@ -150,6 +150,17 @@ _IDLE_REAPER_INTERVAL_S = 1800  # 30 min
 # project conversation store. Pinning cwd here makes those JSONLs easy to avoid
 # in repo-specific scans and easy to garbage-collect on demand.
 _SCRATCH_DIR = COMMAND_CENTER_STATE_DIR / "scratch"
+FLOW_STATE_DIR = COMMAND_CENTER_STATE_DIR / "flow"
+FLOW_INDEX_FILE = FLOW_STATE_DIR / "index.json"
+_FLOW_INDEX_LOCK = threading.Lock()
+_FLOW_FIELD_LABELS = {
+    "status": "Status",
+    "goal": "Goal",
+    "target_date": "Target date",
+    "eta": "ETA",
+    "owner": "Owner",
+    "color_seed": "Color seed",
+}
 _PASTED_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 _PASTED_IMAGE_PATH_RE = re.compile(
     r"(?:file://)?(/[^\s<>\"')]+/\.claude/(?:command-center/)?"
@@ -5518,6 +5529,420 @@ def _strip_title_prefix(title):
     if not title or not _TITLE_STRIP_RE:
         return title
     return _TITLE_STRIP_RE.sub("", title)
+
+
+# ── Flow work-item state ─────────────────────────────────────────────────
+def _flow_display_path(path):
+    try:
+        p = Path(path).expanduser().resolve(strict=False)
+        home = Path.home().resolve(strict=False)
+        rel = p.relative_to(home)
+        return "~/" + str(rel)
+    except (OSError, RuntimeError, ValueError):
+        return str(path)
+
+
+def _flow_slug(value, fallback="item", max_len=48):
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip()).strip("-._")
+    if not s:
+        s = fallback
+    return s[:max_len]
+
+
+def _flow_field_key(label):
+    s = re.sub(r"[^a-z0-9]+", "_", str(label or "").strip().lower()).strip("_")
+    aliases = {
+        "target": "target_date",
+        "date": "target_date",
+        "due": "target_date",
+        "due_date": "target_date",
+        "color": "color_seed",
+    }
+    return aliases.get(s, s)
+
+
+def _flow_node_id(kind, repo_path=None, object_id=None):
+    kind = (kind or "").strip().lower()
+    if kind == "repo":
+        repo = resolve_repo_path(repo_path)
+        return f"repo:{repo}"
+    if kind == "object":
+        oid = _flow_slug(object_id, fallback="object", max_len=96)
+        return f"object:{oid}"
+    raise ValueError("kind must be repo or object")
+
+
+def _flow_state_path(kind, repo_path=None, object_id=None):
+    kind = (kind or "").strip().lower()
+    if kind == "repo":
+        repo = resolve_repo_path(repo_path)
+        leaf = _flow_slug(Path(repo).name, fallback="repo", max_len=44)
+        digest = hashlib.sha1(repo.encode("utf-8")).hexdigest()[:12]
+        return FLOW_STATE_DIR / "repos" / f"{leaf}-{digest}.md"
+    if kind == "object":
+        oid = _flow_slug(object_id, fallback="object", max_len=96)
+        return FLOW_STATE_DIR / "objects" / f"{oid}.md"
+    raise ValueError("kind must be repo or object")
+
+
+def _flow_parse_fields(content):
+    fields = {k: "" for k in _FLOW_FIELD_LABELS}
+    fields["status"] = "Active"
+    fields["color_seed"] = "auto"
+    in_fields = False
+    for line in str(content or "").splitlines():
+        if re.match(r"^##\s+Flow fields\s*$", line.strip(), re.IGNORECASE):
+            in_fields = True
+            continue
+        if in_fields and re.match(r"^##\s+", line):
+            break
+        if not in_fields:
+            continue
+        if not line.strip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        if re.fullmatch(r":?-{3,}:?", cells[0] or ""):
+            continue
+        key = _flow_field_key(cells[0])
+        if key in fields and cells[0].lower() != "field":
+            fields[key] = cells[1]
+    return fields
+
+
+def _flow_managed_block(name, body):
+    return (
+        f"<!-- ccc:auto:start {name} -->\n"
+        f"{str(body or '').rstrip()}\n"
+        f"<!-- ccc:auto:end {name} -->"
+    )
+
+
+def _flow_replace_managed_block(content, name, body):
+    block = _flow_managed_block(name, body)
+    pattern = re.compile(
+        r"<!--\s*ccc:auto:start\s+" + re.escape(name) + r"\s*-->"
+        r"[\s\S]*?"
+        r"<!--\s*ccc:auto:end\s+" + re.escape(name) + r"\s*-->",
+        re.IGNORECASE,
+    )
+    if pattern.search(content or ""):
+        return pattern.sub(block, content, count=1)
+    return str(content or "").rstrip() + "\n\n" + block + "\n"
+
+
+def _flow_table_cell(value):
+    s = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+    s = s.replace("|", "\\|")
+    return s or "-"
+
+
+def _flow_item_done(item):
+    if bool(item.get("done")):
+        return True
+    status = str(item.get("status") or "").strip().lower()
+    return status in {"done", "completed", "complete", "archived", "verified", "closed"}
+
+
+def _flow_current_work_block(items):
+    rows = [
+        "## Current work",
+        "",
+        "| Item | Status | Session | Updated | Notes |",
+        "|---|---|---|---|---|",
+    ]
+    clean = [it for it in (items or []) if isinstance(it, dict) and (it.get("title") or it.get("item"))]
+    if not clean:
+        rows.append("| No visible child work yet. | - | - | - | - |")
+    for it in clean:
+        rows.append(
+            "| "
+            + " | ".join([
+                _flow_table_cell(it.get("title") or it.get("item")),
+                _flow_table_cell(it.get("status")),
+                _flow_table_cell(it.get("session") or it.get("session_id")),
+                _flow_table_cell(it.get("updated")),
+                _flow_table_cell(it.get("notes")),
+            ])
+            + " |"
+        )
+    return "\n".join(rows)
+
+
+def _flow_open_items_block(items):
+    lines = ["## Open items", ""]
+    open_items = [it for it in (items or []) if isinstance(it, dict) and not _flow_item_done(it)]
+    if not open_items:
+        lines.append("- None detected yet.")
+    for it in open_items:
+        title = _flow_table_cell(it.get("title") or it.get("item"))
+        status = _flow_table_cell(it.get("status"))
+        lines.append(f"- {title}" + (f" ({status})" if status != "-" else ""))
+    return "\n".join(lines)
+
+
+def _flow_completed_block(items):
+    lines = ["## Completed", ""]
+    done_items = [it for it in (items or []) if isinstance(it, dict) and _flow_item_done(it)]
+    if not done_items:
+        lines.append("- None detected yet.")
+    for it in done_items:
+        title = _flow_table_cell(it.get("title") or it.get("item"))
+        status = _flow_table_cell(it.get("status"))
+        lines.append(f"- {title}" + (f" ({status})" if status != "-" else ""))
+    return "\n".join(lines)
+
+
+def _flow_template(kind, title, repo_path=None, object_id=None):
+    title = (str(title or "").strip()
+             or (Path(str(repo_path)).name if repo_path else "")
+             or str(object_id or "").strip()
+             or "Flow work item")
+    fields = [
+        "| Field | Value |",
+        "|---|---|",
+        "| Status | Active |",
+        "| Goal |  |",
+        "| Target date |  |",
+        "| ETA |  |",
+        "| Owner |  |",
+        "| Color seed | auto |",
+    ]
+    meta = []
+    if kind == "repo" and repo_path:
+        meta.append(f"Repo path: `{repo_path}`")
+    if kind == "object" and object_id:
+        meta.append(f"Object id: `{object_id}`")
+    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    parts = [
+        f"# {title}",
+        "",
+        "## Flow fields",
+        "",
+        "\n".join(fields),
+        "",
+    ]
+    if meta:
+        parts.extend(["## Identity", "", "\n".join(meta), ""])
+    parts.extend([
+        "## Summary",
+        "",
+        "Write the current state here.",
+        "",
+        _flow_managed_block("status-table", _flow_current_work_block([])),
+        "",
+        _flow_managed_block("open-items", _flow_open_items_block([])),
+        "",
+        _flow_managed_block("completed", _flow_completed_block([])),
+        "",
+        "## Manual notes",
+        "",
+        f"Created by CCC Flow on {now}.",
+        "",
+    ])
+    return "\n".join(parts)
+
+
+def _flow_read_index():
+    try:
+        data = json.loads(FLOW_INDEX_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        data = {}
+    nodes = data.get("nodes") if isinstance(data, dict) else None
+    return nodes if isinstance(nodes, dict) else {}
+
+
+def _flow_write_index(nodes):
+    FLOW_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = FLOW_INDEX_FILE.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps({"schema": 1, "nodes": nodes}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, FLOW_INDEX_FILE)
+
+
+def _flow_index_upsert(entry):
+    with _FLOW_INDEX_LOCK:
+        nodes = _flow_read_index()
+        nodes[entry["node_id"]] = {
+            "kind": entry.get("kind") or "",
+            "repo_path": entry.get("repo_path") or "",
+            "object_id": entry.get("object_id") or "",
+            "title": entry.get("title") or "",
+            "path": entry.get("path") or "",
+            "updated_at": time.time(),
+        }
+        _flow_write_index(nodes)
+
+
+def _flow_response_for_path(entry, path):
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        mtime = path.stat().st_mtime
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}, 500
+    fields = _flow_parse_fields(content)
+    return {
+        "ok": True,
+        "kind": entry.get("kind") or "",
+        "node_id": entry["node_id"],
+        "title": entry.get("title") or "",
+        "repo_path": entry.get("repo_path") or "",
+        "object_id": entry.get("object_id") or "",
+        "path": str(path),
+        "state_path": _flow_display_path(path),
+        "content": content,
+        "mtime": mtime,
+        "fields": fields,
+    }, 200
+
+
+def _flow_entry_from_payload(payload):
+    payload = payload or {}
+    kind = str(payload.get("kind") or "").strip().lower()
+    repo_path = str(payload.get("repo_path") or "").strip()
+    object_id = str(payload.get("object_id") or "").strip()
+    title = str(payload.get("title") or "").strip()
+    node_id = _flow_node_id(kind, repo_path=repo_path, object_id=object_id)
+    if kind == "repo":
+        repo_path = resolve_repo_path(repo_path)
+        if not title:
+            title = Path(repo_path).name
+    elif kind == "object":
+        object_id = _flow_slug(object_id, fallback="object", max_len=96)
+        if not title:
+            title = object_id
+    path = _flow_state_path(kind, repo_path=repo_path, object_id=object_id)
+    return {
+        "kind": kind,
+        "node_id": node_id,
+        "repo_path": repo_path,
+        "object_id": object_id,
+        "title": title,
+        "path": str(path),
+    }, path
+
+
+def _flow_load_node_payload(payload, create=False):
+    try:
+        entry, path = _flow_entry_from_payload(payload)
+    except (RepoContextError, ValueError) as exc:
+        status = exc.status if isinstance(exc, RepoContextError) else 400
+        return {"ok": False, "error": str(exc)}, status
+    if not _path_is_within(path, FLOW_STATE_DIR):
+        return {"ok": False, "error": "invalid flow state path"}, 403
+    if not path.exists():
+        if not create:
+            return {"ok": False, "error": "not found", "path": str(path)}, 404
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            content = _flow_template(
+                entry["kind"],
+                entry.get("title"),
+                repo_path=entry.get("repo_path"),
+                object_id=entry.get("object_id"),
+            )
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            return {"ok": False, "error": f"could not create flow file: {exc}"}, 500
+    _flow_index_upsert(entry)
+    return _flow_response_for_path(entry, path)
+
+
+def _flow_save_node_payload(payload):
+    try:
+        entry, path = _flow_entry_from_payload(payload)
+    except (RepoContextError, ValueError) as exc:
+        status = exc.status if isinstance(exc, RepoContextError) else 400
+        return {"ok": False, "error": str(exc)}, status
+    if not _path_is_within(path, FLOW_STATE_DIR):
+        return {"ok": False, "error": "invalid flow state path"}, 403
+    content = payload.get("content")
+    if not isinstance(content, str):
+        return {"ok": False, "error": "content must be a string"}, 400
+    if len(content.encode("utf-8", errors="replace")) > 1024 * 1024:
+        return {"ok": False, "error": "content too large"}, 413
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and not payload.get("overwrite"):
+            current_mtime = path.stat().st_mtime
+            expected = payload.get("mtime")
+            if expected is not None:
+                try:
+                    expected_f = float(expected)
+                except (TypeError, ValueError):
+                    expected_f = 0.0
+                if expected_f and abs(current_mtime - expected_f) > 0.001:
+                    return {
+                        "ok": False,
+                        "error": "flow file changed on disk",
+                        "mtime": current_mtime,
+                    }, 409
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}, 500
+    _flow_index_upsert(entry)
+    return _flow_response_for_path(entry, path)
+
+
+def _flow_refresh_node_payload(payload):
+    result, status = _flow_load_node_payload(payload, create=True)
+    if not result.get("ok"):
+        return result, status
+    content = result.get("content") or ""
+    items = payload.get("items") or []
+    if not isinstance(items, list):
+        items = []
+    content = _flow_replace_managed_block(content, "status-table", _flow_current_work_block(items))
+    content = _flow_replace_managed_block(content, "open-items", _flow_open_items_block(items))
+    content = _flow_replace_managed_block(content, "completed", _flow_completed_block(items))
+    save_payload = dict(payload)
+    save_payload["content"] = content
+    save_payload["mtime"] = result.get("mtime")
+    save_payload["overwrite"] = True
+    refreshed, refresh_status = _flow_save_node_payload(save_payload)
+    if refreshed.get("ok"):
+        refreshed["derived"] = {
+            "active_session_count": len([it for it in items if isinstance(it, dict) and not _flow_item_done(it)]),
+            "completed_count": len([it for it in items if isinstance(it, dict) and _flow_item_done(it)]),
+            "open_item_count": len([it for it in items if isinstance(it, dict) and not _flow_item_done(it)]),
+        }
+    return refreshed, refresh_status
+
+
+def _flow_index_payload():
+    entries = []
+    with _FLOW_INDEX_LOCK:
+        nodes = _flow_read_index()
+    for node_id, entry in sorted(nodes.items()):
+        if not isinstance(entry, dict):
+            continue
+        path = Path(entry.get("path") or "")
+        if not path.is_file() or not _path_is_within(path, FLOW_STATE_DIR):
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        entries.append({
+            "node_id": node_id,
+            "kind": entry.get("kind") or "",
+            "repo_path": entry.get("repo_path") or "",
+            "object_id": entry.get("object_id") or "",
+            "title": entry.get("title") or "",
+            "path": str(path),
+            "state_path": _flow_display_path(path),
+            "mtime": mtime,
+            "fields": _flow_parse_fields(content),
+        })
+    return {"ok": True, "entries": entries, "count": len(entries)}
 
 # Sidecar state (written by hooks)
 SIDECAR_STATE_DIR = Path.home() / ".claude" / "command-center" / "live-state"
@@ -32072,6 +32497,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(e.as_payload(), e.status)
         elif path == "/api/config":
             self.send_json(get_app_config())
+        elif path == "/api/flow/index":
+            self.send_json(_flow_index_payload())
+        elif path == "/api/flow/node":
+            qs = urllib.parse.parse_qs(parsed.query)
+            payload = {k: (v[0] if isinstance(v, list) and v else v) for k, v in qs.items()}
+            create = str(payload.get("create") or "").lower() in ("1", "true", "yes")
+            result, status = _flow_load_node_payload(payload, create=create)
+            self.send_json(result, status)
         elif path == "/api/question":
             # Pending relayed AskUserQuestion for a session (headless sessions
             # whose PreToolUse hook is blocking on an answer). The modal reads
@@ -33625,6 +34058,26 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 return
             result = create_annotation(payload)
             self.send_json(result, 200 if result.get("ok") else 400)
+            return
+        if path in ("/api/flow/node", "/api/flow/node/refresh"):
+            # Flow work-item state lives under ~/.claude/command-center/flow.
+            # These endpoints create/load/save the Markdown status files used
+            # by repo/object nodes in the Flow board. Same-origin POST is the
+            # trust boundary, matching other local state endpoints.
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            if not isinstance(payload, dict):
+                self.send_json({"ok": False, "error": "expected JSON object"}, 400)
+                return
+            if path.endswith("/refresh"):
+                result, status = _flow_refresh_node_payload(payload)
+            else:
+                result, status = _flow_save_node_payload(payload)
+            self.send_json(result, status)
             return
         if path == "/api/annotations/capture-screen":
             # Native screen-region capture for annotations. The server first

@@ -7131,6 +7131,116 @@
   } catch (_) {}
   let flowDraftFocusId = '';
   let flowSelectedNodes = {};
+  let flowNodeMetaCache = {};
+  let flowNodeMetaFetchInFlight = false;
+  let flowNodeMetaLastFetch = 0;
+  const FLOW_META_FETCH_TTL_MS = 8000;
+  const FLOW_ACCENT_PALETTE = [
+    { id: 'blue', accent: '#58a6ff', soft: 'rgba(88,166,255,0.12)', line: 'rgba(88,166,255,0.46)' },
+    { id: 'teal', accent: '#39d2c0', soft: 'rgba(57,210,192,0.12)', line: 'rgba(57,210,192,0.46)' },
+    { id: 'green', accent: '#3fb950', soft: 'rgba(63,185,80,0.12)', line: 'rgba(63,185,80,0.46)' },
+    { id: 'amber', accent: '#f2cc60', soft: 'rgba(242,204,96,0.13)', line: 'rgba(242,204,96,0.48)' },
+    { id: 'orange', accent: '#ffa657', soft: 'rgba(255,166,87,0.12)', line: 'rgba(255,166,87,0.48)' },
+    { id: 'red', accent: '#ff7b72', soft: 'rgba(255,123,114,0.12)', line: 'rgba(255,123,114,0.46)' },
+    { id: 'pink', accent: '#db61a2', soft: 'rgba(219,97,162,0.13)', line: 'rgba(219,97,162,0.48)' },
+    { id: 'purple', accent: '#bc8cff', soft: 'rgba(188,140,255,0.13)', line: 'rgba(188,140,255,0.48)' },
+    { id: 'indigo', accent: '#8b9cff', soft: 'rgba(139,156,255,0.13)', line: 'rgba(139,156,255,0.48)' },
+    { id: 'slate', accent: '#8b949e', soft: 'rgba(139,148,158,0.13)', line: 'rgba(139,148,158,0.46)' },
+  ];
+
+  function flowHashString(seed) {
+    const s = String(seed || 'flow');
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  function flowPaletteForSeed(seed) {
+    const idx = flowHashString(seed) % FLOW_ACCENT_PALETTE.length;
+    return FLOW_ACCENT_PALETTE[idx] || FLOW_ACCENT_PALETTE[0];
+  }
+
+  function flowAccentStyle(seed) {
+    const p = flowPaletteForSeed(seed);
+    return '--flow-accent:' + p.accent
+      + ';--flow-accent-soft:' + p.soft
+      + ';--flow-accent-line:' + p.line
+      + ';--flow-accent-id:' + p.id + ';';
+  }
+
+  function flowMetaForNode(nodeId) {
+    return (nodeId && flowNodeMetaCache && flowNodeMetaCache[nodeId]) || null;
+  }
+
+  function flowMetaFields(nodeId) {
+    const meta = flowMetaForNode(nodeId);
+    return (meta && meta.fields) || {};
+  }
+
+  function flowColorSeedForNode(nodeId, fallbackSeed) {
+    const fields = flowMetaFields(nodeId);
+    const raw = String(fields.color_seed || '').trim();
+    if (raw && raw.toLowerCase() !== 'auto') return raw;
+    return fallbackSeed || nodeId || 'flow';
+  }
+
+  function flowMergeNodeMeta(entry) {
+    if (!entry || !entry.node_id) return false;
+    const prev = JSON.stringify(flowNodeMetaCache[entry.node_id] || null);
+    flowNodeMetaCache[entry.node_id] = entry;
+    return prev !== JSON.stringify(entry);
+  }
+
+  function scheduleFlowNodeMetaFetch(force) {
+    const now = Date.now();
+    if (!force && (flowNodeMetaFetchInFlight || (now - flowNodeMetaLastFetch) < FLOW_META_FETCH_TTL_MS)) return;
+    flowNodeMetaFetchInFlight = true;
+    fetch('/api/flow/index', { cache: 'no-store' })
+      .then(res => res.json())
+      .then(data => {
+        flowNodeMetaLastFetch = Date.now();
+        let changed = false;
+        const next = {};
+        (data.entries || []).forEach(entry => {
+          if (entry && entry.node_id) next[entry.node_id] = entry;
+        });
+        const prevKeys = Object.keys(flowNodeMetaCache || {});
+        const nextKeys = Object.keys(next);
+        if (prevKeys.length !== nextKeys.length) changed = true;
+        nextKeys.forEach(k => {
+          if (!changed && JSON.stringify(flowNodeMetaCache[k] || null) !== JSON.stringify(next[k])) changed = true;
+        });
+        flowNodeMetaCache = next;
+        if (changed && isFlowView()) {
+          const $s = document.getElementById('convSearch');
+          const convs = (typeof filterConversations === 'function')
+            ? filterConversations($s ? $s.value : '')
+            : (conversationsData || []);
+          renderSidebar(convs, { force: true });
+        }
+      })
+      .catch(() => { flowNodeMetaLastFetch = Date.now(); })
+      .finally(() => { flowNodeMetaFetchInFlight = false; });
+  }
+
+  function flowWorkItemCardHtml(nodeId) {
+    const fields = flowMetaFields(nodeId);
+    const chips = [];
+    const status = String(fields.status || '').trim();
+    const target = String(fields.target_date || '').trim();
+    const eta = String(fields.eta || '').trim();
+    if (status) chips.push('<span class="flow-workitem-chip status">' + escapeHtml(status) + '</span>');
+    if (target) chips.push('<span class="flow-workitem-chip date" title="Target date">' + escapeHtml(target) + '</span>');
+    if (eta) chips.push('<span class="flow-workitem-chip eta" title="ETA">' + escapeHtml(eta) + '</span>');
+    const goal = String(fields.goal || '').trim();
+    let html = '';
+    if (chips.length) html += '<div class="flow-workitem-chips">' + chips.join('') + '</div>';
+    if (goal) html += '<div class="flow-workitem-goal" title="' + escapeAttr(goal) + '">' + escapeHtml(goal) + '</div>';
+    return html;
+  }
 
   function flowSelectedNodeIds() {
     return Object.keys(flowSelectedNodes || {}).filter(id => flowSelectedNodes[id]);
@@ -8512,6 +8622,378 @@
     renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
   }
 
+  let _flowInspectorState = null;
+  let _flowInspectorHiddenInputEls = [];
+
+  function stopFlowNodeInspector() {
+    _flowInspectorState = null;
+    _flowInspectorHiddenInputEls.forEach(item => {
+      if (item && item.el) item.el.style.display = item.display || '';
+    });
+    _flowInspectorHiddenInputEls = [];
+  }
+
+  function hideFlowInspectorInputChrome() {
+    if (_flowInspectorHiddenInputEls.length) return;
+    const els = [];
+    try {
+      const inputBar = typeof getConvInputBarForPane === 'function'
+        ? getConvInputBarForPane(activePaneId())
+        : document.getElementById('convInputBar');
+      const inputCtx = document.querySelector('.conv-pane[data-pane-id="' + activePaneId() + '"] .conv-input-context')
+        || document.getElementById('convInputContext');
+      if (inputBar) els.push(inputBar);
+      if (inputCtx) els.push(inputCtx);
+    } catch (_) {}
+    _flowInspectorHiddenInputEls = els.map(el => ({ el, display: el.style.display || '' }));
+    els.forEach(el => { el.style.display = 'none'; });
+  }
+
+  function flowInspectorPayloadFromNode(node) {
+    if (!node) return null;
+    const kind = node.dataset.flowKind || '';
+    if (kind !== 'repo' && kind !== 'object') return null;
+    const title = ((node.querySelector('.flow-node-title') || {}).textContent || '').trim();
+    const payload = { kind, title };
+    if (kind === 'repo') {
+      payload.repo_path = node.dataset.repoPath || '';
+    } else {
+      payload.object_id = node.dataset.objectId || '';
+      payload.repo_path = flowRepoPathForNode(node) || '';
+    }
+    return payload;
+  }
+
+  function flowInspectorRepoItems(repoPath) {
+    const items = [];
+    (conversationsData || [])
+      .filter(row => row && flowIsVisibleSession(row) && (rowRepoPath(row) || row.folder_path || selectedRepoPath() || '__repo__') === repoPath)
+      .sort((a, b) => flowRowTime(b) - flowRowTime(a))
+      .forEach(row => {
+        const status = flowSessionStatus(row);
+        const branch = row.effective_branch || row.branch || row.git_branch || '';
+        const sid = row.session_id || row.id || '';
+        const col = classifyKanbanColumn(row);
+        items.push({
+          title: flowRowTitle(row),
+          status: status.label || col || 'active',
+          session: sid ? sid.slice(0, 8) : '',
+          updated: flowLastUpdatedLabel(row.last_interacted || row.modified || row.mtime),
+          notes: branch,
+          done: !!row.archived || col === 'verified' || col === 'archived',
+        });
+      });
+    (flowDraftSessions || [])
+      .filter(draft => draft && draft.repo_path === repoPath)
+      .forEach(draft => {
+        items.push({
+          title: flowDraftPrompt(draft) || 'Draft session',
+          status: 'draft',
+          session: draft.id,
+          updated: flowLastUpdatedLabel(draft.updated_at || draft.created_at),
+          notes: 'saved locally',
+          done: false,
+        });
+      });
+    return items;
+  }
+
+  function flowInspectorObjectItems(nodeId) {
+    const board = document.getElementById('flowBoard');
+    const world = board && (board.querySelector('.flow-world') || board);
+    if (!world || !nodeId) return [];
+    const parentMap = {};
+    world.querySelectorAll('.flow-node').forEach(el => {
+      const id = el.dataset.flowNodeId;
+      if (!id) return;
+      parentMap[id] = flowNodeParents[id] || el.dataset.flowParent || '';
+    });
+    const isDescendant = childId => {
+      const seen = new Set([childId]);
+      let cur = parentMap[childId] || '';
+      while (cur && !seen.has(cur)) {
+        if (cur === nodeId) return true;
+        seen.add(cur);
+        cur = parentMap[cur] || '';
+      }
+      return false;
+    };
+    const items = [];
+    world.querySelectorAll('.flow-node').forEach(el => {
+      const id = el.dataset.flowNodeId;
+      if (!id || id === nodeId || !isDescendant(id)) return;
+      const kind = el.dataset.flowKind || '';
+      if (kind !== 'session' && kind !== 'draft-session' && kind !== 'object') return;
+      const titleEl = el.querySelector('.flow-node-title');
+      const input = el.querySelector('.flow-draft-input');
+      const title = ((titleEl && titleEl.textContent) || (input && input.value) || '').trim() || kind;
+      const meta = ((el.querySelector('.flow-node-meta') || {}).textContent || '').trim();
+      const chips = Array.from(el.querySelectorAll('.flow-chip')).map(chip => chip.textContent.trim()).filter(Boolean).join(', ');
+      const status = chips || (meta.split(' · ')[0] || kind);
+      items.push({
+        title,
+        status,
+        session: el.dataset.sessionId || el.dataset.id || el.dataset.draftId || '',
+        updated: meta.split(' · ').slice(-1)[0] || '',
+        notes: kind === 'object' ? 'child object' : '',
+        done: el.classList.contains('is-archived') || /\b(done|completed|verified|archived)\b/i.test(status),
+      });
+    });
+    return items;
+  }
+
+  function flowInspectorItemsForState(state) {
+    if (!state) return [];
+    if (state.kind === 'repo') return flowInspectorRepoItems(state.repo_path || '');
+    return flowInspectorObjectItems(state.node_id || '');
+  }
+
+  function flowInspectorUpdateCache(data) {
+    if (!data || !data.ok || !data.node_id) return;
+    flowMergeNodeMeta({
+      node_id: data.node_id,
+      kind: data.kind,
+      repo_path: data.repo_path || '',
+      object_id: data.object_id || '',
+      title: data.title || '',
+      path: data.path || '',
+      state_path: data.state_path || '',
+      mtime: data.mtime,
+      fields: data.fields || {},
+    });
+  }
+
+  function flowInspectorRenderMarkdown(root) {
+    if (!root) return;
+    const textarea = root.querySelector('[data-flow-inspector-editor]');
+    const rendered = root.querySelector('[data-flow-inspector-rendered]');
+    if (!textarea || !rendered) return;
+    rendered.innerHTML = renderMarkdown(textarea.value || '');
+    tagBlocksForRtl(rendered);
+    try { _renderMermaidBlocks(rendered); } catch (_) {}
+  }
+
+  function flowInspectorSetTab(root, tab) {
+    if (!root) return;
+    const edit = tab === 'edit';
+    root.querySelectorAll('[data-flow-inspector-tab]').forEach(btn => {
+      const active = btn.dataset.flowInspectorTab === tab;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    const rendered = root.querySelector('[data-flow-inspector-rendered]');
+    const editor = root.querySelector('[data-flow-inspector-editor]');
+    if (!edit) flowInspectorRenderMarkdown(root);
+    if (rendered) rendered.hidden = edit;
+    if (editor) {
+      editor.hidden = !edit;
+      if (edit) {
+        setTimeout(() => {
+          try { editor.focus(); } catch (_) {}
+        }, 0);
+      }
+    }
+  }
+
+  function renderFlowNodeInspector(data) {
+    const view = getConvView();
+    if (!view || !data || !data.ok) return;
+    const fields = data.fields || {};
+    const chips = [
+      fields.status ? '<span class="flow-inspector-chip status">' + escapeHtml(fields.status) + '</span>' : '',
+      fields.target_date ? '<span class="flow-inspector-chip">' + escapeHtml(fields.target_date) + '</span>' : '',
+      fields.eta ? '<span class="flow-inspector-chip">' + escapeHtml(fields.eta) + '</span>' : '',
+    ].filter(Boolean).join('');
+    const subtitle = [
+      data.kind === 'repo' ? data.repo_path : data.object_id,
+      data.state_path,
+    ].filter(Boolean).join(' · ');
+    view.innerHTML = '<div class="flow-inspector" data-kind="' + escapeAttr(data.kind || '') + '">'
+      + '<div class="flow-inspector-header">'
+        + '<div class="flow-inspector-kicker">Flow work item</div>'
+        + '<h2>' + escapeHtml(data.title || 'Flow work item') + '</h2>'
+        + '<div class="flow-inspector-subtitle" title="' + escapeAttr(subtitle) + '">' + escapeHtml(subtitle) + '</div>'
+        + (chips ? '<div class="flow-inspector-chips">' + chips + '</div>' : '')
+      + '</div>'
+      + '<div class="flow-inspector-toolbar">'
+        + '<button type="button" class="flow-inspector-tab active" data-flow-inspector-tab="view" aria-pressed="true">View</button>'
+        + '<button type="button" class="flow-inspector-tab" data-flow-inspector-tab="edit" aria-pressed="false">Edit</button>'
+        + '<button type="button" class="flow-inspector-btn" data-flow-inspector-action="save">Save</button>'
+        + '<button type="button" class="flow-inspector-btn" data-flow-inspector-action="refresh">Refresh auto sections</button>'
+        + '<button type="button" class="flow-inspector-btn" data-flow-inspector-action="open-file">Open file</button>'
+        + '<span class="flow-inspector-status" data-flow-inspector-status></span>'
+      + '</div>'
+      + '<div class="flow-inspector-body">'
+        + '<div class="assistant-text flow-inspector-rendered" data-flow-inspector-rendered dir="auto"></div>'
+        + '<textarea class="flow-inspector-editor" data-flow-inspector-editor hidden spellcheck="false"></textarea>'
+      + '</div>'
+      + '</div>';
+    const root = view.querySelector('.flow-inspector');
+    const editor = root && root.querySelector('[data-flow-inspector-editor]');
+    if (root) {
+      root._flowInspectorState = Object.assign({}, data, { content: data.content || '' });
+      root.dataset.mtime = String(data.mtime || 0);
+    }
+    if (editor) editor.value = data.content || '';
+    flowInspectorRenderMarkdown(root);
+    wireFlowNodeInspector(root);
+  }
+
+  function flowInspectorSetStatus(root, text, cls) {
+    const status = root && root.querySelector('[data-flow-inspector-status]');
+    if (!status) return;
+    status.textContent = text || '';
+    status.className = 'flow-inspector-status' + (cls ? ' ' + cls : '');
+  }
+
+  async function flowInspectorSave(root) {
+    if (!root || !root._flowInspectorState) return;
+    const state = root._flowInspectorState;
+    const editor = root.querySelector('[data-flow-inspector-editor]');
+    if (!editor) return;
+    flowInspectorSetStatus(root, 'Saving...', '');
+    const payload = {
+      kind: state.kind,
+      repo_path: state.repo_path || '',
+      object_id: state.object_id || '',
+      title: state.title || '',
+      content: editor.value || '',
+      mtime: Number(root.dataset.mtime || state.mtime || 0),
+    };
+    try {
+      const res = await fetch('/api/flow/node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        flowInspectorSetStatus(root, data.error || 'Save failed', 'error');
+        return;
+      }
+      root._flowInspectorState = Object.assign({}, data, { content: data.content || '' });
+      root.dataset.mtime = String(data.mtime || 0);
+      editor.value = data.content || '';
+      flowInspectorUpdateCache(data);
+      flowInspectorRenderMarkdown(root);
+      flowInspectorSetStatus(root, 'Saved', 'ok');
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''), { force: true });
+    } catch (err) {
+      flowInspectorSetStatus(root, 'Save failed: ' + ((err && err.message) || 'network'), 'error');
+    }
+  }
+
+  async function flowInspectorRefresh(root) {
+    if (!root || !root._flowInspectorState) return;
+    const state = root._flowInspectorState;
+    flowInspectorSetStatus(root, 'Refreshing...', '');
+    try {
+      const res = await fetch('/api/flow/node/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: state.kind,
+          repo_path: state.repo_path || '',
+          object_id: state.object_id || '',
+          title: state.title || '',
+          items: flowInspectorItemsForState(state),
+        }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        flowInspectorSetStatus(root, data.error || 'Refresh failed', 'error');
+        return;
+      }
+      root._flowInspectorState = Object.assign({}, data, { content: data.content || '' });
+      root.dataset.mtime = String(data.mtime || 0);
+      const editor = root.querySelector('[data-flow-inspector-editor]');
+      if (editor) editor.value = data.content || '';
+      flowInspectorUpdateCache(data);
+      flowInspectorRenderMarkdown(root);
+      flowInspectorSetStatus(root, 'Auto sections refreshed', 'ok');
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''), { force: true });
+    } catch (err) {
+      flowInspectorSetStatus(root, 'Refresh failed: ' + ((err && err.message) || 'network'), 'error');
+    }
+  }
+
+  function wireFlowNodeInspector(root) {
+    if (!root || root.dataset.flowInspectorWired) return;
+    root.dataset.flowInspectorWired = '1';
+    root.querySelectorAll('[data-flow-inspector-tab]').forEach(btn => {
+      btn.addEventListener('click', () => flowInspectorSetTab(root, btn.dataset.flowInspectorTab || 'view'));
+    });
+    const editor = root.querySelector('[data-flow-inspector-editor]');
+    if (editor) {
+      editor.addEventListener('input', () => {
+        flowInspectorSetStatus(root, 'Unsaved changes', '');
+        flowInspectorRenderMarkdown(root);
+      });
+    }
+    const saveBtn = root.querySelector('[data-flow-inspector-action="save"]');
+    if (saveBtn) saveBtn.addEventListener('click', () => flowInspectorSave(root));
+    const refreshBtn = root.querySelector('[data-flow-inspector-action="refresh"]');
+    if (refreshBtn) refreshBtn.addEventListener('click', () => flowInspectorRefresh(root));
+    const openBtn = root.querySelector('[data-flow-inspector-action="open-file"]');
+    if (openBtn) openBtn.addEventListener('click', async () => {
+      const state = root._flowInspectorState || {};
+      if (!state.path) return;
+      try {
+        await fetch('/api/open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: state.path, launch: true }),
+        });
+      } catch (_) {}
+    });
+  }
+
+  async function openFlowNodeInspector(node) {
+    const payload = flowInspectorPayloadFromNode(node);
+    if (!payload) return;
+    if (typeof stopGroupChatReader === 'function') {
+      try { stopGroupChatReader({ rerenderSidebar: false }); } catch (_) {}
+    }
+    stopFlowNodeInspector();
+    try { if (typeof stopConvStream === 'function') stopConvStream(); } catch (_) {}
+    try { if (typeof stopSpawnStream === 'function') stopSpawnStream(); } catch (_) {}
+    try { if (typeof stopCodexLogPoller === 'function') stopCodexLogPoller(); } catch (_) {}
+    try { if (typeof setCurrentSession === 'function') setCurrentSession(null, null, null, false, null); } catch (_) {}
+    currentConversation = null;
+    _flowInspectorState = payload;
+    hideFlowInspectorInputChrome();
+    if (typeof updateSplitInputBar === 'function') updateSplitInputBar();
+    if (typeof updateSplitToolbar === 'function') updateSplitToolbar();
+    const paneId = activePaneId();
+    updatePaneHeader(paneId, null, {
+      category: payload.kind === 'repo' ? 'Flow repo' : 'Flow object',
+      title: payload.title || (payload.kind === 'repo' ? _pathLeaf(payload.repo_path) : payload.object_id),
+    });
+    const view = getConvView();
+    if (view) {
+      view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Loading Flow item...</div>';
+    }
+    try {
+      const params = new URLSearchParams();
+      Object.entries(payload).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') params.set(k, v);
+      });
+      params.set('create', '1');
+      const res = await fetch('/api/flow/node?' + params.toString(), { cache: 'no-store' });
+      const data = await res.json();
+      if (!data.ok) {
+        if (view) view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load Flow item: ' + escapeHtml(data.error || 'unknown') + '</div>';
+        return;
+      }
+      _flowInspectorState = data;
+      flowInspectorUpdateCache(data);
+      renderFlowNodeInspector(data);
+      renderSidebar(filterConversations($convSearch ? $convSearch.value : ''), { force: true });
+    } catch (err) {
+      if (view) view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px;">Failed to load Flow item: ' + escapeHtml((err && err.message) || 'network') + '</div>';
+    }
+  }
+
   function renderFlowSidebar(convs) {
     const $flow = document.getElementById('flowBoard');
     const $kanbanBoard = document.getElementById('kanbanBoard');
@@ -8520,6 +9002,7 @@
     if ($convList) $convList.style.display = 'none';
     if ($kanbanBoard) $kanbanBoard.style.display = 'none';
     $flow.style.display = '';
+    scheduleFlowNodeMetaFetch(false);
 
     const rows = (convs || []).filter(flowIsVisibleSession).sort((a, b) => flowRowTime(b) - flowRowTime(a));
     const customObjects = (flowCustomObjects || [])
@@ -8590,7 +9073,9 @@
         meta: isFlowNodeCollapsed(nodeId)
           ? 'collapsed'
           : flowLastUpdatedLabel(obj.updated_at || obj.created_at),
-        className: 'flow-node-object',
+        workItemHtml: flowWorkItemCardHtml(nodeId),
+        accentSeed: flowColorSeedForNode(nodeId, obj.id),
+        className: 'flow-node-work-item flow-node-object',
       });
     });
     if (customObjects.length) {
@@ -8668,7 +9153,9 @@
         title: group.label,
         kicker: 'Repo',
         meta: repoMeta,
-        className: 'flow-node-repo',
+        workItemHtml: flowWorkItemCardHtml(repoId),
+        accentSeed: flowColorSeedForNode(repoId, group.path),
+        className: 'flow-node-work-item flow-node-repo',
       });
 
       visibleDrafts.forEach((draft, idx) => {
@@ -8738,6 +9225,8 @@
     pruneFlowSelectedNodes(records);
 
     const parentMap = flowParentMapFor(records);
+    const recordById = {};
+    records.forEach(rec => { if (rec && rec.id) recordById[rec.id] = rec; });
     const nodeHtml = records.map(rec => {
       const savedPos = flowNodePositions[rec.id];
       const pos = savedPos || { x: rec.x, y: rec.y };
@@ -8785,12 +9274,19 @@
           + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>'
           + '<button type="button" class="flow-draft-play" data-flow-action="play-draft-session" title="Start session" aria-label="Start session">&#9654;</button>'
         : '<div class="flow-node-title">' + escapeHtml(rec.title) + '</div>'
+          + (rec.workItemHtml || '')
           + '<div class="flow-node-meta">' + escapeHtml(rec.meta || '') + '</div>'
           + (rec.chipsHtml || '');
       const selectedClass = flowSelectedNodes[rec.id] ? ' selected' : '';
+      let accentSeed = rec.accentSeed || '';
+      if ((rec.kind === 'session' || rec.kind === 'draft-session') && parent) {
+        const parentRec = recordById[parent];
+        accentSeed = (parentRec && parentRec.accentSeed) || accentSeed;
+      }
+      const accentStyle = accentSeed ? flowAccentStyle(accentSeed) : '';
       return '<div class="flow-node ' + escapeAttr(rec.className) + selectedClass + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
         + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath + dataGcPath + dataGcId + dataGcMode
-        + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;">'
+        + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;' + accentStyle + '">'
         + deleteBtn
         + addBtn
         + collapseBtn
@@ -8874,12 +9370,13 @@
     return 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + dy) + ', ' + x + ' ' + (y - dy) + ', ' + x + ' ' + y;
   }
 
-  function _appendEdgeGroup(svg, childId, parentId, dStr, selected) {
+  function _appendEdgeGroup(svg, childId, parentId, dStr, selected, accentLine) {
     const NS = 'http://www.w3.org/2000/svg';
     const g = document.createElementNS(NS, 'g');
     g.setAttribute('class', 'flow-edge' + (selected ? ' is-selected' : ''));
     g.dataset.childId = childId;
     g.dataset.parentId = parentId;
+    if (accentLine) g.style.setProperty('--flow-edge-color', accentLine);
     const hit = document.createElementNS(NS, 'path');
     hit.setAttribute('class', 'flow-edge-hit');
     hit.setAttribute('d', dStr);
@@ -8950,8 +9447,10 @@
       if (!parent) return;
       const childId = node.dataset.flowNodeId;
       const dStr = _edgePathBetween(parent, node);
+      let accentLine = '';
+      try { accentLine = getComputedStyle(parent).getPropertyValue('--flow-accent-line').trim(); } catch (_) {}
       _appendEdgeGroup(svg, childId, node.dataset.flowParent, dStr,
-                       childId === _selectedFlowEdgeChildId);
+                       childId === _selectedFlowEdgeChildId, accentLine);
     });
     const base = flowEffectiveBaseSize(targetEl, canvas);
     svg.setAttribute('width', base.width);
@@ -9485,6 +9984,9 @@
             if ((gcPath || gcId) && typeof openGroupChatReader === 'function') {
               try { openGroupChatReader(gcPath, topic, gcMode, true, gcId || null); } catch (_) {}
             }
+          } else if (node.dataset.flowKind === 'repo' || node.dataset.flowKind === 'object') {
+            if (flowExpanded) setFlowExpanded(false);
+            openFlowNodeInspector(node);
           }
         };
         node.addEventListener('pointermove', onMove);
@@ -10256,6 +10758,9 @@
   }
 
   function openGroupChatReader(chatPath, topic, mode, includeHuman, chatId) {
+    if (_flowInspectorState) {
+      try { stopFlowNodeInspector(); } catch (_) {}
+    }
     _gcReaderPath = chatPath;
     _gcReaderId = chatId || null;
     _gcReaderTopic = topic || '';
@@ -17002,6 +17507,9 @@
     // is intact — selectConversation will repopulate the view normally.
     if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
       try { stopGroupChatReader({ rerenderSidebar: true }); } catch (_) {}
+    }
+    if (_flowInspectorState) {
+      try { stopFlowNodeInspector(); } catch (_) {}
     }
     mobileShowForCurrentMode();
     currentConversation = id;

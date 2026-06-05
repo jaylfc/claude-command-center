@@ -368,6 +368,75 @@ class TestServerImports(unittest.TestCase):
         self.assertIn(".flow-selection-box", app_css)
         self.assertIn(".flow-node.selected", app_css)
 
+    def test_flow_work_item_inspector_wired(self):
+        """Repo/object Flow nodes open a Markdown-backed work-item inspector,
+        and work-item cards use automatic accents plus parsed Flow fields."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        server_py = pathlib.Path(PROJECT_ROOT, "server.py").read_text(encoding="utf-8")
+        self.assertIn("FLOW_STATE_DIR", server_py)
+        self.assertIn("/api/flow/node", server_py)
+        self.assertIn("/api/flow/node/refresh", server_py)
+        self.assertIn("/api/flow/index", server_py)
+        self.assertIn("function openFlowNodeInspector", app_js)
+        self.assertIn("flowInspectorPayloadFromNode", app_js)
+        self.assertIn("flowInspectorRefresh", app_js)
+        self.assertIn("data-flow-inspector-action=\"refresh\"", app_js)
+        self.assertIn("flow-node-work-item", app_js)
+        self.assertIn("flowAccentStyle", app_js)
+        self.assertIn("flowWorkItemCardHtml", app_js)
+        self.assertIn("accentSeed: flowColorSeedForNode(nodeId, obj.id)", app_js)
+        self.assertIn(".flow-node-work-item", app_css)
+        self.assertIn(".flow-inspector", app_css)
+        self.assertIn("--flow-accent", app_css)
+
+    def test_flow_state_helpers_create_save_refresh_markdown(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        with tempfile.TemporaryDirectory() as td:
+            old_dir = server.FLOW_STATE_DIR
+            old_index = server.FLOW_INDEX_FILE
+            server.FLOW_STATE_DIR = pathlib.Path(td) / "flow"
+            server.FLOW_INDEX_FILE = server.FLOW_STATE_DIR / "index.json"
+            try:
+                payload = {"kind": "object", "object_id": "obj-test", "title": "Release work"}
+                result, status = server._flow_load_node_payload(payload, create=True)
+                self.assertEqual(status, 200)
+                self.assertTrue(result["ok"])
+                self.assertIn("## Flow fields", result["content"])
+                self.assertIn("ccc:auto:start status-table", result["content"])
+                edited = result["content"].replace(
+                    "Write the current state here.",
+                    "Manual summary survives refresh.",
+                )
+                saved, status = server._flow_save_node_payload({
+                    **payload,
+                    "content": edited,
+                    "mtime": result["mtime"],
+                })
+                self.assertEqual(status, 200)
+                refreshed, status = server._flow_refresh_node_payload({
+                    **payload,
+                    "items": [{
+                        "title": "Fix layout",
+                        "status": "working",
+                        "session": "abc12345",
+                        "updated": "just now",
+                        "notes": "main",
+                    }],
+                })
+                self.assertEqual(status, 200)
+                self.assertIn("Manual summary survives refresh.", refreshed["content"])
+                self.assertIn("Fix layout", refreshed["content"])
+                self.assertIn("abc12345", refreshed["content"])
+                index = server._flow_index_payload()
+                self.assertEqual(index["count"], 1)
+                self.assertEqual(index["entries"][0]["fields"]["status"], "Active")
+            finally:
+                server.FLOW_STATE_DIR = old_dir
+                server.FLOW_INDEX_FILE = old_index
+
     def test_mobile_breakpoint_covers_phones_landscape(self):
         """Mobile single-column layout (conv list full-width, conv pane
         slides in as overlay, back button shows) must trigger on phones
