@@ -391,6 +391,34 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("body.flow-popout", app_css)
         self.assertIn(".conv-list-panel > *:not(#flowBoard)", app_css)
 
+    def test_flow_edges_are_selectable_deletable_draggable(self):
+        """Flow edges (the lines connecting child nodes to their parent)
+        are now selectable with a click, deletable with Backspace, and
+        draggable from one parent to another. Each edge renders as a
+        <g class="flow-edge"> containing a wide transparent hit path
+        plus a thin visible line."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        # Edge selection state + DOM contract.
+        self.assertIn("_selectedFlowEdgeChildId", app_js)
+        self.assertIn("function selectFlowEdge", app_js)
+        self.assertIn("function clearFlowEdgeSelection", app_js)
+        self.assertIn("'flow-edge'", app_js)
+        self.assertIn("'flow-edge-hit'", app_js)
+        self.assertIn("'flow-edge-line'", app_js)
+        # Backspace handler + delete helper.
+        self.assertIn("function deleteFlowEdge", app_js)
+        self.assertIn("ev.key === 'Backspace'", app_js)
+        # Drag-to-reparent.
+        self.assertIn("function startEdgeReparentDrag", app_js)
+        self.assertIn("function reparentFlowNode", app_js)
+        self.assertIn("is-drop-target", app_js)
+        # CSS for the hit-area, selected state, drag ghost, drop target.
+        self.assertIn(".flow-edge-hit", app_css)
+        self.assertIn(".flow-edge.is-selected", app_css)
+        self.assertIn(".flow-edge-line.is-dragging", app_css)
+        self.assertIn(".flow-node.is-drop-target", app_css)
+
     def test_mermaid_code_blocks_render_as_svg(self):
         """```mermaid fenced blocks render as SVG instead of raw code.
         renderCodeBlock emits a .mermaid-block carrier whose .mermaid-source

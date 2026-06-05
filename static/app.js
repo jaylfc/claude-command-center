@@ -8556,6 +8556,101 @@
     });
   }
 
+  // The single currently-selected edge, identified by its CHILD node id
+  // (edges are 1:1 with children — each node has at most one parent).
+  // Null means no edge is selected. Persisted only in-memory.
+  let _selectedFlowEdgeChildId = null;
+
+  function _edgePathBetween(parent, node) {
+    // Returns the SVG path `d` string for the curved edge between
+    // parent.bottom and node.top (or sides, for closely-stacked nodes).
+    let sx = parent.offsetLeft + parent.offsetWidth / 2;
+    let sy = parent.offsetTop + parent.offsetHeight;
+    let ex = node.offsetLeft + node.offsetWidth / 2;
+    let ey = node.offsetTop;
+    if (node.offsetTop < parent.offsetTop + parent.offsetHeight + 8) {
+      const toRight = node.offsetLeft >= parent.offsetLeft;
+      sx = toRight ? parent.offsetLeft + parent.offsetWidth : parent.offsetLeft;
+      sy = parent.offsetTop + parent.offsetHeight / 2;
+      ex = toRight ? node.offsetLeft : node.offsetLeft + node.offsetWidth;
+      ey = node.offsetTop + node.offsetHeight / 2;
+      const mid = Math.max(32, Math.abs(ex - sx) / 2);
+      const c1 = toRight ? sx + mid : sx - mid;
+      const c2 = toRight ? ex - mid : ex + mid;
+      return 'M ' + sx + ' ' + sy + ' C ' + c1 + ' ' + sy + ', ' + c2 + ' ' + ey + ', ' + ex + ' ' + ey;
+    }
+    const mid = Math.max(32, (ey - sy) / 2);
+    return 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + mid) + ', ' + ex + ' ' + (ey - mid) + ', ' + ex + ' ' + ey;
+  }
+
+  function _edgePathToPoint(parent, x, y) {
+    // For the live drag preview — bezier from parent's bottom (or side)
+    // to the cursor's world coords. Mirrors the layout decisions in
+    // _edgePathBetween so the live drag visually matches the snap.
+    const sx = parent.offsetLeft + parent.offsetWidth / 2;
+    const sy = parent.offsetTop + parent.offsetHeight;
+    const dy = Math.max(40, (y - sy) / 2);
+    return 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + dy) + ', ' + x + ' ' + (y - dy) + ', ' + x + ' ' + y;
+  }
+
+  function _appendEdgeGroup(svg, childId, parentId, dStr, selected) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'flow-edge' + (selected ? ' is-selected' : ''));
+    g.dataset.childId = childId;
+    g.dataset.parentId = parentId;
+    const hit = document.createElementNS(NS, 'path');
+    hit.setAttribute('class', 'flow-edge-hit');
+    hit.setAttribute('d', dStr);
+    const line = document.createElementNS(NS, 'path');
+    line.setAttribute('class', 'flow-edge-line');
+    line.setAttribute('d', dStr);
+    g.appendChild(hit);
+    g.appendChild(line);
+    svg.appendChild(g);
+    return g;
+  }
+
+  function clearFlowEdgeSelection() {
+    if (_selectedFlowEdgeChildId == null) return;
+    _selectedFlowEdgeChildId = null;
+    document.querySelectorAll('.flow-edge.is-selected').forEach(g => g.classList.remove('is-selected'));
+  }
+
+  function selectFlowEdge(childId) {
+    document.querySelectorAll('.flow-edge.is-selected').forEach(g => g.classList.remove('is-selected'));
+    _selectedFlowEdgeChildId = childId || null;
+    if (childId) {
+      document.querySelectorAll('.flow-edge[data-child-id="' + (window.CSS && CSS.escape ? CSS.escape(childId) : childId) + '"]')
+        .forEach(g => g.classList.add('is-selected'));
+    }
+  }
+
+  function deleteFlowEdge(childId) {
+    if (!childId) return;
+    if (!flowNodeParents[childId]) return;
+    delete flowNodeParents[childId];
+    persistFlowNodeParents();
+    _selectedFlowEdgeChildId = null;
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
+  function reparentFlowNode(childId, newParentId) {
+    if (!childId || !newParentId || childId === newParentId) return;
+    // Prevent cycles: walking up from newParent should not encounter
+    // childId (a node can't be its own ancestor).
+    let walker = newParentId;
+    const seen = new Set();
+    while (walker && !seen.has(walker)) {
+      if (walker === childId) return;
+      seen.add(walker);
+      walker = flowNodeParents[walker];
+    }
+    flowNodeParents[childId] = newParentId;
+    persistFlowNodeParents();
+    renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
+  }
+
   function redrawFlowLinks(targetEl) {
     const canvas = targetEl && targetEl.querySelector('.flow-canvas');
     const world = canvas && (canvas.querySelector('.flow-world') || canvas);
@@ -8565,41 +8660,109 @@
     world.querySelectorAll('.flow-node').forEach(node => {
       nodeById.set(node.dataset.flowNodeId, node);
     });
-    const paths = [];
+    // Rebuild from scratch — child counts/parents can change between
+    // calls. Re-applies the selected class for whichever edge was
+    // selected before the redraw (if it still exists).
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
     world.querySelectorAll('.flow-node[data-flow-parent]').forEach(node => {
       const parent = nodeById.get(node.dataset.flowParent);
       if (!parent) return;
-      let sx = parent.offsetLeft + parent.offsetWidth / 2;
-      let sy = parent.offsetTop + parent.offsetHeight;
-      let ex = node.offsetLeft + node.offsetWidth / 2;
-      let ey = node.offsetTop;
-      let d = '';
-      if (node.offsetTop < parent.offsetTop + parent.offsetHeight + 8) {
-        const toRight = node.offsetLeft >= parent.offsetLeft;
-        sx = toRight ? parent.offsetLeft + parent.offsetWidth : parent.offsetLeft;
-        sy = parent.offsetTop + parent.offsetHeight / 2;
-        ex = toRight ? node.offsetLeft : node.offsetLeft + node.offsetWidth;
-        ey = node.offsetTop + node.offsetHeight / 2;
-        const mid = Math.max(32, Math.abs(ex - sx) / 2);
-        const c1 = toRight ? sx + mid : sx - mid;
-        const c2 = toRight ? ex - mid : ex + mid;
-        d = 'M ' + sx + ' ' + sy + ' C ' + c1 + ' ' + sy + ', ' + c2 + ' ' + ey + ', ' + ex + ' ' + ey;
-      } else {
-        const mid = Math.max(32, (ey - sy) / 2);
-        d = 'M ' + sx + ' ' + sy + ' C ' + sx + ' ' + (sy + mid) + ', ' + ex + ' ' + (ey - mid) + ', ' + ex + ' ' + ey;
-      }
-      paths.push('<path d="' + d + '"></path>');
+      const childId = node.dataset.flowNodeId;
+      const dStr = _edgePathBetween(parent, node);
+      _appendEdgeGroup(svg, childId, node.dataset.flowParent, dStr,
+                       childId === _selectedFlowEdgeChildId);
     });
     const base = flowEffectiveBaseSize(targetEl, canvas);
     svg.setAttribute('width', base.width);
     svg.setAttribute('height', base.height);
-    svg.innerHTML = paths.join('');
+    // Single delegated click + pointerdown wiring per SVG.
+    if (!svg.dataset.flowEdgeWired) {
+      svg.dataset.flowEdgeWired = '1';
+      svg.addEventListener('click', (ev) => {
+        const g = ev.target && ev.target.closest && ev.target.closest('.flow-edge');
+        if (!g) return;
+        ev.stopPropagation();
+        selectFlowEdge(g.dataset.childId);
+      });
+      svg.addEventListener('pointerdown', (ev) => {
+        const g = ev.target && ev.target.closest && ev.target.closest('.flow-edge');
+        if (!g) return;
+        // Only react to primary button.
+        if (ev.button !== undefined && ev.button !== 0) return;
+        // Select on grab so visual stays consistent throughout the drag.
+        selectFlowEdge(g.dataset.childId);
+        startEdgeReparentDrag(ev, targetEl, world, svg, g.dataset.childId, g.dataset.parentId);
+      });
+    }
+  }
+
+  function startEdgeReparentDrag(ev, targetEl, world, svg, childId, parentId) {
+    const parentEl = world.querySelector('.flow-node[data-flow-node-id="' + (window.CSS && CSS.escape ? CSS.escape(parentId) : parentId) + '"]');
+    if (!parentEl) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const NS = 'http://www.w3.org/2000/svg';
+    // Hide the existing edge line during drag, draw a ghost from
+    // parent to cursor instead.
+    const live = svg.querySelector('.flow-edge[data-child-id="' + (window.CSS && CSS.escape ? CSS.escape(childId) : childId) + '"] .flow-edge-line');
+    if (live) live.setAttribute('opacity', '0.2');
+    const ghost = document.createElementNS(NS, 'path');
+    ghost.setAttribute('class', 'flow-edge-line is-dragging');
+    ghost.setAttribute('d', 'M 0 0');
+    svg.appendChild(ghost);
+    let hoverNode = null;
+
+    const onMove = (mv) => {
+      const pt = flowPointerWorldPoint(mv, world);
+      ghost.setAttribute('d', _edgePathToPoint(parentEl, pt.x, pt.y));
+      // Hover detection: which node is under the cursor?
+      const el = document.elementFromPoint(mv.clientX, mv.clientY);
+      const candidate = el && el.closest && el.closest('.flow-node');
+      if (hoverNode && hoverNode !== candidate) hoverNode.classList.remove('is-drop-target');
+      if (candidate && candidate !== hoverNode) {
+        // Don't drop on the child itself.
+        if (candidate.dataset.flowNodeId !== childId) {
+          candidate.classList.add('is-drop-target');
+          hoverNode = candidate;
+        } else {
+          hoverNode = null;
+        }
+      } else if (!candidate) {
+        hoverNode = null;
+      }
+    };
+
+    const cleanup = () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      if (ghost.parentNode) ghost.parentNode.removeChild(ghost);
+      if (live) live.removeAttribute('opacity');
+      if (hoverNode) hoverNode.classList.remove('is-drop-target');
+    };
+
+    const onUp = (upEv) => {
+      const target = hoverNode;
+      cleanup();
+      if (!target) return;
+      const newParent = target.dataset.flowNodeId;
+      if (newParent && newParent !== parentId && newParent !== childId) {
+        reparentFlowNode(childId, newParent);
+      }
+    };
+
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
   }
 
   function startFlowPan(ev, targetEl) {
     if (!targetEl) return;
     if (ev.button !== undefined && ev.button !== 0) return;
-    if (ev.target.closest('.flow-node,button,input,textarea,a')) return;
+    if (ev.target.closest('.flow-node,button,input,textarea,a,.flow-edge')) return;
+    // Clicking background dirt clears any edge selection so the
+    // highlighted line goes back to normal without an explicit Escape.
+    clearFlowEdgeSelection();
     ev.preventDefault();
     ev.stopPropagation();
     beginSidebarDrag();
@@ -8731,6 +8894,23 @@
       targetEl.addEventListener('gesturechange', handleFlowGestureChange, { passive: false });
       document.addEventListener('keydown', ev => {
         if (ev.key === 'Escape' && flowExpanded) setFlowExpanded(false);
+        // Backspace / Delete with an edge selected → drop the parent
+        // assignment (the child falls back to its default repo group).
+        // Skip when a text field is focused so the shortcut doesn't
+        // hijack typing inside an input or the conv composer.
+        if ((ev.key === 'Backspace' || ev.key === 'Delete')
+            && _selectedFlowEdgeChildId
+            && isFlowView()) {
+          const ae = document.activeElement;
+          const inField = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+          if (!inField) {
+            ev.preventDefault();
+            deleteFlowEdge(_selectedFlowEdgeChildId);
+          }
+        }
+        // Escape also clears the edge selection so the user can dismiss
+        // the highlight without an actual delete.
+        if (ev.key === 'Escape') clearFlowEdgeSelection();
       });
       window.addEventListener('resize', () => {
         if (!isFlowView()) return;
