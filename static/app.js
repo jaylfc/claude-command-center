@@ -2170,8 +2170,11 @@
     const timer = setTimeout(() => clearSessionSending(sid), _SENDING_TIMEOUT_MS);
     _sendingSessions.set(sid, { ts: Date.now(), timer });
     touchSessionOptimistically(sid);
+    // Force the sidebar to repaint even though focus is in the conv
+    // input textarea — this is the user's own send event, not a poller
+    // tick, so the pause-while-typing guard should not suppress it.
     if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
-      renderSidebar(filterConversations($convSearch.value));
+      renderSidebar(filterConversations($convSearch.value), { force: true });
     }
   }
   function clearSessionSending(sid) {
@@ -2181,7 +2184,7 @@
     if (entry.timer) clearTimeout(entry.timer);
     _sendingSessions.delete(sid);
     if (typeof renderSidebar === 'function' && typeof filterConversations === 'function' && typeof $convSearch !== 'undefined' && $convSearch) {
-      renderSidebar(filterConversations($convSearch.value));
+      renderSidebar(filterConversations($convSearch.value), { force: true });
     }
   }
   function sessionIsOptimisticallySending(sid) {
@@ -8640,10 +8643,15 @@
     });
   }
 
-  function renderSidebar(convs) {
+  function renderSidebar(convs, opts) {
     if (_renameInProgress) return;
     if (deferSidebarRenderIfDragging()) return;
-    if (shouldPauseSidebarRender()) return;
+    // User-initiated renders pass {force:true} so a Send → "Sending…"
+    // pill shows up while focus is still in the input textarea. The
+    // periodic pause guard exists to keep pollers from yanking the
+    // sidebar around while the user types; it must NOT also suppress
+    // explicit "the user just did something, paint it now" updates.
+    if (!(opts && opts.force) && shouldPauseSidebarRender()) return;
     const $kanbanBoard = document.getElementById('kanbanBoard');
     const $flow = document.getElementById('flowBoard');
     const $convList = document.getElementById('convList');

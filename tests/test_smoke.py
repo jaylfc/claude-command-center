@@ -368,6 +368,19 @@ class TestServerImports(unittest.TestCase):
         self.assertIn(".flow-selection-box", app_css)
         self.assertIn(".flow-node.selected", app_css)
 
+    def test_sending_sidebar_render_bypasses_textarea_pause_guard(self):
+        """Hitting Send leaves focus in the conv input textarea, which
+        normally pauses sidebar renders (so background pollers can't
+        yank the list around mid-type). But the user's own send IS a
+        user-initiated event and must paint the "Sending…" pill in the
+        sidebar row immediately. markSessionSending/clearSessionSending
+        therefore pass {force: true} to renderSidebar, and renderSidebar
+        skips the periodic-pause guard when force is set."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        self.assertIn("renderSidebar(filterConversations($convSearch.value), { force: true });", app_js)
+        self.assertIn("function renderSidebar(convs, opts)", app_js)
+        self.assertIn("if (!(opts && opts.force) && shouldPauseSidebarRender()) return;", app_js)
+
     def test_conv_pct_badge_is_clickable_compact_shortcut(self):
         """The context-% badge on each conv row is a one-click shortcut to
         /compact. Click → confirm → injectToSession('/compact'). The
