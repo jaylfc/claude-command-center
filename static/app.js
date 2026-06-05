@@ -23794,16 +23794,28 @@
 
   function gcShouldShowActivePill(chat, now) {
     if (!chat) return false;
+    // Paused / closed / orchestrator-explicitly-off → never show. The
+    // pill claims "active right now"; if the user just clicked Stop the
+    // pill must respect that immediately, not coast on the freshness
+    // window. Without this, a chat that the user stopped seconds ago
+    // kept saying "auto-pinged · just now" because the trigger
+    // timestamp from before the stop was still within the freshness
+    // window.
+    if (chat.status === 'paused' || chat.status === 'closed') return false;
+    if (chat.paused === true) return false;
+    if (chat.orchestrator_timer_active === false) return false;
     // Even when the server still has it in the watcher (status==='active'
     // for up to 45 min after the last file change), the pill should drop
     // off if there hasn't been a real trigger/activity recently. The
     // user reads "Active Group chat" as "happening right now", not "in
-    // the watcher backlog". Take the freshest signal across triggers,
-    // file activity, and recent local trigger touches.
+    // the watcher backlog". last_mtime is intentionally OMITTED — it's
+    // the chat file's stat mtime which the server bumps on metadata
+    // writes (name_map updates, polled sidecar writes), not real
+    // message arrivals. The label-side code already filtered it out
+    // for the same reason; the show/hide gate should too.
     const freshness = Math.max(
       gcTriggerMs(chat),
-      gcEpochMs(chat.last_activity),
-      gcEpochMs(chat.last_mtime)
+      gcEpochMs(chat.last_activity)
     );
     if (freshness > 0 && (now - freshness) <= GC_ACTIVE_PILL_FRESHNESS_MS) return true;
     // Allow the immediate post-trigger window even if the freshness
@@ -24024,6 +24036,22 @@
         showOpToast?.('Could not ' + (paused ? 'disable' : 'enable') + ' group chat: ' + ((data && data.error) || 'unknown'), 'error');
         return;
       }
+      // Optimistic local update so the red pill drops instantly when
+      // the user clicks Stop, instead of lingering until the next
+      // gcActive poll lands ~15s later.
+      if (Array.isArray(_gcActiveChats)) {
+        const match = _gcActiveChats.find(c =>
+          (chatPath && (c.path_tilde === chatPath || c.path === chatPath))
+          || (chatId && (c.uuid === chatId || c.id === chatId))
+        );
+        if (match) {
+          match.paused = !!paused;
+          match.orchestrator_timer_active = !paused;
+          if (paused) match.status = 'paused';
+          else if (match.status === 'paused') match.status = 'active';
+        }
+      }
+      try { updateActiveGroupChatPill(); } catch (_) {}
       try { await pollGcActive(); } catch (_) {}
       const $s = document.getElementById('convSearch');
       renderArchiveList($s ? $s.value : '');
