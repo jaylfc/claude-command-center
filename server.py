@@ -18473,7 +18473,7 @@ def _find_cursor_workspace_db_and_id(cwd):
         return None, None
 
 
-def _register_composer_in_workspace_db(db_path, sid, title, created_at):
+def _register_composer_in_workspace_db(db_path, sid, title, created_at, updated_at=None):
     try:
         conn = sqlite3.connect(str(db_path), timeout=2.0)
         try:
@@ -18506,7 +18506,7 @@ def _register_composer_in_workspace_db(db_path, sid, title, created_at):
                 "composerId": sid,
                 "name": title or "New Agent",
                 "createdAt": created_at or int(time.time() * 1000),
-                "lastUpdatedAt": int(time.time() * 1000),
+                "lastUpdatedAt": updated_at or int(time.time() * 1000),
                 "unifiedMode": "agent",
                 "forceMode": "edit",
                 "hasUnreadMessages": False,
@@ -18528,6 +18528,7 @@ def _register_composer_in_workspace_db(db_path, sid, title, created_at):
                     composer_entry.update({
                         "name": title or old_entry.get("name") or "New Agent",
                         "createdAt": old_entry.get("createdAt") or created_at or int(time.time() * 1000),
+                        "lastUpdatedAt": updated_at or old_entry.get("lastUpdatedAt") or int(time.time() * 1000),
                         "unifiedMode": old_entry.get("unifiedMode") or "agent",
                         "forceMode": old_entry.get("forceMode") or "edit",
                         "isArchived": old_entry.get("isArchived", False),
@@ -18559,7 +18560,7 @@ def _register_composer_in_workspace_db(db_path, sid, title, created_at):
         return False
 
 
-def _register_composer_in_global_db(global_db_path, workspace_id, sid, title, created_at):
+def _register_composer_in_global_db(global_db_path, workspace_id, sid, title, created_at, updated_at=None):
     try:
         conn = sqlite3.connect(str(global_db_path), timeout=2.0)
         try:
@@ -18591,7 +18592,7 @@ def _register_composer_in_global_db(global_db_path, workspace_id, sid, title, cr
                 "composerId": sid,
                 "name": title or "New Agent",
                 "createdAt": created_at or int(time.time() * 1000),
-                "lastUpdatedAt": int(time.time() * 1000),
+                "lastUpdatedAt": updated_at or int(time.time() * 1000),
                 "unifiedMode": "agent",
                 "forceMode": "edit",
                 "hasUnreadMessages": False,
@@ -18614,6 +18615,7 @@ def _register_composer_in_global_db(global_db_path, workspace_id, sid, title, cr
                     header_entry.update({
                         "name": title or old_entry.get("name") or "New Agent",
                         "createdAt": old_entry.get("createdAt") or created_at or int(time.time() * 1000),
+                        "lastUpdatedAt": updated_at or old_entry.get("lastUpdatedAt") or int(time.time() * 1000),
                         "unifiedMode": old_entry.get("unifiedMode") or "agent",
                         "forceMode": old_entry.get("forceMode") or "edit",
                         "isArchived": old_entry.get("isArchived", False),
@@ -18693,6 +18695,17 @@ def _ensure_cursor_session_visible(session_id, spawn_entry=None):
     if not created_at:
         created_at = int(time.time() * 1000)
 
+    updated_at = None
+    try:
+        path = _cursor_transcript_path(sid)
+        if path and path.is_file():
+            updated_at = int(path.stat().st_mtime * 1000)
+    except OSError:
+        pass
+    if not updated_at:
+        updated_at = created_at
+
+
     try:
         db_dir.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path), timeout=1.0)
@@ -18736,10 +18749,10 @@ def _ensure_cursor_session_visible(session_id, spawn_entry=None):
         # Integrate with Cursor IDE (desktop app) workspace and global databases
         ws_db_path, ws_id = _find_cursor_workspace_db_and_id(cwd)
         if ws_db_path and ws_id:
-            _register_composer_in_workspace_db(ws_db_path, sid, title, created_at)
+            _register_composer_in_workspace_db(ws_db_path, sid, title, created_at, updated_at=updated_at)
             global_db_path = _get_cursor_app_support_dir() / "User" / "globalStorage" / "state.vscdb"
             if global_db_path.is_file():
-                _register_composer_in_global_db(global_db_path, ws_id, sid, title, created_at)
+                _register_composer_in_global_db(global_db_path, ws_id, sid, title, created_at, updated_at=updated_at)
 
         return True
     except Exception as e:
