@@ -1400,7 +1400,10 @@
      global setInterval mute in app.js). Gives a small but constant
      reassurance that the auto-refresh isn't permanently disabled. */
   .live-refresh-cluster {
-    position: fixed; left: 10px; bottom: 10px;
+    /* Sits above the sidebar footer (~42px: 30px btn + 6px*2 pad) so the
+       Active-Group-chat pill no longer covers the footer CPU/health meter
+       (#cccHealth) at bottom-left. */
+    position: fixed; left: 10px; bottom: 48px;
     display: inline-flex; align-items: center; gap: 6px;
     z-index: 100;
     transition: opacity 0.18s ease-out, transform 0.18s ease-out;
