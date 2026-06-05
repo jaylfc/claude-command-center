@@ -7104,6 +7104,7 @@
       + '<div class="flow-toolbar-group" role="group" aria-label="Add">'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
+      +   '<button type="button" class="flow-toolbar-btn" data-flow-action="add-group-chat" title="Create a new group chat — appears on the board so you can drag sessions onto it.">+ Group chat</button>'
       + '</div>'
       + '<div class="flow-toolbar-divider"></div>'
       + '<div class="flow-toolbar-group" role="group" aria-label="Filter">'
@@ -8460,6 +8461,47 @@
       yCursor += Math.ceil(customObjects.length / 2) * 116 + 28;
     }
 
+    // Group chats — third top-level node kind. Sourced from the
+    // pollGcActive cache (_gcActiveChats), shown alongside repos and
+    // objects so the user can see all coordination surfaces in one
+    // place. Drop a session onto one of these nodes to add it as a
+    // participant (same outcome as dropping a conv-row onto a chat
+    // row in the conversation list — see the pointerdown drop handler).
+    const groupChats = Array.isArray(_gcActiveChats) ? _gcActiveChats : [];
+    groupChats.forEach((chat, idx) => {
+      if (!chat || (!chat.topic && !chat.path_tilde)) return;
+      const chatKey = chat.uuid || chat.id || chat.path_tilde || chat.topic;
+      const nodeId = flowNodeKey('group-chat', chatKey);
+      const defaultPos = {
+        x: 28 + (idx % 2) * 292,
+        y: yCursor + Math.floor(idx / 2) * 116,
+      };
+      const participants = Array.isArray(chat.session_ids) ? chat.session_ids.length : 0;
+      const meta = [
+        participants ? (participants + (participants === 1 ? ' session' : ' sessions')) : '0 sessions',
+        chat.status === 'active' ? 'active' : (chat.status || ''),
+        chat.orchestrator_timer_active ? 'orchestrator on' : '',
+        flowLastUpdatedLabel(chat.last_activity || chat.last_mtime || 0),
+      ].filter(Boolean).join(' · ');
+      records.push({
+        id: nodeId,
+        kind: 'group-chat',
+        defaultParent: '',
+        x: defaultPos.x,
+        y: defaultPos.y,
+        title: chat.topic || '(unnamed chat)',
+        kicker: 'Group chat',
+        meta,
+        className: 'flow-node-group-chat',
+        groupChatPath: chat.path_tilde || '',
+        groupChatId: chat.uuid || chat.id || '',
+        groupChatMode: chat.mode || 'topic',
+      });
+    });
+    if (groupChats.length) {
+      yCursor += Math.ceil(groupChats.length / 2) * 116 + 28;
+    }
+
     for (const group of groups) {
       const repoId = flowNodeKey('repo', group.path);
       const repoDefault = { x: 28, y: yCursor };
@@ -8572,6 +8614,9 @@
       const dataObject = rec.objectId ? ' data-object-id="' + escapeAttr(rec.objectId) + '"' : '';
       const dataDraft = rec.draftId ? ' data-draft-id="' + escapeAttr(rec.draftId) + '"' : '';
       const dataRepoPath = rec.repoPath ? ' data-repo-path="' + escapeAttr(rec.repoPath) + '"' : '';
+      const dataGcPath = rec.groupChatPath ? ' data-gc-path="' + escapeAttr(rec.groupChatPath) + '"' : '';
+      const dataGcId = rec.groupChatId ? ' data-gc-id="' + escapeAttr(rec.groupChatId) + '"' : '';
+      const dataGcMode = rec.groupChatMode ? ' data-gc-mode="' + escapeAttr(rec.groupChatMode) + '"' : '';
       const deleteBtn = rec.kind === 'object'
         ? '<button type="button" class="flow-node-delete" data-flow-action="delete-object" title="Delete object" aria-label="Delete object">&times;</button>'
         : rec.kind === 'draft-session'
@@ -8608,7 +8653,7 @@
           + (rec.chipsHtml || '');
       const selectedClass = flowSelectedNodes[rec.id] ? ' selected' : '';
       return '<div class="flow-node ' + escapeAttr(rec.className) + selectedClass + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
-        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath
+        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath + dataGcPath + dataGcId + dataGcMode
         + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;">'
         + deleteBtn
         + addBtn
@@ -8956,6 +9001,14 @@
     const world = canvas && (canvas.querySelector('.flow-world') || canvas);
     const addBtn = targetEl && targetEl.querySelector('[data-flow-action="add-object"]');
     if (addBtn) addBtn.addEventListener('click', createFlowCustomObject);
+    const addGcBtn = targetEl && targetEl.querySelector('[data-flow-action="add-group-chat"]');
+    if (addGcBtn) addGcBtn.addEventListener('click', () => {
+      // Reuses the existing new-group-chat flow (window.prompt for the
+      // name, /api/coordinate POST). pollGcActive afterwards refreshes
+      // _gcActiveChats which triggers a sidebar re-render → the new
+      // node appears on the board.
+      try { createEmptyGroupChat(); } catch (_) {}
+    });
     const annotateBtn = targetEl && targetEl.querySelector('[data-flow-action="annotate"]');
     if (annotateBtn) annotateBtn.addEventListener('click', () => {
       const orig = document.getElementById('annotationStartBtn');
@@ -9236,9 +9289,38 @@
               };
             });
             if (!isGroupDrag && finalDropTarget && finalDropTarget.dataset.flowNodeId) {
-              flowNodeParents[node.dataset.flowNodeId] = finalDropTarget.dataset.flowNodeId;
-              node.dataset.flowParent = finalDropTarget.dataset.flowNodeId;
-              persistFlowNodeParents();
+              // Special case: dropping a session onto a group-chat
+              // node — same semantics as dragging a conv-list row
+              // onto a group-chat row in the sidebar. Adds the
+              // session as a participant via /api/group-chats/add-
+              // participant. Doesn't reparent (sessions stay under
+              // their repo); just registers participation.
+              const targetIsGroupChat = finalDropTarget.dataset.flowKind === 'group-chat';
+              const draggedIsSession = node.dataset.flowKind === 'session';
+              if (targetIsGroupChat && draggedIsSession) {
+                const gcPath = finalDropTarget.dataset.gcPath || '';
+                const gcId = finalDropTarget.dataset.gcId || '';
+                const sid = node.dataset.sessionId || node.dataset.id || '';
+                const row = (typeof conversationsData !== 'undefined' && Array.isArray(conversationsData))
+                  ? conversationsData.find(c => c && (c.session_id === sid || c.id === sid))
+                  : null;
+                const displayName = (row && row.display_name) || '';
+                if (sid && (gcPath || gcId)) {
+                  try { addSessionToGroupChat(gcPath, sid, displayName, gcId); } catch (_) {}
+                }
+                // Snap the session node back to its pre-drag position
+                // — the parent-link side-effect would be wrong, and we
+                // don't want the session to visually leave its repo
+                // cluster just for being added to a chat.
+                const item = dragItems[0];
+                item.el.style.left = Math.round(item.left) + 'px';
+                item.el.style.top = Math.round(item.top) + 'px';
+                flowNodePositions[item.id] = { x: Math.round(item.left), y: Math.round(item.top) };
+              } else {
+                flowNodeParents[node.dataset.flowNodeId] = finalDropTarget.dataset.flowNodeId;
+                node.dataset.flowParent = finalDropTarget.dataset.flowNodeId;
+                persistFlowNodeParents();
+              }
             }
             persistFlowNodePositions();
             redrawFlowLinks(targetEl);
@@ -9256,6 +9338,17 @@
             document.body.classList.add('status-rail-collapsed');
             try { localStorage.setItem('ccc-status-rail-collapsed', '1'); } catch (_) {}
             selectConversation(node.dataset.id);
+          } else if (node.dataset.flowKind === 'group-chat') {
+            // Click a group-chat node → open the chat reader. Same
+            // entry point the sidebar uses (openGroupChatReader). The
+            // node carries the chat's path/id/mode in dataset.
+            const gcPath = node.dataset.gcPath || '';
+            const gcId = node.dataset.gcId || '';
+            const gcMode = node.dataset.gcMode || 'topic';
+            const topic = (node.querySelector('.flow-node-title') || {}).textContent || '';
+            if ((gcPath || gcId) && typeof openGroupChatReader === 'function') {
+              try { openGroupChatReader(gcPath, topic, gcMode, true, gcId || null); } catch (_) {}
+            }
           }
         };
         node.addEventListener('pointermove', onMove);

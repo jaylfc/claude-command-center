@@ -4224,6 +4224,13 @@
     border-left-color: var(--orange);
     background: linear-gradient(rgba(210,153,34,0.10), rgba(210,153,34,0.10)), var(--surface);
   }
+  /* Group chat — distinct cyan accent so users can scan the board and
+     pick out the coordination nodes without reading the kicker label. */
+  .flow-node-group-chat {
+    width: 240px; border-left-color: var(--cyan, #39d2c0);
+    background: linear-gradient(rgba(57,210,192,0.10), rgba(57,210,192,0.10)), var(--surface);
+  }
+  .flow-node-group-chat .flow-node-kicker { color: var(--cyan, #39d2c0); }
   .flow-node-draft {
     border-left-color: var(--green);
     background: linear-gradient(rgba(63,185,80,0.12), rgba(63,185,80,0.12)), var(--surface);

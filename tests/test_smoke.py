@@ -368,6 +368,30 @@ class TestServerImports(unittest.TestCase):
         self.assertIn(".flow-selection-box", app_css)
         self.assertIn(".flow-node.selected", app_css)
 
+    def test_flow_group_chat_nodes_and_drop(self):
+        """Group chats render as a third node kind on the flow board
+        (alongside repo and object), have a "+ Group chat" toolbar
+        button that triggers createEmptyGroupChat, click opens the
+        existing group-chat reader, and dropping a session node onto
+        a group-chat node calls addSessionToGroupChat — same outcome
+        as dragging a conv-list row onto a chat row in the sidebar."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        self.assertIn('data-flow-action="add-group-chat"', app_js)
+        self.assertIn("createEmptyGroupChat()", app_js)
+        self.assertIn("flow-node-group-chat", app_js)
+        # Records carry gc-path / gc-id / gc-mode for the drop handler.
+        self.assertIn("groupChatPath", app_js)
+        self.assertIn("data-gc-path", app_js)
+        # Drop handler: session → group-chat node calls
+        # addSessionToGroupChat instead of the parent-link operation.
+        self.assertIn("targetIsGroupChat", app_js)
+        self.assertIn("addSessionToGroupChat(gcPath, sid, displayName, gcId)", app_js)
+        # Click on a group-chat node opens the reader.
+        self.assertIn("openGroupChatReader(gcPath, topic, gcMode", app_js)
+        # CSS for the distinct accent.
+        self.assertIn(".flow-node-group-chat", app_css)
+
     def test_flow_popout_reader_toggle(self):
         """Flow popout has a button to show/hide a conversation reader
         on the right side. Toggling writes ccc-flow-popout-reader to
