@@ -323,13 +323,15 @@
   }
   body.flow-popout.flow-popout-reader .main {
     display: flex !important;
-    flex: 0 0 40% !important;
+    /* CSS custom prop drives the split: --flow-reader-width persists in
+       localStorage, default 40vw. The resizer below mutates it. */
+    flex: 0 0 var(--flow-reader-width, 40vw) !important;
     position: static !important;
     inset: auto !important;
     transform: none !important;
     height: 100vh !important;
     width: auto !important;
-    min-width: 360px;
+    min-width: 280px;
     border-left: 1px solid var(--border);
   }
   body.flow-popout.flow-popout-reader .sidebar {
@@ -337,7 +339,21 @@
     width: auto !important;
     max-width: none !important;
     height: 100vh !important;
+    min-width: 320px;
   }
+  /* Draggable resizer between flow board (left) and conv reader (right).
+     Six-pixel-wide column with a hover highlight; cursor:col-resize on
+     hover so the affordance is obvious. */
+  .flow-reader-resizer {
+    flex: 0 0 6px;
+    background: var(--border);
+    cursor: col-resize;
+    user-select: none;
+    transition: background 0.12s ease-out;
+  }
+  .flow-reader-resizer:hover,
+  .flow-reader-resizer.is-dragging { background: var(--accent); }
+  body:not(.flow-popout-reader) .flow-reader-resizer { display: none; }
   body.conversation-popout .main {
     display: flex !important;
     position: static !important;
