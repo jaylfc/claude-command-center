@@ -7933,19 +7933,65 @@
     });
   }
 
+  // Translate a screen-space client point into the flow canvas's own
+  // coordinate system (accounting for the canvas's offset and current
+  // zoom). Returns null when the flow canvas isn't mounted.
+  function flowScreenPointToCanvasPos(clientX, clientY) {
+    const canvas = document.querySelector('#flowBoard .flow-canvas');
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const zoom = flowZoom || 1;
+    return {
+      x: Math.max(0, Math.round((clientX - rect.left) / zoom)),
+      y: Math.max(0, Math.round((clientY - rect.top) / zoom)),
+    };
+  }
+
   async function createFlowCustomObject() {
-    const title = (await promptModal('Object name', 'New object') || '').trim();
+    // Fire the prompt FIRST (which mounts and shows the modal
+    // synchronously inside the Promise body), then capture its rect
+    // while it's still on screen. By the time `await` resolves the
+    // modal's already cleanup'd back to display:none, so the rect
+    // would read zero — read it now.
+    const titlePromise = promptModal('Object name', 'New object');
+    const modalEl = document.getElementById('promptModal');
+    let modalRect = null;
+    if (modalEl) {
+      const inner = modalEl.querySelector('.upd-modal, .upd-dialog') || modalEl;
+      const rect = inner.getBoundingClientRect();
+      if (rect.width && rect.height) modalRect = rect;
+    }
+    const title = (await titlePromise || '').trim();
     if (!title) return;
     const now = Date.now();
     const id = 'obj-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
     const obj = { id, title, created_at: now, updated_at: now };
     flowCustomObjects.unshift(obj);
     const nodeId = flowNodeKey('object', id);
-    const existingObjects = document.querySelectorAll('#flowBoard .flow-node-object').length;
-    flowNodePositions[nodeId] = {
-      x: 28 + (existingObjects % 2) * 292,
-      y: 24 + Math.floor(existingObjects / 2) * 116,
-    };
+    let pos = null;
+    if (modalRect) {
+      // The user typed the name into THIS spot on screen — drop the
+      // new object's body right there. Translate the modal's center
+      // into flow coords and pull the top-left back by half the node
+      // default (~264×96) so the body sits on the modal center, not
+      // hanging off the bottom-right of it.
+      pos = flowScreenPointToCanvasPos(
+        modalRect.left + modalRect.width / 2,
+        modalRect.top + modalRect.height / 2,
+      );
+      if (pos) {
+        pos = { x: Math.max(0, pos.x - 132), y: Math.max(0, pos.y - 48) };
+      }
+    }
+    if (!pos) {
+      // Fallback grid for the window.prompt path (no modal element).
+      const existingObjects = document.querySelectorAll('#flowBoard .flow-node-object').length;
+      pos = {
+        x: 28 + (existingObjects % 2) * 292,
+        y: 24 + Math.floor(existingObjects / 2) * 116,
+      };
+    }
+    flowNodePositions[nodeId] = pos;
     persistFlowCustomObjects();
     persistFlowNodePositions();
     renderSidebar(filterConversations($convSearch ? $convSearch.value : ''));
