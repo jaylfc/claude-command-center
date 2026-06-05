@@ -83,6 +83,8 @@ Read `SECURITY.md` before changing anything about network binding, origin checks
 
 - `server.py` is stdlib-only on purpose — no pip dependencies at runtime. Don't import `requests`, `pydantic`, `fastapi`, etc. `urllib` + `http.server` + `json` cover it.
 - `static/index.html` is a single-file app by design (no bundler, no npm). Inline CSS/JS is expected. Don't split it into modules without a strong reason.
+- Flow workspace work (`#flowBoard`, `static/app.js`, `static/app.css`) has
+  maintainer notes in `.claude/rules/flow-workspace.md`.
 - `hooks/` scripts run inside agent hook pipelines — they must exit fast and never prompt.
 - The Morning view (`morning.py`, `morning_store.py`, `static/morning/`) is a **gitignored opt-in plugin** for one user's workflow. Don't reference it in the README or treat it as part of the core.
 
