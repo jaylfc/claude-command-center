@@ -15517,8 +15517,12 @@
           setTimeout(() => toast.remove(), 3500);
         } catch (err) { /* swallow */ }
       }
-      // Re-render
-      renderSidebar(filterConversations($convSearch.value));
+      // Re-render with force: the rename input itself is a text input,
+      // and on blur focus may have moved to the search box (also a text
+      // input). Either case trips shouldPauseSidebarRender, which would
+      // suppress this user-initiated render and leave the title stuck
+      // in edit mode forever. Force bypasses that pause guard.
+      renderSidebar(filterConversations($convSearch.value), { force: true });
     }
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); commit(true); }

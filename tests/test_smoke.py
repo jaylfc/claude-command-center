@@ -391,6 +391,26 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("body.flow-popout", app_css)
         self.assertIn(".conv-list-panel > *:not(#flowBoard)", app_css)
 
+    def test_inline_rename_force_renders_even_when_search_focused(self):
+        """Inline session rename commit() must force the sidebar render —
+        the rename input itself is a text input, and after Enter/blur
+        focus is either on it or has moved to the search box (also
+        text). Either case trips shouldPauseSidebarRender, which would
+        suppress the post-commit render and leave the title stuck in
+        edit mode."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        # The rename commit's renderSidebar call must pass force:true.
+        self.assertIn(
+            "renderSidebar(filterConversations($convSearch.value), { force: true });",
+            app_js,
+        )
+        # And the surrounding function should still be the inline-rename
+        # commit (so we can be sure the right call site got forced).
+        self.assertIn("function startInlineRename", app_js)
+        # Defensive: the inline-rename comment mentions the pause-guard
+        # rationale so a future refactor can't silently drop the force.
+        self.assertIn("trips shouldPauseSidebarRender", app_js)
+
     def test_flow_edges_are_selectable_deletable_draggable(self):
         """Flow edges (the lines connecting child nodes to their parent)
         are now selectable with a click, deletable with Backspace, and
