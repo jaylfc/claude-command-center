@@ -391,6 +391,19 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("body.flow-popout", app_css)
         self.assertIn(".conv-list-panel > *:not(#flowBoard)", app_css)
 
+    def test_macapp_cmd_backtick_cycles_windows(self):
+        """Cmd+` should switch between CCC windows (main ↔ flow popout ↔
+        conv popout). Default Cmd+` works for AppKit apps with multiple
+        windows, but WKWebView swallows the keystroke before AppKit
+        sees it — so we surface explicit Window-menu items for forward
+        and shift-reverse cycling, bound at the menu-bar level."""
+        macapp = pathlib.Path(PROJECT_ROOT, "scripts", "macapp", "main.swift").read_text(encoding="utf-8")
+        self.assertIn('cycleWindowsForward', macapp)
+        self.assertIn('cycleWindowsReverse', macapp)
+        self.assertIn('"Cycle Through Windows"', macapp)
+        # Bound to Cmd+` and Cmd+Shift+` in the Window menu.
+        self.assertIn('keyEquivalent: "`"', macapp)
+
     def test_macapp_does_not_quit_when_last_window_closes(self):
         """Closing a conversation pop-out (or the main window momentarily)
         must NOT terminate the app — that kills the server we spawned

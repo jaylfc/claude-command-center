@@ -545,6 +545,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowMenu.addItem(withTitle: "Close Window",
                            action: #selector(NSWindow.performClose(_:)),
                            keyEquivalent: "w")
+        windowMenu.addItem(NSMenuItem.separator())
+        // Cycle through CCC's own windows. macOS' default Cmd+` works
+        // for AppKit apps with multiple windows, but WKWebView often
+        // eats the keystroke before AppKit sees it — surface an explicit
+        // menu item so the shortcut is bound at the menu-bar level.
+        let cycleForward = windowMenu.addItem(
+            withTitle: "Cycle Through Windows",
+            action: #selector(cycleWindowsForward),
+            keyEquivalent: "`"
+        )
+        cycleForward.keyEquivalentModifierMask = [.command]
+        let cycleReverse = windowMenu.addItem(
+            withTitle: "Cycle Through Windows (Reverse)",
+            action: #selector(cycleWindowsReverse),
+            keyEquivalent: "`"
+        )
+        cycleReverse.keyEquivalentModifierMask = [.command, .shift]
         windowMenuItem.submenu = windowMenu
         mainMenu.addItem(windowMenuItem)
 
@@ -641,6 +658,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func goForward() {
         let view = activeWebView()
         if view.canGoForward { view.goForward() }
+    }
+
+    private func cycleableWindows() -> [NSWindow] {
+        return NSApp.windows.filter { win in
+            win.isVisible && win.canBecomeKey && !win.isMiniaturized && win.styleMask.contains(.titled)
+        }
+    }
+
+    @objc func cycleWindowsForward() {
+        let windows = cycleableWindows()
+        guard windows.count > 1 else { return }
+        let current = NSApp.keyWindow
+        let pos = current.flatMap { windows.firstIndex(of: $0) } ?? -1
+        let next = windows[(pos + 1) % windows.count]
+        next.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func cycleWindowsReverse() {
+        let windows = cycleableWindows()
+        guard windows.count > 1 else { return }
+        let current = NSApp.keyWindow
+        let pos = current.flatMap { windows.firstIndex(of: $0) } ?? 0
+        let next = windows[(pos - 1 + windows.count) % windows.count]
+        next.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc func focusFind() {
