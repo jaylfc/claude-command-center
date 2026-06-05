@@ -67,6 +67,9 @@
   body.hide-gh-issues .is-github-issue {
     display: none !important;
   }
+  [hidden] {
+    display: none !important;
+  }
   :focus { outline: none; }
   button:focus-visible,
   input:focus-visible,
