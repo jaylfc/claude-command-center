@@ -18397,10 +18397,14 @@ def _get_cursor_app_support_dir():
 def _find_cursor_workspace_db_and_id(cwd):
     import urllib.parse
     import sys
+    import uuid
     app_support_dir = _get_cursor_app_support_dir()
     workspace_storage_dir = app_support_dir / "User" / "workspaceStorage"
     if not workspace_storage_dir.is_dir():
-        return None, None
+        try:
+            workspace_storage_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None, None
         
     try:
         target_path = Path(cwd).expanduser().resolve()
@@ -18425,11 +18429,22 @@ def _find_cursor_workspace_db_and_id(cwd):
                 decoded_path = Path(path_str).resolve(strict=False)
                 if decoded_path == target_path:
                     db_path = p / "state.vscdb"
-                    if db_path.is_file():
-                        return db_path, p.name
+                    return db_path, p.name
         except Exception:
             pass
-    return None, None
+            
+    # Not found, create one so Cursor picks it up
+    try:
+        new_uuid = uuid.uuid4().hex
+        new_p = workspace_storage_dir / new_uuid
+        new_p.mkdir(parents=True, exist_ok=True)
+        folder_uri = target_path.as_uri()
+        with open(new_p / "workspace.json", "w", encoding="utf-8") as f:
+            json.dump({"folder": folder_uri}, f)
+        db_path = new_p / "state.vscdb"
+        return db_path, new_uuid
+    except Exception:
+        return None, None
 
 
 def _register_composer_in_workspace_db(db_path, sid, title, created_at):
@@ -18754,6 +18769,21 @@ def backfill_cursor_sidebar_visibility(days=None, repo_paths=None, now=None, max
             sid = _extract_cursor_chat_id_from_log(log_path) or _cursor_session_id_for_spawn_entry(entry)
         if sid:
             add_sid(sid, entry)
+            
+    # Also discover directly from agent-transcripts directory
+    try:
+        paths = _cursor_transcript_paths()
+        for path in paths:
+            try:
+                if path.stat().st_mtime < cutoff:
+                    continue
+                sid = _cursor_chat_id_from_path(path)
+                if sid:
+                    add_sid(sid)
+            except OSError:
+                pass
+    except Exception:
+        pass
 
     updated = 0
     already_visible = 0
