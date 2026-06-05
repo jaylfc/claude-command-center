@@ -4747,7 +4747,13 @@
     const _rtlObserver = new MutationObserver(records => {
       for (const rec of records) {
         rec.addedNodes.forEach(n => {
-          if (n.nodeType === 1) tagBlocksForRtl(n);
+          if (n.nodeType === 1) {
+            tagBlocksForRtl(n);
+            // Lazy-render any new mermaid blocks added to the conv
+            // view. Fire-and-forget — the loader Promise is cached so
+            // repeated calls don't refetch the lib.
+            try { _renderMermaidBlocks(n); } catch (_) {}
+          }
         });
       }
     });
@@ -4758,6 +4764,7 @@
           el.dataset.rtlObserverAttached = '1';
           _rtlObserver.observe(el, { childList: true, subtree: true });
           tagBlocksForRtl(el);
+          try { _renderMermaidBlocks(el); } catch (_) {}
         }
       });
     };
@@ -4871,6 +4878,22 @@
     return out;
   }
   function renderCodeBlock(code, lang) {
+    // Mermaid diagrams render as SVG via the lazy-loaded mermaid lib.
+    // We emit a wrapper carrying the raw source so the post-insert
+    // observer (see _renderMermaidBlocks) can find and convert it.
+    // The <pre> inside is the offline/error fallback — if mermaid never
+    // loads, the user still sees the diagram source as a code block.
+    if ((lang || '').toLowerCase() === 'mermaid') {
+      return (
+        '<div class="mermaid-block" data-mermaid-pending>' +
+          '<div class="cb-head">' +
+            '<span class="cb-lang">mermaid</span>' +
+            '<button class="cb-copy" type="button" title="Copy">Copy</button>' +
+          '</div>' +
+          '<pre class="mermaid-source">' + escapeHtml(code) + '</pre>' +
+        '</div>'
+      );
+    }
     const langLabel = lang
       ? '<span class="cb-lang">' + escapeHtml(lang) + '</span>'
       : '<span class="cb-lang cb-lang-plain">code</span>';
@@ -4882,6 +4905,94 @@
         '<pre class="cb"><code>' + _linkifyEscapedUrls(highlightCode(code, lang)) + '</code></pre>' +
       '</div>'
     );
+  }
+
+  // Lazy Mermaid renderer — loads the lib on first use, processes any
+  // `.mermaid-block[data-mermaid-pending]` nodes within `root`, swaps
+  // the pending pre for the rendered SVG. Hooked into the same scoped
+  // MutationObserver that handles RTL tagging so any path that injects
+  // assistant text gets mermaid rendering for free.
+  let _mermaidLoadPromise = null;
+  function _loadMermaid() {
+    if (_mermaidLoadPromise) return _mermaidLoadPromise;
+    _mermaidLoadPromise = new Promise((resolve, reject) => {
+      if (window.mermaid && typeof window.mermaid.render === 'function') {
+        resolve(window.mermaid);
+        return;
+      }
+      // Use the UMD build so we don't need module=type loading. jsDelivr
+      // has solid uptime; if it ever fails the user just sees the source
+      // as a fallback pre, which is honest about the failure.
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+      s.async = true;
+      s.onload = () => {
+        try {
+          const theme = (document.documentElement.dataset && document.documentElement.dataset.theme === 'light')
+            ? 'default' : 'dark';
+          window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme });
+          resolve(window.mermaid);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      s.onerror = () => reject(new Error('failed to load mermaid'));
+      document.head.appendChild(s);
+    });
+    return _mermaidLoadPromise;
+  }
+  let _mermaidIdSeq = 0;
+  async function _renderMermaidBlocks(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    const pending = [];
+    if (root.matches && root.matches('.mermaid-block[data-mermaid-pending]')) pending.push(root);
+    root.querySelectorAll('.mermaid-block[data-mermaid-pending]').forEach(n => pending.push(n));
+    if (!pending.length) return;
+    let mermaid;
+    try {
+      mermaid = await _loadMermaid();
+    } catch (_) {
+      // Offline / CDN blocked: leave the fallback pre in place but
+      // mark the block done so we don't keep retrying.
+      pending.forEach(el => {
+        el.removeAttribute('data-mermaid-pending');
+        el.setAttribute('data-mermaid-error', 'load-failed');
+      });
+      return;
+    }
+    for (const el of pending) {
+      const src = (el.querySelector('.mermaid-source') || {}).textContent || '';
+      if (!src.trim()) {
+        el.removeAttribute('data-mermaid-pending');
+        continue;
+      }
+      el.removeAttribute('data-mermaid-pending');
+      el.setAttribute('data-mermaid-rendered', '');
+      const id = 'mermaid-svg-' + (++_mermaidIdSeq);
+      try {
+        const result = await mermaid.render(id, src);
+        // mermaid@10 returns { svg, bindFunctions }. Preserve the head
+        // (lang badge + copy button) and replace the source with SVG.
+        const head = el.querySelector('.cb-head');
+        el.innerHTML = '';
+        if (head) el.appendChild(head);
+        const svgWrap = document.createElement('div');
+        svgWrap.className = 'mermaid-svg';
+        svgWrap.innerHTML = result.svg;
+        el.appendChild(svgWrap);
+        if (typeof result.bindFunctions === 'function') {
+          try { result.bindFunctions(svgWrap); } catch (_) {}
+        }
+      } catch (err) {
+        // Render error — put the source back so the user still sees the
+        // diagram intent, with a small error note.
+        el.setAttribute('data-mermaid-error', 'render-failed');
+        const errNote = document.createElement('div');
+        errNote.className = 'mermaid-error';
+        errNote.textContent = 'mermaid render failed: ' + (err && err.message || 'unknown');
+        el.appendChild(errNote);
+      }
+    }
   }
 
   function renderInline(s) {

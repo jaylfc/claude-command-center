@@ -891,6 +891,40 @@
     tab-size: 2;
   }
   pre.cb code { background: transparent; padding: 0; font: inherit; color: inherit; }
+  /* Mermaid diagram block — same chrome as a regular code block, but
+     the body holds an SVG once the lib lands. The pre fallback below
+     uses pre.cb styling so an unrendered block still looks correct. */
+  .mermaid-block {
+    margin: 8px 0; border-radius: 8px; overflow: hidden;
+    background: #0b1016; border: 1px solid var(--border);
+  }
+  .mermaid-block .cb-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 10px; background: rgba(255,255,255,0.025);
+    border-bottom: 1px solid var(--border);
+    font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+    font-size: 11px; color: var(--text-muted);
+  }
+  .mermaid-block pre.mermaid-source {
+    margin: 0; padding: 12px 14px;
+    font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+    font-size: 13px; line-height: 1.5; color: var(--text);
+    white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  }
+  .mermaid-block .mermaid-svg {
+    padding: 12px 14px;
+    overflow-x: auto;
+    text-align: center;
+    background: var(--surface);
+  }
+  .mermaid-block .mermaid-svg svg { max-width: 100%; height: auto; }
+  .mermaid-block .mermaid-error {
+    padding: 8px 14px;
+    font-size: 12px;
+    color: var(--red);
+    border-top: 1px solid var(--border);
+    background: color-mix(in srgb, var(--red) 8%, transparent);
+  }
   .tok-comment  { color: #768390; font-style: italic; }
   .tok-string   { color: #a5d6ff; }
   .tok-keyword  { color: #ff7b72; }

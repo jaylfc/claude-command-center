@@ -391,6 +391,28 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("body.flow-popout", app_css)
         self.assertIn(".conv-list-panel > *:not(#flowBoard)", app_css)
 
+    def test_mermaid_code_blocks_render_as_svg(self):
+        """```mermaid fenced blocks render as SVG instead of raw code.
+        renderCodeBlock emits a .mermaid-block carrier whose .mermaid-source
+        pre is the offline fallback; a lazy lib loader replaces the
+        block with rendered SVG on first appearance. Hooked into the
+        existing conv-view MutationObserver so every render path picks
+        it up for free."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        # Detection inside renderCodeBlock
+        self.assertIn("(lang || '').toLowerCase() === 'mermaid'", app_js)
+        self.assertIn('"mermaid-block"', app_js.replace("'", '"'))
+        # Lazy loader + render helper
+        self.assertIn("_loadMermaid", app_js)
+        self.assertIn("_renderMermaidBlocks", app_js)
+        self.assertIn("cdn.jsdelivr.net/npm/mermaid", app_js)
+        # Hooked into the existing observer that already does RTL tagging.
+        self.assertIn("_renderMermaidBlocks(n)", app_js)
+        # CSS for the carrier + SVG container.
+        self.assertIn(".mermaid-block", app_css)
+        self.assertIn(".mermaid-svg", app_css)
+
     def test_tts_rate_knob_is_live_and_persisted(self):
         """User wanted a live knob that adjusts TTS speed while it's
         playing, plus a persisted default. The rate is no longer
