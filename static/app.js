@@ -5370,7 +5370,12 @@
     try { localStorage.setItem('ccc-conv-panel-open', open ? '1' : '0'); } catch (_) {}
   }
   // ── Mobile overlay helpers ──
-  const _mobileMQ = window.matchMedia('(max-width: 768px)');
+  // 950px covers every phone in portrait AND landscape (iPhone Pro Max
+  // landscape = 932px). The earlier 768 threshold missed every iPhone
+  // landscape orientation — user reported tapping a conv row didn't
+  // open the conv because mobileShowForCurrentMode no-op'd whenever
+  // !isMobile().
+  const _mobileMQ = window.matchMedia('(max-width: 950px)');
   function isMobile() { return _mobileMQ.matches; }
   function mobileShowMain(on) {
     document.body.classList.toggle('mobile-show-main', !!on);

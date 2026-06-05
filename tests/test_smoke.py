@@ -368,6 +368,20 @@ class TestServerImports(unittest.TestCase):
         self.assertIn(".flow-selection-box", app_css)
         self.assertIn(".flow-node.selected", app_css)
 
+    def test_mobile_breakpoint_covers_phones_landscape(self):
+        """Mobile single-column layout (conv list full-width, conv pane
+        slides in as overlay, back button shows) must trigger on phones
+        in BOTH portrait and landscape. iPhone Pro Max landscape is
+        932px so the breakpoint must be ≥ 932; 950px gives a small
+        safety margin. JS _mobileMQ and the relevant CSS @media blocks
+        must use the same threshold so isMobile() and the slide-in
+        overlay agree."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        self.assertIn("matchMedia('(max-width: 950px)')", app_js)
+        # CSS for the back-button visibility + main-overlay must match.
+        self.assertIn("@media (max-width: 950px)", app_css)
+
     def test_flow_group_chat_nodes_and_drop(self):
         """Group chats render as a third node kind on the flow board
         (alongside repo and object), have a "+ Group chat" toolbar

@@ -371,7 +371,10 @@
      leaking into desktop. Hide unless the viewport is mobile-narrow. */
   .mobile-back-btn,
   #mobileBackBtn { display: none !important; }
-  @media (max-width: 720px) {
+  /* Threshold matches the JS _mobileMQ (950px) — covers every phone
+     in portrait AND landscape so the back button is reachable from
+     the conv pane on any phone orientation. */
+  @media (max-width: 950px) {
     .mobile-back-btn,
     #mobileBackBtn { display: inline-flex !important; }
   }
@@ -6973,7 +6976,11 @@
   }
   .attention-row .att-next::before { content: '→ '; opacity: 0.7; }
   .attention-empty { padding: 10px; font-size: 12px; color: var(--text-muted); text-align: center; }
-  @media (max-width: 768px) {
+  /* Mobile / narrow-tablet layout: sidebar fills the viewport, main
+     pane is a slide-in overlay toggled by tapping a conv row → back
+     button. 950px threshold matches the JS _mobileMQ so iPhone
+     landscape (up to ~932px) also gets the single-column treatment. */
+  @media (max-width: 950px) {
     body {
       padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
