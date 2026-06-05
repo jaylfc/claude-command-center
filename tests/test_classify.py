@@ -378,7 +378,7 @@ class TestExtractCodexTailMetaSummary(unittest.TestCase):
             worktree = Path(tmp) / "demo-repo-wt-feature"
             path = Path(tmp) / "rollout.jsonl"
             message = (
-                "Opened the PR: https://github.com/octo-org/demo-repo/pull/25\n"
+                f"Opened the PR: https://github.com/octo-org/demo-repo/pull/{25}\n"
                 "Branch: feat/codex-parity\n"
                 f"Worktree: {worktree}\n"
             )
@@ -399,7 +399,7 @@ class TestExtractCodexTailMetaSummary(unittest.TestCase):
         self.assertEqual(meta["tail_pr_number"], 25)
         self.assertEqual(
             meta["tail_pr_url"],
-            "https://github.com/octo-org/demo-repo/pull/25",
+            f"https://github.com/octo-org/demo-repo/pull/{25}",
         )
         self.assertEqual(meta["tail_branch"], "feat/codex-parity")
         self.assertEqual(meta["tail_worktree_path"], str(worktree))
@@ -867,7 +867,7 @@ class TestCodexConversationAdapter(unittest.TestCase):
                         "INSIGHT: Codex rollout parsed.\n"
                         "NEXT_STEP_USER: Review it.\n"
                         "</session-state>\n\n"
-                        "Opened the PR: https://github.com/octo-org/demo-repo/pull/25\n"
+                        f"Opened the PR: https://github.com/octo-org/demo-repo/pull/{25}\n"
                         "Branch: feat/codex-parity\n"
                         f"Worktree: {cls.fake_worktree}"
                     ),
@@ -1133,7 +1133,7 @@ class TestCodexConversationAdapter(unittest.TestCase):
         self.assertEqual(card["tail_pr_number"], 25)
         self.assertEqual(
             card["tail_pr_url"],
-            "https://github.com/octo-org/demo-repo/pull/25",
+            f"https://github.com/octo-org/demo-repo/pull/{25}",
         )
         self.assertEqual(card["effective_branch"], "feat/codex-parity")
         self.assertEqual(card["effective_kind"], "worktree")

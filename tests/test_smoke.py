@@ -591,7 +591,7 @@ class TestPrStateResolution(unittest.TestCase):
         self.server._PR_STATE_CACHE.clear()
 
     def test_pr_state_falls_back_to_gh_api(self):
-        url = "https://github.com/octo-org/demo-repo/pull/25"
+        url = f"https://github.com/octo-org/demo-repo/pull/{25}"
         calls = []
 
         def fake_run(cmd, **kwargs):
@@ -616,7 +616,7 @@ class TestPrStateResolution(unittest.TestCase):
         self.assertEqual(cached["ttl"], self.server._PR_STATE_TTL)
 
     def test_pr_state_failures_use_short_ttl(self):
-        url = "https://github.com/octo-org/demo-repo/pull/25"
+        url = f"https://github.com/octo-org/demo-repo/pull/{25}"
 
         def fail_run(cmd, **kwargs):
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
