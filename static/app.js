@@ -6826,7 +6826,7 @@
     // dragging but no DOM element actually carries a .dragging class,
     // clear it.
     const domHasDragging = !!document.querySelector(
-      '.flow-node.dragging,.kanban-card.dragging,.kanban-column-header.dragging-header,.conv-item.dragging'
+      '.flow-node.dragging,.kanban-card.dragging,.kanban-column-header.dragging-header,.conv-item.dragging,.flow-board.is-panning'
     );
     if (_sidebarDragInProgress && !domHasDragging) {
       _sidebarDragInProgress = false;
@@ -8855,6 +8855,13 @@
     ev.preventDefault();
     ev.stopPropagation();
     beginSidebarDrag();
+    // Mark the flow board as actively panning so isSidebarDragInProgress's
+    // self-heal selector recognizes this drag — without this class, the
+    // self-heal flips _sidebarDragInProgress back to false within a tick
+    // (pan doesn't put `.dragging` on any node, only the .flow-board is
+    // moving) and background pollers slip through mid-pan, mutating row
+    // data and causing the board to jump.
+    targetEl.classList.add('is-panning');
     const startX = ev.clientX;
     const startY = ev.clientY;
     const startScrollLeft = targetEl.scrollLeft;
@@ -8870,6 +8877,7 @@
       document.removeEventListener('pointerup', onUp);
       document.removeEventListener('pointercancel', onUp);
       targetEl.style.cursor = prevCursor;
+      targetEl.classList.remove('is-panning');
       endSidebarDrag();
     };
     document.addEventListener('pointermove', onMove);
