@@ -368,6 +368,29 @@ class TestServerImports(unittest.TestCase):
         self.assertIn(".flow-selection-box", app_css)
         self.assertIn(".flow-node.selected", app_css)
 
+    def test_macapp_does_not_quit_when_last_window_closes(self):
+        """Closing a conversation pop-out (or the main window momentarily)
+        must NOT terminate the app — that kills the server we spawned
+        and yanks every other open window. Mirrors Safari / Mail
+        behavior: Cmd+Q is the explicit quit path; closing windows
+        leaves the app running. Dock-click re-opens main."""
+        macapp = pathlib.Path(PROJECT_ROOT, "scripts", "macapp", "main.swift").read_text(encoding="utf-8")
+        # Must explicitly return false, not true. A bare "return true" in
+        # this delegate method is the bug we just fixed.
+        self.assertIn(
+            "func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {",
+            macapp,
+        )
+        self.assertNotRegex(
+            macapp,
+            r"applicationShouldTerminateAfterLastWindowClosed\(_ sender: NSApplication\) -> Bool \{\s*return true",
+        )
+        # Dock-click reopen must rebuild a window when the last one closed.
+        self.assertIn(
+            "func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool",
+            macapp,
+        )
+
     def test_sending_sidebar_render_bypasses_textarea_pause_guard(self):
         """Hitting Send leaves focus in the conv input textarea, which
         normally pauses sidebar renders (so background pollers can't

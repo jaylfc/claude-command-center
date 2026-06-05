@@ -372,6 +372,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Standard macOS behavior for full GUI apps (Safari, Mail, etc.):
+        // closing the last window does NOT quit. Otherwise closing a
+        // conversation pop-out — or even just the main window for a
+        // moment — terminates the whole app and kills any server we
+        // spawned. Cmd+Q is the explicit quit path; dock-clicks
+        // (applicationShouldHandleReopen below) bring main back.
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // User clicked the dock icon. If no windows are visible (main was
+        // closed earlier), re-show main. If a popout is still up but main
+        // is hidden, also surface main so the click feels right.
+        if !flag {
+            if let main = mainWebWindow?.window {
+                main.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
         return true
     }
 
