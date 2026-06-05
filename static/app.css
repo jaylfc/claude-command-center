@@ -5086,13 +5086,8 @@
   .annotation-link {
     display: inline-flex; align-items: center; gap: 4px;
     padding: 3px 8px; margin-left: 4px;
-    /* TEMP: bright blue so we can confirm a cache-busted reload picked
-       up new CSS. If you see blue, the new code reached you. Revert
-       once verified. */
-    background: #1f6feb !important;
-    color: #ffffff !important;
-    border: 1px solid #1f6feb !important;
-    border-radius: 999px;
+    background: transparent; color: var(--text-muted);
+    border: 1px solid transparent; border-radius: 999px;
     font-size: 11px; font-family: inherit; cursor: pointer;
     letter-spacing: 0.2px; white-space: nowrap;
     transition: background 0.12s ease-out, color 0.12s ease-out, border-color 0.12s ease-out;
@@ -7017,6 +7012,39 @@
     /* Hide non-essential controls in classic main toolbar */
     .toolbar .font-size-controls { display: none !important; }
     #convSessionId { display: none !important; }
+
+    /* Phone-sized toolbar: trim the topbar down to back-btn + breadcrumb
+       + pop-out so all of it fits on one row instead of wrapping into
+       a second row. Update / Bug-report / Annotate / Screen / Notes /
+       Worktrees / Stats / Terminal / Vercel / localhost / context-rail
+       toggles are all desktop conveniences — surface them via the
+       breadcrumb's right click or a menu in a future iteration.       */
+    #updPill,
+    #bugReportLink,
+    #annotationStartBtn,
+    #annotationScreenBtn,
+    #annotationNotesBtn,
+    #kptWorktreesBtn,
+    #statsBtn,
+    #termToggleBtn,
+    #deployPill,
+    #localhostPill,
+    #statusToggle,
+    #statusPosTop,
+    #statusPosRight {
+      display: none !important;
+    }
+    .ccc-breadcrumb {
+      max-width: none !important;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .ccc-breadcrumb .ccc-breadcrumb-category {
+      max-width: 96px;
+    }
+    /* Push the breadcrumb + pop-out tightly to the left of the toolbar
+       so they live with the back button on one row. */
+    .ccc-topbar { margin-left: 8px !important; gap: 6px !important; }
 
     /* Controls that don't make sense on phones */
     .sh-btn-deploy { display: none !important; }

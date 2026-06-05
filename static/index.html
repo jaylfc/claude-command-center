@@ -299,7 +299,16 @@
           }
           if (pos === 'right' || pos === null) {
             document.body.classList.add('status-pos-right');
-            if (localStorage.getItem('ccc-status-rail-collapsed') === '1') {
+            // Mobile default: the status rail (Original ask / Activity /
+            // Files) eats too much of a phone's viewport, so collapse it
+            // unless the user has explicitly opened it on this device.
+            // The 950px threshold mirrors the JS _mobileMQ + the mobile
+            // @media block in app.css. localStorage='0' means user
+            // explicitly opened it → respect that on mobile too.
+            const _isMobileViewport = (typeof window.matchMedia === 'function')
+              && window.matchMedia('(max-width: 950px)').matches;
+            const _railStored = localStorage.getItem('ccc-status-rail-collapsed');
+            if (_railStored === '1' || (_isMobileViewport && _railStored !== '0')) {
               document.body.classList.add('status-rail-collapsed');
             }
           }
