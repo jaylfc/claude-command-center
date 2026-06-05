@@ -7613,55 +7613,107 @@
 
     // R3/R4 bin-pack for top-level clusters; R7 anchors nested
     // clusters to (ancestor.right + NESTED_GAP_X, ancestor.top).
+    //
+    // Chains (a top-level cluster + all clusters nested under it,
+    // possibly transitively) are bin-packed as a single unit. Earlier
+    // versions advanced the cursor by just the top-level cluster's
+    // own width, so the NEXT top-level cluster slid right over any
+    // nested children of the previous one — repos overlaid objects.
+    // Pre-compute each chain's combined bbox so the cursor advances
+    // past the full footprint.
     const rowBudget = Math.max(MIN_ROW_WIDTH, vpR - vpL - PARENT_PAD * 2);
     const startX = Math.max(0, vpL + PARENT_PAD);
     const startY = Math.max(0, vpT + PARENT_PAD);
+
+    // Group clusters under their top-level root, preserving topo order.
+    const topLevelRootIdOf = new Map();
+    clusters.forEach(c => {
+      const cid = c.parent.dataset.flowNodeId;
+      let cur = cid;
+      let anc = ancestorOf.get(cur);
+      while (anc && clusterById.has(anc) && anc !== cur) {
+        cur = anc;
+        anc = ancestorOf.get(cur);
+      }
+      topLevelRootIdOf.set(cid, cur);
+    });
+    const chains = new Map();  // rootId → [cluster, ...] in topo order
+    orderedParents.forEach(p => {
+      const cid = p.dataset.flowNodeId;
+      const rootId = topLevelRootIdOf.get(cid);
+      if (!chains.has(rootId)) chains.set(rootId, []);
+      chains.get(rootId).push(clusterById.get(cid));
+    });
+
+    // Simulate each chain at origin (0, 0) to learn its combined
+    // bbox. Each nested cluster is placed at its ancestor's right
+    // edge plus NESTED_GAP_X, top-aligned with the ancestor.
+    const chainBBoxes = new Map();
+    chains.forEach((chainClusters, rootId) => {
+      const local = new Map();
+      let maxRight = 0;
+      let maxBottom = 0;
+      chainClusters.forEach(c => {
+        const cid = c.parent.dataset.flowNodeId;
+        let dx = 0;
+        let dy = 0;
+        if (c.ancestor && local.has(c.ancestor)) {
+          const a = local.get(c.ancestor);
+          dx = a.dx + a.w + NESTED_GAP_X;
+          dy = a.dy;
+        }
+        local.set(cid, { dx, dy, w: c.width, h: c.height });
+        if (dx + c.width > maxRight) maxRight = dx + c.width;
+        if (dy + c.height > maxBottom) maxBottom = dy + c.height;
+      });
+      chainBBoxes.set(rootId, { width: maxRight, height: maxBottom, local });
+    });
+
+    // Bin-pack chains (not individual clusters) — the row-budget check
+    // now accounts for nested children, so a wide chain wraps to the
+    // next row instead of bleeding over the next chain.
     let cursorX = startX;
     let cursorY = startY;
     let rowMaxHeight = 0;
     let rowHasCluster = false;
-    clusters.forEach(cluster => {
-      let left;
-      let top;
-      const isNested = cluster.ancestor && placedPos.has(cluster.ancestor);
-      if (isNested) {
-        const anc = placedPos.get(cluster.ancestor);
-        left = anc.left + anc.width + NESTED_GAP_X;
-        top = anc.top;
-      } else {
-        if (rowHasCluster && (cursorX - startX + cluster.width) > rowBudget) {
-          cursorX = startX;
-          cursorY += rowMaxHeight + CLUSTER_MARGIN;
-          rowMaxHeight = 0;
-          rowHasCluster = false;
-        }
-        left = cursorX;
-        top = cursorY;
+    chains.forEach((chainClusters, rootId) => {
+      const bbox = chainBBoxes.get(rootId);
+      if (rowHasCluster && (cursorX - startX + bbox.width) > rowBudget) {
+        cursorX = startX;
+        cursorY += rowMaxHeight + CLUSTER_MARGIN;
+        rowMaxHeight = 0;
+        rowHasCluster = false;
       }
-      const parent = cluster.parent;
-      parent.style.left = Math.round(left) + 'px';
-      parent.style.top = Math.round(top) + 'px';
-      flowNodePositions[parent.dataset.flowNodeId] = { x: Math.round(left), y: Math.round(top) };
-      // R5: indent children.
-      const childBaseX = left + CHILD_INDENT_X;
-      const childBaseY = top + cluster.ph + SESSION_GAP_BELOW_PARENT;
-      cluster.children.forEach((child, idx) => {
-        const col = idx % cluster.C;
-        const row = Math.floor(idx / cluster.C);
-        const x = childBaseX + col * (cluster.cwChild + CHILD_GAP_X);
-        const y = childBaseY + row * (cluster.chChild + CHILD_GAP_Y);
-        child.style.left = Math.round(x) + 'px';
-        child.style.top = Math.round(y) + 'px';
-        flowNodePositions[child.dataset.flowNodeId] = { x: Math.round(x), y: Math.round(y) };
+      const baseLeft = cursorX;
+      const baseTop = cursorY;
+      chainClusters.forEach(cluster => {
+        const cid = cluster.parent.dataset.flowNodeId;
+        const offset = bbox.local.get(cid);
+        const left = baseLeft + offset.dx;
+        const top = baseTop + offset.dy;
+        const parent = cluster.parent;
+        parent.style.left = Math.round(left) + 'px';
+        parent.style.top = Math.round(top) + 'px';
+        flowNodePositions[cid] = { x: Math.round(left), y: Math.round(top) };
+        // R5: indent children.
+        const childBaseX = left + CHILD_INDENT_X;
+        const childBaseY = top + cluster.ph + SESSION_GAP_BELOW_PARENT;
+        cluster.children.forEach((child, idx) => {
+          const col = idx % cluster.C;
+          const row = Math.floor(idx / cluster.C);
+          const x = childBaseX + col * (cluster.cwChild + CHILD_GAP_X);
+          const y = childBaseY + row * (cluster.chChild + CHILD_GAP_Y);
+          child.style.left = Math.round(x) + 'px';
+          child.style.top = Math.round(y) + 'px';
+          flowNodePositions[child.dataset.flowNodeId] = { x: Math.round(x), y: Math.round(y) };
+        });
+        placedPos.set(cid, {
+          left, top, width: cluster.width, height: cluster.height,
+        });
       });
-      placedPos.set(parent.dataset.flowNodeId, {
-        left, top, width: cluster.width, height: cluster.height,
-      });
-      if (!isNested) {
-        cursorX += cluster.width + CLUSTER_MARGIN;
-        if (cluster.height > rowMaxHeight) rowMaxHeight = cluster.height;
-        rowHasCluster = true;
-      }
+      cursorX += bbox.width + CLUSTER_MARGIN;
+      if (bbox.height > rowMaxHeight) rowMaxHeight = bbox.height;
+      rowHasCluster = true;
     });
 
     persistFlowNodePositions();
