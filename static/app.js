@@ -3617,6 +3617,11 @@
       btn.setAttribute('aria-label', active ? 'Stop reading' : 'Read last message');
       btn.setAttribute('aria-pressed', pressed ? 'true' : 'false');
     });
+    // The live rate knob is only useful while there's something to
+    // re-speak — show it whenever playback is active or paused, hide
+    // when fully stopped.
+    const ctrl = document.getElementById('convTtsRateControl');
+    if (ctrl) ctrl.hidden = !(active || _ttsPaused);
     if (failed) {
       setTimeout(() => ttsButtons().forEach(btn => btn.classList.remove('failed')), 1200);
     }
@@ -3783,12 +3788,25 @@
     return null;
   }
 
-  // Fixed playback rate per user request — neither too slow (1x feels
-  // sleepy) nor jarring (1.5x missed words). 1.25x is the sweet spot.
-  const _TTS_RATE = 1.25;
+  // TTS playback rate — user-tunable via a live knob next to the TTS
+  // button (see #convTtsRate). Persisted to localStorage so it sticks
+  // across sessions. 1.25 was the prior baked-in default — anything
+  // higher missed words, anything lower felt sleepy.
+  const _TTS_RATE_MIN = 0.5;
+  const _TTS_RATE_MAX = 2.5;
+  const _TTS_RATE_DEFAULT = 1.25;
+  function _readPersistedTtsRate() {
+    try {
+      const raw = parseFloat(localStorage.getItem('ccc-tts-rate') || '');
+      if (Number.isFinite(raw) && raw >= _TTS_RATE_MIN && raw <= _TTS_RATE_MAX) return raw;
+    } catch (_) {}
+    return _TTS_RATE_DEFAULT;
+  }
+  let _ttsRate = _readPersistedTtsRate();
   let _ttsLastCharIndex = 0;
   let _ttsPaused = false;
   let _ttsBoundUtteranceText = '';
+  let _ttsRateRestartTimer = null;
 
   async function stopTextToSpeech() {
     clearTtsHighlight();
@@ -3828,7 +3846,7 @@
       ttsButtons().forEach(btn => {
         if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
           btn.classList.add('paused');
-          btn.title = 'Resume reading (1.25x)';
+          btn.title = 'Resume reading (' + _ttsRate.toFixed(2) + '×)';
           btn.setAttribute('aria-label', 'Resume reading');
         }
       });
@@ -3866,7 +3884,7 @@
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
     _ttsUtterance = utterance;
     _ttsBoundUtteranceText = textToSpeak;
-    _ttsUtterance.rate = _TTS_RATE;
+    _ttsUtterance.rate = _ttsRate;
 
     _ttsUtterance.onstart = () => {
       if (_ttsUtterance !== utterance) return;
@@ -3967,6 +3985,73 @@
     $convTtsBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
     $convTtsBtn.addEventListener('click', () => readLastMessageAloud('p1'));
   }
+  // Live rate knob — see #convTtsRate in index.html. Drag while playback
+  // is active to change the rate in real time; the change cancels the
+  // current utterance and restarts from the most recent word boundary
+  // so the user hears the new speed within ~150ms instead of waiting
+  // for the next turn. Initialize from the persisted value.
+  const $convTtsRate = document.getElementById('convTtsRate');
+  const $convTtsRateLabel = document.getElementById('convTtsRateLabel');
+  const $convTtsRateControl = document.getElementById('convTtsRateControl');
+  function _syncTtsRateUi() {
+    if ($convTtsRate) $convTtsRate.value = String(_ttsRate);
+    if ($convTtsRateLabel) $convTtsRateLabel.textContent = _ttsRate.toFixed(2) + '×';
+  }
+  function _setTtsRateControlVisible(visible) {
+    if ($convTtsRateControl) $convTtsRateControl.hidden = !visible;
+  }
+  function _restartTtsAtCurrentPosition() {
+    // Only meaningful while playback is active. Cancel the in-flight
+    // utterance and re-speak the slice starting at the most recent
+    // word boundary with the new rate.
+    if (!_ttsBoundUtteranceText) return;
+    const rest = _ttsBoundUtteranceText.slice(_ttsLastCharIndex || 0);
+    if (!rest.trim()) return;
+    const wasPaused = _ttsPaused;
+    try { window.speechSynthesis.cancel(); } catch (_) {}
+    const utterance = new SpeechSynthesisUtterance(rest);
+    utterance.rate = _ttsRate;
+    // Re-base the char index so onboundary keeps tracking against the
+    // original text (mapping highlights still resolve correctly).
+    const offset = _ttsLastCharIndex || 0;
+    _ttsUtterance = utterance;
+    // Keep _ttsBoundUtteranceText pointing at the FULL text so a
+    // subsequent rate change restarts from the right base again.
+    utterance.onboundary = (e) => {
+      if (_ttsUtterance !== utterance) return;
+      if (e.name === 'word') {
+        _ttsLastCharIndex = offset + e.charIndex;
+        highlightTtsWord(_ttsLastCharIndex, e.charLength);
+      }
+    };
+    utterance.onend = () => { if (_ttsUtterance === utterance) stopTextToSpeech(); };
+    utterance.onerror = (e) => {
+      if (_ttsUtterance !== utterance) return;
+      if (e.error !== 'canceled' && e.error !== 'interrupted') stopTextToSpeech();
+    };
+    window.speechSynthesis.speak(utterance);
+    if (wasPaused) {
+      // Honor the existing paused state — pause again right after start.
+      setTimeout(() => { try { window.speechSynthesis.pause(); } catch (_) {} }, 0);
+    }
+  }
+  if ($convTtsRate) {
+    $convTtsRate.addEventListener('input', () => {
+      const raw = parseFloat($convTtsRate.value || '');
+      if (!Number.isFinite(raw)) return;
+      _ttsRate = Math.min(_TTS_RATE_MAX, Math.max(_TTS_RATE_MIN, raw));
+      try { localStorage.setItem('ccc-tts-rate', String(_ttsRate)); } catch (_) {}
+      if ($convTtsRateLabel) $convTtsRateLabel.textContent = _ttsRate.toFixed(2) + '×';
+      // Debounce the restart — drag input fires per-pixel; spinning up
+      // a fresh utterance every event makes the speech stutter.
+      if (_ttsRateRestartTimer) clearTimeout(_ttsRateRestartTimer);
+      _ttsRateRestartTimer = setTimeout(() => {
+        _ttsRateRestartTimer = null;
+        if (_ttsActive || _ttsPaused) _restartTtsAtCurrentPosition();
+      }, 180);
+    });
+  }
+  _syncTtsRateUi();
   // Textarea autosize: grow up to ~10 rows then scroll. Reset to one row
   // on every input so deletions shrink the box too. Mirrors Omnara's
   // behavior — typing more than one line expands the composer in place.

@@ -391,6 +391,30 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("body.flow-popout", app_css)
         self.assertIn(".conv-list-panel > *:not(#flowBoard)", app_css)
 
+    def test_tts_rate_knob_is_live_and_persisted(self):
+        """User wanted a live knob that adjusts TTS speed while it's
+        playing, plus a persisted default. The rate is no longer
+        baked-in to 1.25 — it's read from localStorage at init,
+        controlled by a range input next to the TTS button, and the
+        change cancels + re-speaks from the current word boundary so
+        the new rate kicks in within ~180ms instead of waiting for
+        the next turn."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        index_html = pathlib.Path(PROJECT_ROOT, "static", "index.html").read_text(encoding="utf-8")
+        # Markup
+        self.assertIn('id="convTtsRate"', index_html)
+        self.assertIn('id="convTtsRateControl"', index_html)
+        # State + persistence
+        self.assertIn("let _ttsRate", app_js)
+        self.assertIn("ccc-tts-rate", app_js)
+        self.assertNotIn("const _TTS_RATE =", app_js)
+        # Live restart wiring — input listener + restart helper.
+        self.assertIn("_restartTtsAtCurrentPosition", app_js)
+        self.assertIn("$convTtsRate.addEventListener('input'", app_js)
+        # CSS
+        self.assertIn(".tts-rate-control", app_css)
+
     def test_first_existing_dir_picks_first_real_path(self):
         """Codex / claude rows used to surface a tail-extracted worktree
         cwd that had since been deleted, so Launch built

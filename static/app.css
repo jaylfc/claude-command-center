@@ -3697,6 +3697,35 @@
       0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
     transform: translateY(1px);
   }
+  /* Live TTS rate knob — shown only while playback is active. The
+     range input is intentionally narrow so it slots into the input
+     bar without crowding the send buttons. */
+  .tts-rate-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 6px;
+    height: 28px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+  }
+  .tts-rate-control[hidden] { display: none; }
+  .tts-rate-control input[type="range"] {
+    width: 80px;
+    height: 4px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    margin: 0;
+  }
+  .tts-rate-control .tts-rate-label {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    color: var(--text-muted);
+    min-width: 38px;
+    text-align: right;
+    user-select: none;
+  }
   /* ── Compact-resume card ──────────────────────────────────────────
      The user_text following a /compact run is a multi-page wall of
      prose Claude wrote to "remember" the prior conversation. Wrap it
