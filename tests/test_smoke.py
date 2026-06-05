@@ -402,13 +402,17 @@ class TestServerImports(unittest.TestCase):
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         # New R10 rule documented in the algorithm comment block.
         self.assertIn("R10. INCREMENTAL", app_js)
-        # Anchor at current position rather than bin-pack reset.
-        self.assertIn("INCREMENTAL ORGANIZE", app_js)
-        self.assertIn("root.offsetLeft", app_js)
-        self.assertIn("root.offsetTop", app_js)
-        self.assertIn("originalX: anchorX", app_js)
+        # Per-cluster anchoring — every cluster (root AND nested) starts
+        # at its own parent's current offsetLeft/offsetTop, not a
+        # chain-relative derived offset.
+        self.assertIn("INCREMENTAL ORGANIZE, per-cluster", app_js)
+        self.assertIn("parentNode.offsetLeft", app_js)
+        self.assertIn("parentNode.offsetTop", app_js)
+        self.assertIn("clusterPlacements", app_js)
+        # Unplaced nested clusters seed from "right of ancestor".
+        self.assertIn("ancPlace.x + ancPlace.w + NESTED_GAP_X", app_js)
         # Overlap-resolve picks the worst overlap each iteration and
-        # pushes the chain with smaller displacement.
+        # pushes the cluster with smaller displacement.
         self.assertIn("worstArea", app_js)
         self.assertIn("totalPushPx", app_js)
         self.assertIn("aDisp <= bDisp", app_js)

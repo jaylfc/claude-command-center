@@ -7674,18 +7674,19 @@
   //     DOM attribute second. A full sidebar re-render at the end
   //     rebuilds the DOM from the source-of-truth maps so connector
   //     lines and parent links survive Organize.
-  // R10. INCREMENTAL — chains anchor at their root's CURRENT position;
-  //     no bin-pack reset. Greedy overlap resolver pushes the chain
-  //     that has moved less so far by the minimum amount (right or
-  //     down) until no overlaps remain. Untouched chains (root at
-  //     0,0) get seeded by the legacy bin-pack cursor so first-ever
-  //     Organize still produces a tidy layout, but every subsequent
-  //     run moves the minimum number of pixels needed to keep each
-  //     parent + its sessions + nested objects non-overlapping.
-  //     Trades R1's strict idempotence for "stay where the user put
-  //     things" — re-running Organize on an already-clean board is a
-  //     no-op (zero pushes), so it's still effectively idempotent in
-  //     the common case.
+  // R10. INCREMENTAL, per-cluster — every cluster (root AND nested
+  //     objects) anchors at ITS OWN current parent position. Greedy
+  //     overlap resolver runs over all clusters as individual units,
+  //     pushing the cluster that has moved less so far by the minimum
+  //     right/down distance until no overlaps remain. Untouched
+  //     clusters (parent at 0,0) seed from the legacy bin-pack cursor
+  //     (top-level) or from "right of ancestor + NESTED_GAP_X"
+  //     (nested), so first-ever Organize tidies a fresh board.
+  //     Re-running on an already-clean board moves zero pixels.
+  //     Earlier chain-anchored variants snapped nested objects back
+  //     to "right of ancestor" regardless of where the user had
+  //     dragged them — fixed by treating each cluster as its own
+  //     placement unit instead of a derived offset of its chain root.
   // ──────────────────────────────────────────────────────────────────
   function organizeFlowSessions(targetEl) {
     const board = targetEl || document.getElementById('flowBoard');
@@ -7844,103 +7845,65 @@
     const startX = Math.max(0, vpL + PARENT_PAD);
     const startY = Math.max(0, vpT + PARENT_PAD);
 
-    // Group clusters under their top-level root, preserving topo order.
-    const topLevelRootIdOf = new Map();
-    clusters.forEach(c => {
-      const cid = c.parent.dataset.flowNodeId;
-      let cur = cid;
-      let anc = ancestorOf.get(cur);
-      while (anc && clusterById.has(anc) && anc !== cur) {
-        cur = anc;
-        anc = ancestorOf.get(cur);
-      }
-      topLevelRootIdOf.set(cid, cur);
-    });
-    const chains = new Map();  // rootId → [cluster, ...] in topo order
-    orderedParents.forEach(p => {
-      const cid = p.dataset.flowNodeId;
-      const rootId = topLevelRootIdOf.get(cid);
-      if (!chains.has(rootId)) chains.set(rootId, []);
-      chains.get(rootId).push(clusterById.get(cid));
-    });
-
-    // Simulate each chain at origin (0, 0) to learn its combined
-    // bbox. Each nested cluster is placed at its ancestor's right
-    // edge plus NESTED_GAP_X, top-aligned with the ancestor.
-    const chainBBoxes = new Map();
-    chains.forEach((chainClusters, rootId) => {
-      const local = new Map();
-      let maxRight = 0;
-      let maxBottom = 0;
-      chainClusters.forEach(c => {
-        const cid = c.parent.dataset.flowNodeId;
-        let dx = 0;
-        let dy = 0;
-        if (c.ancestor && local.has(c.ancestor)) {
-          const a = local.get(c.ancestor);
-          dx = a.dx + a.w + NESTED_GAP_X;
-          dy = a.dy;
-        }
-        local.set(cid, { dx, dy, w: c.width, h: c.height });
-        if (dx + c.width > maxRight) maxRight = dx + c.width;
-        if (dy + c.height > maxBottom) maxBottom = dy + c.height;
-      });
-      chainBBoxes.set(rootId, { width: maxRight, height: maxBottom, local });
-    });
-
-    // R10 — INCREMENTAL ORGANIZE (per user request 2026-06-05):
-    //   "we want to move repos and objects as least as possible. The
-    //    only case we're OK moving them is if we cannot form a rectangle
-    //    that includes the sessions beneath them and the object."
-    // Strategy: each chain ANCHORS at its root's CURRENT position (no
-    // bin-pack reset). If two chain bboxes overlap, push the chain that
-    // has moved less so far by the minimum amount (right OR down,
-    // whichever is shorter). Iterate until clean OR a sane cap fires.
-    // Untouched chains (root at 0,0) get seeded by the old bin-pack
-    // cursor so first-ever Organize still produces a tidy layout.
+    // R10 — INCREMENTAL ORGANIZE, per-cluster (replaces the earlier
+    // chain-anchored attempt that snapped nested objects back to
+    // "right of ancestor" regardless of their current position).
+    // Strategy: every cluster — root AND nested — anchors at ITS OWN
+    // current parent position. Bin-pack/seed only fires for clusters
+    // that have literally never been placed (parent at 0,0). The
+    // overlap resolver runs over all clusters as individual units,
+    // pushing the chain that has moved less so far. Re-Organize on a
+    // clean board moves zero pixels regardless of how deep the
+    // hierarchy is.
     let cursorX = startX;
     let cursorY = startY;
     let rowMaxHeight = 0;
     let rowHasCluster = false;
-    const chainPlacements = new Map();
-    chains.forEach((chainClusters, rootId) => {
-      const bbox = chainBBoxes.get(rootId);
-      // The root cluster is the first in topo order (it's the only
-      // one with no in-cluster ancestor); fall back defensively.
-      const rootCluster = chainClusters.find(c => !c.ancestor || !chains.has(c.ancestor)) || chainClusters[0];
-      const root = rootCluster.parent;
-      let anchorX = root.offsetLeft;
-      let anchorY = root.offsetTop;
-      // Untouched node — never placed. Bin-pack seed.
+    const clusterPlacements = new Map();  // cid → placement record
+    // Walk in topo order: when a nested cluster is unplaced (0,0), it
+    // can seed from its ancestor's already-recorded placement.
+    orderedParents.forEach(parentNode => {
+      const cid = parentNode.dataset.flowNodeId;
+      const cluster = clusterById.get(cid);
+      if (!cluster) return;
+      let anchorX = parentNode.offsetLeft;
+      let anchorY = parentNode.offsetTop;
       if (anchorX === 0 && anchorY === 0) {
-        if (rowHasCluster && (cursorX - startX + bbox.width) > rowBudget) {
-          cursorX = startX;
-          cursorY += rowMaxHeight + CLUSTER_MARGIN;
-          rowMaxHeight = 0;
-          rowHasCluster = false;
+        const ancId = ancestorOf.get(cid);
+        const ancPlace = ancId && clusterPlacements.get(ancId);
+        if (ancPlace) {
+          // Unplaced nested cluster — default to "right of ancestor".
+          anchorX = ancPlace.x + ancPlace.w + NESTED_GAP_X;
+          anchorY = ancPlace.y;
+        } else {
+          // Unplaced top-level cluster — bin-pack seed.
+          if (rowHasCluster && (cursorX - startX + cluster.width) > rowBudget) {
+            cursorX = startX;
+            cursorY += rowMaxHeight + CLUSTER_MARGIN;
+            rowMaxHeight = 0;
+            rowHasCluster = false;
+          }
+          anchorX = cursorX;
+          anchorY = cursorY;
+          cursorX += cluster.width + CLUSTER_MARGIN;
+          if (cluster.height > rowMaxHeight) rowMaxHeight = cluster.height;
+          rowHasCluster = true;
         }
-        anchorX = cursorX;
-        anchorY = cursorY;
-        cursorX += bbox.width + CLUSTER_MARGIN;
-        if (bbox.height > rowMaxHeight) rowMaxHeight = bbox.height;
-        rowHasCluster = true;
       }
-      chainPlacements.set(rootId, {
+      clusterPlacements.set(cid, {
         x: anchorX, y: anchorY,
-        w: bbox.width, h: bbox.height,
+        w: cluster.width, h: cluster.height,
         originalX: anchorX, originalY: anchorY,
-        chainClusters,
-        bbox,
+        cluster,
       });
     });
 
-    // Greedy overlap-resolve. Each iteration picks one overlapping
-    // pair and pushes the cheaper-to-move chain by the minimum amount.
-    // The cap is generous but finite — a pathological input (e.g. one
-    // chain wider than the screen with N tiny chains stacked) still
-    // converges in O(N) iterations.
+    // Greedy overlap-resolve over all clusters individually. Each
+    // iteration picks the worst-overlapping pair and pushes the
+    // less-displaced cluster by the minimum right OR down distance
+    // needed to clear. Converges in O(N²) at the cap.
     const SEP = CLUSTER_MARGIN;
-    const entries = Array.from(chainPlacements.values());
+    const entries = Array.from(clusterPlacements.values());
     const maxIter = Math.max(40, entries.length * entries.length * 2);
     let totalPushPx = 0;
     for (let iter = 0; iter < maxIter; iter++) {
@@ -7955,22 +7918,17 @@
             const area = ox * oy;
             if (area > worstArea) {
               worstArea = area;
-              worst = { a, b, ox, oy };
+              worst = { a, b };
             }
           }
         }
       }
       if (!worst) break;
-      const { a, b, ox, oy } = worst;
-      // Push the chain that's currently LESS displaced from its
-      // original anchor — so the algorithm keeps the "already moved"
-      // chain stable instead of ping-ponging it. Tie-break: push the
-      // one further right/down (b is later in iteration, often newer).
+      const { a, b } = worst;
       const aDisp = Math.abs(a.x - a.originalX) + Math.abs(a.y - a.originalY);
       const bDisp = Math.abs(b.x - b.originalX) + Math.abs(b.y - b.originalY);
-      let mover = (aDisp <= bDisp) ? b : a;
-      let other = (mover === a) ? b : a;
-      // Cheapest push direction.
+      const mover = (aDisp <= bDisp) ? b : a;
+      const other = (mover === a) ? b : a;
       const pushRight = (other.x + other.w + SEP) - mover.x;
       const pushDown = (other.y + other.h + SEP) - mover.y;
       if (pushRight > 0 && (pushDown <= 0 || pushRight < pushDown)) {
@@ -7980,38 +7938,35 @@
         mover.y += pushDown;
         totalPushPx += pushDown;
       } else {
-        // Defensive — shouldn't happen if ox/oy > 0.
         break;
       }
     }
 
-    // Apply final placements.
-    chainPlacements.forEach((place) => {
-      const { x: baseLeft, y: baseTop, chainClusters, bbox } = place;
-      chainClusters.forEach(cluster => {
-        const cid = cluster.parent.dataset.flowNodeId;
-        const offset = bbox.local.get(cid);
-        const left = baseLeft + offset.dx;
-        const top = baseTop + offset.dy;
-        const parent = cluster.parent;
-        parent.style.left = Math.round(left) + 'px';
-        parent.style.top = Math.round(top) + 'px';
-        flowNodePositions[cid] = { x: Math.round(left), y: Math.round(top) };
-        // R5: indent children.
-        const childBaseX = left + CHILD_INDENT_X;
-        const childBaseY = top + cluster.ph + SESSION_GAP_BELOW_PARENT;
-        cluster.children.forEach((child, idx) => {
-          const col = idx % cluster.C;
-          const row = Math.floor(idx / cluster.C);
-          const x = childBaseX + col * (cluster.cwChild + CHILD_GAP_X);
-          const y = childBaseY + row * (cluster.chChild + CHILD_GAP_Y);
-          child.style.left = Math.round(x) + 'px';
-          child.style.top = Math.round(y) + 'px';
-          flowNodePositions[child.dataset.flowNodeId] = { x: Math.round(x), y: Math.round(y) };
-        });
-        placedPos.set(cid, {
-          left, top, width: cluster.width, height: cluster.height,
-        });
+    // Apply final placements. Children sessions still re-flow below
+    // their parent in the indented grid — they're never positioned
+    // individually so there's no "stay put" claim to preserve there.
+    clusterPlacements.forEach((place) => {
+      const cluster = place.cluster;
+      const left = place.x;
+      const top = place.y;
+      const cid = cluster.parent.dataset.flowNodeId;
+      cluster.parent.style.left = Math.round(left) + 'px';
+      cluster.parent.style.top = Math.round(top) + 'px';
+      flowNodePositions[cid] = { x: Math.round(left), y: Math.round(top) };
+      // R5: indent children.
+      const childBaseX = left + CHILD_INDENT_X;
+      const childBaseY = top + cluster.ph + SESSION_GAP_BELOW_PARENT;
+      cluster.children.forEach((child, idx) => {
+        const col = idx % cluster.C;
+        const row = Math.floor(idx / cluster.C);
+        const x = childBaseX + col * (cluster.cwChild + CHILD_GAP_X);
+        const y = childBaseY + row * (cluster.chChild + CHILD_GAP_Y);
+        child.style.left = Math.round(x) + 'px';
+        child.style.top = Math.round(y) + 'px';
+        flowNodePositions[child.dataset.flowNodeId] = { x: Math.round(x), y: Math.round(y) };
+      });
+      placedPos.set(cid, {
+        left, top, width: cluster.width, height: cluster.height,
       });
     });
     if (typeof showOpToast === 'function' && totalPushPx > 0) {
