@@ -658,10 +658,11 @@ class TestServerImports(unittest.TestCase):
         # Badge must be in the row-click exclusion list so the row
         # itself doesn't open underneath the /compact confirm.
         self.assertIn('ev.target.closest(\'[data-role="conv-pct-compact"]\')', app_js)
-        # Confirm + POST shape — user explicitly asked for "Compact?"
-        # suggest followed by an inject of /compact.
+        # Confirm + POST shape — compact is a command operation, not a
+        # generic text inject.
         self.assertIn("window.confirm(msg)", app_js)
-        self.assertIn("postInjectInput(sid, '/compact')", app_js)
+        self.assertIn("postCompactSession(sid)", app_js)
+        self.assertIn("/api/session/compact", app_js)
         self.assertIn(".conv-pct-badge.is-actionable", app_css)
 
     def test_relayed_question_renders_inline_in_conv_view(self):
@@ -1234,6 +1235,92 @@ class TestRepoContextHelpers(unittest.TestCase):
         finally:
             with self.server._pending_terminal_input_lock:
                 self.server._pending_terminal_input_queue.clear()
+
+    def test_compact_inject_delegates_to_compact_helper(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        with mock.patch.object(
+            self.server,
+            "compact_session_context",
+            return_value={"ok": True, "compact": True},
+        ) as compact, \
+             mock.patch.object(self.server, "resume_session_headless") as resume:
+            result = self.server._inject_text_into_session(sid, "/compact")
+
+        self.assertTrue(result["ok"])
+        compact.assert_called_once_with(sid, _from_terminal_queue=False)
+        resume.assert_not_called()
+
+    def test_compact_live_terminal_submits_slash_command(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        with mock.patch.object(self.server, "_detect_session_engine", return_value="claude"), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={
+                     "live": True,
+                     "tty": "/dev/ttys001",
+                     "terminal_app": "Terminal",
+                     "status": "idle",
+                 },
+             ), \
+             mock.patch.object(self.server, "_pending_ask_user_question_for_session", return_value=False), \
+             mock.patch.object(self.server, "_terminal_input_queue_has_pending", return_value=False), \
+             mock.patch.object(self.server, "_backup_jsonl_before_compact", return_value="/tmp/backup.jsonl") as backup, \
+             mock.patch.object(
+                 self.server,
+                 "inject_input_via_keystroke",
+                 return_value={"ok": True, "via": "terminal-control"},
+             ) as inject:
+            result = self.server.compact_session_context(sid)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["compact"])
+        self.assertEqual(result["backup_path"], "/tmp/backup.jsonl")
+        backup.assert_called_once_with(sid)
+        inject.assert_called_once_with("/dev/ttys001", "Terminal", "/compact")
+
+    def test_compact_dormant_session_launches_interactive_resume(self):
+        sid = "00000000-0000-4000-8000-000000000001"
+        with mock.patch.object(self.server, "_detect_session_engine", return_value="claude"), \
+             mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
+             mock.patch.object(
+                 self.server,
+                 "session_live_status",
+                 return_value={"live": False, "tty": None, "terminal_app": None},
+             ), \
+             mock.patch.object(self.server, "_pending_ask_user_question_for_session", return_value=False), \
+             mock.patch.object(self.server, "_find_live_spawn_entry_for_session", return_value=None), \
+             mock.patch.object(self.server, "_backup_jsonl_before_compact", return_value="/tmp/backup.jsonl"), \
+             mock.patch.object(
+                 self.server,
+                 "launch_terminal_for_session",
+                 return_value={"ok": True, "terminal_app": "Terminal", "command": "claude --resume ..."},
+             ) as launch:
+            result = self.server.compact_session_context(sid)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["compact"])
+        self.assertTrue(result["launched"])
+        self.assertEqual(result["via"], "terminal-launch")
+        launch.assert_called_once_with(
+            sid,
+            str(self.repo),
+            None,
+            post_slash_commands=["/compact"],
+        )
+
+    def test_compact_rejects_non_claude_sessions(self):
+        result = None
+        with mock.patch.object(self.server, "_detect_session_engine", return_value="codex"), \
+             mock.patch.object(self.server, "launch_terminal_for_session") as launch, \
+             mock.patch.object(self.server, "resume_session_headless") as resume:
+            result = self.server.compact_session_context("codex-session")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "compact_unsupported_engine")
+        launch.assert_not_called()
+        resume.assert_not_called()
 
     def test_live_background_agent_injects_via_daemon_pty(self):
         sid = "00000000-0000-4000-8000-000000000001"

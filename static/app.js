@@ -765,9 +765,73 @@
     // in sync without a full re-render.
     const btn = document.querySelector('[data-flow-action="toggle-reader"]');
     if (btn) btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (on) _ensureFlowReaderResizer();
+  }
+  // Restore the user's last-chosen reader width on boot. The CSS custom
+  // prop drives the .main flex-basis; localStorage seeds it so a reload
+  // doesn't snap back to the 40vw default.
+  function _flowReaderApplyWidth(width) {
+    if (!document.documentElement) return;
+    const w = Math.max(280, Math.min(window.innerWidth - 320, width));
+    document.documentElement.style.setProperty('--flow-reader-width', w + 'px');
+  }
+  function _flowReaderRestoreWidth() {
+    let stored = 0;
+    try { stored = parseInt(localStorage.getItem('ccc-flow-reader-width') || '0', 10); }
+    catch (_) { stored = 0; }
+    if (stored >= 280) _flowReaderApplyWidth(stored);
+  }
+  function _ensureFlowReaderResizer() {
+    if (!document.body || !document.body.classList.contains('flow-popout-reader')) return;
+    if (document.querySelector('.flow-reader-resizer')) return;
+    const main = document.querySelector('body.flow-popout > .main');
+    if (!main || !main.parentNode) return;
+    const resizer = document.createElement('div');
+    resizer.className = 'flow-reader-resizer';
+    resizer.setAttribute('role', 'separator');
+    resizer.setAttribute('aria-orientation', 'vertical');
+    resizer.setAttribute('aria-label', 'Drag to resize the conversation reader');
+    // Insert before .main so the resizer lives between the sidebar (flow
+    // board) on the left and main (conv reader) on the right.
+    main.parentNode.insertBefore(resizer, main);
+    resizer.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== undefined && ev.button !== 0) return;
+      ev.preventDefault();
+      resizer.classList.add('is-dragging');
+      try { resizer.setPointerCapture(ev.pointerId); } catch (_) {}
+      const startX = ev.clientX;
+      const startWidth = main.getBoundingClientRect().width;
+      const onMove = (mv) => {
+        // Dragging RIGHT shrinks the reader, LEFT widens it (the
+        // reader is on the right of the resizer).
+        const next = startWidth - (mv.clientX - startX);
+        _flowReaderApplyWidth(next);
+      };
+      const onUp = (upEv) => {
+        resizer.removeEventListener('pointermove', onMove);
+        resizer.removeEventListener('pointerup', onUp);
+        resizer.removeEventListener('pointercancel', onUp);
+        resizer.classList.remove('is-dragging');
+        try { resizer.releasePointerCapture(upEv.pointerId); } catch (_) {}
+        const finalWidth = main.getBoundingClientRect().width;
+        try { localStorage.setItem('ccc-flow-reader-width', String(Math.round(finalWidth))); }
+        catch (_) {}
+      };
+      resizer.addEventListener('pointermove', onMove);
+      resizer.addEventListener('pointerup', onUp);
+      resizer.addEventListener('pointercancel', onUp);
+    });
   }
   if (FLOW_POPOUT_MODE && document.body && flowPopoutReaderEnabled()) {
     document.body.classList.add('flow-popout-reader');
+    _flowReaderRestoreWidth();
+    // DOM may not be fully built at this point — defer the resizer
+    // insert until after the conv pane mounts.
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', _ensureFlowReaderResizer);
+    } else {
+      setTimeout(_ensureFlowReaderResizer, 0);
+    }
   }
   // Regex compiled from APP_CONFIG.title_strip at load; used to strip
   // user-configured prefixes like "[ACME ...]" from session titles.
@@ -3535,6 +3599,12 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ agent_id: agentId, message: text }),
         });
+      } else if (compactCommand) {
+        res = await fetch('/api/session/compact', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ session_id: sid, terminal_app: liveStatus && liveStatus.terminalApp }),
+        });
       } else {
         res = await fetch('/api/inject-input', {
           method: 'POST',
@@ -3581,7 +3651,7 @@
           setTimeout(refreshConversationList, 1500);
           setTimeout(refreshConversationList, 3500);
         } else if (compactCommand) {
-          showOpToast('Compact requested. Waiting for Claude to write the compact boundary.');
+          showOpToast(compactRequestSuccessMessage(data));
           showCompactInProgressBanner(sid);
           scheduleCompactUsageRefresh(sid);
         }
@@ -12447,6 +12517,27 @@
     return data;
   }
 
+  async function postCompactSession(sessionId, terminalApp) {
+    const payload = { session_id: sessionId };
+    if (terminalApp) payload.terminal_app = terminalApp;
+    const res = await fetch('/api/session/compact', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok && !data.error) data.error = 'HTTP ' + res.status;
+    return data;
+  }
+
+  function compactRequestSuccessMessage(data) {
+    if (data && data.queued) return 'Queued /compact until the terminal session is idle.';
+    if (data && data.launched) return 'Opened Claude terminal and requested /compact.';
+    if (data && data.via === 'bg-agent-pty') return '/compact sent to background agent.';
+    return 'Compact requested. Waiting for Claude to write the compact boundary.';
+  }
+
   // Shared helper: inject text to a session via API
   async function injectToSession(sessionId, text, feedbackEl, clearInput, opts) {
     markSessionSending(sessionId);
@@ -14634,13 +14725,15 @@
         const titleEl = item && item.querySelector('[data-role="title"]');
         const titleText = (titleEl && (titleEl.textContent || '').trim()) || 'this session';
         const msg = 'Context is at ' + pct + '%. Compact "' + titleText + '" now? '
-          + '(Sends /compact to the session.)';
+          + '(Runs Claude Code /compact for the session.)';
         if (!window.confirm(msg)) return;
         try {
-          const data = await postInjectInput(sid, '/compact');
+          const data = await postCompactSession(sid);
           if (data && data.ok) {
-            showOpToast('/compact sent', 'success');
+            showOpToast(compactRequestSuccessMessage(data), 'success');
             touchSessionOptimistically(sid);
+            showCompactInProgressBanner(sid);
+            scheduleCompactUsageRefresh(sid);
           } else {
             showOpToast('/compact failed: ' + ((data && data.error) || 'unknown'), 'error');
           }

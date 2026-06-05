@@ -8000,7 +8000,7 @@ def open_session_in_codex_desktop(session_id, cwd=None):
     return {"ok": True, "url": url}
 
 
-def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
+def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_slash_commands=None):
     """Open a new terminal window and run the resume command for this session.
 
     Idempotent: if a live claude process with a TTY already exists for this
@@ -8011,6 +8011,11 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
     """
     if not session_id:
         return {"ok": False, "error": "missing session_id"}
+    post_slash_commands = [
+        str(cmd).strip()
+        for cmd in (post_slash_commands or [])
+        if str(cmd or "").strip()
+    ]
     # Pre-check: is there already a live claude --resume on this session with a tty?
     try:
         existing = session_live_status(session_id, cwd) or {}
@@ -8018,12 +8023,17 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
             tty = existing.get("tty")
             term_app = existing.get("terminal_app") or _preferred_terminal_app()
             jr = focus_terminal_by_tty(tty, term_app)
+            post_results = []
+            if jr.get("ok") and post_slash_commands:
+                for command_text in post_slash_commands:
+                    post_results.append(inject_input_via_keystroke(tty, term_app, command_text))
             return {
-                "ok": bool(jr.get("ok")),
+                "ok": bool(jr.get("ok")) and all(r.get("ok") for r in post_results),
                 "terminal_app": term_app,
                 "existing": True,
                 "tty": tty,
                 "note": "Live terminal already attached — focused it instead of opening a new one.",
+                "post_results": post_results,
             }
     except Exception:
         pass  # fall through to the normal launch path
@@ -8063,6 +8073,29 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
     # Sanitize for AppleScript (no quotes/backslashes)
     rename_target = rename_target.replace('"', '').replace('\\', '').replace("'", "")[:60]
     color = _pick_color_for_session(rename_target)
+    slash_commands = []
+    if not is_non_claude_engine:
+        slash_commands = [f"/rename {rename_target}", f"/color {color}"]
+        slash_commands.extend(post_slash_commands)
+
+    def slash_sequence(process_name, activate_block):
+        chunks = []
+        for idx, command_text in enumerate(slash_commands):
+            command_lit = as_literal(command_text)
+            chunks.append(activate_block)
+            chunks.append("delay 0.3" if idx == 0 else "delay 0.2")
+            chunks.append(f'''
+        tell application "System Events"
+          tell process "{process_name}"
+            keystroke "{command_lit}"
+            delay 0.25
+            key code 36
+          end tell
+        end tell
+        delay 0.7
+        ''')
+        return "\n".join(chunks)
+
     if target == "iTerm2":
         if is_non_claude_engine:
             script = f'''
@@ -8076,6 +8109,10 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
             return "ok"
             '''
         else:
+            command_sequence = slash_sequence(
+                "iTerm2",
+                'tell application "iTerm2" to activate',
+            )
             script = f'''
         tell application "iTerm2"
           activate
@@ -8085,25 +8122,7 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
           end tell
         end tell
         delay 2.0
-        tell application "iTerm2" to activate
-        delay 0.3
-        tell application "System Events"
-          tell process "iTerm2"
-            keystroke "/rename {rename_target}"
-            delay 0.25
-            key code 36
-          end tell
-        end tell
-        delay 0.7
-        tell application "iTerm2" to activate
-        delay 0.2
-        tell application "System Events"
-          tell process "iTerm2"
-            keystroke "/color {color}"
-            delay 0.25
-            key code 36
-          end tell
-        end tell
+        {command_sequence}
         return "ok"
         '''
     else:
@@ -8127,31 +8146,13 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None):
           set winId to id of window 1
         end tell
         delay 2.0
-        tell application "Terminal"
-          activate
-          set frontmost of (first window whose id is winId) to true
-        end tell
-        delay 0.3
-        tell application "System Events"
-          tell process "Terminal"
-            keystroke "/rename {rename_target}"
-            delay 0.25
-            key code 36
-          end tell
-        end tell
-        delay 0.7
-        tell application "Terminal"
-          activate
-          set frontmost of (first window whose id is winId) to true
-        end tell
-        delay 0.2
-        tell application "System Events"
-          tell process "Terminal"
-            keystroke "/color {color}"
-            delay 0.25
-            key code 36
-          end tell
-        end tell
+        {slash_sequence(
+            "Terminal",
+            'tell application "Terminal"\n'
+            '          activate\n'
+            '          set frontmost of (first window whose id is winId) to true\n'
+            '        end tell',
+        )}
         return "ok"
         '''
 
@@ -24798,6 +24799,128 @@ def _backup_jsonl_before_compact(session_id):
 _COMPACT_TRIGGER_RE = re.compile(r"^\s*/compact(?:\s|$)", re.IGNORECASE)
 
 
+def _compact_result(payload, backup_path=None):
+    payload = dict(payload or {})
+    payload["compact"] = True
+    if backup_path:
+        payload["backup_path"] = backup_path
+    return payload
+
+
+def compact_session_context(session_id, *, terminal_app=None, _from_terminal_queue=False):
+    """Run Claude Code's `/compact` slash command through an interactive surface.
+
+    `/compact` is not a normal user message. Feeding the literal text into
+    `claude -p --resume` does not execute the slash command, so this helper
+    only uses live interactive Claude targets. For dormant Claude sessions it
+    opens `claude --resume` in a terminal and asks that TUI to run `/compact`.
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return {"ok": False, "error": "missing session_id"}
+
+    engine = _detect_session_engine(sid)
+    if engine != "claude":
+        return {
+            "ok": False,
+            "code": "compact_unsupported_engine",
+            "engine": engine,
+            "error": "/compact is only available for Claude Code sessions.",
+        }
+
+    cwd = find_session_cwd(sid)
+    status = session_live_status(sid, cwd) or {}
+    tty = status.get("tty")
+    term_app = terminal_app or status.get("terminal_app") or "Terminal"
+    has_tty = bool(tty) and tty != "??"
+    pending_question = _pending_ask_user_question_for_session(sid)
+
+    if status.get("live") and has_tty:
+        should_queue = (
+            pending_question
+            or _terminal_input_queue_has_pending(sid)
+            or _session_status_is_busy(status)
+        )
+        if should_queue:
+            if _from_terminal_queue:
+                return {
+                    "ok": False,
+                    "code": "compact_session_busy",
+                    "error": "Claude is still busy; compact was not submitted.",
+                }
+            return _compact_result(_queue_terminal_input(sid, "/compact", status))
+        backup_path = _backup_jsonl_before_compact(sid)
+        return _compact_result(
+            inject_input_via_keystroke(tty, term_app, "/compact"),
+            backup_path,
+        )
+
+    if status.get("live") and status.get("kind") == "bg":
+        should_queue = (
+            pending_question
+            or _terminal_input_queue_has_pending(sid)
+            or not _bg_agent_ready_for_input(sid, status)
+        )
+        if should_queue:
+            if _from_terminal_queue:
+                return {
+                    "ok": False,
+                    "code": "compact_session_busy",
+                    "error": "Claude background agent is still busy; compact was not submitted.",
+                }
+            queued_status = dict(status or {})
+            queued_status["status"] = queued_status.get("status") or "busy"
+            return _compact_result(_queue_terminal_input(sid, "/compact", queued_status))
+        worker = _find_live_bg_agent_entry_for_session(sid)
+        backup_path = _backup_jsonl_before_compact(sid)
+        return _compact_result(_inject_bg_agent_via_pty_socket(worker, "/compact"), backup_path)
+
+    if pending_question:
+        return {
+            "ok": False,
+            "code": "compact_question_pending",
+            "error": "This session is waiting for an answer. Answer it before compacting.",
+        }
+
+    live_spawn = _find_live_spawn_entry_for_session(sid)
+    if live_spawn is not None:
+        return {
+            "ok": False,
+            "code": "compact_headless_running",
+            "pid": live_spawn.get("pid"),
+            "error": (
+                "This Claude session is running headlessly. Wait for that run "
+                "to finish, then compact from an interactive terminal."
+            ),
+        }
+
+    if status.get("live"):
+        return {
+            "ok": False,
+            "code": "compact_interactive_target_missing",
+            "error": "CCC found a live Claude session but no interactive terminal to receive /compact.",
+        }
+
+    if _from_terminal_queue:
+        return {
+            "ok": False,
+            "code": "compact_interactive_target_lost",
+            "error": "The queued compact was not submitted because the interactive Claude terminal is gone.",
+        }
+
+    backup_path = _backup_jsonl_before_compact(sid)
+    launched = launch_terminal_for_session(
+        sid,
+        cwd,
+        terminal_app,
+        post_slash_commands=["/compact"],
+    )
+    if launched.get("ok"):
+        launched["via"] = "terminal-launch"
+        launched["launched"] = True
+    return _compact_result(launched, backup_path)
+
+
 def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, mode="send"):
     """Route `text` to a session using the same fall-through as /api/inject-input:
     terminal-control AppleScript when there's a TTY, FIFO write to a live spawn,
@@ -24807,6 +24930,11 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
     text = _strip_ccc_session_state_instruction(text)
     if not session_id or not text:
         return {"ok": False, "error": "missing session_id or text"}
+    if _COMPACT_TRIGGER_RE.match(text):
+        return compact_session_context(
+            session_id,
+            _from_terminal_queue=_from_terminal_queue,
+        )
     # Defense-in-depth: never inject text while an AskUserQuestion is
     # pending. Queue it instead — the queue watcher above also has this
     # guard, so the text will be flushed once the user answers in the UI
@@ -35448,6 +35576,20 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 # whether the keystroke injection itself ends up succeeding.
                 _record_interaction(sid)
                 self.send_json(_inject_text_into_session(sid, text, mode=mode))
+        elif path == "/api/session/compact":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                payload = {}
+            sid = (payload.get("session_id") or "").strip()
+            term_app = payload.get("terminal_app") or None
+            if not sid:
+                self.send_json({"ok": False, "error": "missing session_id"})
+            else:
+                _record_interaction(sid)
+                self.send_json(compact_session_context(sid, terminal_app=term_app))
         elif path == "/api/answer-question":
             # Answer a relayed AskUserQuestion (headless sessions only — the
             # PreToolUse hook is blocking on this file). `answers` is aligned
