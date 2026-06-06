@@ -3732,7 +3732,14 @@ def find_all_conversations(
                 # any `cd` into a worktree), not the launch values.
                 "session_cwd": effective_cwd,
                 "session_cwd_is_worktree": cwd_is_worktree,
+                # Both keys carry the same recency timestamp. The per-repo
+                # /api/sessions builder emits "modified"; this archive builder
+                # historically emitted only "mtime". Clients fall back across
+                # both (c.modified || c.mtime), but emitting both keeps the two
+                # payload shapes identical so a consumer reading either field
+                # never silently gets null.
                 "mtime": row_mtime,
+                "modified": row_mtime,
                 "size": stat.st_size,
                 "first_message": first_message[:200] if first_message else None,
                 "ai_title": (tail_meta.get("ai_title") or None),
@@ -11776,7 +11783,10 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
             "size": stat.st_size,
             # Use last meaningful event timestamp when available; fall back to mtime.
             # This prevents admin writes (custom-title etc.) from bumping "modified".
+            # Emit "mtime" too (same value) so this per-repo payload matches the
+            # archive builder's shape — both endpoints now carry both keys.
             "modified": tail_meta.get("last_meaningful_ts") or stat.st_mtime,
+            "mtime": tail_meta.get("last_meaningful_ts") or stat.st_mtime,
             "modified_human": time.strftime(
                 "%Y-%m-%d %H:%M",
                 time.localtime(tail_meta.get("last_meaningful_ts") or stat.st_mtime),
