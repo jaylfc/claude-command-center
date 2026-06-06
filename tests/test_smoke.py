@@ -327,7 +327,11 @@ class TestServerImports(unittest.TestCase):
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         self.assertIn("function deferSidebarRenderIfDragging", app_js)
         self.assertIn(".flow-node.dragging", app_js)
+        self.assertIn(".flow-board.is-zooming", app_js)
         self.assertIn("beginSidebarDrag();", app_js)
+        self.assertIn("function markFlowZoomInteraction", app_js)
+        self.assertIn("markFlowZoomInteraction(targetEl);", app_js)
+        self.assertIn("markFlowZoomInteraction(ev.currentTarget);", app_js)
         self.assertIn("if (deferSidebarRenderIfDragging()) return;", app_js)
 
     def test_flow_new_session_drafts_wait_for_play(self):

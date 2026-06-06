@@ -7198,7 +7198,7 @@
     // dragging but no DOM element actually carries a .dragging class,
     // clear it.
     const domHasDragging = !!document.querySelector(
-      '.flow-node.dragging,.kanban-card.dragging,.kanban-column-header.dragging-header,.conv-item.dragging,.flow-board.is-panning'
+      '.flow-node.dragging,.kanban-card.dragging,.kanban-column-header.dragging-header,.conv-item.dragging,.flow-board.is-panning,.flow-board.is-zooming'
     );
     if (_sidebarDragInProgress && !domHasDragging) {
       _sidebarDragInProgress = false;
@@ -7360,6 +7360,8 @@
     renderSidebar(convs);
   }
   let flowGestureStartZoom = 1;
+  let flowZoomInteractionTimer = 0;
+  let flowZoomInteractionTarget = null;
   let flowDraftSessions = [];
   try {
     const savedDrafts = JSON.parse(localStorage.getItem('ccc-flow-draft-sessions') || '[]');
@@ -7787,6 +7789,25 @@
     applyFlowZoom(targetEl, Object.assign({}, opts || {}, { oldZoom }));
   }
 
+  function markFlowZoomInteraction(targetEl) {
+    if (!targetEl) return;
+    if (flowZoomInteractionTarget && flowZoomInteractionTarget !== targetEl) {
+      flowZoomInteractionTarget.classList.remove('is-zooming');
+    }
+    flowZoomInteractionTarget = targetEl;
+    targetEl.classList.add('is-zooming');
+    beginSidebarDrag();
+    if (flowZoomInteractionTimer) clearTimeout(flowZoomInteractionTimer);
+    flowZoomInteractionTimer = setTimeout(() => {
+      flowZoomInteractionTimer = 0;
+      if (flowZoomInteractionTarget) {
+        flowZoomInteractionTarget.classList.remove('is-zooming');
+        flowZoomInteractionTarget = null;
+      }
+      endSidebarDrag();
+    }, 220);
+  }
+
   function setFlowExpanded(expanded) {
     flowExpanded = !!expanded;
     try { localStorage.setItem('ccc-flow-expanded', flowExpanded ? '1' : '0'); } catch (_) {}
@@ -7806,6 +7827,7 @@
     if (!targetEl || targetEl.style.display === 'none') return;
     if (ev.target && ev.target.closest && ev.target.closest('input,textarea,select')) return;
     ev.preventDefault();
+    markFlowZoomInteraction(targetEl);
     const delta = Number(ev.deltaY) || 0;
     setFlowZoom(flowZoom * Math.exp(-delta * 0.01), targetEl, {
       clientX: ev.clientX,
@@ -7816,12 +7838,14 @@
   function handleFlowGestureStart(ev) {
     flowGestureStartZoom = flowZoom;
     ev.preventDefault();
+    markFlowZoomInteraction(ev.currentTarget);
   }
 
   function handleFlowGestureChange(ev) {
     ev.preventDefault();
     const scale = Number(ev.scale);
     if (!Number.isFinite(scale) || scale <= 0) return;
+    markFlowZoomInteraction(ev.currentTarget);
     setFlowZoom(flowGestureStartZoom * scale, ev.currentTarget, {
       clientX: ev.clientX,
       clientY: ev.clientY,
