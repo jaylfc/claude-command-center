@@ -18785,6 +18785,36 @@ def _extract_cursor_tail_meta(path):
 
 
 def _cursor_activity_fields_from_tail(tail, live):
+    # Cursor JSONLs don't carry per-event timestamps, so the codex stale-
+    # tool check can't honestly compute "how long has this tool been
+    # pending" — pending_tool_ts gets the file's mtime as a fallback,
+    # which keeps refreshing as the JSONL appends more lines. The result
+    # was that a finished cursor session would keep showing "▶ Bash …"
+    # in the sidebar pill long after the user closed the cursor app.
+    # Use file idleness as the actual signal: if the JSONL hasn't been
+    # written to in the configured window, treat the session as idle and
+    # drop the in-flight pill regardless of the dangling pending_tool.
+    try:
+        idle_threshold = float(os.environ.get("CCC_CURSOR_IDLE_SEC", "60"))
+    except (TypeError, ValueError):
+        idle_threshold = 60.0
+    if live and tail and idle_threshold > 0:
+        mtime = float(tail.get("mtime") or 0)
+        if mtime > 0 and (time.time() - mtime) > idle_threshold:
+            return {
+                "sidecar_status": None,
+                "sidecar_has_writes": False,
+                "sidecar_tool": None,
+                "sidecar_file": None,
+                "sidecar_ts": 0,
+                "sidecar_in_flight": False,
+                "question_waiting": False,
+                "question_text": "",
+                "question_header": "",
+                "question_preamble": "",
+                "question_options": [],
+                "question_option_details": [],
+            }
     return _codex_activity_fields_from_tail(tail, live)
 
 
