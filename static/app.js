@@ -1118,6 +1118,18 @@
   const ARCHIVE_FOLDER_ALL = '__all__';
   const ARCHIVE_FOLDER_FILTER_KEY = 'ccc-archive-folder-filter';
   const _ARCHIVE_MODE_KEY = 'ccc-archive-mode';
+  // Time-window filter for the Archived view (1d | 7d | all). Mirrors the In
+  // Progress list's `_ipWindow`/`ccc-inprogress-window` pattern, but archived
+  // gets its own key and defaults to '1d' so the view opens scoped to recent
+  // activity instead of dumping every session on disk.
+  const ARCHIVE_WINDOW_KEY = 'ccc-archive-window';
+  function _archiveWindow() {
+    try {
+      const value = localStorage.getItem(ARCHIVE_WINDOW_KEY);
+      if (value === '1d' || value === '7d' || value === 'all') return value;
+    } catch (_) {}
+    return '1d';
+  }
   const $convFolderFilter = document.getElementById('convFolderFilter');
   let repoListState = { repos: [], current: '', recent: [] };
   let archiveFolderFilter = (() => {
@@ -14806,8 +14818,21 @@
             return '<span class="conv-archived-expandall" data-role="archived-expand-all" data-dir="' + dir + '" role="button" tabindex="0" title="' + verb + ' project groups">' + verb + '</span>';
           })()
         : '';
-      const _arcTools = (_arcGroupingToggle || _arcExpandAllToggle)
-        ? '<span class="conv-archived-tools">' + _arcGroupingToggle + _arcExpandAllToggle + '</span>'
+      // 1d / 7d / All time-window toggle. Only meaningful in the dedicated
+      // Archived view (renderArchiveList does the actual recency filtering);
+      // the active list's inline "Archived" sub-section is not windowed, so
+      // showing it there would be a dead control. Mirrors the In Progress
+      // window toggle's markup/classes (grouping-opt + data-window).
+      const _arcWindowCur = _archiveWindow();
+      const _arcWindowToggle = showArchived
+        ? '<span class="conv-grouping-toggle conv-window-toggle" data-role="archived-window-toggle" title="Limit archived rows by recent activity">'
+            + '<span class="grouping-opt' + (_arcWindowCur === '1d' ? ' is-active' : '') + '" data-window="1d">1d</span>'
+            + '<span class="grouping-opt' + (_arcWindowCur === '7d' ? ' is-active' : '') + '" data-window="7d">7d</span>'
+            + '<span class="grouping-opt' + (_arcWindowCur === 'all' ? ' is-active' : '') + '" data-window="all">All</span>'
+          + '</span>'
+        : '';
+      const _arcTools = (_arcWindowToggle || _arcGroupingToggle || _arcExpandAllToggle)
+        ? '<span class="conv-archived-tools">' + _arcWindowToggle + _arcGroupingToggle + _arcExpandAllToggle + '</span>'
         : '';
       _archivedHtml =
         '<div class="conv-archived-section' + (_arcCollapsed ? ' collapsed' : '') + '" data-role="archived-section">'
@@ -14949,7 +14974,7 @@
         // Inner tools (grouping toggle, expand-all) live INSIDE the header
         // button — bail before the collapse toggle so clicking them does
         // not also fold the whole section.
-        if (ev.target.closest('[data-role="archived-grouping-toggle"], [data-role="archived-expand-all"]')) return;
+        if (ev.target.closest('[data-role="archived-grouping-toggle"], [data-role="archived-expand-all"], [data-role="archived-window-toggle"]')) return;
         ev.stopPropagation();
         const section = $archivedToggle.closest('[data-role="archived-section"]');
         if (!section) return;
@@ -14968,6 +14993,21 @@
         if (!opt) return;
         const value = opt.getAttribute('data-grouping') === 'time' ? 'time' : 'project';
         try { localStorage.setItem('ccc-archived-grouping', value); } catch (_) {}
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
+      });
+    }
+    // 1d / 7d / All time-window toggle for the Archived view. Mirrors the In
+    // Progress window toggle: read data-window, persist, re-render. Filtering
+    // happens in renderArchiveList against ARCHIVE_WINDOW_KEY.
+    const $archivedWindowToggle = $convList.querySelector('[data-role="archived-window-toggle"]');
+    if ($archivedWindowToggle) {
+      $archivedWindowToggle.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const opt = ev.target.closest('[data-window]');
+        if (!opt) return;
+        const value = opt.getAttribute('data-window');
+        if (value !== '1d' && value !== '7d' && value !== 'all') return;
+        try { localStorage.setItem(ARCHIVE_WINDOW_KEY, value); } catch (_) {}
         renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
@@ -25451,6 +25491,25 @@
     return Math.abs(h) % 360;
   }
 
+  // Wire the "Show all" link shown when the time window emptied the archive.
+  // Flips the persisted window to 'all' and re-renders. Defined separately so
+  // it can be called from the empty-state path (which bypasses the section
+  // header's own toggle handlers).
+  function _wireArchiveWindowShowAll() {
+    const $list = document.getElementById('convList');
+    if (!$list) return;
+    const el = $list.querySelector('[data-role="archive-window-showall"]');
+    if (!el) return;
+    const showAll = () => {
+      try { localStorage.setItem(ARCHIVE_WINDOW_KEY, 'all'); } catch (_) {}
+      renderArchiveList(document.getElementById('convSearch')?.value || '');
+    };
+    el.addEventListener('click', (ev) => { ev.stopPropagation(); showAll(); });
+    el.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.stopPropagation(); showAll(); }
+    });
+  }
+
   function renderArchiveList(filter) {
     const $list = document.getElementById('convList');
     if (!$list) return;
@@ -25477,10 +25536,23 @@
       _finishArchiveRender();
     };
     const archiveRows = _archiveRowsWithBacklog();
+    // Time-window filter (1d | 7d | all). Mirrors the In Progress list's
+    // `_ipWindowCutoff` logic: drop rows whose recency is older than the
+    // window, but keep pinned rows visible regardless of age (same as the
+    // active list). 'all' applies no cutoff. Recency uses the same `modified`
+    // / `mtime` epoch-seconds field the shaping pass reads below.
+    const _arcWindow = _archiveWindow();
+    const _arcWindowDays = _arcWindow === '7d' ? 7 : (_arcWindow === '1d' ? 1 : null);
+    const _arcWindowCutoff = _arcWindowDays
+      ? Math.floor(Date.now() / 1000) - (_arcWindowDays * 24 * 3600)
+      : null;
+    const _windowed = _arcWindowCutoff
+      ? archiveRows.filter(c => c.pinned || ((c.modified || c.mtime || 0) >= _arcWindowCutoff))
+      : archiveRows;
     // Never filter by folder — the folder picker controls grouping and the
     // active-chip highlight only. Hiding sessions from other repos breaks
     // worktree sessions and "by time" cross-repo views.
-    const byFolder = archiveRows;
+    const byFolder = _windowed;
     let rows = q ? byFolder.filter(c =>
       c.pinned ||
       // session_id + id let users paste a session UUID into the search box
@@ -25535,6 +25607,23 @@
     }
     if (!archiveRows.length && !hasGc) {
       _renderArchiveEmpty('<div class="archive-empty-state">No conversations on disk.</div>');
+      return;
+    }
+    // When the unwindowed set has rows but the time-window filter hid them
+    // all, don't dead-end with "No conversations in this folder." — that reads
+    // as "the archive is empty" and strands the user with no way back (the
+    // 1d/7d/All toggle lives inside the section header, which an empty list
+    // does not render). Surface a window-aware message with a "Show all"
+    // affordance, mirroring the In Progress list's window footer.
+    const _arcWindowEmptied = archiveRows.length > 0 && !byFolder.length && _arcWindow !== 'all';
+    if (_arcWindowEmptied && !hasGc) {
+      const _winLabel = _arcWindow === '7d' ? '7 days' : 'day';
+      _renderArchiveEmpty(
+        '<div class="archive-empty-state">No archived conversations in the last ' + _winLabel + '.<br>'
+        + '<span class="conv-inprogress-window-footer-cta" data-role="archive-window-showall" role="button" tabindex="0" style="cursor:pointer;">Show all</span>'
+        + '</div>'
+      );
+      _wireArchiveWindowShowAll();
       return;
     }
     if (!byFolder.length && !hasGc) {
