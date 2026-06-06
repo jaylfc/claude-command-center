@@ -21866,7 +21866,18 @@
           }
         }
         const imagesHtml = renderImageDescriptors(ev.images);
-        const cleanedText = cleanIssuePrompt(ev.text || '');
+        // Safety net: if cleanIssuePrompt strips a user's typed message
+        // down to empty (it's matching a spawn-prompt boilerplate
+        // pattern that overshot), fall back to the raw text so the
+        // user's words never disappear from their own conv view. The
+        // user reported a sent message being swallowed because the
+        // pending echo got dedup'd against the real event but the real
+        // event rendered with empty body.
+        const _rawText = (ev.text || '').trim();
+        let cleanedText = cleanIssuePrompt(ev.text || '');
+        if (_rawText && !String(cleanedText || '').trim()) {
+          cleanedText = ev.text;
+        }
         const notification = parseTaskNotificationBlock(cleanedText);
         if (notification) div.classList.add('task-notification-event');
         // Collapse /compact-resume blocks into a styled card — they're
