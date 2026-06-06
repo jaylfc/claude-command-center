@@ -4416,6 +4416,18 @@
   .flow-chip.stuck   { background: rgba(230, 160, 60, 0.16); color: #e0a83c; border-color: rgba(230, 160, 60, 0.45); }
   .flow-chip.idle    { color: var(--text-2); }
   .flow-chip.offline { background: rgba(220, 80, 80, 0.15); color: #e06c6c; border-color: rgba(220, 80, 80, 0.45); }
+  .conv-codex-state {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; line-height: 1; padding: 3px 8px;
+    border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text-2);
+  }
+  .conv-codex-state .ccs-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .conv-codex-state.state-working { color: #f2cc60; animation: ccc-flow-chip-pulse 1.6s ease-in-out infinite; }
+  .conv-codex-state.state-working.steady { animation: none; }
+  .conv-codex-state.state-stuck   { color: #e0a83c; }
+  .conv-codex-state.state-idle    { color: var(--text-2); }
+  .conv-codex-state.state-offline { color: #e06c6c; }
   @keyframes ccc-flow-chip-pulse {
     0%, 100% { opacity: 1; }
     50%      { opacity: 0.55; }

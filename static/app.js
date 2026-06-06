@@ -419,6 +419,7 @@
     if (document.hidden) return;
     try { if (typeof refreshLiveStatus === 'function') refreshLiveStatus(); } catch (_) {}
     try { if (typeof updateLiveToolStrip === 'function') updateLiveToolStrip(); } catch (_) {}
+    try { if (typeof updateCodexStateBadge === 'function') updateCodexStateBadge(); } catch (_) {}
     try { if (typeof pollGcActive === 'function') pollGcActive(); } catch (_) {}
     try { if (typeof pollVercelDeploy === 'function') pollVercelDeploy(); } catch (_) {}
     try { if (typeof pollLocalhost === 'function') pollLocalhost(); } catch (_) {}
@@ -1862,6 +1863,8 @@
         sidecarStatus: data.sidecar_status || null,
         sidecarTs: data.sidecar_ts || 0,
         sidecarInFlight: !!data.sidecar_in_flight,
+        codexState: data.codex_state || null,
+        codexFresh: !!data.codex_fresh,
         staleToolCall: !!data.stale_tool_call,
         staleToolAgeS: data.stale_tool_age_s || 0,
         questionWaiting: !!data.question_waiting,
@@ -1942,6 +1945,7 @@
     updateJumpButton();
     updateInputBar();
     updateLiveToolStrip();
+    updateCodexStateBadge();
     if (typeof updateSplitToolbar === 'function') updateSplitToolbar();
     syncRelayedQuestionModal();
   }
@@ -2635,6 +2639,29 @@
       $view.appendChild(inline);
     }
     _liveStripShown = true;
+  }
+
+  function updateCodexStateBadge() {
+    const $view = (typeof getConvView === 'function') ? getConvView() : null;
+    if (!$view) return;
+    const st = liveStatus.codexState;  // only set for codex sessions (server-gated)
+    let badge = $view.querySelector('.conv-codex-state');
+    if (!st) { if (badge) badge.remove(); return; }
+    const LABELS = { working: 'Working', idle: 'Idle', stuck: 'Stuck', offline: 'Offline' };
+    const TITLES = {
+      working: 'Codex is working',
+      idle: 'Idle — last turn complete',
+      stuck: 'Stalled — no rollout activity past the stale threshold',
+      offline: 'Codex engine offline — sessions paused',
+    };
+    const steady = (st === 'working' && !liveStatus.codexFresh) ? ' steady' : '';
+    if (!badge) {
+      badge = document.createElement('div');
+      $view.appendChild(badge);
+    }
+    badge.className = 'conv-codex-state state-' + st + steady;
+    badge.title = TITLES[st] || '';
+    badge.innerHTML = '<span class="ccs-dot"></span><span class="ccs-label">' + escapeHtml(LABELS[st] || st) + '</span>';
   }
 
   const $convSessionId = document.getElementById('convSessionId');
@@ -22205,6 +22232,7 @@
     // Re-anchor the inline live-tool indicator at the bottom; new events
     // just appended would otherwise push past it.
     if (typeof updateLiveToolStrip === 'function') updateLiveToolStrip();
+    if (typeof updateCodexStateBadge === 'function') updateCodexStateBadge();
     const compactBoundary = events.find(e => e && e.type === 'system' && e.subtype === 'compact_boundary');
     if (compactBoundary) {
       const sid = compactBoundary.session || (currentSession && currentSession.id) || '';
