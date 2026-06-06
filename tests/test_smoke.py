@@ -446,6 +446,7 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("flowAccentStyle", app_js)
         self.assertIn("flowWorkItemCardHtml", app_js)
         self.assertIn("accentSeed: flowColorSeedForNode(nodeId, obj.id)", app_js)
+        self.assertIn("row.repo_path || row.folder_path || row.spawn_cwd || row.session_cwd || row.cwd", app_js)
         self.assertIn("function flowIndexedRepoEntries", app_js)
         self.assertIn("indexedRepoEntries.forEach(entry =>", app_js)
         self.assertIn("ensureRepoGroup(entry.repo_path).metaEntry = entry;", app_js)
