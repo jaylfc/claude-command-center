@@ -2915,6 +2915,45 @@ def _sys_sessions(rows, now):
     except OSError:
         proj_dirs = []
 
+    # Authoritative pid -> sessionId (Claude writes ~/.claude/sessions/<pid>.json),
+    # so even interactive sessions with no uuid in argv get a real session id —
+    # which unlocks their real last-activity (transcript) and CCC name.
+    try:
+        registry = _load_session_registry()
+    except Exception:
+        registry = {}
+    pid_to_sid, meta_by_sid = {}, {}
+    for sid, data in registry.items():
+        meta_by_sid[sid] = data
+        try:
+            pid_to_sid[int(data.get("pid"))] = sid
+        except (TypeError, ValueError):
+            pass
+    # Names, same priority the sidebar uses: user override > registry name >
+    # spawn-registry name. Loaded once, not per session.
+    try:
+        overrides = _load_session_name_overrides()
+    except Exception:
+        overrides = {}
+    spawn_name_by_sid = {}
+    try:
+        for e in _load_spawn_registry():
+            nm = str(e.get("name") or "").strip()
+            if not nm:
+                continue
+            for key in ("session_id", "resumed_sid"):
+                k = e.get(key)
+                if k:
+                    spawn_name_by_sid.setdefault(k, nm)
+    except Exception:
+        pass
+
+    def _name_for(sid):
+        if not sid:
+            return None
+        nm = overrides.get(sid) or (meta_by_sid.get(sid) or {}).get("name") or spawn_name_by_sid.get(sid)
+        return _truncate_session_name(nm) if nm else None
+
     sessions = []
     for r in rows:
         if _sys_label(r["cmd"]) != "claude CLI":
@@ -2926,11 +2965,15 @@ def _sys_sessions(rows, now):
         worker = next((d for d in drows if _SYS_WORKER_RE.search(d["cmd"])), None)
         interactive = bool(r["tty"]) and r["tty"] not in ("??", "?", "-", "")
         busy = bool(worker) or tree_cpu >= _SYS_BUSY_CPU
-        uuid = (m.group(1) if (m := _SYS_SESSION_UUID_RE.search(r["cmd"])) else None)
-        idle_known = _sys_last_activity_min(uuid, now, proj_dirs)
+        # Registry pid->sid is authoritative; fall back to the uuid in argv.
+        sid = pid_to_sid.get(r["pid"]) or \
+            (m.group(1) if (m := _SYS_SESSION_UUID_RE.search(r["cmd"])) else None)
+        idle_known = _sys_last_activity_min(sid, now, proj_dirs)
         idle_min = idle_known if idle_known is not None else r["etime_min"]
         sessions.append({
             "pid": r["pid"],
+            "session_id": sid,
+            "name": _name_for(sid),
             "age_min": round(r["etime_min"], 1),
             "idle_min": round(idle_min, 1),
             "idle_known": idle_known is not None,
@@ -2983,6 +3026,12 @@ def _build_system_health_uncached():
             "tree_rss_mb": round(sum(s["tree_rss_mb"] for s in sessions)),
             "reapable": len(reap),
             "reapable_rss_mb": round(sum(s["tree_rss_mb"] for s in reap)),
+        },
+        # The reap policy, so the UI can state exactly what "stale" means
+        # without hardcoding (and drifting from) these thresholds.
+        "policy": {
+            "stale_min": _SYS_STALE_MIN,
+            "busy_cpu": _SYS_BUSY_CPU,
         },
     }
 

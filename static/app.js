@@ -205,7 +205,7 @@
         '#sysHealthOverlay.open{display:block;}' +
         '#sysHealthBackdrop{position:absolute;inset:0;background:rgba(0,0,0,.5);}' +
         '#sysHealthPanel{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);' +
-        'width:min(680px,92vw);max-height:86vh;overflow:auto;background:var(--bg-primary,#1c2128);' +
+        'width:min(880px,94vw);max-height:90vh;overflow:auto;background:var(--bg-primary,#1c2128);' +
         'color:var(--text-primary,#e6edf3);border:1px solid var(--border-color,#30363d);border-radius:12px;' +
         'box-shadow:0 18px 60px rgba(0,0,0,.5);font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;}' +
         '#sysHealthPanel h2{margin:0;font-size:14px;font-weight:600;}' +
@@ -223,6 +223,11 @@
         '.sh-sess{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;}' +
         '.sh-sess:hover{background:var(--hover-bg,rgba(127,127,127,.08));}' +
         '.sh-cwd{font-weight:600;}' +
+        '.sh-sesscol{min-width:0;display:flex;flex-direction:column;gap:1px;}' +
+        '.sh-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46ch;}' +
+        '.sh-repo{font-size:11px;opacity:.65;background:var(--hover-bg,rgba(127,127,127,.16));padding:1px 6px;border-radius:4px;margin-left:6px;white-space:nowrap;}' +
+        '.sh-def{font-size:12px;opacity:.75;line-height:1.5;margin:2px 0 9px;}' +
+        '.sh-def b{opacity:.95;}' +
         '.sh-meta{opacity:.7;font-size:12px;}' +
         '.sh-spacer{flex:1 1 auto;}' +
         '.sh-badge{font-size:11px;padding:1px 7px;border-radius:5px;background:var(--hover-bg,rgba(127,127,127,.16));white-space:nowrap;}' +
@@ -310,21 +315,32 @@
     html += '</div>';
 
     // Claude sessions
+    const pol = d.policy || {};
+    const sm = pol.stale_min || 120;
+    const staleLabel = sm >= 60 ? (sm % 60 === 0 ? (sm / 60) + 'h' : (sm / 60).toFixed(1) + 'h') : sm + 'm';
     html += '<div><div class="sh-sec-title" style="display:flex;align-items:center;gap:8px">' +
             '<span>Claude sessions — ' + (t.count || 0) + ' · ' + _shFmtMB(t.tree_rss_mb) +
             (t.reapable ? ' · <span class="sh-warn">' + t.reapable + ' reapable (' + _shFmtMB(t.reapable_rss_mb) + ')</span>' : '') + '</span>' +
-            (t.reapable > 1 ? '<button class="sh-btn sh-btn-danger" data-reapall="1">Reap all stale</button>' : '') +
+            (t.reapable > 1 ? '<button class="sh-btn sh-btn-danger" data-reapall="1" title="Reap every stale tree below">Reap all stale</button>' : '') +
             '</div>';
+    html += '<div class="sh-def"><b>Stale</b> = no terminal attached · idle ≥ ' + staleLabel +
+            ' (no transcript activity) · not running an encode/transcode. Reaping SIGTERMs the whole process tree. ' +
+            'Sessions you’re in (⌨) or actively working (⚙) are never offered.</div>';
     (d.sessions || []).forEach(function (s) {
-      let badge, btn = '';
-      if (s.interactive) { badge = '<span class="sh-badge">⌨ in use</span>'; }
-      else if (s.busy) { badge = '<span class="sh-badge sh-ok">⚙ ' + _shEsc(s.worker || (s.tree_cpu + '% cpu')) + '</span>'; }
-      else if (s.reapable) { badge = '<span class="sh-badge sh-warn">🧹 stale</span>'; btn = 'danger'; }
-      else { badge = '<span class="sh-badge">idle</span>'; btn = 'plain'; }
+      let badge, btn = '', badgeTitle = '';
+      if (s.interactive) { badge = '⌨ in use'; badgeTitle = 'A terminal is attached (you’re in this session) — never reaped'; }
+      else if (s.busy) { badge = '⚙ ' + (s.worker || (s.tree_cpu + '% cpu')); badgeTitle = 'Working (encode/transcode child or live CPU) — never reaped'; }
+      else if (s.reapable) { badge = '🧹 stale'; btn = 'danger'; badgeTitle = 'Headless · idle ≥ ' + staleLabel + ' · not working — safe to reap'; }
+      else { badge = 'idle'; btn = 'plain'; badgeTitle = 'Headless and idle, but more recent than ' + staleLabel + ' — not stale yet'; }
+      const badgeCls = s.busy ? ' sh-ok' : (s.reapable ? ' sh-warn' : '');
       const when = s.idle_known ? 'idle ' + _shFmtIdle(s.idle_min) : 'up ' + _shFmtIdle(s.age_min);
-      html += '<div class="sh-sess">' + badge +
-              '<span class="sh-cwd">' + _shEsc(s.cwd_short) + '</span>' +
-              '<span class="sh-meta">' + when + ' · ' + _shFmtMB(s.tree_rss_mb) + ' · ' + s.nprocs + 'p · PID ' + s.pid + '</span>' +
+      const nameMain = s.name ? _shEsc(s.name) : _shEsc(s.cwd_short);
+      const repoTag = s.name ? '<span class="sh-repo">' + _shEsc(s.cwd_short) + '</span>' : '';
+      html += '<div class="sh-sess"><span class="sh-badge' + badgeCls + '" title="' + _shEsc(badgeTitle) + '">' + _shEsc(badge) + '</span>' +
+              '<div class="sh-sesscol">' +
+                '<div><span class="sh-name">' + nameMain + '</span>' + repoTag + '</div>' +
+                '<div class="sh-meta">' + when + ' · ' + _shFmtMB(s.tree_rss_mb) + ' · ' + s.nprocs + 'p · PID ' + s.pid + '</div>' +
+              '</div>' +
               '<span class="sh-spacer"></span>' +
               (btn ? '<button class="sh-btn ' + (btn === 'danger' ? 'sh-btn-danger' : '') + '" data-reap="' + s.tree_pids.join(',') + '">kill tree</button>' : '') +
               '</div>';
