@@ -867,10 +867,17 @@ class TestServerImports(unittest.TestCase):
         or document-level click handlers can interfere with the popup."""
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         self.assertIn("function selectSlashCommandMenuItemFromEvent(ev)", app_js)
-        self.assertIn("target.closest('.slash-command-item')", app_js)
+        self.assertIn("target && target.closest ? target : (target && target.parentElement)", app_js)
+        self.assertIn("el.closest('.slash-command-item')", app_js)
         self.assertIn("_slashMenuEl.addEventListener('pointerdown'", app_js)
         self.assertIn("_slashMenuEl.addEventListener('mousedown'", app_js)
+        self.assertIn("_slashMenuEl.addEventListener('touchstart'", app_js)
+        self.assertIn("_slashMenuEl.addEventListener('click'", app_js)
         self.assertIn("return commitSlashCommandSelection(_slashMenuInput);", app_js)
+        self.assertIn("function syncSlashCommandMenuSelection()", app_js)
+        self.assertIn("btn.classList.toggle('selected', selected);", app_js)
+        self.assertIn("syncSlashCommandMenuSelection();", app_js)
+        self.assertNotIn("renderSlashCommandMenu(input, _slashMenuItems, q);", app_js)
 
     def test_relayed_question_renders_inline_in_conv_view(self):
         """The "Session is asking a question" surface is an inline card

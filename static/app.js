@@ -3578,7 +3578,8 @@
 
   function selectSlashCommandMenuItemFromEvent(ev) {
     const target = ev && ev.target;
-    const btn = target && target.closest ? target.closest('.slash-command-item') : null;
+    const el = target && target.closest ? target : (target && target.parentElement);
+    const btn = el && el.closest ? el.closest('.slash-command-item') : null;
     if (!btn || !_slashMenuEl || !_slashMenuEl.contains(btn)) return false;
     ev.preventDefault();
     ev.stopPropagation();
@@ -3587,6 +3588,20 @@
       _slashMenuIndex = Math.max(0, Math.min(idx, _slashMenuItems.length - 1));
     }
     return commitSlashCommandSelection(_slashMenuInput);
+  }
+
+  function syncSlashCommandMenuSelection() {
+    if (!_slashMenuEl) return;
+    let selectedBtn = null;
+    _slashMenuEl.querySelectorAll('.slash-command-item').forEach(btn => {
+      const idx = parseInt(btn.dataset.idx || '0', 10);
+      const selected = Number.isFinite(idx) && idx === _slashMenuIndex;
+      btn.classList.toggle('selected', selected);
+      if (selected) selectedBtn = btn;
+    });
+    if (selectedBtn && selectedBtn.scrollIntoView) {
+      selectedBtn.scrollIntoView({ block: 'nearest' });
+    }
   }
 
   function renderSlashCommandMenu(input, commands, query) {
@@ -3633,6 +3648,12 @@
       _slashMenuEl.addEventListener('mousedown', (ev) => {
         if (!selectSlashCommandMenuItemFromEvent(ev)) ev.preventDefault();
       });
+      _slashMenuEl.addEventListener('touchstart', (ev) => {
+        if (selectSlashCommandMenuItemFromEvent(ev)) return;
+      }, { passive: false });
+      _slashMenuEl.addEventListener('click', (ev) => {
+        selectSlashCommandMenuItemFromEvent(ev);
+      });
       document.body.appendChild(_slashMenuEl);
     }
     _slashMenuInput = input;
@@ -3649,8 +3670,9 @@
     )).join('');
     _slashMenuEl.querySelectorAll('.slash-command-item').forEach(btn => {
       btn.addEventListener('mouseenter', () => {
-        _slashMenuIndex = parseInt(btn.dataset.idx || '0', 10);
-        renderSlashCommandMenu(input, _slashMenuItems, q);
+        const idx = parseInt(btn.dataset.idx || '0', 10);
+        if (Number.isFinite(idx)) _slashMenuIndex = idx;
+        syncSlashCommandMenuSelection();
       });
       btn.addEventListener('click', () => commitSlashCommandSelection(input));
     });
@@ -3685,7 +3707,7 @@
   function moveSlashCommandSelection(delta) {
     if (!_slashMenuEl || !_slashMenuItems.length) return false;
     _slashMenuIndex = (_slashMenuIndex + delta + _slashMenuItems.length) % _slashMenuItems.length;
-    renderSlashCommandMenu(_slashMenuInput, _slashMenuItems, slashQueryForInput(_slashMenuInput) || '');
+    syncSlashCommandMenuSelection();
     return true;
   }
 
