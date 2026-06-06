@@ -7558,6 +7558,33 @@
     return fallbackSeed || nodeId || 'flow';
   }
 
+  function flowIndexedRepoEntries() {
+    return Object.values(flowNodeMetaCache || {})
+      .filter(entry => entry && entry.kind === 'repo' && entry.repo_path)
+      .sort((a, b) => {
+        const byTime = (Number(b.mtime) || 0) - (Number(a.mtime) || 0);
+        if (byTime) return byTime;
+        return String(a.title || a.repo_path || '').localeCompare(String(b.title || b.repo_path || ''));
+      });
+  }
+
+  function flowEntryMatchesSearch(entry, query) {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return true;
+    const fields = (entry && entry.fields) || {};
+    const text = [
+      entry && entry.title,
+      entry && entry.repo_path,
+      fields.status,
+      fields.goal,
+      fields.target_date,
+      fields.eta,
+      fields.owner,
+      fields.color_seed,
+    ].filter(Boolean).join(' ').toLowerCase();
+    return text.indexOf(q) !== -1;
+  }
+
   function flowMergeNodeMeta(entry) {
     if (!entry || !entry.node_id) return false;
     const prev = JSON.stringify(flowNodeMetaCache[entry.node_id] || null);
@@ -9756,7 +9783,18 @@
       .filter(draft => draft && draft.id && draft.repo_path)
       .slice()
       .sort((a, b) => flowDraftTime(b) - flowDraftTime(a));
-    if (!rows.length && !customObjects.length && !draftSessions.length) {
+    const searchQuery = (typeof $convSearch !== 'undefined' && $convSearch)
+      ? ($convSearch.value || '')
+      : '';
+    const indexedRepoEntries = flowIndexedRepoEntries()
+      .filter(entry => flowEntryMatchesSearch(entry, searchQuery));
+    const indexedRepoEntryByPath = new Map();
+    indexedRepoEntries.forEach(entry => {
+      if (entry && entry.repo_path && !indexedRepoEntryByPath.has(entry.repo_path)) {
+        indexedRepoEntryByPath.set(entry.repo_path, entry);
+      }
+    });
+    if (!rows.length && !customObjects.length && !draftSessions.length && !indexedRepoEntries.length) {
       $flow.innerHTML = flowToolbarHtml() + '<div class="flow-empty-state">No in-progress sessions.</div>';
       wireFlowBoard($flow);
       setFlowExpanded(flowExpanded);
@@ -9766,8 +9804,18 @@
     const groupsByRepo = new Map();
     const ensureRepoGroup = repoPath => {
       const path = repoPath || selectedRepoPath() || '__repo__';
-      if (!groupsByRepo.has(path)) groupsByRepo.set(path, { sessions: [], drafts: [] });
-      return groupsByRepo.get(path);
+      if (!groupsByRepo.has(path)) {
+        groupsByRepo.set(path, {
+          sessions: [],
+          drafts: [],
+          metaEntry: indexedRepoEntryByPath.get(path) || null,
+        });
+      }
+      const group = groupsByRepo.get(path);
+      if (!group.metaEntry && indexedRepoEntryByPath.has(path)) {
+        group.metaEntry = indexedRepoEntryByPath.get(path);
+      }
+      return group;
     };
     for (const row of rows) {
       const repoPath = rowRepoPath(row) || row.folder_path || selectedRepoPath() || '__repo__';
@@ -9776,17 +9824,23 @@
     for (const draft of draftSessions) {
       ensureRepoGroup(draft.repo_path).drafts.push(draft);
     }
+    indexedRepoEntries.forEach(entry => {
+      ensureRepoGroup(entry.repo_path).metaEntry = entry;
+    });
     const groups = Array.from(groupsByRepo.entries()).map(([path, group]) => {
       const items = (group.sessions || []).slice().sort((a, b) => flowRowTime(b) - flowRowTime(a));
       const drafts = (group.drafts || []).slice().sort((a, b) => flowDraftTime(b) - flowDraftTime(a));
+      const metaEntry = group.metaEntry || null;
       return {
         path,
-        label: flowRepoLabel(path, items),
+        label: (metaEntry && metaEntry.title) || flowRepoLabel(path, items),
         items,
         drafts,
+        metaEntry,
         newest: Math.max(
           items.reduce((best, row) => Math.max(best, flowRowTime(row)), 0),
-          drafts.reduce((best, draft) => Math.max(best, flowDraftTime(draft)), 0)
+          drafts.reduce((best, draft) => Math.max(best, flowDraftTime(draft)), 0),
+          Number(metaEntry && metaEntry.mtime) || 0
         ),
       };
     }).sort((a, b) => (b.newest - a.newest) || a.label.localeCompare(b.label));
