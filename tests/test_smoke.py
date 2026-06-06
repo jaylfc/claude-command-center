@@ -492,9 +492,9 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("matchMedia('(max-width: 950px)')", app_js)
         # CSS for the back-button visibility + main-overlay must match.
         self.assertIn("@media (max-width: 950px)", app_css)
-        self.assertIn('data-role="pane-mobile-back"', index_html)
-        self.assertIn("mobile-show-main .conv-split[data-orientation=\"\"] .conv-pane > .conv-pane-header", app_css)
-        self.assertIn("ev.target.closest('[data-role=\"pane-mobile-back\"]')", app_js)
+        self.assertIn('id="mobileBackBtn"', index_html)
+        self.assertNotIn('data-role="pane-mobile-back"', index_html)
+        self.assertNotIn("mobile-show-main .conv-split[data-orientation=\"\"] .conv-pane > .conv-pane-header", app_css)
         self.assertNotIn("_captureRailEl(document.getElementById('mobileBackBtn'))", app_js)
 
     def test_flow_group_chat_nodes_and_drop(self):
