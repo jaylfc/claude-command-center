@@ -3576,6 +3576,19 @@
       : above) + 'px';
   }
 
+  function selectSlashCommandMenuItemFromEvent(ev) {
+    const target = ev && ev.target;
+    const btn = target && target.closest ? target.closest('.slash-command-item') : null;
+    if (!btn || !_slashMenuEl || !_slashMenuEl.contains(btn)) return false;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const idx = parseInt(btn.dataset.idx || '0', 10);
+    if (Number.isFinite(idx)) {
+      _slashMenuIndex = Math.max(0, Math.min(idx, _slashMenuItems.length - 1));
+    }
+    return commitSlashCommandSelection(_slashMenuInput);
+  }
+
   function renderSlashCommandMenu(input, commands, query) {
     const q = (query || '').toLowerCase();
     // Score each candidate so name matches beat description matches.
@@ -3614,7 +3627,12 @@
     if (!_slashMenuEl) {
       _slashMenuEl = document.createElement('div');
       _slashMenuEl.className = 'slash-command-menu';
-      _slashMenuEl.addEventListener('mousedown', (ev) => ev.preventDefault());
+      _slashMenuEl.addEventListener('pointerdown', (ev) => {
+        if (!selectSlashCommandMenuItemFromEvent(ev)) ev.preventDefault();
+      });
+      _slashMenuEl.addEventListener('mousedown', (ev) => {
+        if (!selectSlashCommandMenuItemFromEvent(ev)) ev.preventDefault();
+      });
       document.body.appendChild(_slashMenuEl);
     }
     _slashMenuInput = input;

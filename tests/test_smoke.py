@@ -862,6 +862,16 @@ class TestServerImports(unittest.TestCase):
         self.assertNotIn("Codex sessions do not use Claude slash commands", app_js)
         self.assertIn("const failurePrefix = compactCommand ? '/compact failed'", app_js)
 
+    def test_slash_command_picker_selects_on_press(self):
+        """Mouse/touch selection must commit on press, before focus refreshes
+        or document-level click handlers can interfere with the popup."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        self.assertIn("function selectSlashCommandMenuItemFromEvent(ev)", app_js)
+        self.assertIn("target.closest('.slash-command-item')", app_js)
+        self.assertIn("_slashMenuEl.addEventListener('pointerdown'", app_js)
+        self.assertIn("_slashMenuEl.addEventListener('mousedown'", app_js)
+        self.assertIn("return commitSlashCommandSelection(_slashMenuInput);", app_js)
+
     def test_relayed_question_renders_inline_in_conv_view(self):
         """The "Session is asking a question" surface is an inline card
         mounted inside the active conversation view (not a body-level
