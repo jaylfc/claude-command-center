@@ -329,11 +329,14 @@ class TestServerImports(unittest.TestCase):
         for mod in ("server", "morning", "morning_store"):
             sys.modules.pop(mod, None)
         server = importlib.import_module("server")
-        # Lone high surrogate in the middle of normal text — the exact
-        # shape that produces the Anthropic 400.
-        dirty = "fix the bug \ud83d in row 42"
+        # Lone high surrogate in the middle of normal text. Build it at
+        # runtime so the source file itself never contains a literal
+        # backslash-u surrogate escape that can poison a Claude transcript
+        # when another agent reads this test.
+        lone_high = chr(0xD83D)
+        dirty = "fix the bug " + lone_high + " in row 42"
         cleaned = server._annotation_text(dirty)
-        self.assertNotIn("\ud83d", cleaned)
+        self.assertNotIn(lone_high, cleaned)
         # Result must round-trip through json + utf-8 — that's the
         # failure surface the Anthropic API rejects.
         json.dumps(cleaned, ensure_ascii=False).encode("utf-8")
@@ -2200,6 +2203,29 @@ class TestRepoContextHelpers(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIsNone(entry["stdin_fd"])
             self.assertLess(elapsed, 0.5)
+        finally:
+            os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
+
+    def test_stream_json_writer_strips_lone_surrogates(self):
+        read_fd, write_fd = os.pipe()
+        try:
+            entry = {"stdin_fd": write_fd, "fifo": None, "proc": None}
+            ok = self.server._write_stream_json_user_message(
+                entry,
+                "queued annotation " + chr(0xD83D) + " after screenshot",
+            )
+            self.assertTrue(ok)
+            os.close(write_fd)
+            write_fd = None
+
+            raw = os.read(read_fd, 65536).decode("utf-8")
+            self.assertNotIn("\\u" + "d83d", raw.lower())
+            payload = json.loads(raw)
+            text = payload["message"]["content"][0]["text"]
+            self.assertNotIn(chr(0xD83D), text)
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
         finally:
             os.close(read_fd)
             if write_fd is not None:

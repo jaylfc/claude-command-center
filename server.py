@@ -4959,7 +4959,7 @@ def _reveal_bug_screenshot(path_str):
 # the user's note plus enough page/element/viewport anchors for a later agent
 # to reopen the page and inspect the same visual area.
 
-_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+_LONE_SURROGATE_RE = re.compile("[{}-{}]".format(chr(0xD800), chr(0xDFFF)))
 
 
 def _strip_lone_surrogates(s):
@@ -23660,6 +23660,9 @@ def _write_stream_json_user_message(target, text, timeout=0.25):
       - A subprocess.Popen — legacy fallback for spawns that didn't
         get a FIFO (mkfifo failure → subprocess.PIPE).
     """
+    text = _strip_lone_surrogates(str(text or ""))
+    if not text:
+        return False
     msg = {
         "type": "user",
         "message": {
