@@ -2097,6 +2097,7 @@
         sidecarInFlight: !!data.sidecar_in_flight,
         codexState: data.codex_state || null,
         codexFresh: !!data.codex_fresh,
+        codexAppServer: !!data.codex_app_server,
         staleToolCall: !!data.stale_tool_call,
         staleToolAgeS: data.stale_tool_age_s || 0,
         questionWaiting: !!data.question_waiting,
@@ -3132,9 +3133,16 @@
   const $convInput = document.getElementById('convInput');
   const $convSendBtn = document.getElementById('convSendBtn');
   const $convSteerBtn = document.getElementById('convSteerBtn');
+  const $convCompactBtn = document.getElementById('convCompactBtn');
   const $convTtsBtn = document.getElementById('convTtsBtn');
   const $convEscBtn = document.getElementById('convEscBtn');
   const $convTtyLabel = document.getElementById('convTtyLabel');
+  const $convCodexAppSrv = document.getElementById('convCodexAppSrv');
+  const $convCodexAppSrvLabel = document.getElementById('convCodexAppSrvLabel');
+  // Guards the Compact button while a compaction request is in flight so a
+  // double-click can't fire two /api/session/compact calls; updateInputBar
+  // respects it so a poll mid-flight doesn't re-enable the button.
+  let _compactInFlight = false;
   const INPUT_DRAFTS_KEY = 'ccc-input-drafts-v1';
   const INPUT_DRAFTS_MAX = 200;
   const INPUT_DRAFT_MAX_CHARS = 50000;
@@ -3390,6 +3398,33 @@
         $convSteerBtn.disabled = !canSteer;
         $convSteerBtn.title = canSteer ? 'Steer running Codex turn now' : 'Steer is only available for Codex sessions';
       }
+      // Compact button — only for compaction-capable open sessions (Claude
+      // AND Codex). cursor/gemini/antigravity return compact_unsupported_engine
+      // server-side, so we don't show it for them. Clicking runs the same path
+      // as typing /compact (routed via postRunCompactForSession).
+      if ($convCompactBtn) {
+        const canCompact = hasSession && !isNewSession && !isBacklogIssue && !isPkood
+          && isCompactionCapableSource(currentSession.source);
+        $convCompactBtn.classList.toggle('visible', canCompact);
+        if (!_compactInFlight) $convCompactBtn.disabled = !canCompact;
+      }
+      // Codex app-server indicator — show only for live Codex sessions; reflect
+      // whether CCC is currently driving Codex via its own app-server (RPC,
+      // can append to a loaded thread + run thread/compact) vs no live
+      // app-server ("exec" fallback would be used). Driven off the 5s
+      // /api/session-status poll's codex_app_server flag.
+      if ($convCodexAppSrv) {
+        const showAppSrv = isCodex && hasSession && !isNewSession && !isBacklogIssue;
+        $convCodexAppSrv.classList.toggle('visible', showAppSrv);
+        if (showAppSrv) {
+          const appLive = !!liveStatus.codexAppServer;
+          $convCodexAppSrv.classList.toggle('live', appLive);
+          if ($convCodexAppSrvLabel) $convCodexAppSrvLabel.textContent = appLive ? 'app-server' : 'exec';
+          $convCodexAppSrv.title = appLive
+            ? 'CCC is driving this Codex session via its app-server (JSON-RPC); /compact and follow-ups append to the loaded thread.'
+            : 'No live CCC Codex app-server; Codex actions fall back to one-shot exec until one starts.';
+        }
+      }
       // Esc only makes sense when there's something live to interrupt — and
       // we don't support pkood interrupts. Hide it everywhere else so the
       // button doesn't tease an action that will just error.
@@ -3430,6 +3465,11 @@
         $convSteerBtn.classList.remove('visible');
         $convSteerBtn.disabled = true;
       }
+      if ($convCompactBtn) {
+        $convCompactBtn.classList.remove('visible');
+        $convCompactBtn.disabled = true;
+      }
+      if ($convCodexAppSrv) $convCodexAppSrv.classList.remove('visible', 'live');
     }
   }
 
@@ -3955,7 +3995,11 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ agent_id: agentId, message: text }),
         });
-      } else if (compactCommand && currentSession.source !== 'codex') {
+      } else if (compactCommand && isCompactionCapableSource(currentSession.source)) {
+        // Both Claude AND Codex compact through /api/session/compact — the
+        // backend routes a codex session to thread/compact via its app-server
+        // (returns via:"codex-compact"). Sending "/compact" as literal text via
+        // /api/inject-input does NOT compact, so it must not fall through here.
         res = await fetch('/api/session/compact', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
@@ -4433,6 +4477,7 @@
   if ($convEscBtn) $convEscBtn.addEventListener('click', sendEscToTerminal);
   if ($convSendBtn) $convSendBtn.addEventListener('click', () => sendToTerminal('p1'));
   if ($convSteerBtn) $convSteerBtn.addEventListener('click', () => sendToTerminal('p1', 'steer'));
+  if ($convCompactBtn) $convCompactBtn.addEventListener('click', () => compactCurrentSession());
   if ($convTtsBtn) {
     $convTtsBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
     $convTtsBtn.addEventListener('click', () => readLastMessageAloud('p1'));
@@ -9608,6 +9653,51 @@
     const FLOW_NODE_W_HINT = 260;
     const FLOW_NODE_H_HINT = 96;
     const FLOW_CANVAS_EDGE_PAD = 5 * 32;  // 5 grid cells
+    // Helper used by the drop handler to nudge a just-dropped node
+    // off any other node it overlaps. Pushes in the cheapest cardinal
+    // direction each iteration; caps at 50 iters so degenerate cases
+    // (no space anywhere) don't loop forever. Maintains a min gap
+    // between the dragged node and every other node.
+    if (typeof window._flowResolveNodeOverlap !== 'function') {
+      window._flowResolveNodeOverlap = function (itemEl, otherEls, gap) {
+        if (!itemEl || !Array.isArray(otherEls) || !otherEls.length) return null;
+        const GAP = Number.isFinite(gap) ? gap : 4;
+        let left = parseFloat(itemEl.style.left) || itemEl.offsetLeft || 0;
+        let top = parseFloat(itemEl.style.top) || itemEl.offsetTop || 0;
+        const w = itemEl.offsetWidth;
+        const h = itemEl.offsetHeight;
+        const others = otherEls.map(el => ({
+          l: el.offsetLeft, t: el.offsetTop,
+          r: el.offsetLeft + el.offsetWidth, b: el.offsetTop + el.offsetHeight,
+        }));
+        for (let iter = 0; iter < 50; iter++) {
+          let collided = null;
+          for (const o of others) {
+            const overlapsX = (left < o.r + GAP) && (left + w + GAP > o.l);
+            const overlapsY = (top < o.b + GAP) && (top + h + GAP > o.t);
+            if (overlapsX && overlapsY) { collided = o; break; }
+          }
+          if (!collided) break;
+          const pushRight = (collided.r + GAP) - left;
+          const pushLeft = (left + w + GAP) - collided.l;
+          const pushDown = (collided.b + GAP) - top;
+          const pushUp = (top + h + GAP) - collided.t;
+          const choices = [
+            { dx: pushRight, dy: 0, dist: pushRight },
+            { dx: -pushLeft, dy: 0, dist: pushLeft },
+            { dx: 0, dy: pushDown, dist: pushDown },
+            { dx: 0, dy: -pushUp, dist: pushUp },
+          ].filter(c => c.dist > 0).sort((a, b) => a.dist - b.dist);
+          if (!choices.length) break;
+          left += choices[0].dx;
+          top += choices[0].dy;
+          if (left < 0) left = 0;
+          if (top < 0) top = 0;
+        }
+        return { left, top };
+      };
+    }
+    const _flowResolveNodeOverlap = window._flowResolveNodeOverlap;
     let canvasWidth = 760;
     let canvasHeight = 360;
     let yCursor = 24;
@@ -10498,6 +10588,26 @@
           try { node.releasePointerCapture(upEv.pointerId); } catch (_) {}
           endSidebarDrag();
           if (moved) {
+            // Resolve drop-time overlaps so two nodes never sit on top
+            // of each other and always keep a ≥4px gap. Skip when
+            // dropping onto a group-chat node (handled below by snap-
+            // back-to-pre-drag) or onto a regular reparent target
+            // (handled below by reparent — the about-to-render layout
+            // pass will spread them anyway). Only triggers when the
+            // user dropped on empty canvas.
+            const _droppedOnTarget = !!(finalDropTarget && finalDropTarget.dataset.flowNodeId);
+            if (!_droppedOnTarget && typeof window._flowResolveNodeOverlap === 'function') {
+              const draggedIds = new Set(dragItems.map(it => it.id));
+              const others = Array.from(world.querySelectorAll('.flow-node'))
+                .filter(el => !draggedIds.has(el.dataset.flowNodeId));
+              dragItems.forEach(item => {
+                const resolved = window._flowResolveNodeOverlap(item.el, others, 4);
+                if (resolved) {
+                  item.el.style.left = Math.round(resolved.left) + 'px';
+                  item.el.style.top = Math.round(resolved.top) + 'px';
+                }
+              });
+            }
             dragItems.forEach(item => {
               flowNodePositions[item.id] = {
                 x: Math.round(item.el.offsetLeft),
@@ -13684,12 +13794,62 @@
     return data;
   }
 
+  // Engines whose /compact runs through /api/session/compact (a real
+  // compaction). Claude opens an interactive TUI; Codex routes to the
+  // app-server's thread/compact RPC. cursor/gemini/antigravity return
+  // compact_unsupported_engine, so we don't expose compaction for them.
+  function isCompactionCapableSource(source) {
+    return source === 'codex' || !source || source === 'claude';
+  }
+
   async function postRunCompactForSession(sessionId, source, terminalApp) {
-    if (source === 'codex') return postInjectInput(sessionId, '/compact');
+    // Both Claude and Codex compact via /api/session/compact. (Codex used to
+    // be (wrongly) routed to postInjectInput('/compact') here, which sent the
+    // literal text instead of compacting.)
     return postCompactSession(sessionId, terminalApp);
   }
 
+  // Compact-button handler. Reuses postRunCompactForSession + the same
+  // toast/banner/refresh logic as typing /compact so both paths stay
+  // consistent. Used by the #convCompactBtn click.
+  async function compactCurrentSession() {
+    if (_compactInFlight) return;
+    const sid = currentSession.id;
+    if (!sid) return;
+    const source = currentSession.source;
+    if (!isCompactionCapableSource(source)) {
+      showOpToast('Compaction is not supported for this engine.', 'error');
+      return;
+    }
+    _compactInFlight = true;
+    if ($convCompactBtn) $convCompactBtn.disabled = true;
+    try {
+      const data = await postRunCompactForSession(
+        sid, source, liveStatus && liveStatus.terminalApp);
+      if (data && data.ok) {
+        showOpToast(compactRequestSuccessMessage(data, source), 'success');
+        touchSessionOptimistically(sid);
+        if (source !== 'codex') {
+          showCompactInProgressBanner(sid);
+          scheduleCompactUsageRefresh(sid);
+        } else {
+          setTimeout(refreshConversationList, 1500);
+          setTimeout(refreshConversationList, 3500);
+        }
+      } else {
+        const reason = (data && (formatInjectFailure(data, 0) || data.error)) || 'unknown';
+        showOpToast('/compact failed: ' + reason, 'error');
+      }
+    } catch (err) {
+      showOpToast('/compact failed: ' + ((err && err.message) || 'network error'), 'error');
+    } finally {
+      _compactInFlight = false;
+      if (typeof updateInputBar === 'function') updateInputBar();
+    }
+  }
+
   function compactRequestSuccessMessage(data, source) {
+    if (data && data.via === 'codex-compact') return 'Codex conversation compacted.';
     if (data && data.queued) return 'Queued /compact until the terminal session is idle.';
     if (data && data.submit_key === 'tab') return 'Queued Codex /compact in the live terminal.';
     if (source === 'codex' && data && data.via === 'terminal-control') return '/compact sent to the live Codex terminal.';
