@@ -29440,6 +29440,112 @@
       catch (_) { /* function defined later in same scope; ignore early-click race */ }
     });
   }
+  // "Manage group chats" modal — lists every chat from _gcActiveChats
+  // with a per-row pause / unpause toggle. Opens from the gear button
+  // next to "+ New Group chat".
+  const $sidebarManageGroupChatsBtn = document.getElementById('sidebarManageGroupChatsBtn');
+  const $gcManageModal = document.getElementById('gcManageModal');
+  const $gcManageBody = document.getElementById('gcManageBody');
+  function _gcManageRender() {
+    if (!$gcManageBody) return;
+    const chats = Array.isArray(_gcActiveChats) ? _gcActiveChats.slice() : [];
+    if (!chats.length) {
+      $gcManageBody.innerHTML = '<div style="padding:24px;color:var(--text-muted);text-align:center;">No group chats yet. Use "+ New Group chat" to create one.</div>';
+      return;
+    }
+    // Newest first by last_activity / last_mtime so the row the user
+    // is most likely to touch shows at the top.
+    chats.sort((a, b) => {
+      const at = Math.max(a.last_activity || 0, a.last_mtime || 0);
+      const bt = Math.max(b.last_activity || 0, b.last_mtime || 0);
+      return bt - at;
+    });
+    const rows = chats.map(chat => {
+      const topic = chat.topic || '(unnamed chat)';
+      const id = chat.uuid || chat.id || '';
+      const path = chat.path_tilde || chat.path || '';
+      const paused = chat.paused === true
+        || chat.status === 'paused'
+        || chat.orchestrator_timer_active === false;
+      const closed = chat.status === 'closed';
+      const participants = Array.isArray(chat.session_ids) ? chat.session_ids.length : 0;
+      const ageSec = (() => {
+        const t = Math.max(chat.last_activity || 0, chat.last_mtime || 0);
+        if (!t) return null;
+        return Math.max(0, Math.floor(Date.now() / 1000 - t));
+      })();
+      const ageLabel = ageSec == null
+        ? ''
+        : (ageSec < 60 ? 'just now'
+          : ageSec < 3600 ? Math.floor(ageSec / 60) + 'm ago'
+          : Math.floor(ageSec / 3600) + 'h ago');
+      const statusLabel = closed ? 'closed'
+        : paused ? 'paused'
+        : 'active';
+      const statusColor = closed ? 'var(--text-muted)'
+        : paused ? 'var(--orange)'
+        : 'var(--green)';
+      const btnLabel = closed ? '—'
+        : paused ? 'Resume'
+        : 'Pause';
+      const btnDisabled = closed ? ' disabled' : '';
+      return ''
+        + '<div class="gc-manage-row" style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border);">'
+        +   '<div style="flex:1 1 auto;min-width:0;">'
+        +     '<div style="font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(topic) + '</div>'
+        +     '<div style="font-size:11px;color:var(--text-muted);">'
+        +       '<span style="color:' + statusColor + ';">' + statusLabel + '</span>'
+        +       ' · ' + participants + (participants === 1 ? ' session' : ' sessions')
+        +       (ageLabel ? ' · ' + ageLabel : '')
+        +     '</div>'
+        +   '</div>'
+        +   '<button type="button" class="btn" data-gc-manage-toggle'
+        +     ' data-gc-path="' + escapeAttr(path) + '"'
+        +     ' data-gc-id="' + escapeAttr(id) + '"'
+        +     ' data-gc-target-paused="' + (paused ? '0' : '1') + '"'
+        +     btnDisabled + '>' + btnLabel + '</button>'
+        + '</div>';
+    }).join('');
+    $gcManageBody.innerHTML = rows;
+    // Wire each row's pause/resume button.
+    $gcManageBody.querySelectorAll('[data-gc-manage-toggle]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const path = btn.getAttribute('data-gc-path') || '';
+        const id = btn.getAttribute('data-gc-id') || '';
+        const target = btn.getAttribute('data-gc-target-paused') === '1';
+        btn.disabled = true;
+        btn.textContent = target ? 'Pausing…' : 'Resuming…';
+        try {
+          await setGroupChatPaused(path, id, target);
+        } catch (_) { /* setGroupChatPaused surfaces its own toast */ }
+        _gcManageRender();
+      });
+    });
+  }
+  function _gcManageOpen() {
+    if (!$gcManageModal) return;
+    _gcManageRender();
+    $gcManageModal.hidden = false;
+    $gcManageModal.classList.add('open');
+    // Refresh from the server in case the cache is stale, then re-render.
+    if (typeof pollGcActive === 'function') {
+      try { pollGcActive().then(_gcManageRender).catch(() => {}); } catch (_) {}
+    }
+  }
+  function _gcManageClose() {
+    if (!$gcManageModal) return;
+    $gcManageModal.hidden = true;
+    $gcManageModal.classList.remove('open');
+  }
+  if ($sidebarManageGroupChatsBtn) $sidebarManageGroupChatsBtn.addEventListener('click', _gcManageOpen);
+  if ($gcManageModal) {
+    $gcManageModal.querySelectorAll('[data-gc-manage-close]').forEach(el => {
+      el.addEventListener('click', _gcManageClose);
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !$gcManageModal.hidden) _gcManageClose();
+    });
+  }
 
   // ── Spawn cwd picker (new-session mode) ──────────────────────────────
   // Populates a path input above the input box so the user picks or types
