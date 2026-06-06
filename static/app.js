@@ -12812,11 +12812,26 @@
       // ── Auto-scroll horizontally during drag near edges ──
       let autoScrollRaf = null;
       let lastPointerX = 0;
+      let lastDragOverTs = 0;
 
       targetEl.addEventListener('dragover', (ev) => {
         lastPointerX = ev.clientX;
+        lastDragOverTs = performance.now();
         if (autoScrollRaf) return;
         const tick = () => {
+          // Self-terminate if dragover events stopped arriving. An active drag
+          // fires dragover continuously; ~200ms of silence means the drag
+          // ended (or its drop/dragend/dragleave was dropped on the floor —
+          // HTML5 DnD is flaky and the Flow board rewrites its DOM via
+          // innerHTML mid-drag). Without this the rAF looped forever, calling
+          // getBoundingClientRect + writing scrollLeft every frame — a forced
+          // synchronous layout per frame that pegged the WKWebView at ~90% CPU
+          // long after the drag was over.
+          if (performance.now() - lastDragOverTs > 200) {
+            cancelAnimationFrame(autoScrollRaf);
+            autoScrollRaf = null;
+            return;
+          }
           const rect = targetEl.getBoundingClientRect();
           const EDGE = 80;
           const SPEED = 15;
