@@ -16397,7 +16397,7 @@ def _spawn_entry_active_tool_child(entry):
         return None
     try:
         proc = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,pgid=,stat=,command="],
+            ["ps", "-axo", "pid=,ppid=,pgid=,stat=,etime=,command="],
             capture_output=True,
             text=True,
             timeout=2,
@@ -16407,8 +16407,8 @@ def _spawn_entry_active_tool_child(entry):
     if proc.returncode != 0:
         return None
     for raw in (proc.stdout or "").splitlines():
-        parts = raw.strip().split(None, 4)
-        if len(parts) < 4:
+        parts = raw.strip().split(None, 5)
+        if len(parts) < 5:
             continue
         try:
             pid = int(parts[0])
@@ -16418,16 +16418,52 @@ def _spawn_entry_active_tool_child(entry):
             continue
         if ppid != parent_pid or pgid == parent_pid:
             continue
-        command = parts[4] if len(parts) > 4 else ""
+        command = parts[5] if len(parts) > 5 else ""
         if _is_ccc_hook_command(command):
             continue
+        # Derive the child's real start time from elapsed (ps etime) so the
+        # UI shows the true tool age. Without this the caller stamps
+        # time.time() every poll, freezing a hung child at "running <1s"
+        # forever and dodging the frontend's 5-minute stale-tool cap.
+        elapsed = _parse_ps_etime(parts[4])
+        started_at = (time.time() - elapsed) if elapsed is not None else None
         return {
             "pid": pid,
             "pgid": pgid,
             "stat": parts[3],
             "command": command,
+            "started_at": started_at,
         }
     return None
+
+
+def _parse_ps_etime(text):
+    """Parse BSD ps ``etime`` ([[DD-]HH:]MM:SS) into elapsed seconds.
+
+    Returns None on anything unparseable so callers can fall back.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    days = 0
+    if "-" in text:
+        day_part, _, text = text.partition("-")
+        try:
+            days = int(day_part)
+        except ValueError:
+            return None
+    bits = text.split(":")
+    try:
+        nums = [int(b) for b in bits]
+    except ValueError:
+        return None
+    if len(nums) == 3:
+        h, m, s = nums
+    elif len(nums) == 2:
+        h, m, s = 0, nums[0], nums[1]
+    else:
+        return None
+    return days * 86400 + h * 3600 + m * 60 + s
 
 
 def _queue_terminal_input(session_id, text, status=None):
@@ -33008,7 +33044,12 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                         status["sidecar_tool"] = "Bash"
                         status["sidecar_file"] = _shell_command_activity_label(active_child.get("command") or "")
                         status["sidecar_status"] = "active"
-                        status["sidecar_ts"] = time.time()
+                        # Real child start time (from ps etime) so a hung tool
+                        # ages out via the frontend's 5-min cap instead of
+                        # re-stamping "now" every poll and showing "running <1s"
+                        # forever. Falls back to now if elapsed was unparseable.
+                        _child_started = active_child.get("started_at")
+                        status["sidecar_ts"] = _child_started if _child_started else time.time()
                         status["sidecar_in_flight"] = True
                         status["active_child_pid"] = active_child.get("pid")
                         status["active_child_pgid"] = active_child.get("pgid")
