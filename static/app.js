@@ -16328,10 +16328,22 @@
   }
   if ($convKanbanToggle) {
     $convKanbanToggle.addEventListener('click', () => {
-      const next = sidebarViewMode === 'list' ? 'flow' : 'list';
-      setSidebarViewMode(next);
-      updateKanbanToggle();
-      renderSidebar(filterConversations($convSearch.value));
+      // User asked: clicking the Flow toggle should POP THE FLOW INTO
+      // A NEW WINDOW, not swap the sidebar in-place. openFlowPopout
+      // routes to the native CCC window inside the mac app and to a
+      // browser popup otherwise. If we ARE already inside the flow
+      // popout, fall back to the legacy in-sidebar swap (no point
+      // popping a popout).
+      if (typeof FLOW_POPOUT_MODE !== 'undefined' && FLOW_POPOUT_MODE) {
+        const next = sidebarViewMode === 'list' ? 'flow' : 'list';
+        setSidebarViewMode(next);
+        updateKanbanToggle();
+        renderSidebar(filterConversations($convSearch.value));
+        return;
+      }
+      if (typeof openFlowPopout === 'function') {
+        openFlowPopout(null);
+      }
     });
   }
   // Compact-rows toggle. Adds a class to the conv-list so the row
