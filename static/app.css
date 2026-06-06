@@ -4185,6 +4185,29 @@
     -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
   }
   .flow-toolbar-spacer { flex: 1 1 auto; min-width: 8px; }
+  /* Conversation search inside the flow toolbar — mirrors the main
+     sidebar's #convSearch so users can filter the flow board without
+     flipping back to the dashboard. */
+  .flow-toolbar-search {
+    flex: 0 0 auto;
+    width: 200px;
+    min-width: 140px;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    outline: none;
+  }
+  .flow-toolbar-search::placeholder { color: var(--text-muted); }
+  .flow-toolbar-search:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(88,166,255,0.35);
+  }
   .flow-toolbar-divider {
     width: 1px; align-self: stretch;
     background: var(--border);

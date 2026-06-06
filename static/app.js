@@ -7862,7 +7862,17 @@
     const recordTitle = flowOrganizeRecordSession
       ? 'Stop recording this manual Flow layout for Organize+'
       : 'Record a before/after Flow layout example for Organize+';
+    // Mirror the main sidebar's conversation search so the flow popout
+    // can filter the board without flipping back to the dashboard.
+    // Initial value reads from $convSearch so a search active in the
+    // main window survives a popout-only refresh.
+    const searchInitial = (typeof $convSearch !== 'undefined' && $convSearch)
+      ? ($convSearch.value || '')
+      : '';
     return '<div class="flow-toolbar">'
+      + '<input type="text" class="flow-toolbar-search" id="flowToolbarSearch"'
+      +   ' placeholder="Search sessions…" autocomplete="off" spellcheck="false"'
+      +   ' value="' + escapeAttr(searchInitial) + '">'
       + '<div class="flow-toolbar-group" role="group" aria-label="Add">'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="add-draft-session">+ Session</button>'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="add-object">+ Object</button>'
@@ -10433,6 +10443,39 @@
   function wireFlowBoard(targetEl) {
     const canvas = targetEl && targetEl.querySelector('.flow-canvas');
     const world = canvas && (canvas.querySelector('.flow-world') || canvas);
+    // Flow-toolbar search input. Mirrors its value into $convSearch so
+    // filterConversations() (which reads from $convSearch) returns the
+    // narrowed set, then forces a sidebar render. Debounced lightly so
+    // fast typing doesn't thrash innerHTML every keystroke.
+    const $flowSearch = targetEl && targetEl.querySelector('#flowToolbarSearch');
+    if ($flowSearch) {
+      let _flowSearchTimer = null;
+      $flowSearch.addEventListener('input', () => {
+        if (typeof $convSearch !== 'undefined' && $convSearch) {
+          $convSearch.value = $flowSearch.value;
+        }
+        if (_flowSearchTimer) clearTimeout(_flowSearchTimer);
+        _flowSearchTimer = setTimeout(() => {
+          _flowSearchTimer = null;
+          if (typeof renderSidebar === 'function' && typeof filterConversations === 'function') {
+            const q = $flowSearch.value || '';
+            renderSidebar(filterConversations(q), { force: true });
+          }
+        }, 120);
+      });
+      // Esc clears the filter — same shortcut as the dashboard's
+      // search input.
+      $flowSearch.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && $flowSearch.value) {
+          ev.preventDefault();
+          $flowSearch.value = '';
+          if (typeof $convSearch !== 'undefined' && $convSearch) $convSearch.value = '';
+          if (typeof renderSidebar === 'function' && typeof filterConversations === 'function') {
+            renderSidebar(filterConversations(''), { force: true });
+          }
+        }
+      });
+    }
     const addBtn = targetEl && targetEl.querySelector('[data-flow-action="add-object"]');
     if (addBtn) addBtn.addEventListener('click', createFlowCustomObject);
     const addGcBtn = targetEl && targetEl.querySelector('[data-flow-action="add-group-chat"]');
