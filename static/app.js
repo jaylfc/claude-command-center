@@ -24940,6 +24940,13 @@
     if (repoChanged) {
       restoreSplitState();
       loadConversationList();
+      // Notify subscribers outside this IIFE (terminal panel etc.) so
+      // they can react to a fresh repo selection without polling.
+      try {
+        window.dispatchEvent(new CustomEvent('ccc-repo-changed', {
+          detail: { repoPath: newRepo },
+        }));
+      } catch (_) {}
     }
   }
 
@@ -26715,6 +26722,11 @@
     renderRpmLists();
     $rpm.classList.add('open');
   }
+  // Exposed for inline <script> blocks that live outside this IIFE
+  // (e.g. the terminal panel in index.html). Without this, those
+  // blocks have no way to open the repo picker — the "Pick a repo"
+  // label in the terminal header was unclickable noise.
+  try { window.cccOpenRepoPicker = openRepoPickerModal; } catch (_) {}
   function closeRepoPickerModal() {
     if (!$rpm) return;
     $rpm.classList.remove('open');

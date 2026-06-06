@@ -302,6 +302,22 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("openConversationPopout(convId, null, null)", app_js)
         self.assertIn(".ccc-breadcrumb-popout", app_css)
 
+    def test_terminal_pick_a_repo_label_is_clickable(self):
+        """The terminal panel's "Pick a repo" placeholder used to be
+        passive text — user had no way to actually pick a repo from
+        there. The placeholder now opens window.cccOpenRepoPicker
+        (the existing repo-picker modal exposed for non-IIFE
+        callers), and a ccc-repo-changed event refreshes the cwd."""
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        index_html = pathlib.Path(PROJECT_ROOT, "static", "index.html").read_text(encoding="utf-8")
+        # App.js exposes the picker + fires the change event.
+        self.assertIn("window.cccOpenRepoPicker = openRepoPickerModal", app_js)
+        self.assertIn("CustomEvent('ccc-repo-changed'", app_js)
+        # Terminal panel listens + wires click.
+        self.assertIn("cccOpenRepoPicker", index_html)
+        self.assertIn("ccc-repo-changed", index_html)
+        self.assertIn("is-pickable", index_html)
+
     def test_annotation_text_strips_lone_surrogates(self):
         """An unpaired UTF-16 surrogate code point (U+D800..U+DFFF)
         coming from the browser's clipboard / selection APIs used to

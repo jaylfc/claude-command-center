@@ -1423,7 +1423,29 @@
     let label = shown.split('/').filter(Boolean).pop() || 'repo';
     if (label.length > 24) label = '…' + label.slice(-23);
     $prompt.textContent = label;
+    // When the label is the "Pick a repo" placeholder (set from
+    // refreshCwd when no repo is selected), make it clickable so the
+    // user actually has a way out — previously the label just sat
+    // there with no affordance.
+    const isPlaceholder = (rel === 'Pick a repo');
+    $cwdLabel.classList.toggle('is-pickable', isPlaceholder);
+    $cwdLabel.style.cursor = isPlaceholder ? 'pointer' : '';
+    $cwdLabel.title = isPlaceholder
+      ? 'No repo selected — click to pick one'
+      : (cwd || shown);
   }
+  $cwdLabel.addEventListener('click', () => {
+    if (!$cwdLabel.classList.contains('is-pickable')) return;
+    if (typeof window.cccOpenRepoPicker === 'function') {
+      try { window.cccOpenRepoPicker(); } catch (_) {}
+    }
+  });
+  // Re-poll cwd when the user picks a repo elsewhere (sidebar dropdown,
+  // repo-picker modal). Avoids the stale "Pick a repo" label sticking
+  // around until the user closes + reopens the terminal panel.
+  window.addEventListener('ccc-repo-changed', () => {
+    if ($panel.classList.contains('open')) refreshCwd();
+  });
 
   async function refreshCwd() {
     const repoPath = selectedRepoPath();
