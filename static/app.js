@@ -3416,6 +3416,7 @@
       if ($convCodexAppSrv) {
         const showAppSrv = isCodex && hasSession && !isNewSession && !isBacklogIssue;
         $convCodexAppSrv.classList.toggle('visible', showAppSrv);
+        if (!showAppSrv) $convCodexAppSrv.classList.remove('live');
         if (showAppSrv) {
           const appLive = !!liveStatus.codexAppServer;
           $convCodexAppSrv.classList.toggle('live', appLive);
@@ -8886,6 +8887,133 @@
     return { x: 320, y: 24 + existingDrafts * 92 };
   }
 
+  // Picker modal opened by "+" on a repo/object node. Shows a "New
+  // draft session" shortcut at the top, then a searchable list of
+  // every existing session (active + archived) with metadata. Click
+  // a row → set flowNodeParents so the session nests under this
+  // parent on next render.
+  function _flowOpenAttachPicker(parentNodeId, parentRepoPath, parentTitle) {
+    document.querySelectorAll('.flow-attach-picker').forEach(n => n.remove());
+    const modal = document.createElement('div');
+    modal.className = 'upd-overlay flow-attach-picker open';
+    modal.innerHTML =
+        '<div class="upd-backdrop" data-fap-close></div>'
+      + '<div class="upd-dialog" style="width:min(620px,94vw);max-height:80vh;display:flex;flex-direction:column;">'
+      +   '<div class="upd-header">'
+      +     '<h2 class="upd-title">Attach to ' + escapeHtml(parentTitle || 'parent') + '</h2>'
+      +     '<button class="upd-close" type="button" data-fap-close aria-label="Close">&times;</button>'
+      +   '</div>'
+      +   '<div class="upd-body" style="overflow:hidden;display:flex;flex-direction:column;flex:1 1 auto;min-height:0;gap:8px;">'
+      +     '<button type="button" class="btn" data-fap-new style="text-align:left;">+ Create a new draft session here</button>'
+      +     '<input type="text" id="flowAttachPickerSearch" class="repo-picker-search" placeholder="Search by session name, id, repo…" style="width:100%;">'
+      +     '<label style="display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:12px;cursor:pointer;">'
+      +       '<input type="checkbox" id="flowAttachPickerArchived" checked> Include archived'
+      +     '</label>'
+      +     '<div id="flowAttachPickerList" style="flex:1 1 auto;overflow-y:auto;border:1px solid var(--border);border-radius:6px;"></div>'
+      +   '</div>'
+      + '</div>';
+    document.body.appendChild(modal);
+    const $list = modal.querySelector('#flowAttachPickerList');
+    const $search = modal.querySelector('#flowAttachPickerSearch');
+    const $archived = modal.querySelector('#flowAttachPickerArchived');
+    const close = () => { modal.remove(); };
+    modal.querySelectorAll('[data-fap-close]').forEach(el => el.addEventListener('click', close));
+    document.addEventListener('keydown', function onKey(ev) {
+      if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+    });
+    modal.querySelector('[data-fap-new]').addEventListener('click', () => {
+      try { createFlowDraftSession(parentRepoPath || '', parentNodeId); } catch (_) {}
+      close();
+    });
+    function _gather() {
+      const seen = new Map();
+      const collect = arr => {
+        if (!Array.isArray(arr)) return;
+        for (const c of arr) {
+          if (!c) continue;
+          const sid = c.session_id || c.id;
+          if (!sid) continue;
+          if (c.source === 'backlog' || c.source === 'github_pr' || c.source === 'pkood') continue;
+          if (String(sid).startsWith('backlog-') || String(sid).startsWith('issue-')) continue;
+          if (!seen.has(sid)) seen.set(sid, c);
+        }
+      };
+      collect(typeof conversationsData !== 'undefined' ? conversationsData : null);
+      collect(typeof archiveData !== 'undefined' ? archiveData : null);
+      return Array.from(seen.values());
+    }
+    function _render() {
+      const q = ($search.value || '').trim().toLowerCase();
+      const includeArchived = $archived.checked;
+      const all = _gather();
+      const rows = all.filter(c => {
+        if (!includeArchived && c.archived) return false;
+        if (!q) return true;
+        const hay = [
+          c.display_name || '', c.first_message || '',
+          c.session_id || c.id || '',
+          c.folder_label || c.folder_label_chip || '',
+          c.source || c.engine || '',
+        ].join(' ').toLowerCase();
+        return hay.indexOf(q) >= 0;
+      }).sort((a, b) => (b.last_interacted || b.modified || 0) - (a.last_interacted || a.modified || 0));
+      if (!rows.length) {
+        $list.innerHTML = '<div style="padding:24px;color:var(--text-muted);text-align:center;font-size:13px;">No sessions match.</div>';
+        return;
+      }
+      const capped = rows.slice(0, 200);
+      $list.innerHTML = capped.map(c => {
+        const sid = c.session_id || c.id;
+        const title = String(c.display_name || c.first_message || sid).slice(0, 80);
+        const meta = [
+          c.source || c.engine || 'claude',
+          c.folder_label || c.folder_label_chip || '',
+          c.archived ? 'archived' : '',
+          (typeof relativeTime === 'function')
+            ? (relativeTime(c.last_interacted || c.modified || c.mtime) || '')
+            : '',
+        ].filter(Boolean).join(' · ');
+        return ''
+          + '<div class="flow-attach-row" data-sid="' + escapeAttr(sid) + '" data-row-id="' + escapeAttr(c.id || sid) + '" '
+          +   'style="padding:8px 12px;border-bottom:1px solid var(--border);cursor:pointer;">'
+          +   '<div style="font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(title) + '</div>'
+          +   '<div style="font-size:11px;color:var(--text-muted);">' + escapeHtml(meta) + '</div>'
+          + '</div>';
+      }).join('') + (rows.length > 200
+        ? '<div style="padding:8px 12px;color:var(--text-muted);font-size:11px;text-align:center;">Showing 200 of ' + rows.length + ' — refine search.</div>'
+        : '');
+      $list.querySelectorAll('.flow-attach-row').forEach(row => {
+        row.addEventListener('click', () => {
+          const sid = row.getAttribute('data-sid');
+          if (!sid) return;
+          const sessionNodeId = flowNodeKey('session', sid);
+          flowNodeParents[sessionNodeId] = parentNodeId;
+          const rowId = row.getAttribute('data-row-id') || sid;
+          if (typeof setFlowPinned === 'function') {
+            try { setFlowPinned(rowId, true); } catch (_) {}
+          }
+          try { persistFlowNodeParents(); } catch (_) {}
+          if (typeof showOpToast === 'function') {
+            showOpToast('Attached to ' + (parentTitle || 'parent'));
+          }
+          close();
+          if (typeof renderSidebar === 'function'
+              && typeof filterConversations === 'function'
+              && typeof $convSearch !== 'undefined' && $convSearch) {
+            renderSidebar(filterConversations($convSearch.value), { force: true });
+          }
+        });
+      });
+    }
+    if ($search) {
+      $search.addEventListener('input', _render);
+      setTimeout(() => { try { $search.focus(); } catch (_) {} }, 60);
+    }
+    if ($archived) $archived.addEventListener('change', _render);
+    _render();
+  }
+  window._flowOpenAttachPicker = _flowOpenAttachPicker;
+
   function createFlowDraftSession(repoPath, parentNodeId) {
     const targetRepo = repoPath || flowCurrentRepoForDraft();
     if (!targetRepo || targetRepo === '__repo__') {
@@ -10393,10 +10521,19 @@
           ev.stopPropagation();
           const node = btn.closest('.flow-node');
           const isNodeParent = node && (node.dataset.flowKind === 'repo' || node.dataset.flowKind === 'object');
-          createFlowDraftSession(
-            isNodeParent ? flowRepoPathForNode(node) : '',
-            isNodeParent ? node.dataset.flowNodeId : ''
-          );
+          const parentNodeId = isNodeParent ? node.dataset.flowNodeId : '';
+          const parentRepoPath = isNodeParent ? flowRepoPathForNode(node) : '';
+          const parentTitle = isNodeParent
+            ? ((node.querySelector('.flow-node-title') || {}).textContent || '').trim()
+            : '';
+          // "+ on a parent" opens a picker — pick "New draft" (the
+          // original behavior) OR pick an existing session (incl.
+          // archived) to attach as a child of this object/repo.
+          if (isNodeParent && typeof window._flowOpenAttachPicker === 'function') {
+            window._flowOpenAttachPicker(parentNodeId, parentRepoPath, parentTitle);
+          } else {
+            createFlowDraftSession(parentRepoPath, parentNodeId);
+          }
         });
       });
     }
@@ -13792,9 +13929,13 @@
   // Engines whose /compact runs through /api/session/compact (a real
   // compaction). Claude opens an interactive TUI; Codex routes to the
   // app-server's thread/compact RPC. cursor/gemini/antigravity return
-  // compact_unsupported_engine, so we don't expose compaction for them.
+  // compact_unsupported_engine server-side, so we don't expose compaction
+  // for them. Exclusion-based because Claude sessions carry assorted source
+  // values ('interactive', 'sdk-cli', 'claude', 'bg', or empty) — anything
+  // that isn't a known unsupported engine is treated as Claude-family.
+  const COMPACT_UNSUPPORTED_SOURCES = new Set(['cursor', 'gemini', 'antigravity', 'pkood']);
   function isCompactionCapableSource(source) {
-    return source === 'codex' || !source || source === 'claude';
+    return !COMPACT_UNSUPPORTED_SOURCES.has(source);
   }
 
   async function postRunCompactForSession(sessionId, source, terminalApp) {
