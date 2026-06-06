@@ -1218,6 +1218,25 @@
     outline-offset: 1px;
   }
   .ccc-breadcrumb .ccc-breadcrumb-popout svg { display: block; }
+  .ccc-breadcrumb .ccc-breadcrumb-compact {
+    flex: 0 0 auto;
+    display: inline-flex; align-items: center;
+    height: 22px; padding: 0 10px;
+    font: 600 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--accent, #5b8def);
+    background: color-mix(in srgb, var(--accent, #5b8def) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #5b8def) 35%, transparent);
+    border-radius: 5px; cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .ccc-breadcrumb .ccc-breadcrumb-compact:hover {
+    background: color-mix(in srgb, var(--accent, #5b8def) 22%, transparent);
+    border-color: color-mix(in srgb, var(--accent, #5b8def) 55%, transparent);
+  }
+  .ccc-breadcrumb .ccc-breadcrumb-compact:focus-visible {
+    outline: 2px solid var(--accent, #5b8def); outline-offset: 1px;
+  }
   .conv-pane-titlebar {
     min-width: 0;
     flex: 1 1 auto;

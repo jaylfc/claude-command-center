@@ -16966,6 +16966,17 @@
     openConversationPopout(convId, null, null);
   });
 
+  // Breadcrumb Compact button — delegated (survives every updatePaneHeader
+  // innerHTML rewrite). Compacts whatever conversation the active pane shows
+  // (same target as compactCurrentSession, which reads currentSession).
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest && ev.target.closest('[data-role="ccc-breadcrumb-compact"]');
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    try { compactCurrentSession(); } catch (_) {}
+  });
+
   function startExternalConversationDrag(convId, repoPath) {
     if (CONV_POPOUT_MODE || !convId) return;
     const row = rowForConversationId(convId);
@@ -17578,10 +17589,19 @@
             +   '<path d="M11 1L6 6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>'
             + '</svg>'
           + '</button>';
+        // Labeled Compact button for the active conversation — the prominent,
+        // always-visible home (single-pane mode CSS-hides the in-pane header,
+        // so this breadcrumb slot is where the user looks). Shown only for
+        // compaction-capable engines (Claude + Codex). Click is delegated.
+        const compactBtn = (currentSession && isCompactionCapableSource(currentSession.source))
+          ? '<button type="button" class="ccc-breadcrumb-compact" data-role="ccc-breadcrumb-compact"'
+            + ' title="Compact this conversation — summarize earlier turns to free up context">Compact</button>'
+          : '';
         breadcrumbEl.innerHTML = ''
           + (category ? '<span class="ccc-breadcrumb-category">' + escapeHtml(category) + '</span>' : '')
           + (title ? '<span class="ccc-breadcrumb-title">' + escapeHtml(title) + '</span>' : '')
           + (sizeBytes > 0 ? '<span class="ccc-breadcrumb-size" title="' + sizeBytes.toLocaleString() + ' bytes">' + escapeHtml(formatSize(sizeBytes)) + '</span>' : '')
+          + compactBtn
           + popoutBtn;
         breadcrumbEl.hidden = false;
       } else if (isActive) {
