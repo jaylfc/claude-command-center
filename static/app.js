@@ -13605,16 +13605,18 @@
       } else if (c.is_live && c.sidecar_status === 'active' && c.sidecar_tool) {
         const sidecarAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
         if (sidecarAge < 300) {
-          // Row view stays compact: show only a short detail, with the
-          // full file/command available in the hover title.
+          // Row pill stays TIGHT — just the tool label (glowing when
+          // in-flight). The file/command path was ellipsizing into
+          // unreadable suffixes like "...nter/static/app.js" and
+          // pushing the rest of the row meta off-screen. The full
+          // detail still lives in the hover title for users who want
+          // to confirm what's being touched.
           const rawDetail = c.sidecar_file || '';
-          const shortFile = shortenLiveActivityDetail(rawDetail, c.sidecar_tool, isCommandActivityTool(c.sidecar_tool) ? 30 : 40);
           const arrow = c.sidecar_in_flight ? '▶ ' : '';
           const liveTitle = liveActivityTitle(c.sidecar_in_flight ? 'Currently running' : 'Last completed', c.sidecar_tool, rawDetail);
           liveToolHtml = '<span class="conv-live-tool' + (c.sidecar_in_flight ? ' in-flight' : '') + '" '
             + 'title="' + escapeAttr(liveTitle) + '">'
             + '<span class="conv-live-name">' + arrow + escapeHtml(liveActivityCompactToolLabel(c.sidecar_tool)) + '</span>'
-            + (shortFile ? '<span class="conv-live-file' + liveActivityDetailClass(c.sidecar_tool) + '">' + escapeHtml(shortFile) + '</span>' : '')
             + '</span>';
         }
       }
