@@ -2426,15 +2426,23 @@
     white-space: nowrap;
   }
   .live-badge-dot {
+    position: relative;
     width: 6px; height: 6px; border-radius: 50%;
     background: var(--green, #3fb950);
-    box-shadow: 0 0 0 0 rgba(63,185,80,0.5);
+  }
+  /* GPU-composited ring (transform+opacity) — see .conv-live-dot::after. */
+  .live-badge-dot::after {
+    content: ''; position: absolute; inset: 0;
+    border-radius: 50%;
+    background: rgba(63,185,80,0.55);
     animation: live-pulse 1.4s ease-out infinite;
+    will-change: transform, opacity;
+    pointer-events: none;
   }
   @keyframes live-pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(63,185,80,0.55); }
-    70%  { box-shadow: 0 0 0 6px rgba(63,185,80,0);   }
-    100% { box-shadow: 0 0 0 0 rgba(63,185,80,0);     }
+    0%   { transform: scale(1);   opacity: 0.55; }
+    70%  { transform: scale(3);   opacity: 0; }
+    100% { transform: scale(3);   opacity: 0; }
   }
   .stream-bubble {
     margin: 8px -13px; padding: 10px 12px;
@@ -2556,19 +2564,31 @@
    * user knows where the freshness comes from. */
   .conv-live-dot {
     display: inline-block;
+    position: relative;
     width: 7px; height: 7px;
     border-radius: 50%;
     background: var(--accent, #58a6ff);
-    box-shadow: 0 0 0 0 rgba(88,166,255,0.55);
     margin-right: 4px;
     flex-shrink: 0;
     vertical-align: middle;
+  }
+  /* Sonar-ping ring as a pseudo-element animating transform+opacity, which
+     WebKit composites on the GPU. The previous box-shadow-spread keyframe
+     forced a full CPU repaint every frame — multiplied across every live
+     sidebar row it pegged the WKWebView content process at ~95% CPU even
+     while idle. transform/opacity here is paint-free. */
+  .conv-live-dot::after {
+    content: ''; position: absolute; inset: 0;
+    border-radius: 50%;
+    background: rgba(88,166,255,0.55);
     animation: ccc-live-dot-pulse 2.4s ease-out infinite;
+    will-change: transform, opacity;
+    pointer-events: none;
   }
   @keyframes ccc-live-dot-pulse {
-    0%   { box-shadow: 0 0 0 0 rgba(88,166,255,0.55); }
-    70%  { box-shadow: 0 0 0 6px rgba(88,166,255,0); }
-    100% { box-shadow: 0 0 0 0 rgba(88,166,255,0); }
+    0%   { transform: scale(1);    opacity: 0.55; }
+    70%  { transform: scale(2.7);  opacity: 0; }
+    100% { transform: scale(2.7);  opacity: 0; }
   }
 
   /* Per-event timestamps prefixed to each conversation row. Sourced from
@@ -4686,20 +4706,25 @@
   .kanban-column.verified .kanban-column-header { color: var(--green); }
   .kanban-column.verified .count { background: rgba(63,185,80,0.2); color: var(--green); }
 
-  /* Animated glow on Working column cards */
+  /* Animated glow on Working column cards. The glow lives on a pseudo-element
+     with a STATIC box-shadow; only its opacity animates, which WebKit
+     composites on the GPU. Animating box-shadow/border-color directly (the
+     old keyframe) forced a CPU repaint every frame per active card. */
   @keyframes working-glow {
-    0%, 100% {
-      border-color: rgba(251,202,4,0.4) !important;
-      box-shadow: 0 0 6px rgba(251,202,4,0.2);
-    }
-    50% {
-      border-color: rgba(251,202,4,0.9) !important;
-      box-shadow: 0 0 18px rgba(251,202,4,0.55);
-    }
+    0%, 100% { opacity: 0.35; }
+    50%      { opacity: 1; }
   }
   .kanban-card.truly-active {
-    animation: working-glow 1.6s ease-in-out infinite !important;
-    border: 1px solid rgba(251,202,4,0.4) !important;
+    position: relative;
+    border: 1px solid rgba(251,202,4,0.7) !important;
+  }
+  .kanban-card.truly-active::after {
+    content: ''; position: absolute; inset: -1px;
+    border-radius: inherit;
+    box-shadow: 0 0 18px rgba(251,202,4,0.55);
+    animation: working-glow 1.6s ease-in-out infinite;
+    will-change: opacity;
+    pointer-events: none;
   }
   /* "no edits" attribute: shown on cards whose Claude has never edited a file
      (live or dead — liveness doesn't matter). Renders as a small lowercase
