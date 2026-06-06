@@ -3791,6 +3791,44 @@
     border-color: var(--border); cursor: not-allowed; opacity: 0.5;
   }
   .conv-input-bar .steer-btn svg { display: block; }
+  /* Compact button — mirrors the steer button's pill shape but in a neutral
+     accent so it reads as "context maintenance" rather than "interrupt". */
+  .conv-input-bar .compact-btn {
+    width: 32px; height: 32px; flex-shrink: 0;
+    border-radius: 999px; border: 1px solid rgba(88,166,255,0.42); cursor: pointer;
+    background: rgba(88,166,255,0.12); color: var(--accent);
+    line-height: 1; padding: 0;
+    display: none; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+  }
+  .conv-input-bar .compact-btn.visible { display: inline-flex; }
+  .conv-input-bar .compact-btn:hover {
+    background: rgba(88,166,255,0.20);
+    border-color: rgba(88,166,255,0.70);
+  }
+  .conv-input-bar .compact-btn:active { transform: translateY(1px); }
+  .conv-input-bar .compact-btn:disabled {
+    background: transparent; color: var(--text-muted);
+    border-color: var(--border); cursor: not-allowed; opacity: 0.5;
+  }
+  .conv-input-bar .compact-btn svg { display: block; }
+  /* Codex app-server indicator — a subtle pill in the input hint row. */
+  .conv-input-hint .codex-appsrv {
+    display: none; align-items: center; gap: 4px;
+    margin-left: 8px; padding: 1px 7px; border-radius: 999px;
+    font-size: 11px; line-height: 1.5; font-weight: 600;
+    border: 1px solid var(--border); color: var(--text-muted);
+    background: var(--surface-2);
+  }
+  .conv-input-hint .codex-appsrv.visible { display: inline-flex; }
+  .conv-input-hint .codex-appsrv .dot {
+    width: 6px; height: 6px; border-radius: 999px; background: var(--text-muted);
+  }
+  .conv-input-hint .codex-appsrv.live {
+    color: var(--green); border-color: rgba(63,185,80,0.42);
+    background: rgba(63,185,80,0.10);
+  }
+  .conv-input-hint .codex-appsrv.live .dot { background: var(--green); }
   .conv-input-bar .tts-btn {
     width: 32px; height: 32px; flex-shrink: 0;
     border-radius: 999px; border: 1px solid var(--border); cursor: pointer;
@@ -4206,25 +4244,6 @@
     background-size: var(--flow-grid-size) var(--flow-grid-size);
     background-position:
       calc(var(--flow-pad-x) - 1px) calc(var(--flow-pad-y) - 1px);
-    /* Mark the canvas edge so the "unreachable border" past it (the
-       .flow-board background) is visually distinct from the pannable
-       canvas. The dashed line + faint outer glow tells the user:
-       beyond here you cannot pan. */
-    outline: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
-    outline-offset: -1px;
-  }
-  /* The board area past the canvas — visually de-emphasized so the
-     "unreachable" zone reads as out-of-bounds. */
-  .flow-board {
-    background:
-      repeating-linear-gradient(
-        45deg,
-        color-mix(in srgb, var(--text-muted) 4%, transparent) 0,
-        color-mix(in srgb, var(--text-muted) 4%, transparent) 6px,
-        transparent 6px,
-        transparent 12px
-      ),
-      var(--bg);
   }
   .flow-world {
     position: absolute; left: 0; top: 0;
