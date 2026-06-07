@@ -19671,6 +19671,50 @@
     }
   }
 
+  // Read a markdown file from disk and (re)paint the status-rail file viewer.
+  // Shared by the sidebar row click and the header refresh button so a manual
+  // refresh re-pulls the current file's content instead of showing whatever
+  // was cached when it was first opened. Throws on failure; caller decides how
+  // to surface it.
+  async function loadMarkdownIntoFileViewer(target, label) {
+    const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
+    const r = await fetch('/api/read-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: target, session_id: sid}),
+    });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({error: 'load failed'}));
+      throw new Error(j.error || ('HTTP ' + r.status));
+    }
+    const res = await r.json();
+    if (!res.ok) throw new Error(res.error || 'load failed');
+    const rail = document.getElementById('statusRail');
+    const bodyEl = document.getElementById('fileViewerBody');
+    const filenameEl = document.getElementById('fileViewerFilename');
+    const viewer = document.getElementById('statusRailFileViewer');
+    if (bodyEl) {
+      bodyEl.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(res.content) : res.content;
+      // Rewrite <img src=…> to route through /api/local-image so relative
+      // paths (./screenshot.png), bare names, and absolute filesystem paths
+      // all resolve against the markdown file's directory, not the CCC origin.
+      const _mdDir = target.replace(/\/[^/]*$/, '');
+      bodyEl.querySelectorAll('img').forEach((img) => {
+        const raw = img.getAttribute('src') || '';
+        if (!raw) return;
+        if (/^(https?:|data:|blob:|file:|\/api\/)/i.test(raw)) return;
+        let abs;
+        if (raw.startsWith('/')) abs = raw;
+        else if (raw.startsWith('~/')) abs = raw;
+        else abs = _mdDir + '/' + raw;
+        img.src = '/api/local-image?path=' + encodeURIComponent(abs);
+      });
+    }
+    if (filenameEl && label != null) filenameEl.textContent = label;
+    if (viewer) viewer.setAttribute('data-current-path', target);
+    if (rail) rail.classList.add('file-viewer-active');
+  }
+
   function renderSidebarFileRow(row) {
     const rowEl = document.createElement('div');
     rowEl.className = 'sidebar-file-row';
@@ -19761,56 +19805,9 @@
         const isMarkdown = row.category === 'markdown' || (typeof _isMarkdownPath === 'function' && _isMarkdownPath(row.target));
         if (isMarkdown) {
           try {
-            const sid = sessionIdByConv[currentConversation] || (currentSession && currentSession.id) || '';
-            const r = await fetch('/api/read-file', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({path: row.target, session_id: sid}),
-            });
-            if (r.ok) {
-              const res = await r.json();
-              if (res.ok) {
-                const rail = document.getElementById('statusRail');
-                const bodyEl = document.getElementById('fileViewerBody');
-                const filenameEl = document.getElementById('fileViewerFilename');
-                const viewer = document.getElementById('statusRailFileViewer');
-                if (bodyEl) {
-                  bodyEl.innerHTML = typeof renderMarkdown === 'function' ? renderMarkdown(res.content) : res.content;
-                  // Rewrite <img src=…> to route through /api/local-image
-                  // so relative paths (./screenshot.png), bare names, and
-                  // absolute filesystem paths all resolve against the
-                  // markdown file's directory instead of the CCC origin.
-                  const _mdDir = row.target.replace(/\/[^/]*$/, '');
-                  bodyEl.querySelectorAll('img').forEach((img) => {
-                    const raw = img.getAttribute('src') || '';
-                    if (!raw) return;
-                    if (/^(https?:|data:|blob:|file:|\/api\/)/i.test(raw)) return;
-                    let abs;
-                    if (raw.startsWith('/')) abs = raw;
-                    else if (raw.startsWith('~/')) abs = raw;
-                    else abs = _mdDir + '/' + raw;
-                    img.src = '/api/local-image?path=' + encodeURIComponent(abs);
-                  });
-                }
-                if (filenameEl) {
-                  filenameEl.textContent = row.label;
-                }
-                if (viewer) {
-                  viewer.setAttribute('data-current-path', row.target);
-                }
-                if (rail) {
-                  rail.classList.add('file-viewer-active');
-                }
-                return;
-              } else {
-                sidebarShowFileToast(rowEl, res.error || 'load failed');
-              }
-            } else {
-              const j = await r.json().catch(() => ({error: 'load failed'}));
-              sidebarShowFileToast(rowEl, j.error || ('HTTP ' + r.status));
-            }
+            await loadMarkdownIntoFileViewer(row.target, row.label);
           } catch (err) {
-            sidebarShowFileToast(rowEl, 'network error');
+            sidebarShowFileToast(rowEl, err.message || 'load failed');
           }
           return;
         }
@@ -24393,6 +24390,25 @@
           showOpToast('Open failed: ' + (err && err.message || 'network error'), 'error');
         } finally {
           $fileViewerOpenExt.disabled = false;
+        }
+      });
+    }
+    const $fileViewerRefresh = document.getElementById('fileViewerRefreshBtn');
+    if ($fileViewerRefresh) {
+      $fileViewerRefresh.addEventListener('click', async () => {
+        const viewer = document.getElementById('statusRailFileViewer');
+        const path = viewer && viewer.getAttribute('data-current-path');
+        if (!path) return;
+        const label = (document.getElementById('fileViewerFilename') || {}).textContent || null;
+        $fileViewerRefresh.disabled = true;
+        $fileViewerRefresh.classList.add('is-spinning');
+        try {
+          await loadMarkdownIntoFileViewer(path, label);
+        } catch (err) {
+          showOpToast('Refresh failed: ' + (err && err.message || 'network error'), 'error');
+        } finally {
+          $fileViewerRefresh.disabled = false;
+          $fileViewerRefresh.classList.remove('is-spinning');
         }
       });
     }

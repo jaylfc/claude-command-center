@@ -7412,6 +7412,24 @@
   }
   .file-viewer-open-external:disabled { opacity: 0.5; pointer-events: none; }
   .file-viewer-open-external svg { display: block; }
+  /* Refresh button — square icon-only sibling of the Open button. */
+  .file-viewer-refresh {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted, #8b949e);
+    padding: 4px; border-radius: 4px; cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .file-viewer-refresh:hover {
+    background: var(--surface-2, #161b22);
+    color: var(--text, #c9d1d9);
+    border-color: rgba(255,255,255,0.18);
+  }
+  .file-viewer-refresh:disabled { opacity: 0.5; pointer-events: none; }
+  .file-viewer-refresh svg { display: block; }
+  .file-viewer-refresh.is-spinning svg { animation: fvr-spin 0.7s linear infinite; }
+  @keyframes fvr-spin { to { transform: rotate(360deg); } }
   .file-viewer-body {
     flex: 1;
     overflow-y: auto;
