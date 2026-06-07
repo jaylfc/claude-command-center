@@ -31091,6 +31091,19 @@ def _git_toplevel_for_path(path, cache):
     key = str(probe)
     if key in cache:
         return cache[key]
+    # Fast path: if `probe` sits inside a toplevel we already resolved this
+    # scan, it shares that toplevel — skip the git shell-out. Sessions in one
+    # repo touch many distinct subdirs, so without this a cold session scan
+    # fires hundreds of `git rev-parse` subprocesses (≈9s for ~400 sessions);
+    # this collapses them to one per repo. Tops are tracked under a sentinel
+    # key (real keys are always absolute paths, so "\x00tops" never collides).
+    tops = cache.get("\x00tops")
+    if tops is None:
+        tops = cache["\x00tops"] = []
+    for top in tops:
+        if key == top or key.startswith(top + os.sep):
+            cache[key] = top
+            return top
     try:
         r = subprocess.run(
             ["git", "-C", key, "rev-parse", "--show-toplevel"],
@@ -31100,6 +31113,8 @@ def _git_toplevel_for_path(path, cache):
     except (subprocess.SubprocessError, OSError):
         top = None
     cache[key] = top
+    if top and top not in tops:
+        tops.append(top)
     return top
 
 
