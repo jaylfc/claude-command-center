@@ -123,6 +123,20 @@ def _write_question_answer(session_id, answers):
         os.replace(tmp, path)
     except OSError as e:
         return {"ok": False, "error": f"could not write answer: {e}"}
+    # The user just answered — proactively drop the AskUserQuestion in-flight
+    # marker so the "Question waiting for answer" indicator clears on the very
+    # next status poll, instead of lingering (with stale preamble text) until
+    # the tool_result round-trips back into the transcript. That lag is the
+    # "question synchronization isn't working" symptom: the prompt is already
+    # answered but the live indicator keeps showing it as waiting.
+    try:
+        marker = SIDECAR_STATE_DIR / f"{session_id}_in_flight.json"
+        if marker.exists():
+            data = json.loads(marker.read_text())
+            if isinstance(data, dict) and data.get("tool") == "AskUserQuestion":
+                marker.unlink()
+    except (OSError, ValueError):
+        pass
     return {"ok": True, "questions": len(req.get("questions") or [])}
 ANNOTATIONS_FILE = COMMAND_CENTER_STATE_DIR / "annotations.json"
 ANNOTATION_SCREENSHOT_DIR = COMMAND_CENTER_STATE_DIR / "annotation-screenshots"
