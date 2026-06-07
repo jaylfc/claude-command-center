@@ -17938,6 +17938,24 @@
   // session reads as an empty pane with zero explanation: the only hint is a
   // cryptic "ctx unavailable" pill. Informational only; it clears itself the
   // moment the session is live again.
+  // How long a transcript must sit untouched before its last tool action is
+  // treated as a genuine stall (vs. the normal pause between turns). Kept
+  // generous so an actively-progressing session never flashes the
+  // "stopped before finishing" banner.
+  const INCOMPLETE_QUIET_MS = 90000;
+  function _conversationIsQuiet(view) {
+    let freshest = 0;
+    const stamped = view.querySelectorAll('[data-ts-epoch]');
+    for (let i = 0; i < stamped.length; i++) {
+      const ep = Number(stamped[i].dataset.tsEpoch);
+      if (ep > freshest) freshest = ep;
+    }
+    // No usable timestamps (synthetic / very old logs) → treat as quiet so
+    // genuinely historical sessions still surface the banner.
+    if (!freshest) return true;
+    return (Date.now() - freshest) >= INCOMPLETE_QUIET_MS;
+  }
+
   function updateSessionOutcomeBanner(view) {
     if (!view) return;
     // Drop any stale banner first so re-renders never stack duplicates.
@@ -17971,9 +17989,14 @@
       kind = 'error';
       title = 'This session hit an error';
       detail = (errNode.textContent || '').replace(/^\[J [^\]]*\]\s*/, '').trim().slice(0, 220);
-    } else if (lastNode && lastNode.classList.contains('tool-call-group')) {
+    } else if (lastNode && lastNode.classList.contains('tool-call-group')
+               && _conversationIsQuiet(view)) {
       // Transcript stops on a tool action with nothing after it: the agent
       // was mid-task when it stopped (crash, kill, or headless exit).
+      // Gated on quiet-time (_conversationIsQuiet) so it does NOT fire in the
+      // normal gap between a tool finishing and the next step — for engines
+      // like Codex `liveStatus.live` is often false mid-progress, which made
+      // this banner trigger-happy.
       kind = 'incomplete';
       title = 'This session stopped before finishing';
       const lbl = lastNode.querySelector('.tcg-label');
@@ -23036,6 +23059,11 @@
       // rather than render time; fall back to render time only when the
       // event has no ts (synthetic / very old logs).
       div.dataset.renderTs = eventStamp(ev.ts) || nowStamp();
+      // Epoch of the event's own JSONL timestamp — lets the outcome banner
+      // tell a genuinely-stalled session from one that's just between turns
+      // (the freshest epoch is how long ago the transcript last moved).
+      const _evEpoch = ev.ts ? Date.parse(ev.ts) : NaN;
+      if (!isNaN(_evEpoch)) div.dataset.tsEpoch = String(_evEpoch);
       // Tag assistant rows with the source message_id so the streaming
       // bubble can detect "JSONL already won" and hand off cleanly.
       if (ev.type === 'assistant' && ev.message_id) {
