@@ -29781,6 +29781,12 @@
         body: JSON.stringify({
           annotation_id: ann.id || '',
           text: annUxFixesQueuePrompt(ann),
+          note: ann.note || '',
+          url: ann.url || '',
+          title: ann.title || '',
+          selector: (ann.element && ann.element.selector) || ann.selector || '',
+          screenshot_path: ann.screenshot_path || '',
+          source: 'ccc',
           engine: getSpawnEngine(),
         }),
       });
@@ -29798,7 +29804,12 @@
       if (_targetSid && typeof markSessionSending === 'function') {
         markSessionSending(_targetSid);
       }
-      showOpToast(data.action === 'spawned' ? 'UX fixes queue session created' : 'Annotation sent to UX fixes queue', 'success');
+      showOpToast(
+        data.number
+          ? ('Queued as UX fix #' + data.number)
+          : (data.action === 'spawned' ? 'UX fixes queue session created' : 'Annotation sent to UX fixes queue'),
+        'success'
+      );
       // When a NEW session was spawned, force-pull the sessions list so
       // the new row appears in the conv sidebar immediately — don't wait
       // for the next poll cycle. Also schedule a few tighter polls so a
