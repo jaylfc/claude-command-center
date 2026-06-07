@@ -369,6 +369,14 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("screenshot_warning", server_py)
         self.assertNotIn("other tool", app_js.lower())
 
+    def test_ux_fixes_queue_progress_badge_is_rendered_from_queue_api(self):
+        app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
+        app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
+        self.assertIn("/api/ux-fixes/list", app_js)
+        self.assertIn("claimed_by", app_js)
+        self.assertIn("conv-ux-fix-progress", app_js)
+        self.assertIn(".conv-item .conv-ux-fix-progress", app_css)
+
     def test_sidebar_refresh_defers_while_dragging(self):
         app_js = pathlib.Path(PROJECT_ROOT, "static", "app.js").read_text(encoding="utf-8")
         self.assertIn("function deferSidebarRenderIfDragging", app_js)

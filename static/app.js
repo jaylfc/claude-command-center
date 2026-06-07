@@ -17,6 +17,7 @@
   const _PAUSE_WHEN_HIDDEN = new Set([
     'liveStatus', 'liveToolStrip', 'sessionsList', 'gcActive', 'issues',
     'vercelDeploy', 'localhost', 'worktreesBadge', 'archiveTimes',
+    'uxFixesQueueMeta',
   ]);
   function _pollerSkip(name) {
     return _pollerOff(name) || (_PAUSE_WHEN_HIDDEN.has(name) && document.hidden);
@@ -56,6 +57,7 @@
     issues:         { ms: 10000, label: 'issues',  surface: 'Sidebar — GitHub Issues section',             desc: 'GitHub issues for the active repo.' },
     sessionsList:   { ms: 60000, label: 'sessions',surface: 'Sidebar — session list',                      desc: 'Archive/session refresh (~3MB, stale-cache).' },
     archiveTimes:   { ms: 90000, label: 'archive-t',surface: 'Sidebar — archive row times',                  desc: 'Refresh archive last_interacted/modified so row times stay live.' },
+    uxFixesQueueMeta:{ ms: 15000, label: 'uxq',     surface: 'Sidebar — UX-fixes queue row',                 desc: 'UX-fixes queue current/last-number badge.' },
     gcActive:       { ms: 15000, label: 'gc-live', surface: 'Sidebar — active-group-chat footer pill',     desc: 'Active group-chat coordinations badge.' },
     vercelDeploy:   { ms: 15000, label: 'vercel',  surface: 'Top bar — Vercel deploy badge',               desc: 'Latest Vercel deploy status.' },
     localhost:      { ms: 15000, label: 'localhost',surface: 'Top bar — localhost pill',                   desc: 'Localhost dev-server reachability probe.' },
@@ -14905,6 +14907,7 @@
       let titleClass = '';
       if (c.name_overridden) titleClass = 'user-renamed';
       else if (!c.display_name && !c.ai_title && !c.first_message) titleClass = 'untitled';
+      const uxFixesQueueProgressHtml = _uxFixesQueueProgressHtml(c);
       // Prefer the last assistant "outcome" (summary) over the original ask —
       // mirrors the kanban card behavior so list view shows what the session did.
       let askHtml = '';
@@ -15439,6 +15442,7 @@
             + leftFolderChipHtml
             + titleFolderChipHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
+            + uxFixesQueueProgressHtml
             + historyBadgeHtml
             + repoBadgeHtml
             + pinnedHtml
@@ -26719,6 +26723,76 @@
   let archiveData = [];
   let archiveLoaded = false;
   let _lastArchiveRenderFilter = null;
+  let uxFixesQueueMeta = { total: 0, byClaimedSession: new Map() };
+  let _uxFixesQueueMetaPromise = null;
+  let _uxFixesQueueMetaLoadedAt = 0;
+  const UX_FIXES_QUEUE_META_TTL_MS = 15 * 1000;
+
+  function _normalizeUxFixesSessionId(value) {
+    return String(value || '').trim().toLowerCase();
+  }
+
+  function _setUxFixesQueueMeta(items) {
+    const byClaimedSession = new Map();
+    let total = 0;
+    for (const item of (Array.isArray(items) ? items : [])) {
+      const number = Number(item && item.number);
+      if (!Number.isFinite(number) || number <= 0) continue;
+      total = Math.max(total, number);
+      if ((item.status || '') !== 'in_progress') continue;
+      const sid = _normalizeUxFixesSessionId(item.claimed_by);
+      if (!sid) continue;
+      const prev = byClaimedSession.get(sid);
+      if (!prev || number > prev.number) {
+        byClaimedSession.set(sid, { number, lane: item.lane || 'normal' });
+      }
+    }
+    uxFixesQueueMeta = { total, byClaimedSession };
+    _uxFixesQueueMetaLoadedAt = Date.now();
+    return uxFixesQueueMeta;
+  }
+
+  function _uxFixesQueueProgressForRow(c) {
+    const sid = _normalizeUxFixesSessionId(c && (c.session_id || c.id));
+    if (!sid || !uxFixesQueueMeta || !uxFixesQueueMeta.byClaimedSession) return null;
+    const current = uxFixesQueueMeta.byClaimedSession.get(sid);
+    const total = Number(uxFixesQueueMeta.total || 0);
+    if (!current || !Number.isFinite(total) || total <= 0) return null;
+    return { current: current.number, total, lane: current.lane || 'normal' };
+  }
+
+  function _uxFixesQueueProgressHtml(c) {
+    const progress = _uxFixesQueueProgressForRow(c);
+    if (!progress) return '';
+    const title = 'Current UX fix #' + progress.current + '; latest queued fix #' + progress.total;
+    return '<span class="conv-ux-fix-progress" title="' + escapeAttr(title) + '">'
+      + '(' + escapeHtml(progress.current) + '/' + escapeHtml(progress.total) + ')'
+      + '</span>';
+  }
+
+  async function refreshUxFixesQueueMeta(opts = {}) {
+    if (_uxFixesQueueMetaPromise) return _uxFixesQueueMetaPromise;
+    const fresh = _uxFixesQueueMetaLoadedAt
+      && (Date.now() - _uxFixesQueueMetaLoadedAt) < UX_FIXES_QUEUE_META_TTL_MS;
+    if (!opts.force && fresh) return uxFixesQueueMeta;
+    _uxFixesQueueMetaPromise = (async () => {
+      try {
+        const res = await fetch('/api/ux-fixes/list', { cache: 'no-store' });
+        if (!res.ok) return uxFixesQueueMeta;
+        const data = await res.json().catch(() => ({}));
+        const meta = _setUxFixesQueueMeta(Array.isArray(data.items) ? data.items : []);
+        if (opts.render !== false && typeof _renderArchiveIfLoaded === 'function') {
+          _renderArchiveIfLoaded();
+        }
+        return meta;
+      } catch (_) {
+        return uxFixesQueueMeta;
+      } finally {
+        _uxFixesQueueMetaPromise = null;
+      }
+    })();
+    return _uxFixesQueueMetaPromise;
+  }
 
   function _archiveRowStableKey(c) {
     if (!c) return '';
@@ -27044,6 +27118,7 @@
       loadCrossRepoIssues(),
       refreshArchivedGroupChats().catch(() => {}),
       repoListState.repos.length ? Promise.resolve(null) : loadRepoList().catch(() => null),
+      refreshUxFixesQueueMeta({ force }).catch(() => null),
     ]).then(([issues]) => {
       crossRepoIssuesData = issues || [];
       _archiveSideDataHydratedAt = Date.now();
@@ -27660,6 +27735,10 @@
         } catch (_) {}
       }).catch(() => {});
     }), 90 * 1000);
+    setInterval(_gated('uxFixesQueueMeta', () => {
+      if (document.hidden) return;
+      refreshUxFixesQueueMeta({ force: true }).catch(() => {});
+    }), 15 * 1000);
   })();
 
   // Set up the In Group Chat polling exactly once at boot. Used to be
@@ -30063,6 +30142,9 @@
         || '';
       if (_targetSid && typeof markSessionSending === 'function') {
         markSessionSending(_targetSid);
+      }
+      if (typeof refreshUxFixesQueueMeta === 'function') {
+        refreshUxFixesQueueMeta({ force: true }).catch(() => {});
       }
       showOpToast(
         data.number
