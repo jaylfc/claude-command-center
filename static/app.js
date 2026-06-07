@@ -22974,6 +22974,27 @@
     return /^(no response (requested|needed|required)|nothing (to (do|add|report)|further( to (do|add))?)|acknowledged|no action (needed|required)|standing by|continuing|will continue)\.?$/.test(t);
   }
 
+  // The first user message is shown as "Original ask" in the sticky header
+  // (inline mode) or the status rail (right-rail mode); its in-conversation
+  // bubble is meant to stay hidden via `is-pinned-in-sticky` so the same text
+  // isn't shown twice. The one-shot `_firstUserMsgRendered` guard that adds
+  // that class can miss the bubble (tail loads, re-renders, rail relocation),
+  // leaving the ask visible in BOTH places — "this feels redundant". Re-assert
+  // the pin idempotently after each render, but ONLY when an Original-ask copy
+  // exists elsewhere, so we never hide the sole copy of the message.
+  function _ensureFirstUserPinned($view) {
+    if (!$view) return;
+    const isActiveView = $view === (getConvViewForPane(activePaneId()) || $conversationsView);
+    const hasOriginalElsewhere =
+      !!$view.querySelector('.conv-sticky-header .csh-ask-original')
+      || (isActiveView && !!document.querySelector('#statusRail .csh-ask-original'));
+    if (!hasOriginalElsewhere) return;
+    const firstUser = $view.querySelector('.event.user_text:not(.is-dynamic-pinned-in-sticky)');
+    if (firstUser && !firstUser.classList.contains('is-pinned-in-sticky')) {
+      firstUser.classList.add('is-pinned-in-sticky');
+    }
+  }
+
   function renderConversationEvents(events, paneId) {
     if (!Array.isArray(events)) return true;  // defensive: backlog/unknown responses
     // Do not defer transcript rendering while the composer is focused.
@@ -23581,6 +23602,7 @@
     ffcRefreshForCurrent();
     updateSessionOutcomeBanner($view);
     _firePhoneModeReadIfDone(events, paneId);
+    _ensureFirstUserPinned($view);
     return true;
   }
 
@@ -24080,6 +24102,9 @@
         row.appendChild(liveAct);
       }
     }
+    // Original ask is now mounted in its slot — re-hide the duplicate
+    // in-conversation bubble for the active pane (toggle-without-rebuild path).
+    _ensureFirstUserPinned(getConvViewForPane(activePaneId()) || $conversationsView);
   }
 
   // Wire pill click + start polling once on first JS load.
