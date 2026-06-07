@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.10.0] - 2026-06-07
+
+### Added
+- "+" on a repo or object node in the Flow workspace now opens a session picker instead of immediately creating a draft. The picker shows:
+
+- **+ Create a new draft session here** at the top (the original behavior — one click, same as before).
+- **Search box** — fuzzy-matches against display name, first message, session id, repo / folder label, and engine name.
+- **Include archived** checkbox (on by default per user ask).
+- **Scrollable session list** — up to 200 results sorted by most recent activity; click a row to attach.
+
+Clicking a session sets `flowNodeParents[<session-node-id>] = <parent-node-id>` so it nests under the object/repo on the next render, and pins it to the flow board so an archived session attached this way stays visible regardless of the toolbar's archive toggle.
+- The Flow workspace toolbar now has a "Search sessions…" input on the left. Mirrors the main sidebar's `#convSearch` — typing in either updates the other and re-renders the flow board with the filtered set via the existing `filterConversations`. Initial value reads from `$convSearch` so a search you started in the main window carries into the popout. Esc clears the filter. 120 ms debounce so fast typing doesn't thrash the canvas innerHTML.
+- Telemetry schema v2: opt-in daily ping now includes `sessions_today` (count of JSONL transcripts modified in the last 24h, capped at 100000) so we can tell opt-in-then-bounced installs from sticky installs without identifying individual sessions. The worker still accepts v1 payloads. Also added a new `POST /v1/open` anonymous open beacon that fires once per server boot with only `schema_version`, `version`, `platform` — no install_id, no engines, no identifier of any kind. The beacon is not gated on opt-in (because it carries no identity) but is still killed by `CCC_TELEMETRY_DISABLED=1`, the single user switch for the whole process. Engines list expanded to include `cursor` and `antigravity` (already detected by `server.py`). See `docs/telemetry.md` for the full contract.
+
+### Changed
+- Reverted the tight-canvas + dashed-edge + diagonal-stripe marking shipped earlier today per user pivot ("let's get rid of borders, we should just have a big canvas that's it"). Canvas is back to viewport-fill (`max(content + per-node-pad, viewport)`) with no edge outline and the original solid `var(--bg)` board background. The overlap-prevent + low-zoom font-readability fixes from the same day stay — they're independent of the border question.
+- The in-app terminal panel's keyboard shortcut moved from ⌘\` to ⌘2. ⌘\` is macOS' system-level "cycle windows of active app" shortcut — CCC also exposes it via the .app shell for cycling between CCC's own windows (Sparkle release pending) — so the prior binding hijacked the cycler. ⌘2 is unused by CCC and free across all major browsers. The handler also skips while focus is in a text input / textarea / contenteditable so a literal "2" mid-draft never accidentally toggles the panel; the topbar button still works as a fallback. Tooltip on the topbar button now advertises the new shortcut.
+- TTS rate knob is now restricted to 0.8 – 1.3× (was 0.5 – 2.5×). Anything outside that window pushes playback into the "robot at half-speed" or "auctioneer" zone that nobody actually wants. Tighter slider means a misclick can't yank you all the way to either extreme. Existing bounds-check in `_readPersistedTtsRate` clamps any stale localStorage value (e.g. 1.5 saved during the wider range) back to the default on next boot.
+
+### Fixed
+- `/compact` on a Claude session that's still running headlessly no longer rejects with "Wait for it to finish, then click Compact again". Now it's queued via the standard terminal-input queue — same path regular injections take when the agent is busy. The queue drains automatically the moment the headless run finishes and an interactive terminal opens, so `/compact` runs without a second user click. UI toast reads "Queued /compact until the terminal session is idle" instead of "/compact failed". Existing client wiring (`compactRequestSuccessMessage`) already handles the `data.queued === true` response shape, so this is a server-only change.
+- When a Claude session's recorded cwd is gone (the folder was moved, renamed, or deleted), sending a message no longer drops the message and shows "Send failed: Session cwd is gone…". The server now queues the text via the standard terminal-input queue and returns `{ok: True, queued: True, cwd_missing: True, missing_path: …}`. The client surfaces a friendlier toast: "Queued — session folder is missing (<path>). Restore it or relocate to resume." The queue drains the moment the directory is restored on disk OR (in a follow-up) the user points CCC at the new location via the relocation cache. Either way the typed message is preserved, not lost.
+
+Implementation: new `_maybe_queue_on_invalid_cwd(session_id, text, status, result)` wraps `resume_session_headless` calls inside `_inject_text_into_session`; when the resume's downstream call returns `code: 'invalid_cwd'`, the wrapper queues the text and returns a queued response shape the client already knows how to handle.
+- Group archived Claude Flow session nodes under the real repo path when archive rows also carry a Claude project slug.
+- Flow's session-attach picker (the new "+"-on-a-node modal) now actually nests the picked session under the parent. Root: the click handler tried to call `setFlowPinned(rowId, true)` but no such function exists — the real helper is `flowPinnedSessionIds.add(id)` + `persistFlowPinnedSessionIds()`. Without the pin, archived picks failed `flowIsVisibleSession` (it gates on `archived && !flowIncludeArchived && !pinnedInFlow`) and the session never rendered; only the `flowNodeParents` write survived, with no visible effect. Switched to the correct API and pin both shapes (`rowId` + `sid`) so `isFlowPinned`'s id-or-session_id lookup hits regardless of which one the row carries.
+- Two flow-board fixes:
+
+1. **Canvas no longer extends forever past content.** Previously the canvas was sized to `max(content + tiny pad, viewport)` — so on a wide viewport with sparse content, the canvas became huge and you had to pan through screens of empty grid to find the next cluster. Now the canvas hugs content + a 5-grid-cell (160px) buffer on each side, and the area past the canvas (the unreachable .flow-board background) gets a faint diagonal-stripe pattern + the canvas itself gets a dashed orange outline so the boundary reads as "this is the edge, can't pan past it".
+
+2. **Node text stays readable when the canvas is zoomed out.** `.flow-world` applies `transform: scale(--flow-zoom)` which shrinks everything linearly with zoom — at 62% the title font dropped to ~8px on-screen and got unreadable. Each node's title / meta / kicker now uses `clamp(base, base / zoom, 2× base)` so the on-screen pixel size stays near the base when zoomed out (and never blows up to comically huge at extreme zoom-outs).
+- Dropping a node on top of another node no longer leaves them overlapping. On pointer-up the drop handler now runs `_flowResolveNodeOverlap` against every non-dragged node — if the dropped position collides with anything, the dragged node is pushed in the cheapest cardinal direction (right / down / left / up) by the minimum needed to clear, with a 4 px enforced gap. Iterates up to 50 times so chained collisions resolve cleanly. Only runs when the drop landed on empty canvas — drops onto a real drop-target (reparent to repo/object, add-to-group-chat) keep their existing semantics.
+- Show Flow repo work items that only exist in the Flow markdown index, even when they have no visible sessions or drafts.
+- Fixed Flow repo/object clicks leaking an empty Files panel into the right sidebar.
+- Attach Flow session nodes to their repo when the session row only reports `session_cwd`/`cwd`.
+- Headless Claude resume/spawn prompts now strip lone UTF-16 surrogates at the final stream-JSON writer, and the regression tests no longer contain literal surrogate escape text that can poison another agent's transcript.
+- Sent messages that the agent never acknowledges no longer vanish silently from the conv view. Earlier, after a 5m15s timeout, the pending `.event.user_text.pending` div was just removed — the user would see their typed text gone and assume it had been delivered. Now the timeout converts the div to a `.not-acknowledged` state with a red border, a "⚠ Not acknowledged by the agent — your message may not have been delivered" label, a **Re-send** button (re-injects via the standard `injectToSession`), and a × to dismiss. The text the user typed is preserved as the bubble's body so they can copy it if needed, even after dismiss.
+- Fixed slash command picker rows so mouse and touch presses select the command instead of leaving the dropdown open.
+- The terminal panel now auto-scrolls reliably as new output arrives. Root: the "is user near the bottom" check ran AFTER the new line was appended to `#termLog`, so `scrollHeight` had already inflated by the just-added height and the threshold (`< 80px from bottom`) was missed by exactly that much. Users who were glued to the bottom saw the autoscroll silently skip. Fix: capture `wasNearBottom` BEFORE the `appendChild`, decide based on that. Scrolling-up-to-read-history still pauses autoscroll — that intentional behavior is unchanged.
+- The terminal panel's "Pick a repo" placeholder is now clickable. Previously the label was passive text — user had no way to actually pick a repo from inside the terminal panel and had to navigate back to the sidebar dropdown. Now the placeholder shows a pointer cursor and click opens the existing repo-picker modal. `openRepoPickerModal` is exposed on `window.cccOpenRepoPicker` so inline `<script>` blocks living outside the main app.js IIFE (like the terminal panel's script) can call it. A new `ccc-repo-changed` CustomEvent fires whenever `setArchiveFolderFilter` changes the active repo so the terminal panel refreshes its cwd display without polling.
+
 ## [4.9.0] - 2026-06-06
 
 ### Added
@@ -1565,7 +1606,8 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v4.9.0...HEAD
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v4.10.0...HEAD
+[4.10.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.10.0
 [4.9.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.9.0
 [4.8.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.8.0
 [4.7.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.7.0

@@ -1,1 +1,0 @@
-Headless Claude resume/spawn prompts now strip lone UTF-16 surrogates at the final stream-JSON writer, and the regression tests no longer contain literal surrogate escape text that can poison another agent's transcript.

@@ -1,1 +1,0 @@
-- Fixed slash command picker rows so mouse and touch presses select the command instead of leaving the dropdown open.
