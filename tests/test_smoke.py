@@ -6019,5 +6019,48 @@ class TestCodexStateWiring(unittest.TestCase):
         self.assertIn("conv-codex-state", css)
 
 
+class TestSpawnReturnAddress(unittest.TestCase):
+    """The 'return address' lets a spawned session report back to its
+    dispatcher on completion. See /api/sessions/spawn report_to field."""
+
+    def setUp(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        self.server = importlib.import_module("server")
+
+    def test_normalize_accepts_canonical_and_aliases(self):
+        sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        for key in ("report_to", "return_to", "reply_to"):
+            val, err = self.server._normalize_return_address({key: sid})
+            self.assertIsNone(err, key)
+            self.assertEqual(val, sid, key)
+
+    def test_normalize_none_when_absent(self):
+        self.assertEqual(self.server._normalize_return_address({}), (None, None))
+
+    def test_normalize_rejects_shell_metachars(self):
+        val, err = self.server._normalize_return_address({"report_to": "x; rm -rf /"})
+        self.assertIsNone(val)
+        self.assertTrue(err)
+
+    def test_normalize_rejects_too_short(self):
+        val, err = self.server._normalize_return_address({"report_to": "abc"})
+        self.assertIsNone(val)
+        self.assertTrue(err)
+
+    def test_wrap_is_noop_without_address(self):
+        self.assertEqual(
+            self.server._wrap_prompt_with_return_address("do x", None), "do x"
+        )
+
+    def test_wrap_embeds_address_and_inject_api(self):
+        sid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        out = self.server._wrap_prompt_with_return_address("do x", sid, port=8090)
+        self.assertIn("do x", out)
+        self.assertIn(sid, out)
+        self.assertIn("/api/inject-input", out)
+        self.assertIn("STATUS", out)
+
+
 if __name__ == "__main__":
     unittest.main()

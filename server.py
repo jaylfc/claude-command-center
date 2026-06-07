@@ -23393,6 +23393,72 @@ def _finalize_spawn_response(resp, entry, ctx, *, wait_for_session_id=True):
     return resp
 
 
+# A "return address" is the dispatching session's UUID. Validate loosely —
+# Claude/Codex/Gemini/Cursor session ids are UUID-ish (hex + dashes), but stay
+# permissive enough for any reasonable engine id. The value lands in prompt
+# text and a curl the spawned agent runs, so reject anything that could break
+# out of either: shell metachars, quotes, whitespace, control chars.
+_RETURN_ADDRESS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,127}$")
+
+
+def _normalize_return_address(payload):
+    """Pull the optional return address from a spawn payload.
+
+    Accepts `report_to` (canonical) and the aliases `return_to` / `reply_to`
+    for ergonomics. Returns `(value_or_None, error_or_None)`.
+    """
+    raw = None
+    for key in ("report_to", "return_to", "reply_to"):
+        v = payload.get(key)
+        if isinstance(v, str) and v.strip():
+            raw = v.strip()
+            break
+    if raw is None:
+        return None, None
+    if not _RETURN_ADDRESS_RE.match(raw):
+        return None, (
+            "report_to must be a session id "
+            "(8-128 chars, letters/digits/_.- only)"
+        )
+    return raw, None
+
+
+def _wrap_prompt_with_return_address(prompt, report_to, port=None):
+    """Append a 'report back when done' footer addressed to `report_to`.
+
+    Engine-agnostic by design: it is plain prompt text instructing the spawned
+    agent to POST one structured completion report to /api/inject-input,
+    targeting the dispatching session. Works identically for claude / codex /
+    cursor / antigravity since none of them need a special channel — they all
+    can run the curl. No-op when `report_to` is falsy.
+    """
+    rid = (report_to or "").strip()
+    if not rid:
+        return prompt
+    p = port or PORT
+    footer = (
+        "\n\n---\n"
+        "## Return address — report back when done\n"
+        f"You were dispatched by another CCC session (id `{rid}`). When this "
+        "task is fully complete — whether it SUCCEEDED or FAILED — send exactly "
+        "ONE completion report back to that session via CCC's inject-input API. "
+        "Run the curl with the network sandbox disabled (localhost IPC):\n\n"
+        "```bash\n"
+        f"curl -s --max-time 30 -X POST \"http://127.0.0.1:{p}/api/inject-input\" \\\n"
+        "  -H \"Content-Type: application/json\" \\\n"
+        f"  -d '{{\"session_id\": \"{rid}\", \"text\": \"<your report>\"}}'\n"
+        "```\n\n"
+        "The report text must contain, in this order:\n"
+        "- STATUS: SUCCEEDED or FAILED\n"
+        "- SUMMARY: 1-3 sentence summary of what you did\n"
+        "- FILES: relevant file paths touched/created (or \"none\")\n"
+        "- REASON: if FAILED, the reason and what blocked you (omit if succeeded)\n\n"
+        "Send the report once, at the very end — not progress updates mid-task. "
+        "Remember to JSON-escape the text (quotes, newlines) so the payload is valid.\n"
+    )
+    return prompt + footer
+
+
 def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, model=None):
     """Spawn a headless Claude Code session and return tracking info.
 
@@ -36037,6 +36103,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             name = (payload.get("name") or "").strip() or None
             engine_raw = payload.get("engine")
             engine, model = _spawn_request_engine_and_model(payload)
+            report_to, report_to_error = _normalize_return_address(payload)
             cwd_raw = payload.get("cwd")
             cwd_input = cwd_raw.strip() if isinstance(cwd_raw, str) else ""
             cwd_resolved = None
@@ -36078,8 +36145,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 }, 400)
             elif cwd_error:
                 self.send_json({"ok": False, "error": f"invalid cwd: {cwd_error}"}, 400)
+            elif report_to_error:
+                self.send_json({"ok": False, "error": report_to_error}, 400)
             else:
                 try:
+                    # Return address: spawned session reports back to its
+                    # dispatcher on completion. No-op when report_to is unset.
+                    prompt = _wrap_prompt_with_return_address(prompt, report_to)
                     spawn_cwd = str(cwd_resolved) if cwd_resolved else None
                     if engine == "codex":
                         result = spawn_session_codex(
@@ -36118,6 +36190,8 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                             model=model,
                         )
                     result.setdefault("engine", engine)
+                    if report_to and isinstance(result, dict):
+                        result["report_to"] = report_to
                     if result.get("code") in (
                         "claude_unavailable",
                         "codex_unavailable",
