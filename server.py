@@ -20260,6 +20260,19 @@ def find_cursor_conversations(
         sid = _cursor_chat_id_from_path(path)
         if not sid:
             continue
+        # One row per session id, chosen by mtime order alone. The same Cursor
+        # session id can appear under more than one project dir — either two
+        # copies of one logical session, or (Cursor reuses ids across
+        # workspaces) two genuinely distinct conversations that collide on the
+        # id. Either way the sidebar/archive must surface a single row. Paths
+        # are sorted newest-first, so register the sid here — before the repo
+        # filter and the tail parse — so the survivor is identical across every
+        # repo view and we never parse a duplicate transcript. Doing the dedup
+        # after the repo filter would let two copies that both match a repo
+        # (e.g. a pinned sid) each fall through into separate rows.
+        if sid in seen_sids:
+            continue
+        seen_sids.add(sid)
         scanned += 1
         try:
             st = path.stat()
@@ -20319,13 +20332,6 @@ def find_cursor_conversations(
         pending_tool = tail.get("pending_tool") if is_live else None
         pending_file = tail.get("pending_file") if is_live else None
         branch = tail.get("tail_branch") or _git_branch_for_cwd(effective_cwd)
-        # One row per session id. Paths are newest-first, so the first
-        # qualifying path for a sid is the freshest one that matches this
-        # repo; any later duplicate (a stale copy under another project dir)
-        # is dropped.
-        if sid in seen_sids:
-            continue
-        seen_sids.add(sid)
         out.append({
             "id": sid,
             "session_id": sid,
