@@ -1242,7 +1242,14 @@
      reveals it when the active pane has a row to describe. */
   .ccc-breadcrumb {
     display: flex; align-items: center; gap: 8px;
-    min-width: 0; max-width: 50%;
+    min-width: 0; max-width: 72%;
+    /* Claim the empty left side of the toolbar. #convStatus (margin-left:auto)
+       used to shove the breadcrumb into the right half, leaving the left
+       blank while category/title truncated to "claud…"/"U…". order:-1 puts
+       the breadcrumb first so that auto-margin pushes the OTHER slots right
+       instead, and the wider cap lets the crammed data breathe. */
+    order: -1;
+    margin-right: auto;
     padding: 2px 8px;
     overflow: hidden;
   }
