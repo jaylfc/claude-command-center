@@ -14203,7 +14203,7 @@
       : 'When CCC last polled these processes';
     el.innerHTML = pill(headOn, stale, stale ? 'headless ⚠' : 'headless', headTitle)
       + pill(termOn, false, 'terminal', termTitle)
-      + (ago ? '<span class="ccc-proc-checked" title="' + escapeHtml(checkedTitle) + '">checked ' + escapeHtml(ago) + '</span>' : '');
+      + (ago ? '<span class="ccc-proc-checked" title="' + escapeHtml(checkedTitle) + '">checked ' + escapeHtml(ago) + (clock ? ' · ' + escapeHtml(clock) : '') + '</span>' : '');
   }
 
   async function postRunCompactForSession(sessionId, source, terminalApp) {
