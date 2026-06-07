@@ -4062,6 +4062,13 @@
           showOpToast('Queued for Codex.');
           setTimeout(refreshConversationList, 1500);
           setTimeout(refreshConversationList, 3500);
+        } else if (data.queued && data.cwd_missing) {
+          // Server queued the message because the session's cwd is
+          // gone (moved / renamed / deleted). Surface that the message
+          // is preserved AND offer to locate the new directory so the
+          // queue can drain.
+          const missing = data.missing_path || '(unknown path)';
+          showOpToast('Queued — session folder is missing (' + missing + '). Restore it or relocate to resume.', 'info');
         } else if (data.queued) {
           showOpToast(compactCommand
             ? 'Queued /compact until the terminal session is idle.'

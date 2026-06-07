@@ -26647,14 +26647,46 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
                 return {"ok": True, "pid": spawn["pid"], "via": "spawn-fifo"}
             if not _spawn_entry_active_tool_child(spawn):
                 _retire_unresponsive_spawn_entry(spawn, terminate=True)
-                return resume_session_headless(session_id, text)
+                return _maybe_queue_on_invalid_cwd(
+                    session_id, text, status, resume_session_headless(session_id, text),
+                )
             return {
                 "ok": False,
                 "pid": spawn["pid"],
                 "via": "spawn-fifo",
                 "error": "session input pipe is busy",
             }
-        return resume_session_headless(session_id, text)
+        return _maybe_queue_on_invalid_cwd(
+            session_id, text, status, resume_session_headless(session_id, text),
+        )
+
+
+def _maybe_queue_on_invalid_cwd(session_id, text, status, result):
+    """If a resume returned invalid_cwd, queue the text so it isn't lost.
+
+    The user's typed message would otherwise vanish into a toast and they'd
+    have to retype after relocating the cwd. Queueing means the moment the
+    user points CCC at the new directory (or restores it on disk), the
+    next inject drains the queue and the message goes through. Adds a
+    note to the response so the client can show a helpful toast.
+    """
+    if not isinstance(result, dict):
+        return result
+    if (result.get("code") or "") != "invalid_cwd":
+        return result
+    if not text:
+        return result
+    queued_status = dict(status or {})
+    queued_status["status"] = queued_status.get("status") or "cwd-missing"
+    queued = _queue_terminal_input(session_id, text, queued_status)
+    queued["cwd_missing"] = True
+    queued["missing_path"] = result.get("path") or ""
+    queued["original_error"] = result.get("error") or "Session cwd is gone"
+    queued["note"] = (
+        "Queued — your message will be sent the moment the directory is "
+        "restored or you point CCC at the new location."
+    )
+    return queued
 
 
 def _set_session_model(session_id, model, context_1m):
