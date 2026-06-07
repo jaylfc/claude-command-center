@@ -503,6 +503,44 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
                 resolved = candidate
             break
 
+    # Bare-name fallback. An inline link like `SYNTHESIS.md` carries only the
+    # basename, but the agent may have created/touched it in a directory the
+    # session visited — not its launch cwd or the repo root. When every
+    # root-joined candidate misses, resolve the bare name against the absolute
+    # file paths this session actually referenced via tool calls ("open the
+    # file in the directory we were really working in"). Authorization is
+    # unchanged: the resolved path still passes the sandbox checks below — a
+    # session-referenced file already satisfies _session_referenced_open_path.
+    # Restricted to slashless bare names so genuine relative paths keep their
+    # explicit root-relative meaning.
+    if not resolved and session_id and target and "/" not in target and not target.startswith("~"):
+        want = os.path.basename(target)
+        try:
+            referenced_paths, _cd_targets = _scan_session_tool_paths(session_id, max_events=2000)
+        except Exception:
+            referenced_paths = []
+        # Newest-referenced first, so the file the agent most recently worked
+        # with wins when several share a basename.
+        for raw in reversed(referenced_paths or []):
+            if not isinstance(raw, str):
+                continue
+            try:
+                normalized = _open_target_path(raw)
+                if not normalized:
+                    continue
+                cand = Path(normalized).expanduser()
+            except (OSError, ValueError, RuntimeError):
+                continue
+            if cand.name != want:
+                continue
+            tried.append(str(cand))
+            if cand.exists():
+                try:
+                    resolved = cand.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    resolved = cand
+                break
+
     if not resolved:
         return {"ok": False, "error": "not found", "tried": tried, "status": 404}
 
