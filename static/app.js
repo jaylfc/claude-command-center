@@ -4010,27 +4010,67 @@
     + "Break a complex message into multiple turns of conversation. "
     + "Do not include the session-state summary block at the end of this reply.";
   let _phoneModePending = null;   // { paneId, convId } while awaiting a reply
-  let _phoneModeTimer = null;
+  let _phoneModeTimer = null;     // 240s safety disarm
+  let _phoneModeSettleTimer = null; // short "transcript settled" debounce
+
+  function _disarmPhoneModeRead() {
+    _phoneModePending = null;
+    if (_phoneModeTimer) { clearTimeout(_phoneModeTimer); _phoneModeTimer = null; }
+    if (_phoneModeSettleTimer) { clearTimeout(_phoneModeSettleTimer); _phoneModeSettleTimer = null; }
+  }
 
   function _armPhoneModeRead(paneId) {
     _phoneModePending = { paneId: paneId, convId: currentConversation };
     if (_phoneModeTimer) clearTimeout(_phoneModeTimer);
+    if (_phoneModeSettleTimer) { clearTimeout(_phoneModeSettleTimer); _phoneModeSettleTimer = null; }
     // Safety disarm: if the turn never completes, don't blurt out a reply
     // minutes later for a session the user has moved on from.
-    _phoneModeTimer = setTimeout(() => { _phoneModePending = null; _phoneModeTimer = null; }, 240000);
+    _phoneModeTimer = setTimeout(() => { _disarmPhoneModeRead(); }, 240000);
+  }
+
+  // Decide whether a streamed/polled event batch contains the assistant's
+  // spoken reply for the turn we're waiting on. Interactive Claude sessions
+  // never emit a `type:"result"` line (that's a `claude -p` headless
+  // artifact) — they stream `assistant` events only — so keying solely on
+  // `result` meant the auto-read never fired for the common case. We accept
+  // EITHER a terminal `result` event (headless / Codex / Gemini) OR an
+  // `assistant` event that actually carries spoken text (a tool-only
+  // assistant turn has no `kind:"text"` block and shouldn't trigger a read).
+  function _batchHasSpeakableReply(events) {
+    if (!Array.isArray(events)) return false;
+    return events.some(e => {
+      if (!e) return false;
+      if (e.type === 'result') return true;
+      if (e.type === 'assistant' && Array.isArray(e.blocks)) {
+        return e.blocks.some(b => b && b.kind === 'text' && String(b.text || '').trim());
+      }
+      return false;
+    });
   }
 
   function _firePhoneModeReadIfDone(events, paneId) {
     if (!_phoneModePending) return;
     if (_phoneModePending.paneId !== paneId || _phoneModePending.convId !== currentConversation) return;
-    // A `result` event marks the end of an agent turn across engines.
-    const done = Array.isArray(events) && events.some(e => e && e.type === 'result');
-    if (!done) return;
+    if (!_batchHasSpeakableReply(events)) return;
+    // A turn streams as multiple assistant batches (text, then tool_use,
+    // then more text). Debounce: each speakable batch (re)starts a short
+    // settle timer; we only read once the transcript has been quiet for
+    // ~900ms, so intermediate streaming renders don't trigger a premature
+    // read of a half-formed reply. The read still fires exactly ONCE
+    // because firing disarms the pending state.
+    if (_phoneModeSettleTimer) clearTimeout(_phoneModeSettleTimer);
     const pend = _phoneModePending;
-    _phoneModePending = null;
-    if (_phoneModeTimer) { clearTimeout(_phoneModeTimer); _phoneModeTimer = null; }
-    // Let the final assistant text settle in the DOM before reading.
-    setTimeout(() => { try { readLastMessageAloud(pend.paneId); } catch (_) {} }, 400);
+    _phoneModeSettleTimer = setTimeout(() => {
+      // Re-check the pending state at fire time — the user may have switched
+      // conversations or a fresh arm may have superseded this one.
+      if (!_phoneModePending
+          || _phoneModePending !== pend
+          || _phoneModePending.convId !== currentConversation) {
+        return;
+      }
+      _disarmPhoneModeRead();
+      try { readLastMessageAloud(pend.paneId); } catch (_) {}
+    }, 900);
   }
 
   async function submitPlus(paneId) {
