@@ -9742,6 +9742,8 @@
     try { if (typeof stopCodexLogPoller === 'function') stopCodexLogPoller(); } catch (_) {}
     try { if (typeof setCurrentSession === 'function') setCurrentSession(null, null, null, false, null); } catch (_) {}
     currentConversation = null;
+    if (typeof ffcUpdateSidebar === 'function') ffcUpdateSidebar(null);
+    if (typeof closeStatusRailFileViewer === 'function') closeStatusRailFileViewer();
     _flowInspectorState = payload;
     hideFlowInspectorInputChrome();
     if (typeof updateSplitInputBar === 'function') updateSplitInputBar();
