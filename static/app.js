@@ -3153,6 +3153,7 @@
   const $convInputBar = document.getElementById('convInputBar');
   const $convInput = document.getElementById('convInput');
   const $convSendBtn = document.getElementById('convSendBtn');
+  const $convSubmitPlusBtn = document.getElementById('convSubmitPlusBtn');
   const $convSteerBtn = document.getElementById('convSteerBtn');
   const $convCompactBtn = document.getElementById('convCompactBtn');
   const $convTtsBtn = document.getElementById('convTtsBtn');
@@ -3998,6 +3999,54 @@
     $input.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
+  // ── Submit+ (phone mode) ─────────────────────────────────────────────
+  // Appends a "reply as if on a phone call" instruction to the typed text,
+  // sends it like a normal message, then — once the reply lands — auto-reads
+  // it aloud. The trailing session-state summary is excluded from the spoken
+  // text (see buildTtsDataFromElements) so the user hears the answer, not the
+  // dashboard's machine-readable footer.
+  const PHONE_MODE_SUFFIX =
+    "\n\nReply as if you're in a phone conversation with the user — response needs to be conversational and short. "
+    + "Break a complex message into multiple turns of conversation. "
+    + "Do not include the session-state summary block at the end of this reply.";
+  let _phoneModePending = null;   // { paneId, convId } while awaiting a reply
+  let _phoneModeTimer = null;
+
+  function _armPhoneModeRead(paneId) {
+    _phoneModePending = { paneId: paneId, convId: currentConversation };
+    if (_phoneModeTimer) clearTimeout(_phoneModeTimer);
+    // Safety disarm: if the turn never completes, don't blurt out a reply
+    // minutes later for a session the user has moved on from.
+    _phoneModeTimer = setTimeout(() => { _phoneModePending = null; _phoneModeTimer = null; }, 240000);
+  }
+
+  function _firePhoneModeReadIfDone(events, paneId) {
+    if (!_phoneModePending) return;
+    if (_phoneModePending.paneId !== paneId || _phoneModePending.convId !== currentConversation) return;
+    // A `result` event marks the end of an agent turn across engines.
+    const done = Array.isArray(events) && events.some(e => e && e.type === 'result');
+    if (!done) return;
+    const pend = _phoneModePending;
+    _phoneModePending = null;
+    if (_phoneModeTimer) { clearTimeout(_phoneModeTimer); _phoneModeTimer = null; }
+    // Let the final assistant text settle in the DOM before reading.
+    setTimeout(() => { try { readLastMessageAloud(pend.paneId); } catch (_) {} }, 400);
+  }
+
+  async function submitPlus(paneId) {
+    paneId = paneId || activePaneId();
+    const _paneEl = document.querySelector(`.conv-pane[data-pane-id="${paneId}"]`);
+    const $input = (_paneEl && _paneEl.querySelector('.conv-input-bar textarea, .conv-input-bar input[type="text"]')) || $convInput;
+    if (!$input) return;
+    const base = ($input.value || '').trim();
+    if (!base) return;
+    // Augment the message, arm the auto-read, then reuse the normal send path
+    // so queueing / echo / engine routing all behave identically.
+    $input.value = base + PHONE_MODE_SUFFIX;
+    _armPhoneModeRead(paneId);
+    await sendToTerminal(paneId, 'send');
+  }
+
   async function sendToTerminal(paneId, mode = 'send') {
     if (paneId) {
       setActivePaneById(paneId);
@@ -4270,10 +4319,13 @@
         acceptNode: function(node) {
           const parent = node.parentElement;
           if (parent && (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE')) return NodeFilter.FILTER_REJECT;
+          // Never read the machine-readable session-state summary card aloud —
+          // it's a dashboard footer, not part of the spoken reply.
+          if (parent && parent.closest && parent.closest('.session-state-block')) return NodeFilter.FILTER_REJECT;
           return NodeFilter.FILTER_ACCEPT;
         }
       }, false);
-      
+
       let node;
       while ((node = walker.nextNode())) {
         const nodeText = node.nodeValue;
@@ -4573,6 +4625,7 @@
 
   if ($convEscBtn) $convEscBtn.addEventListener('click', sendEscToTerminal);
   if ($convSendBtn) $convSendBtn.addEventListener('click', () => sendToTerminal('p1'));
+  if ($convSubmitPlusBtn) $convSubmitPlusBtn.addEventListener('click', () => submitPlus('p1'));
   if ($convSteerBtn) $convSteerBtn.addEventListener('click', () => sendToTerminal('p1', 'steer'));
   if ($convCompactBtn) $convCompactBtn.addEventListener('click', () => compactCurrentSession());
   if ($convTtsBtn) {
@@ -23443,6 +23496,7 @@
     }
     ffcRefreshForCurrent();
     updateSessionOutcomeBanner($view);
+    _firePhoneModeReadIfDone(events, paneId);
     return true;
   }
 

@@ -3905,6 +3905,25 @@
     border-color: var(--border); cursor: not-allowed; opacity: 0.5;
   }
   .conv-input-bar .send-btn svg { display: block; }
+  /* Submit+ — phone-mode send (teal/green to read as "talk", distinct from
+     the accent send button next to it). */
+  .conv-input-bar .submit-plus-btn {
+    width: 32px; height: 32px; flex-shrink: 0;
+    border-radius: 999px; border: 1px solid rgba(63,185,80,0.42); cursor: pointer;
+    background: rgba(63,185,80,0.14); color: var(--green);
+    line-height: 1; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+  }
+  .conv-input-bar .submit-plus-btn:hover {
+    background: rgba(63,185,80,0.22); border-color: rgba(63,185,80,0.70);
+  }
+  .conv-input-bar .submit-plus-btn:active { transform: translateY(1px); }
+  .conv-input-bar .submit-plus-btn:disabled {
+    background: transparent; color: var(--text-muted);
+    border-color: var(--border); cursor: not-allowed; opacity: 0.5;
+  }
+  .conv-input-bar .submit-plus-btn svg { display: block; }
   .conv-input-bar .steer-btn {
     width: 32px; height: 32px; flex-shrink: 0;
     border-radius: 999px; border: 1px solid rgba(210,153,34,0.42); cursor: pointer;
