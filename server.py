@@ -18145,7 +18145,11 @@ def _gemini_chat_paths():
             if not chats.is_dir():
                 continue
             try:
+                # Older Gemini CLI wrote one JSON object per chat (session-*.json);
+                # newer builds write line-delimited logs (session-*.jsonl). Pick up
+                # both so recent sessions don't silently vanish from the board.
                 paths.extend(p for p in chats.glob("session-*.json") if p.is_file())
+                paths.extend(p for p in chats.glob("session-*.jsonl") if p.is_file())
             except OSError:
                 continue
     except OSError:
@@ -18159,11 +18163,57 @@ def _gemini_chat_paths():
     return paths
 
 
-def _load_gemini_chat(path):
-    try:
-        data = json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError, ValueError):
+def _parse_gemini_jsonl(text):
+    """Reconstruct the legacy single-object chat shape from a line-delimited
+    Gemini chat log.
+
+    Newer Gemini CLI writes session-*.jsonl: the first line is the session
+    header (sessionId/projectHash/lastUpdated/...), `{"$set": {...}}` lines patch
+    header fields incrementally (e.g. lastUpdated), and the remaining lines are
+    message records. Downstream code expects the old shape — a dict with a
+    top-level `messages` list — so normalise to that here."""
+    header = None
+    messages = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        patch = obj.get("$set")
+        if isinstance(patch, dict):
+            if header is not None:
+                header.update(patch)
+            continue
+        if header is None and obj.get("sessionId"):
+            header = obj
+            continue
+        messages.append(obj)
+    if header is None:
         return None
+    header = dict(header)
+    header["messages"] = messages
+    return header
+
+
+def _load_gemini_chat(path):
+    p = Path(path)
+    try:
+        text = p.read_text()
+    except OSError:
+        return None
+    if p.suffix == ".jsonl":
+        return _parse_gemini_jsonl(text)
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # Some builds emit line-delimited chats under a .json-ish name; fall
+        # back to JSONL parsing before giving up.
+        data = _parse_gemini_jsonl(text)
     return data if isinstance(data, dict) else None
 
 
