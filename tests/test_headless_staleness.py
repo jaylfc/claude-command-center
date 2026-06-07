@@ -1,0 +1,227 @@
+"""GH #71 — stale Claude headless detection / retirement.
+
+Unit-level coverage of the staleness machinery without spawning real
+`claude` processes: we stage a fake transcript (.jsonl) and a fake headless
+stdout log on disk, build a spawn-entry dict shaped like the real ones, and
+drive the helper functions directly.
+
+The hard contracts under test:
+  * A lone headless that only ITSELF advances the transcript is never flagged
+    stale (no-regression: the no-concurrency inject path must be unchanged).
+  * A transcript advanced by an EXTERNAL writer (no new headless result) is
+    flagged stale.
+  * A busy headless (active tool child) is never retired.
+  * The use-time inject path retires + respawns on stale, and is untouched
+    when there is no concurrency.
+"""
+import json
+import sys
+from unittest import mock
+
+import pytest
+
+
+@pytest.fixture()
+def server_mod():
+    sys.modules.pop("server", None)
+    import server
+    return server
+
+
+def _write_jsonl(path, events):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for ev in events:
+            f.write(json.dumps(ev) + "\n")
+
+
+def _event(uuid):
+    return {"type": "assistant", "uuid": uuid, "sessionId": "SID", "entrypoint": "sdk-cli"}
+
+
+def _result_lines(n):
+    return "".join(
+        json.dumps({"type": "result", "subtype": "success", "session_id": "SID", "num_turns": i + 1}) + "\n"
+        for i in range(n)
+    )
+
+
+def _stage(server_mod, tmp_path, transcript_events, hl_result_count):
+    """Stage a transcript + headless log; return (sid, entry)."""
+    sid = "11111111-2222-3333-4444-555555555555"
+    projects = tmp_path / "projects"
+    enc = "-fake-cwd"
+    transcript = projects / enc / (sid + ".jsonl")
+    _write_jsonl(transcript, transcript_events)
+    log = tmp_path / "hl.log"
+    log.write_text(_result_lines(hl_result_count))
+    server_mod.PROJECTS_ROOT = projects
+    entry = {
+        "pid": 999999,
+        "engine": "claude",
+        "resumed_sid": sid,
+        "log": str(log),
+        "fifo": None,
+        "stdin_fd": None,
+    }
+    return sid, entry, transcript, log
+
+
+def test_no_watermark_is_not_stale(server_mod, tmp_path):
+    sid, entry, _t, _l = _stage(server_mod, tmp_path, [_event("a")], 0)
+    # No watermark recorded yet → never stale (first use baselines it).
+    assert server_mod._headless_spawn_is_stale(entry, sid) is False
+
+
+def test_lone_headless_own_response_not_stale(server_mod, tmp_path):
+    """No-regression: the headless's OWN turn advancing the transcript must
+    not be mistaken for an external writer."""
+    sid, entry, transcript, log = _stage(server_mod, tmp_path, [_event("a")], 0)
+    # CCC injects → record watermark (size/uuid of [a], result_count=0).
+    server_mod._update_spawn_transcript_watermark(entry, sid)
+    # The headless responds: transcript grows AND its stdout log gains a result.
+    _write_jsonl(transcript, [_event("a"), _event("b")])
+    log.write_text(_result_lines(1))
+    # Tail moved but result_count rose → attributed to the headless → NOT stale.
+    assert server_mod._headless_spawn_is_stale(entry, sid) is False
+    # And the watermark re-baselined to the new tail.
+    assert entry["_transcript_watermark"][2] == 1
+
+
+def test_external_writer_is_stale(server_mod, tmp_path):
+    """A transcript advance with NO new headless result == external writer."""
+    sid, entry, transcript, log = _stage(server_mod, tmp_path, [_event("a")], 1)
+    log.write_text(_result_lines(1))
+    server_mod._update_spawn_transcript_watermark(entry, sid)  # baseline at result_count=1
+    # External terminal appends a turn; headless produced NO new result.
+    _write_jsonl(transcript, [_event("a"), _event("ext1"), _event("ext2")])
+    assert server_mod._headless_spawn_is_stale(entry, sid) is True
+
+
+def test_no_change_not_stale(server_mod, tmp_path):
+    sid, entry, _t, _l = _stage(server_mod, tmp_path, [_event("a")], 0)
+    server_mod._update_spawn_transcript_watermark(entry, sid)
+    assert server_mod._headless_spawn_is_stale(entry, sid) is False
+
+
+def test_retire_idle_helper_skips_busy(server_mod, tmp_path):
+    sid, entry, _t, _l = _stage(server_mod, tmp_path, [_event("a")], 0)
+    with mock.patch.object(server_mod, "_detect_session_engine", return_value="claude"), \
+         mock.patch.object(server_mod, "_find_live_spawn_entry_for_session", return_value=entry), \
+         mock.patch.object(server_mod, "_spawn_entry_active_tool_child", return_value={"pid": 1}), \
+         mock.patch.object(server_mod, "_retire_unresponsive_spawn_entry") as retire:
+        res = server_mod._retire_idle_headless_for_session(sid)
+    assert res["retired"] is False
+    assert res.get("reason") == "busy"
+    retire.assert_not_called()
+
+
+def test_retire_idle_helper_retires_idle(server_mod, tmp_path):
+    sid, entry, _t, _l = _stage(server_mod, tmp_path, [_event("a")], 0)
+    with mock.patch.object(server_mod, "_detect_session_engine", return_value="claude"), \
+         mock.patch.object(server_mod, "_find_live_spawn_entry_for_session", return_value=entry), \
+         mock.patch.object(server_mod, "_spawn_entry_active_tool_child", return_value=None), \
+         mock.patch.object(server_mod, "_retire_unresponsive_spawn_entry") as retire:
+        res = server_mod._retire_idle_headless_for_session(sid)
+    assert res["retired"] is True
+    assert res["pid"] == 999999
+    retire.assert_called_once()
+
+
+def test_retire_idle_helper_skips_non_claude(server_mod, tmp_path):
+    sid, entry, _t, _l = _stage(server_mod, tmp_path, [_event("a")], 0)
+    with mock.patch.object(server_mod, "_detect_session_engine", return_value="codex"), \
+         mock.patch.object(server_mod, "_retire_unresponsive_spawn_entry") as retire:
+        res = server_mod._retire_idle_headless_for_session(sid)
+    assert res["retired"] is False
+    retire.assert_not_called()
+
+
+def test_inject_no_concurrency_writes_fifo_unchanged(server_mod, tmp_path):
+    """No concurrency: a lone idle headless inject must behave exactly as
+    before — a single FIFO write, no retire, no respawn."""
+    sid, entry, _t, _l = _stage(server_mod, tmp_path, [_event("a")], 0)
+    # Give it a baseline watermark so the stale-check runs (and returns False).
+    server_mod._update_spawn_transcript_watermark(entry, sid)
+    status = {"live": False, "tty": None, "status": None}
+    with mock.patch.object(server_mod, "find_session_cwd", return_value="/fake/cwd"), \
+         mock.patch.object(server_mod, "session_live_status", return_value=status), \
+         mock.patch.object(server_mod, "_is_codex_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_cursor_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_gemini_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_antigravity_session", return_value=False), \
+         mock.patch.object(server_mod, "_find_live_spawn_entry_for_session", return_value=entry), \
+         mock.patch.object(server_mod, "_terminal_input_queue_has_pending", return_value=False), \
+         mock.patch.object(server_mod, "_spawn_entry_active_tool_child", return_value=None), \
+         mock.patch.object(server_mod, "_pending_ask_user_question_for_session", return_value=False), \
+         mock.patch.object(server_mod, "_write_stream_json_user_message", return_value=True) as wr, \
+         mock.patch.object(server_mod, "_retire_unresponsive_spawn_entry") as retire, \
+         mock.patch.object(server_mod, "resume_session_headless") as respawn:
+        res = server_mod._inject_text_into_session(sid, "hello")
+    assert res["ok"] is True
+    assert res["via"] == "spawn-fifo"
+    wr.assert_called_once()
+    retire.assert_not_called()
+    respawn.assert_not_called()
+
+
+def test_inject_stale_retires_and_respawns(server_mod, tmp_path):
+    """Use-time staleness: an external writer advanced the transcript → the
+    headless is retired and a fresh resume handles the text."""
+    sid, entry, transcript, log = _stage(server_mod, tmp_path, [_event("a")], 1)
+    log.write_text(_result_lines(1))
+    server_mod._update_spawn_transcript_watermark(entry, sid)
+    # External writer appends, no new headless result → stale.
+    _write_jsonl(transcript, [_event("a"), _event("ext1")])
+    status = {"live": False, "tty": None, "status": None}
+    with mock.patch.object(server_mod, "find_session_cwd", return_value="/fake/cwd"), \
+         mock.patch.object(server_mod, "session_live_status", return_value=status), \
+         mock.patch.object(server_mod, "_is_codex_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_cursor_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_gemini_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_antigravity_session", return_value=False), \
+         mock.patch.object(server_mod, "_find_live_spawn_entry_for_session", return_value=entry), \
+         mock.patch.object(server_mod, "_terminal_input_queue_has_pending", return_value=False), \
+         mock.patch.object(server_mod, "_spawn_entry_active_tool_child", return_value=None), \
+         mock.patch.object(server_mod, "_pending_ask_user_question_for_session", return_value=False), \
+         mock.patch.object(server_mod, "_write_stream_json_user_message", return_value=True) as wr, \
+         mock.patch.object(server_mod, "_retire_unresponsive_spawn_entry") as retire, \
+         mock.patch.object(server_mod, "resume_session_headless",
+                           return_value={"ok": True, "resumed": True}) as respawn:
+        res = server_mod._inject_text_into_session(sid, "hello")
+    # Stale path: retired + respawned, no FIFO write to the stale headless.
+    retire.assert_called_once()
+    respawn.assert_called_once()
+    wr.assert_not_called()
+    assert res.get("resumed") is True
+
+
+def test_inject_busy_headless_never_retired_even_if_tail_moved(server_mod, tmp_path):
+    """Safety: a busy headless (active tool child) is never retired by the
+    use-time check, even if the transcript looks advanced."""
+    sid, entry, transcript, log = _stage(server_mod, tmp_path, [_event("a")], 1)
+    log.write_text(_result_lines(1))
+    server_mod._update_spawn_transcript_watermark(entry, sid)
+    _write_jsonl(transcript, [_event("a"), _event("ext1")])
+    status = {"live": False, "tty": None, "status": None}
+    # active_child truthy at the moment of the guard → busy → queue, not retire.
+    with mock.patch.object(server_mod, "find_session_cwd", return_value="/fake/cwd"), \
+         mock.patch.object(server_mod, "session_live_status", return_value=status), \
+         mock.patch.object(server_mod, "_is_codex_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_cursor_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_gemini_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_antigravity_session", return_value=False), \
+         mock.patch.object(server_mod, "_find_live_spawn_entry_for_session", return_value=entry), \
+         mock.patch.object(server_mod, "_terminal_input_queue_has_pending", return_value=False), \
+         mock.patch.object(server_mod, "_spawn_entry_active_tool_child",
+                           return_value={"pid": 4242}), \
+         mock.patch.object(server_mod, "_pending_ask_user_question_for_session", return_value=False), \
+         mock.patch.object(server_mod, "_queue_terminal_input",
+                           return_value={"ok": True, "queued": True}) as q, \
+         mock.patch.object(server_mod, "_retire_unresponsive_spawn_entry") as retire, \
+         mock.patch.object(server_mod, "resume_session_headless") as respawn:
+        res = server_mod._inject_text_into_session(sid, "hello")
+    retire.assert_not_called()
+    respawn.assert_not_called()
+    q.assert_called_once()
+    assert res.get("queued") is True

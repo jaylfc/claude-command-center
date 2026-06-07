@@ -9096,7 +9096,16 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
         subprocess.Popen(["osascript", "-e", script], stdout=lf, stderr=lf)
     except (FileNotFoundError, OSError) as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "terminal_app": target, "command": command}
+    result = {"ok": True, "terminal_app": target, "command": command}
+    # GH #71 (mechanism 2) — the terminal we just opened (`claude --resume`)
+    # becomes the live process driving this session; a previously-spawned idle
+    # headless is now a stale fallback. Retire it right here so CCC won't route
+    # to it after the terminal closes. Claude-only and never a busy headless.
+    if not is_non_claude_engine:
+        retired = _retire_idle_headless_for_session(session_id, reason="launch-terminal")
+        if retired.get("retired"):
+            result["retired_headless_pid"] = retired.get("pid")
+    return result
 
 
 def inject_input_via_keystroke(tty, terminal_app, text, submit_key="return"):
@@ -23877,6 +23886,299 @@ def _find_live_spawn_entry_for_session(session_id):
     return None
 
 
+# ── Headless staleness detection (GH #71) ─────────────────────────────────────
+#
+# A live `claude` process runs off in-memory state loaded at resume and NEVER
+# re-reads the transcript from disk. So a CCC-spawned persistent headless goes
+# stale the moment a *different* writer (a human terminal, or any other
+# `claude --resume`) appends a turn to the shared append-only `.jsonl`. If CCC
+# then keeps writing to that stale headless, it answers from frozen memory —
+# an effective rollback (GH #71 / scratch C3).
+#
+# Staleness signal — why (size_bytes, last_event_uuid) of the transcript tail,
+# attributed via the headless's own stdout result-count:
+# I verified empirically (2026-06-07, claude 2.1.168) that the on-disk events
+# carry NO field that identifies the writing process. A separate
+# `claude --resume <sid> -p` writes the SAME `sessionId` and the SAME
+# `entrypoint` ("sdk-cli") as our own headless — identical on disk. The
+# headless's own stdout-log event uuids also do NOT match the transcript uuids,
+# so cross-referencing the log uuids is unreliable too. The robust signal is:
+#   1. transcript tail = (byte size, last real event uuid), and
+#   2. the headless's OWN stdout log emits one `result` event per turn it
+#      completes — a reliable, monotone count of turns THIS headless produced.
+# We watermark the transcript tail together with the headless's result-count.
+# At the next inject we recompute both: if the headless's result-count grew,
+# the tail moved because of the headless's OWN response → refresh the watermark
+# (NOT stale). If after accounting for the headless's own turns the tail STILL
+# differs from the watermark → a *different* writer (terminal / other resume)
+# appended → STALE. This attribution is what keeps the no-concurrency path from
+# false-positiving: a lone headless's own delayed response is recognised as its
+# own work, not mistaken for an external writer.
+#
+# Correctness over precision: a fresh `claude --resume` always reads current
+# disk, so retire+respawn is ALWAYS correct. When uncertain we prefer to
+# retire — the only cost is an unnecessary respawn, never a rollback.
+
+
+def _headless_log_result_count(entry):
+    """Count `result` events in a Claude headless's own stdout log.
+
+    Each completed turn emits exactly one stream-json {"type":"result"} line,
+    so this is a monotone count of turns THIS headless produced — the basis
+    for attributing transcript growth to the headless itself vs an external
+    writer. Returns 0 if the log can't be read.
+    """
+    if not isinstance(entry, dict):
+        return 0
+    log = entry.get("log")
+    if not log:
+        return 0
+    count = 0
+    try:
+        with open(log, "rb") as f:
+            for raw in f:
+                # Cheap pre-filter before json.loads on every line.
+                if b'"type":"result"' not in raw and b'"type": "result"' not in raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if ev.get("type") == "result":
+                    count += 1
+    except OSError:
+        return 0
+    return count
+
+
+def _transcript_tail_signature(session_id):
+    """Return (size_bytes, last_event_uuid) for a session's transcript.
+
+    last_event_uuid is the `uuid` of the last JSONL event that has one
+    (some trailer events like last-prompt/mode have uuid=None — we skip
+    those so the signature tracks real conversation events). Returns
+    (None, None) if the transcript can't be read.
+    """
+    path = _find_session_jsonl(session_id)
+    if path is None:
+        return (None, None)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return (None, None)
+    last_uuid = None
+    try:
+        # Read only the tail; transcripts can be large. 64 KiB comfortably
+        # covers several events even with big tool payloads.
+        with open(path, "rb") as f:
+            if size > 65536:
+                f.seek(size - 65536)
+                f.readline()  # discard partial first line
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                u = ev.get("uuid")
+                if u:
+                    last_uuid = u
+    except OSError:
+        return (size, None)
+    return (size, last_uuid)
+
+
+def _spawn_entry_session_id(entry):
+    """Best-effort sessionId a Claude spawn entry is driving.
+
+    For a `claude --resume` spawn that's `resumed_sid`; for a fresh spawn
+    it's the sid minted in the log header. Returns None if unknown.
+    """
+    if not isinstance(entry, dict):
+        return None
+    sid = entry.get("resumed_sid")
+    if sid:
+        return sid
+    log = entry.get("log")
+    if log:
+        ids = _log_session_ids(log)
+        if len(ids) == 1:
+            return next(iter(ids))
+    return None
+
+
+def _update_spawn_transcript_watermark(entry, session_id=None):
+    """Snapshot the transcript tail + the headless's own result-count.
+
+    Call when CCC drives the headless. The pair stored on the entry under
+    `_transcript_watermark` = (size, last_uuid, result_count) lets the next
+    inject distinguish growth produced by THIS headless (result_count rose)
+    from growth produced by an external writer.
+    """
+    if not isinstance(entry, dict):
+        return
+    sid = session_id or _spawn_entry_session_id(entry)
+    if not sid:
+        return
+    size, last_uuid = _transcript_tail_signature(sid)
+    entry["_transcript_watermark"] = (size, last_uuid, _headless_log_result_count(entry))
+
+
+def _headless_spawn_is_stale(entry, session_id=None):
+    """True if a writer OTHER than this headless advanced the transcript.
+
+    Compares the current transcript tail against the watermark recorded when
+    CCC last drove this headless. Growth attributable to the headless's own
+    turns (its stdout result-count rose since the watermark) is NOT stale —
+    we refresh the watermark in place and return False. Any *remaining*
+    advance (tail moved with no new headless result) means a different writer
+    appended → stale.
+
+    Returns False (not stale) when there's no watermark yet (first use), the
+    transcript can't be read, or the tail matches. Claude-only by
+    construction (callers gate on engine == "claude").
+    """
+    if not isinstance(entry, dict):
+        return False
+    watermark = entry.get("_transcript_watermark")
+    if not watermark:
+        return False
+    sid = session_id or _spawn_entry_session_id(entry)
+    if not sid:
+        return False
+    cur_size, cur_uuid = _transcript_tail_signature(sid)
+    if cur_size is None:
+        return False
+    prev_size, prev_uuid, prev_results = watermark
+    if prev_size is None:
+        return False
+    tail_moved = (cur_size != prev_size) or (cur_uuid != prev_uuid)
+    if not tail_moved:
+        return False
+    # Tail moved. Did THIS headless produce a new turn since the watermark?
+    cur_results = _headless_log_result_count(entry)
+    if cur_results > prev_results:
+        # Growth is (at least partly) the headless's own response landing on
+        # disk after the watermark was taken. Re-baseline to the current tail
+        # and treat as current — a lone, busy-then-idle headless is the
+        # common no-concurrency case and must not be retired here.
+        entry["_transcript_watermark"] = (cur_size, cur_uuid, cur_results)
+        return False
+    # Tail advanced with no new headless result → an external writer is ahead
+    # of the headless's in-memory state.
+    return True
+
+
+def _retire_idle_headless_for_session(session_id, *, reason=""):
+    """Retire a CCC-spawned IDLE Claude headless for `session_id` (GH #71).
+
+    Used when a terminal takes over a session (mechanism 2 on launch, and
+    mechanism 5 in the background watcher). Safety: only Claude engine, and
+    NEVER a busy headless — an active tool child means it's mid-turn, so we
+    leave it alone (killing real work is worse than a transient stale read,
+    which the use-time check (4) will catch on the next inject anyway).
+
+    Returns a dict {retired: bool, pid?, reason?}.
+    """
+    if not session_id:
+        return {"retired": False}
+    if _detect_session_engine(session_id) != "claude":
+        return {"retired": False}
+    spawn = _find_live_spawn_entry_for_session(session_id)
+    if spawn is None or spawn.get("engine") != "claude":
+        return {"retired": False}
+    # Never retire a busy headless (mid-turn / running a tool).
+    if _spawn_entry_active_tool_child(spawn):
+        return {"retired": False, "reason": "busy"}
+    pid = spawn.get("pid")
+    _retire_unresponsive_spawn_entry(spawn, terminate=True)
+    return {"retired": True, "pid": pid, "reason": reason or "terminal-takeover"}
+
+
+def _session_has_live_terminal(session_id, exclude_pid=None):
+    """True if a live interactive `claude` (a real TTY) exists for `session_id`,
+    other than `exclude_pid` (the headless's own pid).
+
+    Reads Claude's per-process registry files directly (rather than
+    `_load_session_registry`, which collapses a C3 concurrent pair to a single
+    pid) so we can see a terminal that coexists with our headless. A registry
+    entry counts as a terminal only if its pid is a live `claude` with a TTY.
+    """
+    if not session_id:
+        return False
+    if not SESSIONS_REGISTRY.is_dir():
+        return False
+    try:
+        session_files = list(SESSIONS_REGISTRY.iterdir())
+    except OSError:
+        return False
+    try:
+        exclude_pid = int(exclude_pid) if exclude_pid is not None else None
+    except (TypeError, ValueError):
+        exclude_pid = None
+    for f in session_files:
+        if not f.name.endswith(".json") or not f.is_file():
+            continue
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("sessionId") != session_id:
+            continue
+        try:
+            pid = int(data.get("pid"))
+        except (TypeError, ValueError):
+            continue
+        if exclude_pid is not None and pid == exclude_pid:
+            continue
+        if not _pid_is_engine_process(pid, "claude"):
+            continue
+        if _process_tty(pid):
+            return True
+    return False
+
+
+def _start_headless_staleness_watcher() -> None:
+    """GH #71 (mechanism 5) — always-on server-side reaper.
+
+    Every ~8s, for each CCC-spawned live Claude headless that now shares its
+    session with a live terminal (TTY) and is idle, retire the headless. This
+    runs regardless of any open dashboard, so a stale ~500MB headless doesn't
+    linger after a human opens a terminal on the same session. Busy headless
+    (mid-turn) are never retired — that's the hard safety rule.
+    """
+    def _watcher():
+        while True:
+            time.sleep(8)
+            try:
+                # Snapshot: only live Claude headless spawns.
+                entries = [
+                    s for s in list(_spawned_sessions)
+                    if isinstance(s, dict) and s.get("engine") == "claude"
+                ]
+            except Exception:
+                continue
+            for entry in entries:
+                try:
+                    if _poll_spawn_entry(entry) is not None:
+                        continue  # already exited
+                    sid = _spawn_entry_session_id(entry)
+                    if not sid:
+                        continue
+                    if not _session_has_live_terminal(sid, exclude_pid=entry.get("pid")):
+                        continue
+                    # A terminal is driving this session. Retire the idle
+                    # headless (the helper enforces Claude-only + not-busy).
+                    _retire_idle_headless_for_session(sid, reason="watcher-terminal-takeover")
+                except Exception:
+                    continue
+    threading.Thread(
+        target=_watcher, daemon=True, name="headless-staleness-watcher"
+    ).start()
+
+
 def resume_session_headless(session_id, text):
     """Resume a dormant session headlessly (`claude --resume`) and send text.
 
@@ -23997,6 +24299,12 @@ def resume_session_headless(session_id, text):
             "resumed": True,
         }
     _spawned_sessions.append(entry)
+    # GH #71 — baseline the staleness watermark to the transcript as it stands
+    # at fresh-resume time. This resume just read current disk, so the tail is
+    # current; any later advance with no new headless turn means an external
+    # writer took over. result_count starts at 0 (the initial prompt's response
+    # hasn't been written yet — the next inject's check will attribute it).
+    _update_spawn_transcript_watermark(entry, session_id)
     _record_spawn_to_registry(
         pid=proc.pid,
         name=entry["name"],
@@ -26316,8 +26624,29 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
                     if active_child:
                         queued_status["active_child_pid"] = active_child.get("pid")
                     return _queue_terminal_input(session_id, text, queued_status)
+            # GH #71 — use-time staleness check (Claude headless only). If the
+            # transcript advanced past what this headless last produced, a
+            # different writer (a terminal, or another `claude --resume`) drove
+            # the session — our headless's in-memory state is behind disk.
+            # Writing to it now would answer from frozen memory (the "rollback").
+            # Retire the stale headless and route through a fresh resume, which
+            # reads current disk. Guarded so we NEVER retire a busy headless
+            # (an active tool child means it's mid-turn): a fresh resume is
+            # always correct, so we only ever risk an unnecessary respawn.
+            if (
+                spawn.get("engine") == "claude"
+                and not _spawn_entry_active_tool_child(spawn)
+                and _headless_spawn_is_stale(spawn, session_id)
+            ):
+                _retire_unresponsive_spawn_entry(spawn, terminate=True)
+                return resume_session_headless(session_id, text)
             ok = _write_stream_json_user_message(spawn, text)
             if ok:
+                if spawn.get("engine") == "claude":
+                    # Record where the transcript stands now that this headless
+                    # has been driven, so the next inject can detect an
+                    # external writer that arrived in between.
+                    _update_spawn_transcript_watermark(spawn, session_id)
                 return {"ok": True, "pid": spawn["pid"], "via": "spawn-fifo"}
             if not _spawn_entry_active_tool_child(spawn):
                 _retire_unresponsive_spawn_entry(spawn, terminate=True)
@@ -38840,6 +39169,10 @@ def main():
     # Recover in-progress group-chat coordinations and start background watcher.
     _start_coordination_watcher()
     _start_resume_queue_watcher()
+    # GH #71 (mechanism 5) — always-on reaper for stale Claude headless agents
+    # whose session has been taken over by a live terminal. Runs regardless of
+    # any open dashboard so the ~500MB stale process doesn't linger.
+    _start_headless_staleness_watcher()
     print()
     try:
         server.serve_forever()
