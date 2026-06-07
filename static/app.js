@@ -14490,6 +14490,21 @@
     const el = document.querySelector('[data-role="ccc-breadcrumb-proc"]');
     if (!el) return;
     const ls = liveStatus || {};
+    const pill0 = (on, warn, label, title) =>
+      '<span class="ccc-proc-pill ' + (on ? (warn ? 'is-stale' : 'is-on') : 'is-off') + '"'
+      + ' title="' + escapeHtml(title) + '">'
+      + '<span class="ccc-proc-dot"></span>' + escapeHtml(label) + '</span>';
+    // Codex sessions reuse this breadcrumb slot for app-server/exec status
+    // (moved up from the input-hint footer). app-server = CCC drives Codex via
+    // its JSON-RPC app-server; exec = one-shot fallback.
+    if (currentSession && currentSession.source === 'codex') {
+      const appLive = !!ls.codexAppServer;
+      el.innerHTML = pill0(appLive, false, appLive ? 'app-server' : 'exec',
+        appLive
+          ? 'CCC is driving this Codex session via its app-server (JSON-RPC); /compact and follow-ups append to the loaded thread.'
+          : 'No live CCC Codex app-server; Codex actions fall back to one-shot exec until one starts.');
+      return;
+    }
     const headOn = !!ls.headlessPresent;
     const stale = headOn && !!ls.headlessStale;
     const termOn = !!ls.terminalPresent;
@@ -18050,7 +18065,7 @@
         // last checked. (The Compact button lives in the input box now.) Filled
         // imperatively by updateConvProcessIndicator() so the "checked Xs ago"
         // label stays fresh between full breadcrumb rebuilds. Claude-only.
-        const procSlot = (currentSession && isClaudeSource(currentSession.source))
+        const procSlot = (currentSession && (isClaudeSource(currentSession.source) || currentSession.source === 'codex'))
           ? '<span class="ccc-breadcrumb-proc" data-role="ccc-breadcrumb-proc"></span>'
           : '';
         breadcrumbEl.innerHTML = ''
