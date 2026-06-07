@@ -1179,8 +1179,13 @@ class TestRepoContextHelpers(unittest.TestCase):
     def setUp(self):
         self.tmp_home = tempfile.mkdtemp(prefix="ccc-repo-context-home-")
         self._prev_home = os.environ.get("HOME")
+        self._prev_ux_fixes_queue_file = os.environ.get("UX_FIXES_QUEUE_FILE")
         os.environ["HOME"] = str(pathlib.Path(self.tmp_home).resolve())
-        for mod in ("server", "morning", "morning_store"):
+        self.ux_fixes_queue_file = pathlib.Path(
+            self.tmp_home, ".claude", "command-center", "ux-fixes-queue.json"
+        ).resolve()
+        os.environ["UX_FIXES_QUEUE_FILE"] = str(self.ux_fixes_queue_file)
+        for mod in ("server", "morning", "morning_store", "ux_fixes_queue"):
             sys.modules.pop(mod, None)
         self.server = importlib.import_module("server")
         self.repo = pathlib.Path(self.tmp_home, "demo-repo").resolve()
@@ -1192,12 +1197,25 @@ class TestRepoContextHelpers(unittest.TestCase):
             os.environ.pop("HOME", None)
         else:
             os.environ["HOME"] = self._prev_home
-        for mod in ("server", "morning", "morning_store"):
+        if self._prev_ux_fixes_queue_file is None:
+            os.environ.pop("UX_FIXES_QUEUE_FILE", None)
+        else:
+            os.environ["UX_FIXES_QUEUE_FILE"] = self._prev_ux_fixes_queue_file
+        for mod in ("server", "morning", "morning_store", "ux_fixes_queue"):
             sys.modules.pop(mod, None)
         shutil.rmtree(self.tmp_home, ignore_errors=True)
 
     def test_valid_repo_path_is_accepted(self):
         self.assertEqual(self.server.resolve_repo_path(str(self.repo)), str(self.repo))
+
+    def test_ux_fixes_queue_file_is_isolated_to_test_home(self):
+        self.assertEqual(
+            self.server.ux_fixes_queue.QUEUE_FILE,
+            self.ux_fixes_queue_file,
+        )
+        result = self.server.enqueue_annotation_ux_fixes_queue("Annotation: isolated")
+        self.assertTrue(result["ok"])
+        self.assertTrue(self.ux_fixes_queue_file.exists())
 
     def test_repo_path_with_plus_resolves_when_query_decoded_to_space(self):
         """A repo with `+` in its name arrives as a space via URL query-string
@@ -1774,7 +1792,10 @@ class TestRepoContextHelpers(unittest.TestCase):
                 "_inject_text_into_session",
                 return_value={"ok": True, "via": "spawn-fifo"},
             ) as inject, mock.patch.object(self.server, "spawn_session") as spawn:
-                result = self.server.enqueue_annotation_ux_fixes_queue("Annotation: bad pill")
+                result = self.server.enqueue_annotation_ux_fixes_queue(
+                    "Annotation: bad pill",
+                    inject=True,
+                )
         finally:
             self.server.CCC_ROOT = old_root
 
@@ -1800,7 +1821,10 @@ class TestRepoContextHelpers(unittest.TestCase):
                 "spawn_session",
                 return_value={"ok": True, "pid": 123, "log": str(log_path)},
             ) as spawn:
-                result = self.server.enqueue_annotation_ux_fixes_queue("Annotation: bad pill")
+                result = self.server.enqueue_annotation_ux_fixes_queue(
+                    "Annotation: bad pill",
+                    inject=True,
+                )
         finally:
             self.server.CCC_ROOT = old_root
 
