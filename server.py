@@ -20161,6 +20161,17 @@ def find_cursor_conversations(
     paths = _cursor_transcript_paths()
     if not paths:
         return []
+    # The same Cursor session id can appear under more than one project dir
+    # (e.g. a numeric workspace id AND a path-slug dir each hold an
+    # agent-transcripts/<sid>/<sid>.jsonl). Without dedup the list shows the
+    # user two identical "Cursor session" rows for one session — and both open
+    # the same transcript. Scan newest-first and keep one row per sid (see
+    # seen_sids below), mirroring _cursor_transcript_path()'s newest-mtime
+    # pick so the list and the opened transcript never disagree.
+    try:
+        paths = sorted(paths, key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        pass
     repo_path_obj = None
     if repo_only:
         repo_path = resolve_repo_path(repo_path)
@@ -20192,6 +20203,7 @@ def find_cursor_conversations(
     git_top_cache = {}
     out = []
     scanned = 0
+    seen_sids = set()
     for path in paths:
         if limit and scanned >= int(limit):
             break
@@ -20257,6 +20269,13 @@ def find_cursor_conversations(
         pending_tool = tail.get("pending_tool") if is_live else None
         pending_file = tail.get("pending_file") if is_live else None
         branch = tail.get("tail_branch") or _git_branch_for_cwd(effective_cwd)
+        # One row per session id. Paths are newest-first, so the first
+        # qualifying path for a sid is the freshest one that matches this
+        # repo; any later duplicate (a stale copy under another project dir)
+        # is dropped.
+        if sid in seen_sids:
+            continue
+        seen_sids.add(sid)
         out.append({
             "id": sid,
             "session_id": sid,
