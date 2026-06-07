@@ -1611,7 +1611,12 @@ class TestRepoContextHelpers(unittest.TestCase):
         inject.assert_not_called()
         write.assert_not_called()
 
-    def test_compact_live_tty_plus_headless_spawn_rejects_before_keystroke(self):
+    def test_compact_live_tty_plus_headless_spawn_runs_in_terminal(self):
+        # Concurrent terminal + headless no longer blocks /compact. With the
+        # staleness machinery (GH #71) retiring a stale headless the moment CCC
+        # would route to it, /compact runs in the terminal (keystroke) and the
+        # headless can't be reused with a pre-compact view. (Previously this
+        # rejected with compact_headless_running.)
         sid = "00000000-0000-4000-8000-000000000001"
         spawn = {"pid": 12345}
         with mock.patch.object(self.server, "_detect_session_engine", return_value="claude"), \
@@ -1627,17 +1632,19 @@ class TestRepoContextHelpers(unittest.TestCase):
                  },
              ), \
              mock.patch.object(self.server, "_find_live_spawn_entry_for_session", return_value=spawn), \
-             mock.patch.object(self.server, "_backup_jsonl_before_compact") as backup, \
+             mock.patch.object(self.server, "_pending_ask_user_question_for_session", return_value=None), \
+             mock.patch.object(self.server, "_terminal_input_queue_has_pending", return_value=False), \
+             mock.patch.object(self.server, "_session_status_is_busy", return_value=False), \
+             mock.patch.object(self.server, "_backup_jsonl_before_compact", return_value="/tmp/bk.jsonl") as backup, \
              mock.patch.object(self.server, "_queue_terminal_input") as queue, \
-             mock.patch.object(self.server, "inject_input_via_keystroke") as inject:
+             mock.patch.object(self.server, "inject_input_via_keystroke", return_value={"ok": True, "submitted": True}) as inject:
             result = self.server.compact_session_context(sid)
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "compact_headless_running")
-        self.assertEqual(result["pid"], 12345)
-        backup.assert_not_called()
+        # Runs /compact in the terminal, not rejected as headless-running.
+        self.assertNotEqual(result.get("code"), "compact_headless_running")
+        inject.assert_called_once()
+        backup.assert_called_once()
         queue.assert_not_called()
-        inject.assert_not_called()
 
     def test_compact_live_no_tty_registry_rejects_as_headless_running(self):
         sid = "00000000-0000-4000-8000-000000000001"

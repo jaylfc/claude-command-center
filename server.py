@@ -26405,33 +26405,24 @@ def compact_session_context(session_id, *, terminal_app=None, _from_terminal_que
     tty = status.get("tty")
     term_app = terminal_app or status.get("terminal_app") or "Terminal"
     has_tty = bool(tty) and tty != "??"
-    # A live headless spawn on this session blocks /compact by design:
-    # compaction rewrites the transcript, and doing that while a concurrent
-    # headless process holds the pre-compact view is the corruption case we
-    # don't risk. Keep the guard, but make the message honest — when the user
-    # is already in a terminal (concurrent pair), "CCC will open a terminal"
-    # and "wait for it to finish" are both wrong/unhelpful.
-    live_spawn = _find_live_spawn_entry_for_session(sid)
+    # A live headless spawn blocks /compact only when there's NO terminal to run
+    # it in (headless-only — there's no TUI for the slash command). When the
+    # session ALSO has a terminal (the concurrent case), we no longer block:
+    # /compact runs in the terminal below, and the now-redundant headless can't
+    # be reused with a stale pre-compact view because the staleness machinery
+    # (GH #71) retires it the moment CCC would route to it. (/compact is also
+    # append-only on disk, so there's no truncation race either.)
+    live_spawn = _find_live_spawn_entry_for_session(sid) if not has_tty else None
     if live_spawn is not None:
-        if has_tty:
-            msg = (
-                "This session has a live headless CCC agent (PID "
-                f"{live_spawn.get('pid')}) on it at the same time as your "
-                "terminal. Compacting while both are live could corrupt the "
-                "transcript, so CCC won't. Stop the headless agent (it shows "
-                "as ⚠ concurrent in System Health), then compact."
-            )
-        else:
-            msg = (
-                "This session is still running headlessly. Wait for it to "
-                "finish, then click Compact again; CCC will open an "
-                "interactive terminal to run /compact."
-            )
         return {
             "ok": False,
             "code": "compact_headless_running",
             "pid": live_spawn.get("pid"),
-            "error": msg,
+            "error": (
+                "This session is still running headlessly. Wait for it to "
+                "finish, then click Compact again; CCC will open an "
+                "interactive terminal to run /compact."
+            ),
         }
     if status.get("live") and not has_tty and status.get("kind") != "bg":
         payload = {
