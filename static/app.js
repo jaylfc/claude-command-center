@@ -22899,6 +22899,16 @@
     return wrap;
   }
 
+  // True when an assistant turn is nothing but a filler acknowledgment — the
+  // "No response requested." class of reply agents emit to a harness resume
+  // nudge. Anchored full-string match so real messages that merely contain
+  // the phrase are never hidden.
+  function _isNoopAckText(s) {
+    if (!s) return false;
+    const t = String(s).trim().toLowerCase().replace(/\s+/g, ' ');
+    return /^(no response (requested|needed|required)|nothing (to (do|add|report)|further( to (do|add))?)|acknowledged|no action (needed|required)|standing by|continuing|will continue)\.?$/.test(t);
+  }
+
   function renderConversationEvents(events, paneId) {
     if (!Array.isArray(events)) return true;  // defensive: backlog/unknown responses
     // Do not defer transcript rendering while the composer is focused.
@@ -23302,6 +23312,15 @@
           }
         }
         if (!hasNonTool) div.classList.add('tool-only');
+        // Hide bare no-op acknowledgments ("No response requested." etc.):
+        // filler an agent emits when the Claude Code harness resume-nudges an
+        // idle session ("Continue from where you left off"). Zero signal, and
+        // confusing in the transcript. Only hide when the WHOLE turn is the
+        // filler phrase and carries no tool call.
+        const _ackBlocks = Array.isArray(ev.blocks) ? ev.blocks : [];
+        const _ackText = _ackBlocks.filter(b => b && b.kind === 'text').map(b => b.text || '').join(' ');
+        const _ackHasTool = _ackBlocks.some(b => b && b.kind === 'tool_use');
+        if (!_ackHasTool && _isNoopAckText(_ackText)) div.classList.add('is-noop-ack');
         div.innerHTML = html;
       } else if (ev.type === 'result') {
         const dur = typeof ev.duration_ms === 'number' ? (ev.duration_ms / 1000).toFixed(1) + 's' : ev.duration_ms;

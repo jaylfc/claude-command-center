@@ -582,6 +582,9 @@
 
   .event.assistant { background: rgba(188, 140, 255, 0.06); border-left-color: var(--purple); }
   .event.tool_result { display: none; } /* hide tool results - they're noise */
+  /* Bare no-op acknowledgments ("No response requested.") — filler replies to
+     harness resume nudges. Hidden: zero signal, clutters the transcript. */
+  .event.assistant.is-noop-ack { display: none; }
 
   /* End-of-session outcome banner: tells the user what happened when a
      session ended badly (error) or just stopped mid-action with no answer. */
