@@ -19,34 +19,66 @@ issue.
 
 ## What is sent
 
-The complete payload, in JSON, posted once per UTC day to a single
-HTTPS endpoint:
+The complete schema-v2 payload, in JSON, posted once per UTC day to a
+single HTTPS endpoint:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "install_id": "00000000-0000-4000-8000-000000000000",
-  "version": "3.4.0",
+  "version": "4.9.0",
   "platform": "darwin",
   "engines": "claude,codex",
-  "last_active_date": "2026-05-19"
+  "last_active_date": "2026-06-07",
+  "sessions_today": 4
 }
 ```
 
-| field              | type   | example                | source                                                                |
-| ------------------ | ------ | ---------------------- | --------------------------------------------------------------------- |
-| `schema_version`   | int    | `1`                    | constant in `server.py` — bumps if the shape ever changes              |
-| `install_id`       | uuidv4 | random                 | generated locally on first opt-in; never derived from machine identity |
-| `version`          | semver | `3.4.0`                | `__version__` from `server.py`                                        |
-| `platform`         | string | `darwin` / `linux`     | `sys.platform`                                                        |
-| `engines`          | string | `claude,codex,gemini`  | which of {claude,codex,gemini} binaries are on PATH — no usage signal |
-| `last_active_date` | string | `2026-05-19` (or `""`) | newest `~/.claude/projects/**/*.jsonl` mtime, **date only**            |
+| field              | type   | example                            | source                                                                                |
+| ------------------ | ------ | ---------------------------------- | ------------------------------------------------------------------------------------- |
+| `schema_version`   | int    | `2`                                | constant in `server.py`; v1 omits `sessions_today` and is still accepted server-side  |
+| `install_id`       | uuidv4 | random                             | generated locally on first opt-in; never derived from machine identity                |
+| `version`          | semver | `4.9.0`                            | `__version__` from `server.py`                                                        |
+| `platform`         | string | `darwin` / `linux`                 | `sys.platform`                                                                        |
+| `engines`          | string | `claude,codex,cursor,antigravity`  | which of {claude, codex, gemini, cursor, antigravity} binaries are on PATH            |
+| `last_active_date` | string | `2026-06-07` (or `""`)             | newest `~/.claude/projects/**/*.jsonl` mtime, **date only**                            |
+| `sessions_today`   | int    | `4`                                | count of `*.jsonl` files under `~/.claude/projects/` with mtime in the last 24h; capped at 100000 |
 
 The HTTP request also carries:
 - `User-Agent: claude-command-center/<version> (telemetry)`.
 - `Content-Type: application/json`.
 
-That's it.
+That's it for the opt-in daily ping. See the next section for the
+separate, smaller, anonymous open beacon.
+
+## Anonymous open beacon
+
+Schema v2 introduced one additional endpoint — `POST /v1/open` — that
+fires **once per server boot**, with the following 3-field body and
+**nothing else**:
+
+```json
+{
+  "schema_version": 1,
+  "version": "4.9.0",
+  "platform": "darwin"
+}
+```
+
+This beacon is **not** gated on the opt-in switch because it carries
+**no `install_id`, no identifier of any kind**, and no engine list.
+The aggregate it produces is "how many distinct CCC server boots
+happened on a given UTC day"; an individual boot cannot be linked back
+to anything else the same machine sends or to any prior boot from the
+same machine.
+
+It is still gated on the `CCC_TELEMETRY_DISABLED` env var — that single
+switch is the user's guarantee that no bytes leave the host from this
+process, regardless of opt-in state.
+
+If you are uneasy about the beacon despite it carrying no identity,
+set `CCC_TELEMETRY_DISABLED=1` before launching `server.py` / the
+`.app` / `./run.sh`; it kills both the daily ping and the boot beacon.
 
 ## What is **never** sent
 
@@ -55,8 +87,10 @@ version bump and a documented breaking change.
 
 - Prompt content, transcripts, conversation events, tool calls, tool
   results, file contents.
-- Session counts, usage volume, message counts, per-session timing,
-  token counts, model names, costs.
+- Usage volume, message counts, per-session timing, token counts, model
+  names, costs. (Schema v2 added a single `sessions_today` integer — a
+  count of `*.jsonl` files modified in the last 24h. That is the only
+  usage-shaped field; everything else in this row remains off-limits.)
 - Repo paths, repo names, branch names, file paths, cwd, project slug.
 - User identity: name, email, hostname, username, login, IP address,
   git config, system locale.
@@ -125,11 +159,14 @@ All under `~/.config/claude-command-center/` (mode `0700`):
 - No retries on the same day. If the Worker is unreachable for 24h,
   that day's signal is simply lost — by design.
 
-## Endpoint
+## Endpoints
 
-- Default: `https://telemetry.claude-command-center.workers.dev/v1/ping`.
-- Override: set `CCC_TELEMETRY_ENDPOINT=<url>`. Useful for staging,
-  forking, or proxying through a fleet-managed collector.
+- Daily opt-in ping: `POST https://telemetry.claude-command-center.workers.dev/v1/ping`.
+- Anonymous open beacon (once per boot, no identity): `POST https://telemetry.claude-command-center.workers.dev/v1/open`.
+- Override: set `CCC_TELEMETRY_ENDPOINT=<url>`. The override is applied
+  to **both** endpoints (`/v1/ping` is replaced with `/v1/open` for the
+  beacon URL). Useful for staging, forking, or proxying through a
+  fleet-managed collector.
 - The Worker source is at
   [`infra/telemetry-worker/`](../infra/telemetry-worker/).
 

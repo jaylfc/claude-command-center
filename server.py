@@ -38813,10 +38813,18 @@ def _raise_open_file_limit(min_soft=2048):
 # All telemetry log lines are tagged `[telemetry]` so users grepping the
 # server log can audit exactly when (and whether) anything fires.
 
-_TELEMETRY_SCHEMA_VERSION = 1
+_TELEMETRY_SCHEMA_VERSION = 2
 _TELEMETRY_DEFAULT_ENDPOINT = (
     "https://telemetry.claude-command-center.workers.dev/v1/ping"
 )
+# Anonymous open beacon. Fires once per server boot, not gated on opt-in
+# (carries NO install_id and NO identity — three fields total: schema,
+# version, platform). Still honors the CCC_TELEMETRY_DISABLED env var so
+# users have one switch that kills every wire byte from this process.
+_TELEMETRY_OPEN_DEFAULT_ENDPOINT = (
+    "https://telemetry.claude-command-center.workers.dev/v1/open"
+)
+_TELEMETRY_OPEN_FIRED = False
 _TELEMETRY_STATE_DIR_PATH = Path.home() / ".config" / "claude-command-center"
 _TELEMETRY_DOCS_URL = (
     "https://github.com/amirfish1/claude-command-center/blob/main/docs/telemetry.md"
@@ -39027,8 +39035,45 @@ def _telemetry_last_active_date():
         return ""
 
 
+def _telemetry_count_sessions_today():
+    """Count distinct JSONL transcripts modified in the last 24h.
+
+    Coarse "daily session count" proxy: scans PROJECTS_ROOT, returns the
+    number of *.jsonl files whose mtime falls in the last 24h. No content
+    is opened. Capped at 100000 to keep the payload bounded.
+    """
+    root = PROJECTS_ROOT
+    try:
+        if not root.is_dir():
+            return 0
+    except OSError:
+        return 0
+    cutoff = time.time() - 86400
+    n = 0
+    try:
+        for project_dir in root.iterdir():
+            if not project_dir.is_dir():
+                continue
+            try:
+                for jsonl in project_dir.iterdir():
+                    if not jsonl.name.endswith(".jsonl"):
+                        continue
+                    try:
+                        if jsonl.stat().st_mtime >= cutoff:
+                            n += 1
+                            if n >= 100000:
+                                return n
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+    except OSError:
+        return n
+    return n
+
+
 def _build_telemetry_payload():
-    """Assemble the 5-field dict. Returns None when no install-id is available."""
+    """Assemble the schema-v2 dict. Returns None when no install-id is available."""
     install_id = _telemetry_load_or_init_install_id()
     if not install_id:
         return None
@@ -39039,7 +39084,75 @@ def _build_telemetry_payload():
         "platform": sys.platform,
         "engines": ",".join(_telemetry_detect_engines()),
         "last_active_date": _telemetry_last_active_date(),
+        "sessions_today": _telemetry_count_sessions_today(),
     }
+
+
+def _telemetry_resolved_open_endpoint():
+    """Endpoint for the anonymous open beacon. Derive from the opt-in
+    endpoint if CCC_TELEMETRY_ENDPOINT is set (swap /v1/ping → /v1/open)
+    so forks / staging proxies just need one env var."""
+    custom = (os.environ.get("CCC_TELEMETRY_ENDPOINT") or "").strip()
+    if custom:
+        if custom.endswith("/v1/ping"):
+            return custom[: -len("/v1/ping")] + "/v1/open"
+        return custom.rstrip("/") + "/v1/open"
+    return _TELEMETRY_OPEN_DEFAULT_ENDPOINT
+
+
+def _send_telemetry_open_beacon():
+    """Fire-and-forget POST of the 3-field anonymous open beacon.
+
+    Not gated on opt-in by design: the payload carries NO install_id and
+    NO identifying data, so the privacy contract holds without per-user
+    consent. The CCC_TELEMETRY_DISABLED env var still kills it; that is
+    the single switch users have for the whole process.
+    """
+    if _telemetry_disabled_env():
+        return False
+    payload = {
+        "schema_version": 1,
+        "version": __version__,
+        "platform": sys.platform,
+    }
+    try:
+        data = json.dumps(payload).encode("utf-8")
+    except (TypeError, ValueError):
+        return False
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"claude-command-center/{__version__} (telemetry-open)",
+    }
+    req = urllib.request.Request(
+        _telemetry_resolved_open_endpoint(), data=data, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_TELEMETRY_TOTAL_TIMEOUT_S) as resp:
+            status = getattr(resp, "status", 0) or 0
+            return 200 <= status < 300
+    except Exception:
+        return False
+
+
+def _telemetry_fire_open_beacon_once():
+    """Daemon thread target. Sleeps the same initial delay as the opt-in
+    loop so the dashboard paints first, then fires the beacon once. Sets
+    a module-global flag so a watchdog-driven restart inside the same
+    process can't double-fire."""
+    global _TELEMETRY_OPEN_FIRED
+    if _TELEMETRY_OPEN_FIRED:
+        return
+    try:
+        time.sleep(_TELEMETRY_INITIAL_DELAY_S)
+    except Exception:
+        return
+    if _TELEMETRY_OPEN_FIRED:
+        return
+    _TELEMETRY_OPEN_FIRED = True
+    try:
+        _send_telemetry_open_beacon()
+    except Exception:
+        pass
 
 
 def _telemetry_read_last_ping_date():
@@ -39241,6 +39354,12 @@ def main():
     # thread here is unconditional but no bytes leave the host unless the
     # user clicks "Enable" on the dashboard bar. See _telemetry_loop docs.
     threading.Thread(target=_telemetry_loop, daemon=True, name="ccc-telemetry").start()
+    # Anonymous open beacon — fires ONCE per boot. NOT opt-in, but carries
+    # no install_id and no identity (3 fields: schema, version, platform).
+    # The CCC_TELEMETRY_DISABLED env var kills it; that single switch is
+    # the user's guarantee that nothing leaves the host. See
+    # docs/telemetry.md#anonymous-open-beacon.
+    threading.Thread(target=_telemetry_fire_open_beacon_once, daemon=True, name="ccc-telemetry-open").start()
     # Recover in-progress group-chat coordinations and start background watcher.
     _start_coordination_watcher()
     _start_resume_queue_watcher()
