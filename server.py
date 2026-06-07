@@ -26421,31 +26421,28 @@ def compact_session_context(session_id, *, terminal_app=None, _from_terminal_que
     # be reused with a stale pre-compact view because the staleness machinery
     # (GH #71) retires it the moment CCC would route to it. (/compact is also
     # append-only on disk, so there's no truncation race either.)
+    # User-visible policy (per 2026-06-07): never bounce /compact with a
+    # "wait then click again" error — queue it instead. The standard
+    # terminal-input queue drains the moment the headless run finishes
+    # and an interactive terminal opens, so /compact will run
+    # automatically. UX matches a regular injection: "queued" not
+    # "rejected".
     live_spawn = _find_live_spawn_entry_for_session(sid) if not has_tty else None
     if live_spawn is not None:
-        return {
-            "ok": False,
-            "code": "compact_headless_running",
-            "pid": live_spawn.get("pid"),
-            "error": (
-                "This session is still running headlessly. Wait for it to "
-                "finish, then click Compact again; CCC will open an "
-                "interactive terminal to run /compact."
-            ),
-        }
+        queued_status = {"pid": live_spawn.get("pid"), "status": "headless"}
+        result = _compact_result(_queue_terminal_input(sid, "/compact", queued_status))
+        result["via"] = "terminal-queued-headless"
+        result["note"] = "Queued — /compact will run when the headless session finishes."
+        return result
     if status.get("live") and not has_tty and status.get("kind") != "bg":
-        payload = {
-            "ok": False,
-            "code": "compact_headless_running",
-            "error": (
-                "This session is still running headlessly. Wait for it to "
-                "finish, then click Compact again; CCC will open an "
-                "interactive terminal to run /compact."
-            ),
+        queued_status = {
+            "pid": status.get("pid"),
+            "status": status.get("status") or "headless",
         }
-        if status.get("pid"):
-            payload["pid"] = status.get("pid")
-        return payload
+        result = _compact_result(_queue_terminal_input(sid, "/compact", queued_status))
+        result["via"] = "terminal-queued-headless"
+        result["note"] = "Queued — /compact will run when the headless session finishes."
+        return result
 
     pending_question = _pending_ask_user_question_for_session(sid)
 
