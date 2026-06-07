@@ -2076,6 +2076,9 @@
   // agent calling /api/sessions/spawn for a sibling Codex / Gemini
   // session) and trigger a conv-list refresh immediately.
   let _lastSeenSpawnCount = null;
+  // Wall-clock (ms) of the last successful /api/session-status read. Powers the
+  // "checked Xs ago" label on the conversation top-bar process indicator.
+  let _lastStatusCheckedAt = 0;
   async function refreshLiveStatus() {
     if (!currentSession.id) {
       liveStatus = { live: false, pid: null, tty: null, terminalApp: null, ambiguous: false, matchCount: 0, staleToolCall: false, staleToolAgeS: 0, questionWaiting: false, questionText: '', questionHeader: '', questionPreamble: '', questionOptions: [], questionOptionDetails: [] };
@@ -2113,7 +2116,14 @@
         questionPreamble: data.question_preamble || '',
         questionOptions: Array.isArray(data.question_options) ? data.question_options : [],
         questionOptionDetails: Array.isArray(data.question_option_details) ? data.question_option_details : [],
+        headlessPresent: !!data.headless_present,
+        headlessPid: data.headless_pid || null,
+        headlessStale: !!data.headless_stale,
+        terminalPresent: !!data.terminal_present,
       };
+      // Timestamp of this successful status read — drives the "checked Xs ago"
+      // freshness label on the conversation top-bar process indicator.
+      _lastStatusCheckedAt = Date.now();
       // Detect server-side spawns we didn't initiate from this client
       // (e.g. agent calls /api/sessions/spawn for a sibling Codex /
       // Gemini session). Server returns a running count of CCC-spawned
@@ -2186,6 +2196,7 @@
     updateInputBar();
     updateLiveToolStrip();
     updateCodexStateBadge();
+    updateConvProcessIndicator();
     if (typeof updateSplitToolbar === 'function') updateSplitToolbar();
     syncRelayedQuestionModal();
   }
@@ -14100,22 +14111,60 @@
     return !COMPACT_UNSUPPORTED_SOURCES.has(source);
   }
 
+  // Engines that are NOT Claude. Claude rows carry source 'claude' /
+  // 'interactive' / 'sdk-cli' / 'bg' / empty — anything not in this set is
+  // treated as Claude. Used to gate the headless/terminal process indicator,
+  // which models Claude's architecture specifically.
+  const NON_CLAUDE_SOURCES = new Set(['codex', 'gemini', 'cursor', 'antigravity', 'pkood']);
+  function isClaudeSource(source) {
+    return !NON_CLAUDE_SOURCES.has(source);
+  }
+
+  function _procCheckedAgoLabel(ms) {
+    if (!ms) return '';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 10) return 'just now';
+    if (s < 60) return s + 's ago';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'm ago';
+    return Math.round(m / 60) + 'h ago';
+  }
+
+  // Fill the breadcrumb process-presence slot: a "headless" pill and a
+  // "terminal" pill (on/off/stale) plus a "checked Xs ago" freshness label.
+  // Imperative (not part of the breadcrumb innerHTML) so the "ago" stays live
+  // on every 5s poll without a full breadcrumb rebuild. No-op when the slot
+  // isn't present (non-Claude session, or breadcrumb hidden).
+  function updateConvProcessIndicator() {
+    const el = document.querySelector('[data-role="ccc-breadcrumb-proc"]');
+    if (!el) return;
+    const ls = liveStatus || {};
+    const headOn = !!ls.headlessPresent;
+    const stale = headOn && !!ls.headlessStale;
+    const termOn = !!ls.terminalPresent;
+    const pill = (on, warn, label, title) =>
+      '<span class="ccc-proc-pill ' + (on ? (warn ? 'is-stale' : 'is-on') : 'is-off') + '"'
+      + ' title="' + escapeHtml(title) + '">'
+      + '<span class="ccc-proc-dot"></span>' + escapeHtml(label) + '</span>';
+    const headTitle = headOn
+      ? (stale
+          ? 'A CCC-spawned headless agent is running but STALE — another writer advanced the transcript; it will be auto-retired'
+          : 'A CCC-spawned headless agent is running (pid ' + (ls.headlessPid || '?') + ')')
+      : 'No CCC-spawned headless agent for this session';
+    const termTitle = termOn
+      ? 'A live terminal (TTY) is attached to this session'
+      : 'No live terminal attached to this session';
+    const ago = _procCheckedAgoLabel(_lastStatusCheckedAt);
+    el.innerHTML = pill(headOn, stale, stale ? 'headless ⚠' : 'headless', headTitle)
+      + pill(termOn, false, 'terminal', termTitle)
+      + (ago ? '<span class="ccc-proc-checked" title="When CCC last polled these processes">checked ' + escapeHtml(ago) + '</span>' : '');
+  }
+
   async function postRunCompactForSession(sessionId, source, terminalApp) {
     // Both Claude and Codex compact via /api/session/compact. (Codex used to
     // be (wrongly) routed to postInjectInput('/compact') here, which sent the
     // literal text instead of compacting.)
     return postCompactSession(sessionId, terminalApp);
-  }
-
-  // Reflect compaction-in-flight on the breadcrumb Compact button directly
-  // (the render also respects _compactInFlight, but the next render can be a
-  // poll-interval away — this flips it the instant the user clicks).
-  function _setBreadcrumbCompacting(on) {
-    const b = document.querySelector('[data-role="ccc-breadcrumb-compact"]');
-    if (!b) return;
-    b.classList.toggle('is-compacting', !!on);
-    b.disabled = !!on;
-    b.textContent = on ? 'Compacting…' : 'Compact';
   }
 
   // Compact-button handler. Reuses postRunCompactForSession + the same
@@ -14135,7 +14184,6 @@
     // Immediate "it started" feedback — the request (esp. Codex thread/resume
     // + compact, or Claude queueing) can take a moment to ack.
     showOpToast('Compacting conversation…', 'info');
-    _setBreadcrumbCompacting(true);
     try {
       const data = await postRunCompactForSession(
         sid, source, liveStatus && liveStatus.terminalApp);
@@ -14157,7 +14205,6 @@
       showOpToast('/compact failed: ' + ((err && err.message) || 'network error'), 'error');
     } finally {
       _compactInFlight = false;
-      _setBreadcrumbCompacting(false);
       if (typeof updateInputBar === 'function') updateInputBar();
     }
   }
@@ -17024,17 +17071,6 @@
     openConversationPopout(convId, null, null);
   });
 
-  // Breadcrumb Compact button — delegated (survives every updatePaneHeader
-  // innerHTML rewrite). Compacts whatever conversation the active pane shows
-  // (same target as compactCurrentSession, which reads currentSession).
-  document.addEventListener('click', (ev) => {
-    const btn = ev.target && ev.target.closest && ev.target.closest('[data-role="ccc-breadcrumb-compact"]');
-    if (!btn) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    try { compactCurrentSession(); } catch (_) {}
-  });
-
   function startExternalConversationDrag(convId, repoPath) {
     if (CONV_POPOUT_MODE || !convId) return;
     const row = rowForConversationId(convId);
@@ -17647,23 +17683,22 @@
             +   '<path d="M11 1L6 6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>'
             + '</svg>'
           + '</button>';
-        // Labeled Compact button for the active conversation — the prominent,
-        // always-visible home (single-pane mode CSS-hides the in-pane header,
-        // so this breadcrumb slot is where the user looks). Shown only for
-        // compaction-capable engines (Claude + Codex). Click is delegated.
-        const compactBtn = (currentSession && isCompactionCapableSource(currentSession.source))
-          ? '<button type="button" class="ccc-breadcrumb-compact' + (_compactInFlight ? ' is-compacting' : '') + '"'
-            + ' data-role="ccc-breadcrumb-compact"' + (_compactInFlight ? ' disabled' : '')
-            + ' title="Compact this conversation — summarize earlier turns to free up context">'
-            + (_compactInFlight ? 'Compacting…' : 'Compact') + '</button>'
+        // Process-presence indicator — shows whether this Claude session has a
+        // CCC-spawned headless and/or a live terminal (TTY), plus when it was
+        // last checked. (The Compact button lives in the input box now.) Filled
+        // imperatively by updateConvProcessIndicator() so the "checked Xs ago"
+        // label stays fresh between full breadcrumb rebuilds. Claude-only.
+        const procSlot = (currentSession && isClaudeSource(currentSession.source))
+          ? '<span class="ccc-breadcrumb-proc" data-role="ccc-breadcrumb-proc"></span>'
           : '';
         breadcrumbEl.innerHTML = ''
           + (category ? '<span class="ccc-breadcrumb-category">' + escapeHtml(category) + '</span>' : '')
           + (title ? '<span class="ccc-breadcrumb-title">' + escapeHtml(title) + '</span>' : '')
           + (sizeBytes > 0 ? '<span class="ccc-breadcrumb-size" title="' + sizeBytes.toLocaleString() + ' bytes">' + escapeHtml(formatSize(sizeBytes)) + '</span>' : '')
-          + compactBtn
+          + procSlot
           + popoutBtn;
         breadcrumbEl.hidden = false;
+        updateConvProcessIndicator();
       } else if (isActive) {
         breadcrumbEl.innerHTML = '';
         breadcrumbEl.hidden = true;
