@@ -18943,7 +18943,20 @@
     document.body.classList.remove('is-issue-view');
     const _rail = document.getElementById('statusRail');
     if (_rail) {
-      _rail.querySelectorAll('.csh-ask-original.is-issue-header').forEach(n => n.remove());
+      // Clear EVERY stale Original-ask / activity node the previous
+      // conversation left mounted in the rail — not just the synthetic
+      // issue-header. In right-rail mode the sticky's `.csh-ask-original`
+      // is MOVED into #statusRail; wiping $view.innerHTML below destroys
+      // the sticky but leaves these rail-hosted copies behind. If the
+      // next conversation has no first user message yet (still loading,
+      // or genuinely has none), the sticky never rebuilds and
+      // `_applyStatusRailLayout` keeps treating the leftover rail node as
+      // "live" — so the rail stays stuck on the PREVIOUS conversation's
+      // ask. Clearing here makes the rail blank until the new conv's
+      // first user message repaints it. `setActivePaneById` above already
+      // made the switched pane active, so the single global rail belongs
+      // to this selection.
+      _rail.querySelectorAll('.csh-ask-original, .csh-col-activity').forEach(n => n.remove());
     }
     // Also pull #issueCloseActions out of the rail if it's still there
     // (left over from the previous issue view) — its parent issue body
