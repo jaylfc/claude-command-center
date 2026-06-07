@@ -23399,6 +23399,7 @@
       updateConversationEndAffordance($view);
     }
     ffcRefreshForCurrent();
+    updateSessionOutcomeBanner($view);
     return true;
   }
 
