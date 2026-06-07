@@ -18198,8 +18198,18 @@
     let kind = null, title = '', detail = '';
     if (errNode) {
       kind = 'error';
-      title = 'This session hit an error';
-      detail = (errNode.textContent || '').replace(/^\[J [^\]]*\]\s*/, '').trim().slice(0, 220);
+      const rawErr = (errNode.textContent || '').replace(/^\[J [^\]]*\]\s*/, '').trim();
+      // An AskUserQuestion that timed out isn't really a session error — it's
+      // an unanswered prompt. Give that case explicit, actionable wording
+      // instead of the generic "hit an error" + a truncated system message,
+      // which reads as vague/alarming.
+      if (/no answer was provided in claude command center within the wait window/i.test(rawErr)) {
+        title = 'A question went unanswered';
+        detail = 'The agent asked you a question, but no answer arrived before its wait window closed — so it continued with a sensible default. Reply below to steer it if that default was wrong.';
+      } else {
+        title = 'This session hit an error';
+        detail = rawErr.slice(0, 220);
+      }
     } else if (lastNode && lastNode.classList.contains('tool-call-group')
                && _conversationIsQuiet(view)) {
       // Transcript stops on a tool action with nothing after it: the agent
