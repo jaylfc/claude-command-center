@@ -4035,6 +4035,81 @@
     text-align: right;
     user-select: none;
   }
+  /* ── Floating TTS playback control ────────────────────────────────
+     Fixed top-right pill that appears while a read is playing for a
+     conversation the user has navigated away from. Pause/resume + stop
+     so playback stays under control once it's decoupled from the
+     focused pane. z-index sits above the transcript but below modals
+     and lightboxes (9999), and it's nudged left of the very corner so
+     it never sits under the window controls / scrollbar gutter. */
+  .tts-floating-control {
+    position: fixed;
+    top: 12px;
+    right: 16px;
+    z-index: 800;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 8px 5px 12px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border) 55%);
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface) 88%);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.32), 0 0 0 1px rgba(0,0,0,0.12);
+    color: var(--text);
+    font-size: 12px;
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    animation: ttsFcIn 0.16s ease-out;
+  }
+  .tts-floating-control[hidden] { display: none; }
+  @keyframes ttsFcIn {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .tts-floating-control .tts-fc-icon {
+    display: inline-flex;
+    color: var(--accent);
+  }
+  /* Pulse the speaker icon while actively reading; hold steady when paused. */
+  .tts-floating-control:not(.is-paused) .tts-fc-icon {
+    animation: ttsFcPulse 1.4s ease-in-out infinite;
+  }
+  @keyframes ttsFcPulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+  }
+  .tts-floating-control .tts-fc-label {
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    user-select: none;
+    min-width: 52px;
+  }
+  .tts-floating-control .tts-fc-btn {
+    width: 28px; height: 28px; flex-shrink: 0;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 0; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+  }
+  .tts-floating-control .tts-fc-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 50%, var(--border) 50%);
+  }
+  .tts-floating-control .tts-fc-btn:active { transform: translateY(1px); }
+  .tts-floating-control .tts-fc-stop:hover {
+    color: var(--red, #e5484d);
+    border-color: color-mix(in srgb, var(--red, #e5484d) 60%, var(--border) 40%);
+  }
+  /* Toggle button shows pause OR play depending on state. */
+  .tts-floating-control .tts-fc-toggle .tts-fc-play-icon { display: none; }
+  .tts-floating-control .tts-fc-toggle .tts-fc-pause-icon { display: block; }
+  .tts-floating-control.is-paused .tts-fc-toggle .tts-fc-play-icon { display: block; }
+  .tts-floating-control.is-paused .tts-fc-toggle .tts-fc-pause-icon { display: none; }
   /* ── Compact-resume card ──────────────────────────────────────────
      The user_text following a /compact run is a multi-page wall of
      prose Claude wrote to "remember" the prior conversation. Wrap it

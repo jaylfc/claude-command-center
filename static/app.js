@@ -4014,19 +4014,98 @@
   let _phoneModeTimer = null;     // 240s safety disarm
   let _phoneModeSettleTimer = null; // short "transcript settled" debounce
 
+  let _phoneModePollTimer = null; // background session-scoped completion poll
+
   function _disarmPhoneModeRead() {
     _phoneModePending = null;
     if (_phoneModeTimer) { clearTimeout(_phoneModeTimer); _phoneModeTimer = null; }
     if (_phoneModeSettleTimer) { clearTimeout(_phoneModeSettleTimer); _phoneModeSettleTimer = null; }
+    if (_phoneModePollTimer) { clearInterval(_phoneModePollTimer); _phoneModePollTimer = null; }
   }
 
-  function _armPhoneModeRead(paneId) {
-    _phoneModePending = { paneId: paneId, convId: currentConversation };
+  function _armPhoneModeRead(paneId, sessionId) {
+    _phoneModePending = {
+      paneId: paneId,
+      convId: currentConversation,
+      sessionId: sessionId || (currentSession && currentSession.id) || sessionIdByConv[currentConversation] || currentConversation,
+      baselineLine: null,   // tail cursor captured at arm time; set async below
+      fired: false,
+    };
     if (_phoneModeTimer) clearTimeout(_phoneModeTimer);
     if (_phoneModeSettleTimer) { clearTimeout(_phoneModeSettleTimer); _phoneModeSettleTimer = null; }
+    if (_phoneModePollTimer) { clearInterval(_phoneModePollTimer); _phoneModePollTimer = null; }
     // Safety disarm: if the turn never completes, don't blurt out a reply
     // minutes later for a session the user has moved on from.
     _phoneModeTimer = setTimeout(() => { _disarmPhoneModeRead(); }, 240000);
+    // Capture a baseline so the background poll can tell "new reply after we
+    // armed" from "the reply that was already there". Then start the poll —
+    // it fires the read even when the user has navigated AWAY from this
+    // conversation (the focused-render path, _firePhoneModeReadIfDone, only
+    // works while the Submit+ conversation stays focused).
+    _armPhoneModeBackgroundPoll(_phoneModePending);
+  }
+
+  async function _armPhoneModeBackgroundPoll(pend) {
+    const sid = pend && pend.sessionId;
+    if (!sid) return;
+    // Baseline the current tail so we only react to a NEW assistant turn.
+    try {
+      const res = await fetch('/api/conversations/' + encodeURIComponent(sid) + '?tail=1');
+      const data = await res.json();
+      if (_phoneModePending === pend) pend.baselineLine = (data && typeof data.last_line === 'number') ? data.last_line : 0;
+    } catch (_) {
+      if (_phoneModePending === pend) pend.baselineLine = 0;
+    }
+    if (_phoneModePending !== pend) return;  // superseded / disarmed while baselining
+    if (_phoneModePollTimer) clearInterval(_phoneModePollTimer);
+    _phoneModePollTimer = setInterval(() => { _phoneModeBackgroundPollTick(pend); }, 2000);
+  }
+
+  // One poll tick: only acts when the Submit+ conversation is NOT focused —
+  // the focused case is handled by _firePhoneModeReadIfDone off the live
+  // render, which also gives word-highlight. When off-focus, fetch the tail,
+  // look for a fresh speakable assistant reply past the baseline, and speak
+  // its text directly (no DOM needed).
+  async function _phoneModeBackgroundPollTick(pend) {
+    if (_phoneModePending !== pend || pend.fired) return;
+    // While focused, defer to the render-driven path entirely.
+    if (pend.convId === currentConversation) return;
+    const sid = pend.sessionId;
+    if (!sid) return;
+    let data;
+    try {
+      const after = (typeof pend.baselineLine === 'number') ? pend.baselineLine : 0;
+      const res = await fetch('/api/conversations/' + encodeURIComponent(sid) + '?after=' + after);
+      data = await res.json();
+    } catch (_) { return; }
+    if (_phoneModePending !== pend || pend.fired) return;
+    if (pend.convId === currentConversation) return;  // user came back; let render path handle it
+    const events = (data && data.events) || [];
+    if (!_batchHasSpeakableReply(events)) return;
+    // Extract the spoken text of the latest assistant text turn, stripping the
+    // session-state footer (same exclusion as the DOM path).
+    const text = _spokenTextFromEvents(events);
+    if (!text) return;
+    pend.fired = true;
+    const paneId = pend.paneId;
+    _disarmPhoneModeRead();
+    try { speakTextDirect(text, pend.convId, paneId); } catch (_) {}
+  }
+
+  // Pull the spoken reply from a raw event batch: the last assistant event's
+  // concatenated text blocks, with the <session-state> footer removed.
+  function _spokenTextFromEvents(events) {
+    if (!Array.isArray(events)) return '';
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (!e || e.type !== 'assistant' || !Array.isArray(e.blocks)) continue;
+      const parts = e.blocks.filter(b => b && b.kind === 'text').map(b => String(b.text || ''));
+      if (!parts.length) continue;
+      const raw = parts.join('\n\n');
+      const clean = _stripSessionStateFromText(raw);
+      if (clean) return clean;
+    }
+    return '';
   }
 
   // Decide whether a streamed/polled event batch contains the assistant's
@@ -4050,7 +4129,7 @@
   }
 
   function _firePhoneModeReadIfDone(events, paneId) {
-    if (!_phoneModePending) return;
+    if (!_phoneModePending || _phoneModePending.fired) return;
     if (_phoneModePending.paneId !== paneId || _phoneModePending.convId !== currentConversation) return;
     if (!_batchHasSpeakableReply(events)) return;
     // A turn streams as multiple assistant batches (text, then tool_use,
@@ -4066,9 +4145,11 @@
       // conversations or a fresh arm may have superseded this one.
       if (!_phoneModePending
           || _phoneModePending !== pend
+          || pend.fired
           || _phoneModePending.convId !== currentConversation) {
         return;
       }
+      pend.fired = true;
       _disarmPhoneModeRead();
       try { readLastMessageAloud(pend.paneId); } catch (_) {}
     }, 900);
@@ -4084,7 +4165,7 @@
     // Augment the message, arm the auto-read, then reuse the normal send path
     // so queueing / echo / engine routing all behave identically.
     $input.value = base + PHONE_MODE_SUFFIX;
-    _armPhoneModeRead(paneId);
+    _armPhoneModeRead(paneId, (currentSession && currentSession.id) || sessionIdByConv[currentConversation] || currentConversation);
     await sendToTerminal(paneId, 'send');
   }
 
@@ -4267,6 +4348,12 @@
   const TTS_TEXT_MAX_CHARS = 12000;
   let _ttsActive = false;
   let _ttsActivePaneId = null;
+  // Which conversation the active utterance belongs to. Decouples playback
+  // from the focused pane: when the user navigates away mid-read we keep
+  // speaking, and we only "rearm on new turn" (resetTtsOnNewTurn) when a
+  // fresh turn lands IN THE CONVERSATION BEING READ — not when the user
+  // merely switches to another conversation.
+  let _ttsActiveConvId = null;
   let _ttsStatusTimer = null;
   let _ttsStatusFailures = 0;
 
@@ -4302,6 +4389,9 @@
     if (failed) {
       setTimeout(() => ttsButtons().forEach(btn => btn.classList.remove('failed')), 1200);
     }
+    // Keep the floating playback control (shown when reading a conversation
+    // that isn't the focused one) in sync with the current state.
+    updateTtsFloatingControl();
   }
 
   let _ttsUtterance = null;
@@ -4504,17 +4594,129 @@
     _ttsLastCharIndex = 0;
     _ttsPaused = false;
     _ttsBoundUtteranceText = '';
+    _ttsActiveConvId = null;
     setTtsButtonsBusy(false);
     setTtsButtonsState(false, false);
   }
 
-  // Reset TTS state whenever the active conversation grows — a fresh
-  // turn should "rearm" the button so the next click reads the NEW
-  // message, not resumes the prior one mid-sentence.
-  function resetTtsOnNewTurn() {
-    if (_ttsActive || _ttsPaused || _ttsUtterance) {
-      stopTextToSpeech();
+  // Reset TTS state whenever the conversation BEING READ grows a fresh
+  // turn — so the next click reads the NEW message, not resumes the prior
+  // one mid-sentence. Crucially this is keyed to the conversation that owns
+  // the active utterance (_ttsActiveConvId), NOT the focused pane: switching
+  // to a different conversation must NOT cancel an in-progress read. The
+  // caller (renderConversationEvents) already filters to the focused render;
+  // this guard is a second line of defense so a background render of the
+  // speaking conversation is the only thing that can rearm playback.
+  function resetTtsOnNewTurn(forConvId) {
+    if (!(_ttsActive || _ttsPaused || _ttsUtterance)) return;
+    // If we know which conversation the new turn is for, only reset when it
+    // matches the one currently being spoken. Unknown convId (legacy callers)
+    // falls back to the old unconditional behavior.
+    if (forConvId != null && _ttsActiveConvId != null && forConvId !== _ttsActiveConvId) return;
+    stopTextToSpeech();
+  }
+
+  // ── Floating playback control ────────────────────────────────────────
+  // A small fixed widget (top-right) that appears whenever TTS is playing
+  // for a conversation the user is NOT currently looking at. The in-bar TTS
+  // button is only reachable while that conversation is focused; once the
+  // user navigates away (which no longer cancels playback) this is the only
+  // affordance to pause / resume / stop the read. We hide it while the
+  // speaking conversation IS focused, since the in-bar button covers that.
+  function updateTtsFloatingControl() {
+    const el = document.getElementById('ttsFloatingControl');
+    if (!el) return;
+    const playing = !!(_ttsActive || _ttsPaused);
+    const offFocus = _ttsActiveConvId && _ttsActiveConvId !== currentConversation;
+    const show = playing && !!offFocus;
+    el.hidden = !show;
+    el.classList.toggle('is-paused', !!_ttsPaused);
+    const label = el.querySelector('.tts-fc-label');
+    if (label) label.textContent = _ttsPaused ? 'Paused' : 'Reading…';
+    const toggle = el.querySelector('.tts-fc-toggle');
+    if (toggle) {
+      toggle.title = _ttsPaused ? 'Resume reading' : 'Pause reading';
+      toggle.setAttribute('aria-label', _ttsPaused ? 'Resume reading' : 'Pause reading');
+      toggle.classList.toggle('is-paused', !!_ttsPaused);
     }
+  }
+
+  function _wireTtsFloatingControl() {
+    const el = document.getElementById('ttsFloatingControl');
+    if (!el) return;
+    const toggle = el.querySelector('.tts-fc-toggle');
+    const stop = el.querySelector('.tts-fc-stop');
+    if (toggle) {
+      toggle.addEventListener('mousedown', (ev) => ev.preventDefault());
+      toggle.addEventListener('click', () => {
+        // Reuse the existing play/pause toggle on the same utterance. Pass the
+        // pane that owns the active read so the in-bar button state also tracks.
+        readLastMessageAloud(_ttsActivePaneId || activePaneId());
+      });
+    }
+    if (stop) {
+      stop.addEventListener('mousedown', (ev) => ev.preventDefault());
+      stop.addEventListener('click', () => { stopTextToSpeech(); });
+    }
+  }
+
+  // Strip the machine-readable session-state footer from a raw assistant
+  // message before speaking it. Mirrors buildTtsDataFromElements' DOM-level
+  // exclusion of .session-state-block, but for plain text fetched from the
+  // API (used by the background Submit+ completion path when the user has
+  // navigated away and there's no rendered transcript to read from).
+  function _stripSessionStateFromText(text) {
+    let out = String(text || '');
+    const idx = out.indexOf('<session-state>');
+    if (idx !== -1) out = out.slice(0, idx);
+    // Belt-and-suspenders: also drop the "Before your final reply…" trailer
+    // some prompts emit without the tags.
+    out = out.replace(/\n*Before your final reply[\s\S]*$/i, '');
+    return out.trim();
+  }
+
+  // Speak a captured string directly — no DOM mapping / word highlight.
+  // Used when the conversation that produced the reply is not on screen
+  // (Submit+ background completion). Honors the same single-utterance state
+  // (_ttsUtterance / _ttsActive / _ttsPaused / _ttsActiveConvId) so the
+  // floating control and in-bar button stay consistent, and rate changes
+  // restart from the current word like the normal path.
+  function speakTextDirect(text, convId, paneId) {
+    if (!window.speechSynthesis) return false;
+    const clean = String(text || '').trim();
+    if (!clean) return false;
+    // Starting a fresh read supersedes any prior utterance.
+    if (_ttsActive || _ttsPaused || _ttsUtterance) {
+      try { window.speechSynthesis.cancel(); } catch (_) {}
+    }
+    clearTtsHighlight();
+    _ttsTextMapping = [];
+    _ttsLastCharIndex = 0;
+    _ttsPaused = false;
+    const clipped = clean.length > TTS_TEXT_MAX_CHARS ? clean.slice(0, TTS_TEXT_MAX_CHARS) : clean;
+    const utterance = new SpeechSynthesisUtterance(clipped);
+    _ttsUtterance = utterance;
+    _ttsBoundUtteranceText = clipped;
+    _ttsActiveConvId = convId || null;
+    utterance.rate = _ttsRate;
+    utterance.onstart = () => {
+      if (_ttsUtterance !== utterance) return;
+      setTtsButtonsState(true, false, paneId || _ttsActivePaneId || activePaneId());
+      setTtsButtonsBusy(false);
+    };
+    utterance.onend = () => { if (_ttsUtterance === utterance) stopTextToSpeech(); };
+    utterance.onerror = (e) => {
+      if (_ttsUtterance !== utterance) return;
+      if (e.error !== 'canceled' && e.error !== 'interrupted') stopTextToSpeech();
+    };
+    utterance.onboundary = (e) => {
+      if (_ttsUtterance !== utterance) return;
+      if (e.name === 'word') _ttsLastCharIndex = e.charIndex;
+    };
+    window.speechSynthesis.speak(utterance);
+    // Reflect state immediately in case onstart is slow to fire.
+    setTtsButtonsState(true, false, paneId || _ttsActivePaneId || activePaneId());
+    return true;
   }
 
   async function readLastMessageAloud(paneId) {
@@ -4536,6 +4738,7 @@
           btn.setAttribute('aria-label', 'Resume reading');
         }
       });
+      updateTtsFloatingControl();
       return;
     }
     if (_ttsPaused && _ttsUtterance) {
@@ -4548,6 +4751,7 @@
           btn.setAttribute('aria-label', 'Pause reading');
         }
       });
+      updateTtsFloatingControl();
       return;
     }
 
@@ -4565,6 +4769,12 @@
 
     setActivePaneById(paneId);
     setTtsButtonsBusy(true);
+
+    // Remember which conversation this read belongs to so navigating away
+    // does not cancel it, and so the floating control can show/hide based on
+    // whether that conversation is still the focused one.
+    const _pane = paneByPaneId(paneId);
+    _ttsActiveConvId = (_pane && _pane.conversationId) || currentConversation || null;
 
     _ttsTextMapping = mappingToUse;
     const utterance = new SpeechSynthesisUtterance(textToSpeak);
@@ -4740,6 +4950,7 @@
     });
   }
   _syncTtsRateUi();
+  _wireTtsFloatingControl();
   // Textarea autosize: grow up to ~10 rows then scroll. Reset to one row
   // on every input so deletions shrink the box too. Mirrors Omnara's
   // behavior — typing more than one line expands the composer in place.
@@ -18939,6 +19150,10 @@
     }
     mobileShowForCurrentMode();
     currentConversation = id;
+    // A read in progress for a DIFFERENT conversation keeps playing; surface
+    // the floating pause/resume/stop control now that its conversation is no
+    // longer focused (and hide the control if we just refocused it).
+    if (typeof updateTtsFloatingControl === 'function') updateTtsFloatingControl();
     refreshConversationBackgroundForPane(paneId);
     // Remember which card was last opened so we can re-open it on the
     // next page load. Reads happen in loadConversationList once the list
@@ -23042,7 +23257,11 @@
           const escLineCheck = (window.CSS && CSS.escape) ? CSS.escape(String(ev.line)) : String(ev.line);
           if ($view.querySelector('.event[data-jsonl-line="' + escLineCheck + '"]')) continue;
         }
-        resetTtsOnNewTurn();
+        // Scope the rearm to the conversation being rendered. A fresh turn in
+        // a DIFFERENT conversation (e.g. the user navigated away while a read
+        // is playing) must not cancel the in-progress utterance — that's the
+        // whole point of decoupling playback from focus.
+        resetTtsOnNewTurn(currentConversation);
         break;
       }
     }

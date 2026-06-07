@@ -78,6 +78,37 @@
 </script>
 </head>
 <body>
+  <!-- Floating TTS playback control. Fixed top-right; shown only while a
+       Text-to-Speech read is playing for a conversation the user is NOT
+       currently viewing (e.g. a Submit+ reply that landed after they
+       navigated away). Gives pause/resume + stop without re-opening that
+       conversation. Hidden whenever the speaking conversation is focused —
+       the in-bar TTS button covers that case. Wired in app.js
+       (_wireTtsFloatingControl / updateTtsFloatingControl). -->
+  <div id="ttsFloatingControl" class="tts-floating-control" hidden role="status" aria-live="polite" aria-label="Reading aloud">
+    <span class="tts-fc-icon" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M11 5 6 9H3v6h3l5 4V5Z"></path>
+        <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
+        <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+      </svg>
+    </span>
+    <span class="tts-fc-label">Reading…</span>
+    <button type="button" class="tts-fc-btn tts-fc-toggle" title="Pause reading" aria-label="Pause reading">
+      <svg class="tts-fc-pause-icon" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+        <rect x="6" y="5" width="4" height="14" rx="1"></rect>
+        <rect x="14" y="5" width="4" height="14" rx="1"></rect>
+      </svg>
+      <svg class="tts-fc-play-icon" viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+        <path d="M7 5l12 7-12 7V5Z"></path>
+      </svg>
+    </button>
+    <button type="button" class="tts-fc-btn tts-fc-stop" title="Stop reading" aria-label="Stop reading">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+        <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
+      </svg>
+    </button>
+  </div>
   <!-- PWA install banner (tab-mode only). Hidden by default; surfaced after
        a short delay if the page is NOT running standalone, with copy
        tailored to the current platform. Dismissal is persisted for 14
