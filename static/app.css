@@ -673,6 +673,22 @@
   .event.user_text.send-queued .send-queued-note {
     margin-top: 8px; font-size: 11px; color: var(--text-muted);
   }
+  /* State 2: delivered to the session, awaiting Claude. Calm + NOT italic
+     (italic = the ambiguous "sending…/maybe lost" state) — a quiet green
+     "delivered" so a safely-delivered message no longer looks at-risk. */
+  .event.user_text.send-delivered {
+    font-style: normal; opacity: 1;
+    background: rgba(63, 185, 80, 0.06); border-left-color: var(--green);
+  }
+  .event.user_text.send-delivered .label::after {
+    content: ' · delivered';
+    font-style: normal; font-weight: 400;
+    color: var(--green); text-transform: none; letter-spacing: 0;
+    font-size: 10px; margin-left: 4px;
+  }
+  .event.user_text.send-delivered .send-delivered-note {
+    margin-top: 6px; font-size: 11px; color: var(--text-muted);
+  }
   .event.user_text {
     background: rgba(63, 185, 80, 0.08); border-left-color: var(--green);
   }

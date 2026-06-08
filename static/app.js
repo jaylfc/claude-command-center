@@ -3970,6 +3970,31 @@
     note.textContent = '⏳ ' + (label || 'Queued — will send when the session finishes its current step.');
   }
 
+  // State 2 of the echo lifecycle: the server confirmed the inject reached the
+  // session (ok:true) but the message hasn't landed in the JSONL transcript
+  // yet. This is NOT the ambiguous "sending… / maybe lost" state (1) — it's
+  // safely delivered and just awaiting Claude. Give it its own calm visual and
+  // cancel the not-acknowledged timer (delivery is confirmed, so it can't be
+  // "lost"). The normal JSONL dedupe removes the echo once the durable event
+  // renders (state 3).
+  function markPendingSendDelivered(pending) {
+    if (!pending || !pending.entry) return;
+    if (pending.entry.timer) { clearTimeout(pending.entry.timer); pending.entry.timer = null; }
+    const div = pending.element;
+    if (!div) return;
+    // Don't downgrade a richer state (server-queued / failed) back to delivered.
+    if (div.classList.contains('send-queued') || div.classList.contains('not-acknowledged')) return;
+    div.classList.remove('pending');
+    div.classList.add('send-delivered');
+    let note = div.querySelector('.send-delivered-note');
+    if (!note) {
+      note = document.createElement('div');
+      note.className = 'send-delivered-note';
+      div.appendChild(note);
+    }
+    note.textContent = '✓ Delivered — waiting for Claude to pick it up.';
+  }
+
   function isCursorUsageLimitFailure(data, reason) {
     const text = [
       data && data.engine,
@@ -4358,6 +4383,14 @@
             setTimeout(refreshConversationList, 1500);
             setTimeout(refreshConversationList, 3500);
           }
+        } else {
+          // Plain inject success — Claude TTY ('terminal-control') or headless
+          // ('spawn-fifo'). The server confirmed delivery (ok:true) but the
+          // message isn't in the JSONL yet. Previously this fell through and
+          // did nothing, leaving the echo stuck in the ambiguous italic
+          // "sending…" state until transcript dedup happened to match it (or
+          // never did). Confirm it now: "delivered, awaiting Claude".
+          markPendingSendDelivered(pendingSend);
         }
       } else {
         const reason = formatInjectFailure(data, res.status);
