@@ -27242,7 +27242,10 @@
       projectMaxSeq.set(project, Math.max(projectMaxSeq.get(project) || 0, seq));
       const status = item.status || '';
       if (status === 'closed') {
-        const csid = _uxFixesIdentityKey(item.claimed_by);
+        // Credit the CLOSER (a worker may close by ref without a prior claim),
+        // falling back to the claimer. Without this, by-ref closes are
+        // unattributed and the chip freezes at the last *claimed* ticket.
+        const csid = _uxFixesIdentityKey(item.closed_by || item.claimed_by);
         if (!csid) continue; // unclaimed close (e.g. a manual probe) → no row to credit
         const closedAt = _uxFixesClosedAtMs(item);
         const prevC = projectLastClosed.get(project);

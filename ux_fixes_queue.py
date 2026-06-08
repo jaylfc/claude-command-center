@@ -319,6 +319,15 @@ def update_status(ident: Any, status: str, session_id: str = "") -> Optional[Dic
                     it["claimed_at"] = now
                 if status == "closed":
                     it["closed_at"] = now
+                    # Attribute the close so a worker that closed a ticket
+                    # by ref (without a prior claim) still gets credited — the
+                    # dashboard progress chip credits the closer, and an
+                    # unattributed close otherwise freezes it at the last
+                    # *claimed* ticket. Preserve the claimer if no closer given.
+                    if session_id:
+                        it["closed_by"] = str(session_id)
+                    elif it.get("claimed_by"):
+                        it["closed_by"] = it["claimed_by"]
                 if status == "open":
                     it["claimed_by"] = None
                     it["claimed_at"] = None
