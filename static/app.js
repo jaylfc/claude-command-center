@@ -14732,8 +14732,27 @@
       + '<span class="ccc-proc-dot"></span>' + escapeHtml(headLabel) + '</span>';
     el.innerHTML = headPill
       + pill(termOn, false, 'terminal', termTitle)
-      + (ago ? '<span class="ccc-proc-checked" title="' + escapeHtml(checkedTitle) + '">checked ' + escapeHtml(ago) + (clock ? ' · ' + escapeHtml(clock) : '') + '</span>' : '');
+      + (ago ? '<span class="ccc-proc-checked" title="' + escapeHtml(checkedTitle) + '">checked ' + escapeHtml(ago) + (clock ? ' · ' + escapeHtml(clock) : '') + '</span>' : '')
+      + '<button type="button" class="ccc-proc-refresh" title="Refresh this session\'s headless / terminal state now" aria-label="Refresh state">↻</button>';
   }
+
+  // Quick-refresh for the headless/terminal state line (CCC-27). The "checked
+  // Xs ago" label only advances on the 5s poll; this button forces an
+  // immediate re-poll so the user doesn't wait. Delegated (one listener) since
+  // updateConvProcessIndicator rebuilds the slot's innerHTML on every tick.
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest && ev.target.closest('.ccc-proc-refresh');
+    if (!btn) return;
+    ev.preventDefault();
+    if (btn.classList.contains('is-spinning')) return;
+    btn.classList.add('is-spinning');
+    Promise.resolve()
+      .then(() => (typeof refreshLiveStatus === 'function' ? refreshLiveStatus() : null))
+      .then(() => { if (typeof fetchConversationEvents === 'function') {
+        try { return fetchConversationEvents(typeof activePaneId === 'function' ? activePaneId() : undefined); } catch (e) {}
+      } })
+      .finally(() => { setTimeout(() => btn.classList.remove('is-spinning'), 350); });
+  });
 
   async function postRunCompactForSession(sessionId, source, terminalApp) {
     // Both Claude and Codex compact via /api/session/compact. (Codex used to

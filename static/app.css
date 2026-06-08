@@ -1405,6 +1405,25 @@
     color: var(--text-muted, var(--text-2));
     white-space: nowrap;
   }
+  .ccc-breadcrumb .ccc-proc-refresh {
+    flex: 0 0 auto;
+    margin-left: 2px;
+    padding: 0;
+    width: 18px; height: 18px; line-height: 18px;
+    border: none; border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted, var(--text-2));
+    font-size: 12px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .ccc-breadcrumb .ccc-proc-refresh:hover {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+  }
+  .ccc-breadcrumb .ccc-proc-refresh.is-spinning {
+    animation: ccc-compact-spin 0.6s linear infinite;
+    color: var(--accent);
+  }
   .conv-pane-titlebar {
     min-width: 0;
     flex: 1 1 auto;
