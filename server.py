@@ -26130,6 +26130,14 @@ def _start_coordination_watcher() -> None:
     this filter, a server restart silently un-archives chats from the
     watcher's perspective and resumes nudging participants of chats the
     user thought were closed for good.
+
+    Also skip chats with `closed_at` set: the watcher already dropped them on
+    an idle timeout or a done marker, so they are no longer being coordinated.
+    Re-registering them on boot would resurrect a finished chat as "active"
+    and silently resume nudging (and token spend) — the surprising "the group
+    chat started orchestrating just because I reloaded the server" behaviour.
+    A human post clears closed_at and re-registers, so genuinely-active chats
+    (closed_at is None) still resume normally.
     """
     group_chats_dir = os.path.expanduser("~/.claude/group-chats")
     cutoff = time.time() - _COORD_DEATH_TIMEOUT
@@ -26145,6 +26153,8 @@ def _start_coordination_watcher() -> None:
                 meta = _load_group_chat_sidecar(md_path)
                 if meta.get("archived"):
                     continue   # explicitly retired — don't resurrect
+                if meta.get("closed_at"):
+                    continue   # already idled/done — don't resume on boot
                 _register_coordination(md_path)
             except OSError:
                 continue
