@@ -18211,10 +18211,6 @@
     // Need real content to reason about; skip empty / still-loading panes.
     if (!view.querySelector(':scope > .event, :scope > .tool-call-group')) return;
 
-    // An error anywhere in the transcript is always worth surfacing — error
-    // tool-results are otherwise buried inside a collapsed tool group.
-    const errNode = view.querySelector('.tool-result-output.is-error');
-
     // Walk back to the last meaningful node, skipping the sticky header, the
     // pinned original ask, hidden tool_result markers, the load-earlier
     // banner, and our own banner.
@@ -18227,6 +18223,17 @@
       lastNode = n;
       break;
     }
+
+    // Only treat an error as a session OUTCOME when it's the session's LAST
+    // meaningful action AND the transcript has gone quiet. A routine failed
+    // command (git pathspec miss, grep no-match) buried mid-run is recoverable
+    // noise the agent moved past — surfacing every one of those produced the
+    // "so many errors! what is this one" complaint. If the agent did anything
+    // after the error (the next node isn't the failing group), it recovered.
+    const tailQuiet = _conversationIsQuiet(view);
+    const errNode = (lastNode && tailQuiet)
+      ? lastNode.querySelector('.tool-result-output.is-error')
+      : null;
 
     let kind = null, title = '', detail = '';
     if (errNode) {
@@ -18244,7 +18251,7 @@
         detail = rawErr.slice(0, 220);
       }
     } else if (lastNode && lastNode.classList.contains('tool-call-group')
-               && _conversationIsQuiet(view)) {
+               && tailQuiet) {
       // Transcript stops on a tool action with nothing after it: the agent
       // was mid-task when it stopped (crash, kill, or headless exit).
       // Gated on quiet-time (_conversationIsQuiet) so it does NOT fire in the
