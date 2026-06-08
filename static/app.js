@@ -2109,6 +2109,7 @@
         sidecarInFlight: !!data.sidecar_in_flight,
         codexState: data.codex_state || null,
         codexFresh: !!data.codex_fresh,
+        codexStateReason: data.codex_state_reason || '',
         codexAppServer: !!data.codex_app_server,
         staleToolCall: !!data.stale_tool_call,
         staleToolAgeS: data.stale_tool_age_s || 0,
@@ -2916,9 +2917,13 @@
       badge = document.createElement('div');
       $view.appendChild(badge);
     }
+    // For a stuck session, answer "why?" right on the pill: show the concrete
+    // reason (hung tool + how long silent) inline, not just a bare "Stuck".
+    const reason = (st === 'stuck') ? (liveStatus.codexStateReason || '') : '';
     badge.className = 'conv-codex-state state-' + st + steady;
-    badge.title = TITLES[st] || '';
-    badge.innerHTML = '<span class="ccs-dot"></span><span class="ccs-label">' + escapeHtml(LABELS[st] || st) + '</span>';
+    badge.title = reason || TITLES[st] || '';
+    badge.innerHTML = '<span class="ccs-dot"></span><span class="ccs-label">' + escapeHtml(LABELS[st] || st) + '</span>'
+      + (reason ? '<span class="ccs-reason">' + escapeHtml(reason) + '</span>' : '');
   }
 
   const $convSessionId = document.getElementById('convSessionId');

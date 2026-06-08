@@ -2557,6 +2557,7 @@ _LIVE_ACTIVITY_FIELD_KEYS = (
     "last_event_type",
     "codex_state",
     "codex_fresh",
+    "codex_state_reason",
     "needs_approval",
     "needs_approval_message",
     "question_waiting",
@@ -16764,7 +16765,29 @@ def _codex_state_fields(sid, now=None):
     fields["codex_state"] = state
     if state == "working":
         fields["codex_fresh"] = (now - float(mtime)) < _codex_fresh_threshold_s()
+    elif state == "stuck":
+        fields["codex_state_reason"] = _codex_stuck_reason(tail, mtime, now)
     return fields
+
+
+def _codex_stuck_reason(tail, mtime, now):
+    """Human-readable 'why is this codex session stuck' string.
+
+    Stuck = mid-turn but the rollout has not advanced past the stale
+    threshold. Name the tool it stalled on (if any) and how long it has been
+    silent, so the UI can answer 'do we know why it was stuck?'.
+    """
+    try:
+        mins = int(max(0.0, float(now) - float(mtime or 0)) // 60)
+    except (TypeError, ValueError):
+        mins = 0
+    ago = f"{mins}m" if mins else "under a minute"
+    pending = (tail or {}).get("pending_tool")
+    if pending:
+        target = (tail or {}).get("pending_file") or ""
+        label = (f"{pending} {target}".strip())
+        return f"No output for {ago} while running {label} — the tool call looks hung."
+    return f"No output for {ago} after the last message — the turn stalled with no tool running."
 
 
 def find_codex_conversations(
