@@ -15283,7 +15283,13 @@
           + '</span>';
       } else if (c.is_live && c.sidecar_status === 'active' && c.sidecar_tool) {
         const sidecarAge = c.sidecar_ts ? Math.max(0, Math.floor(Date.now() / 1000 - c.sidecar_ts)) : 9999;
-        if (sidecarAge < 300) {
+        // An IN-FLIGHT tool can legitimately run a while; a COMPLETED one
+        // ("last completed") must drop fast or the row keeps claiming e.g.
+        // "Reading file" minutes after it finished — reading as stale/wrong
+        // versus the pane (CCC-32). Age is computed client-side from
+        // sidecar_ts, so it ages out even while polling is paused.
+        const freshWindow = c.sidecar_in_flight ? 300 : 60;
+        if (sidecarAge < freshWindow) {
           // Row pill stays TIGHT — just the tool label (glowing when
           // in-flight). The file/command path was ellipsizing into
           // unreadable suffixes like "...nter/static/app.js" and
