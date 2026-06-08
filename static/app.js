@@ -15126,7 +15126,33 @@
       if (sid) _convById.set(sid, c);
     }
     const _inGroupChatIds = new Set(_gcActiveChats.flatMap(c => c.session_ids || []));
+    // Global one-row-per-session dedup (CCC-41). The same session_id can arrive
+    // as more than one conv object (e.g. a Ready-to-Merge copy carrying a PR
+    // number AND a plain In-Progress copy), which rendered the session twice
+    // across sections — CCC-34's dedup only covered the In-Progress bucket.
+    // Collapse to the single best copy per session key BEFORE partitioning.
+    // Backlog/issue cards (id="backlog-issue-N", no session_id) keep distinct
+    // keys, so they're never merged into a session. Group-chat participant rows
+    // come from a separate list and are untouched.
+    const _convScore = (x) => (x.source !== 'github_pr' ? 4 : 0)
+      + (x.is_live ? 2 : 0) + (x.tail_pr_number ? 1 : 0);
+    const _dedupedConvs = [];
+    const _convDedupIdx = new Map();
     for (const c of convs) {
+      const _k = c.session_id || c.id || '';
+      if (!_k) { _dedupedConvs.push(c); continue; }
+      if (_convDedupIdx.has(_k)) {
+        const _i = _convDedupIdx.get(_k);
+        const _ex = _dedupedConvs[_i];
+        const _better = _convScore(c) > _convScore(_ex)
+          || (_convScore(c) === _convScore(_ex) && (c.modified || 0) > (_ex.modified || 0));
+        if (_better) _dedupedConvs[_i] = c;
+        continue;
+      }
+      _convDedupIdx.set(_k, _dedupedConvs.length);
+      _dedupedConvs.push(c);
+    }
+    for (const c of _dedupedConvs) {
       if (_repoSearchActive && _repoSearchActive.ids.has(c.session_id || c.id)) continue;
       // A UUID/prefix/substring search is a direct lookup; keep it above
       // pipeline sections and history-index matches.
