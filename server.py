@@ -38312,7 +38312,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             sid = payload.get("session_id", "")
             cwd = payload.get("cwd") or None
             term_app = payload.get("terminal_app") or None
-            self.send_json(launch_terminal_for_session(sid, cwd, term_app))
+            # Optional REPL slash commands to run once the terminal is up (e.g.
+            # /clear for a headless session — CCC-44). Restricted to slash
+            # commands so this can't keystroke arbitrary shell text.
+            post_cmds = [
+                str(c).strip()
+                for c in (payload.get("post_slash_commands") or [])
+                if str(c or "").strip().startswith("/")
+            ]
+            self.send_json(launch_terminal_for_session(sid, cwd, term_app, post_slash_commands=post_cmds or None))
         elif path == "/api/jump-terminal":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""

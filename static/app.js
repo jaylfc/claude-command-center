@@ -4362,6 +4362,7 @@
       return;
     }
     const compactCommand = /^\/compact(?:\s|$)/i.test(text);
+    const clearCommand = /^\/clear(?:\s|$)/i.test(text);
     if ($actionBtn) $actionBtn.disabled = true;
     const flashRed = () => {
       $input.style.borderColor = 'var(--red)';
@@ -4395,6 +4396,36 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ session_id: sid, terminal_app: liveStatus && liveStatus.terminalApp }),
         });
+      } else if (clearCommand && isClaudeSource(currentSession.source) && !(liveStatus && liveStatus.terminalPresent)) {
+        // /clear is a REPL-only command. Written to a headless stream-json stdin
+        // it's just literal text and never runs — hence "/clear still not
+        // working" (CCC-44). A session WITH a live terminal keystrokes /clear to
+        // its REPL fine (falls through to the normal inject below); a headless
+        // one has no REPL, so route it through a terminal that runs /clear.
+        try {
+          const r = await fetch('/api/launch-terminal', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              session_id: sid,
+              cwd: currentSession.cwd || '',
+              terminal_app: (liveStatus && liveStatus.terminalApp) || null,
+              post_slash_commands: ['/clear'],
+            }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (r.ok && d.ok) {
+            markPendingSendQueued(pendingSend, 'Opened a terminal to run /clear (a headless session has no REPL to clear).');
+            showOpToast('Opened a terminal — /clear runs there. Headless sessions have no REPL to clear in place.', 'info');
+          } else {
+            markPendingSendQueued(pendingSend, '/clear could not be routed to a terminal.');
+            showOpToast('Could not open a terminal for /clear: ' + (d.error || ('HTTP ' + r.status)), 'error');
+          }
+        } catch (e) {
+          showOpToast('Could not open a terminal for /clear: ' + (e && e.message ? e.message : e), 'error');
+        }
+        if ($actionBtn) $actionBtn.disabled = false;
+        return;
       } else {
         res = await fetch('/api/inject-input', {
           method: 'POST',
