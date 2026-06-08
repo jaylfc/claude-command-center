@@ -8910,28 +8910,38 @@ def session_live_status(session_id, session_cwd):
     registry = _load_session_registry()
     entry = registry.get(session_id)
     if entry:
-        pid = int(entry["pid"])
-        result["pid"] = pid
-        result["match_count"] = 1
-        result["status"] = entry.get("status")
-        result["kind"] = entry.get("kind")
-        result["job_id"] = entry.get("jobId")
-        result["agent"] = entry.get("agent")
-        # Hydrate tty + terminal_app from the live pid
         try:
-            ps_out = subprocess.run(
-                ["ps", "-o", "tty=", "-p", str(pid)],
-                capture_output=True, text=True, timeout=1,
-            )
-            tty = (ps_out.stdout or "").strip()
-            if tty and tty != "??":
-                result["tty"] = tty
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-        term_app, _ = _proc_ancestor_terminal(pid)
-        result["terminal_app"] = term_app
-        result["live"] = True
-        return result
+            pid = int(entry["pid"])
+        except (TypeError, ValueError, KeyError):
+            pid = 0
+        # CCC-45: only trust the registry entry when its pid is ACTUALLY alive.
+        # A stale ~/.claude/sessions/<pid>.json — claude exited without cleanup
+        # (e.g. after a /clear fork) — otherwise reported the session "live"
+        # with a tty, so CCC keystroked input into a dead terminal / the ether.
+        # When the pid is gone, fall through to scanning real running processes
+        # (authoritative) instead of trusting the registry blindly.
+        if pid and _pid_alive(pid):
+            result["pid"] = pid
+            result["match_count"] = 1
+            result["status"] = entry.get("status")
+            result["kind"] = entry.get("kind")
+            result["job_id"] = entry.get("jobId")
+            result["agent"] = entry.get("agent")
+            # Hydrate tty + terminal_app from the live pid
+            try:
+                ps_out = subprocess.run(
+                    ["ps", "-o", "tty=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=1,
+                )
+                tty = (ps_out.stdout or "").strip()
+                if tty and tty != "??":
+                    result["tty"] = tty
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass
+            term_app, _ = _proc_ancestor_terminal(pid)
+            result["terminal_app"] = term_app
+            result["live"] = True
+            return result
 
     # Fallback: cwd-based matching (for older claude versions or missing registry)
     if not session_cwd:
