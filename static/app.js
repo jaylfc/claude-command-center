@@ -2240,8 +2240,32 @@
       sessionId: null, nonce: null, fetching: false,
       submitting: false, questions: null, selections: null,
     };
+    // Card gone — un-hide the inline transcript copy of the question.
+    try { _syncLiveQuestionDuplicateHide(); } catch (_) {}
   }
   function closeRelayedQuestionModal() { closeRelayedQuestionInline(); }
+
+  // The pending question renders TWICE in the conversation view: once as the
+  // live answerable card (showRelayedQuestionInline) and once as its inline
+  // transcript tool-call (.ask-user-block). While the card is up, hide the
+  // inline duplicate (the last .ask-user-block — the pending question); restore
+  // it when the card closes so the answered question still reads back in
+  // history. Idempotent + re-applied on each render (the transcript rebuilds
+  // the inline blocks without the hide class).
+  function _syncLiveQuestionDuplicateHide() {
+    const cardEl = _relayedQuestionInlineEl();
+    const view = (cardEl && cardEl.closest('.conversations-view'))
+      || (typeof getConvView === 'function' ? getConvView() : null);
+    if (!view) return;
+    view.querySelectorAll('.is-live-question-dup').forEach(function (n) {
+      n.classList.remove('is-live-question-dup');
+    });
+    if (!cardEl) return;
+    const blocks = view.querySelectorAll('.ask-user-block');
+    if (!blocks.length) return;
+    const last = blocks[blocks.length - 1];
+    (last.closest('.tool-call') || last).classList.add('is-live-question-dup');
+  }
 
   // Called each poll tick. Decides whether to fetch/show/close the inline
   // question card based on the open session's question_waiting flag.
@@ -2342,6 +2366,8 @@
         '<button type="button" class="ccc-q-send ccc-q-primary" disabled>Send answer</button>' +
       '</div>';
     $view.appendChild(modal);
+    // Card is up — hide the duplicate inline copy of this question.
+    try { _syncLiveQuestionDuplicateHide(); } catch (_) {}
 
     const sendBtn = modal.querySelector('.ccc-q-send');
     const dismissBtn = modal.querySelector('.ccc-q-dismiss');
@@ -24062,6 +24088,9 @@
     updateSessionOutcomeBanner($view);
     _firePhoneModeReadIfDone(events, paneId);
     _ensureFirstUserPinned($view);
+    // Re-hide the inline duplicate of a pending question after the transcript
+    // rebuilds (it re-creates the .ask-user-block without the hide class).
+    try { _syncLiveQuestionDuplicateHide(); } catch (_) {}
     return true;
   }
 

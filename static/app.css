@@ -877,6 +877,13 @@
     background: var(--surface-2);
     border-radius: 4px;
   }
+  /* While the live answerable question card is showing, hide the inline
+     transcript copy of that same pending question so it isn't shown twice.
+     !important overrides the hide-tools force-visible rule for ask-user
+     tool calls. Restored (class removed) when the card closes. */
+  .conversations-view .is-live-question-dup,
+  .conversations-view .tool-call.is-live-question-dup,
+  .hide-tools .tool-call.ask-user-question.is-live-question-dup { display: none !important; }
   .tool-call.ask-user-question .ask-user-block + .ask-user-block {
     margin-top: 6px;
   }
