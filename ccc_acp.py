@@ -47,9 +47,7 @@ from acp.schema import (
     PlanEntry,
     PromptCapabilities,
     SessionCapabilities,
-    SessionCloseCapabilities,
     SessionInfo,
-    SessionListCapabilities,
 )
 
 # ---------------------------------------------------------------------------
@@ -189,8 +187,10 @@ class CCCACPAgent(Agent):
             agentCapabilities=AgentCapabilities(
                 promptCapabilities=PromptCapabilities(embeddedContext=True),
                 sessionCapabilities=SessionCapabilities(
-                    close=SessionCloseCapabilities(),
-                    list=SessionListCapabilities(),
+                    close=True,
+                    list=True,
+                    resume=False,
+                    fork=False,
                 ),
             ),
             agentInfo=Implementation(
@@ -203,12 +203,10 @@ class CCCACPAgent(Agent):
     # ── session/new ───────────────────────────────────────────────────────
 
     async def new_session(
-        self, cwd: str = None, mcp_servers=None, **kw
+        self, cwd: str, mcp_servers=None, **kw
     ) -> NewSessionResponse:
         """Create a new Claude Code headless session in *cwd*."""
         session_id = uuid.uuid4().hex
-        if cwd is None:
-            cwd = os.getcwd()
         cwd = os.path.abspath(cwd)
         os.makedirs(cwd, exist_ok=True)
 
