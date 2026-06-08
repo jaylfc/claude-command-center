@@ -4424,13 +4424,16 @@
           // The session is busy (or headless mid-tool). Keep the echo visible
           // as "queued" — NOT "terminal idle" (a headless session has no
           // terminal) and NOT the not-acknowledged timeout — so the user sees
-          // their message is parked and will be delivered, not lost.
-          markPendingSendQueued(pendingSend, compactCommand
-            ? 'Queued /compact — will run when the session finishes its current step.'
-            : 'Queued — will send when the session finishes its current step.');
-          showOpToast(compactCommand
-            ? 'Queued /compact until the session is idle.'
-            : 'Queued — will send when the session finishes its current step.');
+          // their message is parked and will be delivered, not lost. Prefer the
+          // server's explicit reason (e.g. Antigravity can't take input
+          // mid-turn) so "Queued" is never unexplained (CCC-42/43).
+          const queuedMsg = data.queued_reason
+            ? 'Queued — ' + data.queued_reason
+            : (compactCommand
+                ? 'Queued /compact — will run when the session finishes its current step.'
+                : 'Queued — will send when the session finishes its current step.');
+          markPendingSendQueued(pendingSend, queuedMsg);
+          showOpToast(queuedMsg);
         } else if (data.via === 'codex-steer') {
           showOpToast('Steered running Codex turn.');
           setTimeout(refreshConversationList, 1500);
@@ -14787,6 +14790,17 @@
           : 'No live CCC Codex app-server; Codex actions fall back to one-shot exec until one starts.');
       return;
     }
+    // Antigravity is always headless — CCC resumes it per turn, no TTY. Surface
+    // a single "headless" pill so the engine mode is visible (CCC-42), lit when
+    // a resume is actively running.
+    if (currentSession && currentSession.source === 'antigravity') {
+      const agLive = !!ls.live;
+      el.innerHTML = pill0(agLive, false, agLive ? 'headless · running' : 'headless',
+        agLive
+          ? 'Antigravity is running headlessly (CCC resumes it per turn — there is no live terminal)'
+          : 'Antigravity is idle — CCC resumes it headlessly when you send (there is no live terminal)');
+      return;
+    }
     const headOn = !!ls.headlessPresent;
     const stale = headOn && !!ls.headlessStale;
     const termOn = !!ls.terminalPresent;
@@ -18432,7 +18446,7 @@
         // last checked. (The Compact button lives in the input box now.) Filled
         // imperatively by updateConvProcessIndicator() so the "checked Xs ago"
         // label stays fresh between full breadcrumb rebuilds. Claude-only.
-        const procSlot = (currentSession && (isClaudeSource(currentSession.source) || currentSession.source === 'codex'))
+        const procSlot = (currentSession && (isClaudeSource(currentSession.source) || currentSession.source === 'codex' || currentSession.source === 'antigravity'))
           ? '<span class="ccc-breadcrumb-proc" data-role="ccc-breadcrumb-proc"></span>'
           : '';
         // Proc slot (headless/terminal indication) sits right after the

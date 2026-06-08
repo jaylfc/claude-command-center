@@ -23325,6 +23325,24 @@ def _resume_session_antigravity_app(session_id, text):
     }
 
 
+# A headless Antigravity resume that's still "alive" past this window is treated
+# as a lingering/hung process rather than a real in-flight turn, so new input
+# resumes fresh instead of queuing behind it forever (CCC-42/43).
+_ANTIGRAVITY_RESUME_STALE_S = 5 * 60
+
+
+def _spawn_entry_started_epoch(entry):
+    """Epoch seconds for a spawn entry's ``started`` stamp (``%Y%m%dT%H%M%S``,
+    local time), or 0 when missing/unparseable."""
+    raw = (entry or {}).get("started")
+    if not raw:
+        return 0
+    try:
+        return time.mktime(time.strptime(str(raw), "%Y%m%dT%H%M%S"))
+    except (ValueError, TypeError, OverflowError):
+        return 0
+
+
 def resume_session_antigravity(session_id, text):
     """Resume an Antigravity conversation through AGY CLI or the running app.
 
@@ -23353,6 +23371,15 @@ def resume_session_antigravity(session_id, text):
         if s.get("engine") == "antigravity" and s.get("resumed_sid") == session_id:
             try:
                 if _poll_spawn_entry(s) is None:
+                    # The prior resume process still LOOKS alive. A headless
+                    # Antigravity turn that has overrun a sane window is almost
+                    # always a lingering/hung process, not real work — queuing
+                    # behind it freezes input forever and paints a permanent
+                    # "thinking"/"Queued" (CCC-42/43). Past the threshold, treat
+                    # it as done and fall through to a fresh resume instead.
+                    started = _spawn_entry_started_epoch(s)
+                    if started and (time.time() - started) > _ANTIGRAVITY_RESUME_STALE_S:
+                        continue
                     with _pending_resume_lock:
                         _pending_resume_queue.setdefault(session_id, []).append(text)
                     _save_pending_inputs()
@@ -23362,6 +23389,7 @@ def resume_session_antigravity(session_id, text):
                         "queued": True,
                         "pid": s.get("pid"),
                         "via": "antigravity-resume-queued",
+                        "queued_reason": "waiting for the current Antigravity turn to finish (it can't take input mid-turn)",
                     }
             except Exception:
                 pass
