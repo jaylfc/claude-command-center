@@ -2641,6 +2641,19 @@
       _optimisticAgentTimer = null;
     }
   }
+  // Tier 2 (live-thinking-and-input-echo doc): advance the optimistic agent
+  // indicator from "Sending…" to "🧠 Thinking…" once the message is delivered
+  // (ACK) and the agent goes to work. Only updates an EXISTING indicator —
+  // never resurrects one already cleared by the response landing (state:
+  // sending → thinking → done). Cleared by clearOptimisticAgentIndicator when
+  // the real response/activity arrives.
+  function setOptimisticAgentThinking($view) {
+    const el = ($view || document).querySelector('.conv-live-tool-inline.optimistic');
+    if (!el) return;
+    el.classList.add('is-thinking');
+    const tool = el.querySelector('.cl-tool');
+    if (tool) tool.innerHTML = '🧠 Thinking&hellip;';
+  }
 
   function isCommandActivityTool(tool) {
     const name = toolDisplayName(String(tool || ''));
@@ -4030,6 +4043,9 @@
       div.appendChild(note);
     }
     note.textContent = '✓ Delivered — waiting for Claude to pick it up.';
+    // Tier 2: the agent now has the message — advance the live turn status from
+    // "Sending…" to "🧠 Thinking…". Clears when the response lands.
+    setOptimisticAgentThinking(div.parentNode);
   }
 
   function isCursorUsageLimitFailure(data, reason) {
