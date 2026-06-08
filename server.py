@@ -14364,13 +14364,21 @@ def _parse_conversation_event(ev, line_num):
                     blocks.append({"kind": "text", "text": txt})
             elif btype == "thinking":
                 thinking = block.get("thinking", "").strip()
+                # Extended-thinking blocks are often signature-only in the
+                # persisted transcript: the reasoning text is stripped and only
+                # a cryptographic signature survives. Emit a marker block in
+                # that case so the UI can still show "thinking happened this
+                # turn" rather than silently dropping it.
+                signature = (block.get("signature") or "").strip()
                 if thinking:
                     # Was a 300-char preview — too short now that the thinking
                     # block is shown (collapsed/expandable) in the UI. Send a
                     # generous slice so the expanded view is readable without
                     # shipping unbounded reasoning on every turn.
                     preview = thinking[:4000] + ("..." if len(thinking) > 4000 else "")
-                    blocks.append({"kind": "thinking", "text": preview})
+                    blocks.append({"kind": "thinking", "text": preview, "signature_only": False})
+                elif signature:
+                    blocks.append({"kind": "thinking", "text": "", "signature_only": True})
 
         if blocks:
             return {
@@ -22256,9 +22264,12 @@ def _parse_antigravity_event(ev, line_num, usage_map=None):
     if ev_type == "PLANNER_RESPONSE":
         blocks = []
         thinking = (ev.get("thinking") or "").strip()
+        signature = (ev.get("signature") or "").strip()
         if thinking:
             preview = thinking[:300] + ("..." if len(thinking) > 300 else "")
-            blocks.append({"kind": "thinking", "text": preview})
+            blocks.append({"kind": "thinking", "text": preview, "signature_only": False})
+        elif signature:
+            blocks.append({"kind": "thinking", "text": "", "signature_only": True})
         content = (ev.get("content") or "").strip()
         if _antigravity_embedded_system_message(content):
             content = ""

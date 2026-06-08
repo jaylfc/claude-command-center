@@ -20511,14 +20511,16 @@
             });
           }
         } else if (b.type === 'thinking') {
-          // Don't bother rendering empty thinking blocks — they appear
-          // as the first block of every assistant turn and are noisy.
+          // Headless stream-json carries no thinking text (only a signature is
+          // emitted post-turn), so show the same compact "thinking happened"
+          // marker as the durable render rather than noisy placeholder text.
           if (!slot.querySelector('.stream-block-thinking')) {
-            const div = document.createElement('div');
-            div.className = 'stream-block-thinking';
-            div.dataset.renderTs = nowStamp();
-            div.textContent = '(thinking…)';
-            slot.appendChild(div);
+            const span = document.createElement('span');
+            span.className = 'stream-block-thinking thinking-marker';
+            span.dataset.renderTs = nowStamp();
+            span.title = 'Claude used extended thinking this turn (reasoning text not persisted — only a cryptographic signature)';
+            span.textContent = '🧠 thought';
+            slot.appendChild(span);
           }
         }
       }
@@ -23796,7 +23798,15 @@
             html += '<div class="assistant-text" dir="auto">' + renderMarkdown(b.text) + '</div>';
             hasNonTool = true;
           } else if (b.kind === 'thinking') {
-            html += '<div class="thinking-block"><span class="thinking-toggle" onclick="this.parentElement.querySelector(\'.t-body\').style.display=this.parentElement.querySelector(\'.t-body\').style.display===\'none\'?\'block\':\'none\'">💭 Thinking</span><div class="t-body" style="display:none">' + escapeHtml(b.text) + '</div></div>';
+            if (b.signature_only || !b.text) {
+              // Signature-only: the reasoning text was not persisted (only a
+              // cryptographic signature survived). Show a compact, non-expandable
+              // marker so the user knows extended thinking happened this turn.
+              html += '<span class="thinking-marker" title="Claude used extended thinking this turn (reasoning text not persisted — only a cryptographic signature)">🧠 thought</span>';
+            } else {
+              // Text present: visible block with a collapsed, expandable body.
+              html += '<div class="thinking-block"><span class="thinking-toggle" onclick="this.parentElement.querySelector(\'.t-body\').style.display=this.parentElement.querySelector(\'.t-body\').style.display===\'none\'?\'block\':\'none\'">💭 Thinking</span><div class="t-body" style="display:none">' + escapeHtml(b.text) + '</div></div>';
+            }
             hasNonTool = true;
           }
         }
