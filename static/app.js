@@ -33387,8 +33387,9 @@
   async function checkOnboarding() {
     try {
       const res = await fetch('/api/onboarding/status');
+      if (!res.ok) return;
       const data = await res.json();
-      if (!data.completed) {
+      if (data && data.clis && !data.completed) {
         showOnboarding(data);
       }
     } catch (e) {
