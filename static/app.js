@@ -23892,10 +23892,10 @@
             hasNonTool = true;
           }
         }
-        // Per-turn token chips (currently only set for Antigravity sessions —
-        // the server attaches tokens_in/out/thinking from the trajectory's
-        // modelUsage when the Antigravity app is running). Mirrors the line
-        // Antigravity prints in its own chat header.
+        // Per-turn token chips. Set for Antigravity (from the trajectory's
+        // modelUsage) and for Claude (from each assistant message's
+        // message.usage, server-side) so every turn ends with an "X in | Y out"
+        // count — useful context-size reassurance.
         if ((ev.tokens_in || ev.tokens_out || ev.tokens_thinking)) {
           const chipText = _formatAntigravityTokenChips(ev.tokens_in, ev.tokens_out, ev.tokens_thinking);
           if (chipText) {

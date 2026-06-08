@@ -14381,13 +14381,28 @@ def _parse_conversation_event(ev, line_num):
                     blocks.append({"kind": "thinking", "text": "", "signature_only": True})
 
         if blocks:
-            return {
+            out_ev = {
                 "line": line_num,
                 "ts": ts,
                 "type": "assistant",
                 "message_id": msg.get("id", ""),
                 "blocks": blocks,
             }
+            # Per-turn token usage: surface a "X in | Y out" chip at the end of
+            # every assistant turn (interactive transcripts have no `result`
+            # event, so without this they show no token count at all). tokens_in
+            # is the full input processed this turn (uncached + cache read +
+            # cache creation) so it reflects the real context size.
+            usage = msg.get("usage")
+            if isinstance(usage, dict):
+                tin = (int(usage.get("input_tokens") or 0)
+                       + int(usage.get("cache_read_input_tokens") or 0)
+                       + int(usage.get("cache_creation_input_tokens") or 0))
+                tout = int(usage.get("output_tokens") or 0)
+                if tin or tout:
+                    out_ev["tokens_in"] = tin
+                    out_ev["tokens_out"] = tout
+            return out_ev
 
     if ev_type == "result":
         cost = ev.get("cost_usd", "?")
