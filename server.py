@@ -27060,23 +27060,41 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
                 "terminal. Launch or focus the session, then retry."
             ),
         }
-    # Defense-in-depth: never inject text while an AskUserQuestion is
-    # pending. Queue it instead — the queue watcher above also has this
-    # guard, so the text will be flushed once the user answers in the UI
-    # and the pending-question marker clears. The watcher fix at the
-    # top-level loop covers queued sends; this catches direct injects
-    # (annotation flows, /api/inject-input direct calls, etc.).
-    if not _from_terminal_queue and _pending_ask_user_question_for_session(session_id):
+    # Defense-in-depth: never inject text while the session is parked on an
+    # interactive PICKER — an AskUserQuestion prompt or a permission/approval
+    # prompt. Typed input there doesn't reach the agent; it answers (or
+    # mangles) the picker. THIS is the case that actually warrants queueing —
+    # not a busy tool turn, which the TUI/stream-json both accept input during.
+    # Queue it instead; it flushes once the user resolves the prompt in the UI
+    # and the marker clears. Covers direct injects (annotation flows,
+    # /api/inject-input) as well as the top-level queue watcher.
+    if not _from_terminal_queue and (
+        _pending_ask_user_question_for_session(session_id)
+        or _read_notification_state(session_id)
+    ):
         return _queue_terminal_input(session_id, text, {"status": "busy"})
     if is_codex and mode == "steer":
         return resume_session_codex(session_id, text, steer=True)
     if status.get("live") and has_tty:
         if not _from_terminal_queue:
-            if _terminal_input_queue_has_pending(session_id) or _session_status_is_busy(status):
-                if is_codex:
-                    return resume_session_codex(session_id, text)
-                if is_cursor:
-                    return resume_session_cursor(session_id, text)
+            busy_or_pending = (
+                _terminal_input_queue_has_pending(session_id)
+                or _session_status_is_busy(status)
+            )
+            # Codex/Cursor keep their own busy-turn delivery (resume/steer) —
+            # their TUIs aren't driven by raw keystrokes the way Claude's is.
+            if busy_or_pending and is_codex:
+                return resume_session_codex(session_id, text)
+            if busy_or_pending and is_cursor:
+                return resume_session_cursor(session_id, text)
+            # Claude TTY: only queue to preserve ORDER when input is already
+            # queued. A merely-busy turn no longer blocks — the Claude TUI
+            # accepts typed input mid-turn and queues it itself (verified for
+            # headless; same queued-messages behaviour in the TUI). Picker
+            # states (question/approval), where keystrokes WOULD mangle, are
+            # already caught by the guard above. The tty-unreachable fallback
+            # below still queues if the keystroke can't reach the tab.
+            if _terminal_input_queue_has_pending(session_id):
                 return _queue_terminal_input(session_id, text, status)
         keystroke_result = inject_input_via_keystroke(tty, term_app or "Terminal", text)
         # If the AppleScript can't find the terminal tab (user switched
