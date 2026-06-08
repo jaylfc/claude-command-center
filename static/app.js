@@ -30319,12 +30319,27 @@
 
   function annElementSummary(el) {
     if (!el || !el.tagName) return {};
+    // Capture identifying attributes beyond the bare selector so the worker
+    // can anchor on a meaningful element even when the dot lands on a generic
+    // container (e.g. #convInputBar): classes, aria-label, title, data-* keys.
+    const data = {};
+    if (el.dataset) {
+      let n = 0;
+      for (const k in el.dataset) {
+        if (n++ >= 8) break;
+        data[k] = annText(el.dataset[k], 80);
+      }
+    }
     return {
       tag: el.tagName.toLowerCase(),
       id: el.id || '',
       role: el.getAttribute('role') || '',
       selector: annSelectorFor(el),
       href: el.getAttribute('href') || '',
+      classes: el.classList ? Array.from(el.classList).slice(0, 8).join(' ') : '',
+      aria: el.getAttribute('aria-label') || '',
+      title: el.getAttribute('title') || '',
+      data,
       text: annText(annElementText(el), 200),
     };
   }
@@ -30679,6 +30694,19 @@
     // see where the element lives in the page.
     const contextRect = annContextRect(element, rect);
     const screen = annEstimateScreenRect(contextRect);
+    // Snapshot the session's live process state AT ANNOTATION TIME so
+    // liveness bugs ("is this headless? is the terminal alive?") arrive with
+    // evidence instead of needing reconstruction later.
+    const _ls = (typeof liveStatus !== 'undefined' && liveStatus) || {};
+    const liveStatusSnapshot = {
+      source: (typeof currentSession !== 'undefined' && currentSession && currentSession.source) || '',
+      live: !!_ls.live,
+      headless_present: !!_ls.headlessPresent,
+      headless_pid: _ls.headlessPid || null,
+      headless_stale: !!_ls.headlessStale,
+      terminal_present: !!_ls.terminalPresent,
+      tty: _ls.tty || null,
+    };
     const payload = {
       note,
       url: window.location.href,
@@ -30690,6 +30718,7 @@
       device_pixel_ratio: screen.device_pixel_ratio || (window.devicePixelRatio || 1),
       screen,
       element: annElementSummary(element),
+      live_status: liveStatusSnapshot,
       capture_screen: true,
     };
     if (screenshotB64) payload.screenshot_b64 = screenshotB64;
@@ -31019,7 +31048,13 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-        savedAnnotation = data.annotation;
+        // Merge the payload we built (enriched element, live_status) under the
+        // server's saved record (id, screenshot_path) so downstream text —
+        // preview, queue prompt, copy, new-session — carries the full context
+        // even if the server doesn't echo every custom field. Drop the heavy
+        // base64 so it doesn't linger on the in-memory annotation.
+        savedAnnotation = Object.assign({}, payload, data.annotation || {});
+        delete savedAnnotation.screenshot_b64;
         noteEl.disabled = true;
         if (cancelBtn) cancelBtn.hidden = true;
         if (openSessionBtn) openSessionBtn.disabled = false;
@@ -31235,7 +31270,13 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-        savedAnnotation = data.annotation;
+        // Merge the payload we built (enriched element, live_status) under the
+        // server's saved record (id, screenshot_path) so downstream text —
+        // preview, queue prompt, copy, new-session — carries the full context
+        // even if the server doesn't echo every custom field. Drop the heavy
+        // base64 so it doesn't linger on the in-memory annotation.
+        savedAnnotation = Object.assign({}, payload, data.annotation || {});
+        delete savedAnnotation.screenshot_b64;
         noteEl.disabled = true;
         if (cancelBtn) cancelBtn.hidden = true;
         if (openSessionBtn) openSessionBtn.disabled = false;
@@ -31320,6 +31361,23 @@
     if (ann.session_id) anchors.push('Session ID: ' + ann.session_id);
     if (element.selector) anchors.push('Selector: ' + annClipText(element.selector, 200));
     if (element.text) anchors.push('Element: ' + annClipText(element.text, 160));
+    if (element.classes) anchors.push('Classes: ' + annClipText(element.classes, 160));
+    if (element.aria) anchors.push('Aria-label: ' + annClipText(element.aria, 120));
+    if (element.title) anchors.push('Title: ' + annClipText(element.title, 120));
+    if (element.data && Object.keys(element.data).length) {
+      const dataStr = Object.keys(element.data).map(k => k + '=' + element.data[k]).join(', ');
+      anchors.push('Data-attrs: ' + annClipText(dataStr, 200));
+    }
+    const ls = ann.live_status;
+    if (ls && (ls.source || ls.headless_present || ls.terminal_present || ls.live)) {
+      const bits = [];
+      if (ls.source) bits.push(ls.source);
+      bits.push(ls.live ? 'live' : 'not-live');
+      if (ls.headless_present) bits.push('headless' + (ls.headless_pid ? ' pid ' + ls.headless_pid : '') + (ls.headless_stale ? ' (STALE)' : ''));
+      if (ls.terminal_present) bits.push('terminal' + (ls.tty ? ' ' + ls.tty : ''));
+      if (!ls.headless_present && !ls.terminal_present) bits.push('no headless/terminal process');
+      anchors.push('Session state: ' + bits.join(' · '));
+    }
     if (ann.screenshot_path) anchors.push('Screenshot: ' + ann.screenshot_path);
     if (anchors.length) {
       lines.push('', 'Anchors:', anchors.map(v => '- ' + v).join('\n'));
