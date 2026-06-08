@@ -26956,21 +26956,46 @@ def compact_session_context(session_id, *, terminal_app=None, _from_terminal_que
     # and an interactive terminal opens, so /compact will run
     # automatically. UX matches a regular injection: "queued" not
     # "rejected".
+    # Headless /compact: /compact is a slash command that ONLY executes in an
+    # interactive surface — written to a stream-json stdin it's just literal
+    # text and never runs. Queuing it (the old behavior) therefore never fired
+    # for a long-lived headless session. When the headless is IDLE (no in-flight
+    # turn to lose), launch a `claude --resume` terminal that runs /compact —
+    # the same proven path used for dormant sessions; the staleness machinery
+    # (GH #71) retires the now-redundant headless. Only queue when BUSY, so a
+    # mid-turn run isn't abandoned.
+    def _launch_terminal_compact(note):
+        backup_path = _backup_jsonl_before_compact(sid)
+        launched = launch_terminal_for_session(
+            sid, cwd, term_app, post_slash_commands=["/compact"],
+        )
+        if launched.get("ok"):
+            launched["via"] = "terminal-launch-headless"
+            launched["launched"] = True
+            launched.setdefault("note", note)
+        return _compact_result(launched, backup_path)
+
     live_spawn = _find_live_spawn_entry_for_session(sid) if not has_tty else None
     if live_spawn is not None:
+        if not _spawn_entry_active_tool_child(live_spawn):
+            return _launch_terminal_compact(
+                "Opened a terminal to run /compact — the idle headless session is retired in its favor.")
         queued_status = {"pid": live_spawn.get("pid"), "status": "headless"}
         result = _compact_result(_queue_terminal_input(sid, "/compact", queued_status))
         result["via"] = "terminal-queued-headless"
-        result["note"] = "Queued — /compact will run when the headless session finishes."
+        result["note"] = "Queued — /compact will run when the headless turn finishes."
         return result
     if status.get("live") and not has_tty and status.get("kind") != "bg":
+        if not _session_status_is_busy(status):
+            return _launch_terminal_compact(
+                "Opened a terminal to run /compact — the idle headless session is retired in its favor.")
         queued_status = {
             "pid": status.get("pid"),
             "status": status.get("status") or "headless",
         }
         result = _compact_result(_queue_terminal_input(sid, "/compact", queued_status))
         result["via"] = "terminal-queued-headless"
-        result["note"] = "Queued — /compact will run when the headless session finishes."
+        result["note"] = "Queued — /compact will run when the headless turn finishes."
         return result
 
     pending_question = _pending_ask_user_question_for_session(sid)
