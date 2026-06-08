@@ -1133,6 +1133,13 @@
     font-variant-numeric: tabular-nums;
     cursor: help;
   }
+  /* Merged into the trailing tool-call line (CCC-30): sits at the right edge
+     of the flex row instead of floating as its own line below the turn. */
+  .tool-call .event-token-chips.is-merged {
+    margin: 0 0 0 auto;
+    align-self: center;
+    white-space: nowrap;
+  }
 
   .line-num { font-size: 10px; color: var(--text-muted); opacity: 0.5; float: right; }
   .msg-ts { font-size: 10px; color: var(--text-muted); opacity: 0.4; float: right; margin-right: 8px; font-variant-numeric: tabular-nums; }

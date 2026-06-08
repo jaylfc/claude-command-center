@@ -23900,6 +23900,11 @@
       } else if (ev.type === 'assistant') {
         let html = '<span class="line-num">L' + ev.line + '</span>' + tsSpan(ev.ts);
         let hasNonTool = false;
+        // Collect block HTML in parts so the per-turn token chip can be merged
+        // into the end of the last tool-call (CCC-30) instead of floating as
+        // its own line below the turn.
+        const blockParts = [];
+        let lastToolPartIdx = -1;
         for (const b of ev.blocks) {
           if (b.kind === 'tool_use') {
             // Seed the subagent-tab label when a Task tool_use lands in
@@ -23958,7 +23963,7 @@
             const commandDisclosure = renderToolCommandDisclosure(b, detail);
             const commandClass = commandDisclosure ? ' has-command-disclosure' : '';
             const toolUseId = String(b.id || b.tool_use_id || '').trim();
-            html += '<div class="tool-call' + toolClass + detail.className + commandClass + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '" data-tool-use-id="' + escapeAttr(toolUseId) + '">'
+            blockParts.push('<div class="tool-call' + toolClass + detail.className + commandClass + '" data-tool-detail="' + escapeAttr(detail.full) + '" data-tool-source="' + escapeAttr(source) + '" data-tool-use-id="' + escapeAttr(toolUseId) + '">'
               + '<span class="arrow">-></span> '
               + sourceHtml
               + '<span class="tool-name" data-tool-name="' + escapeAttr(b.name || '') + '">' + escapeHtml(displayName) + '</span>'
@@ -23966,36 +23971,46 @@
                   ? askBody
                   : (detail.display ? ' <span class="tool-detail" title="' + escapeAttr(detail.full) + '">' + escapeHtml(detail.display) + '</span>' : ''))
               + commandDisclosure
-              + '</div>';
+              + '</div>');
+            lastToolPartIdx = blockParts.length - 1;
           } else if (b.kind === 'text') {
-            html += '<div class="assistant-text" dir="auto">' + renderMarkdown(b.text) + '</div>';
+            blockParts.push('<div class="assistant-text" dir="auto">' + renderMarkdown(b.text) + '</div>');
             hasNonTool = true;
           } else if (b.kind === 'thinking') {
             if (b.signature_only || !b.text) {
               // Signature-only: the reasoning text was not persisted (only a
               // cryptographic signature survived). Show a compact, non-expandable
               // marker so the user knows extended thinking happened this turn.
-              html += '<span class="thinking-marker" title="Claude used extended thinking this turn (reasoning text not persisted — only a cryptographic signature)">🧠 thought</span>';
+              blockParts.push('<span class="thinking-marker" title="Claude used extended thinking this turn (reasoning text not persisted — only a cryptographic signature)">🧠 thought</span>');
             } else {
               // Text present: visible block with a collapsed, expandable body.
-              html += '<div class="thinking-block"><span class="thinking-toggle" onclick="this.parentElement.querySelector(\'.t-body\').style.display=this.parentElement.querySelector(\'.t-body\').style.display===\'none\'?\'block\':\'none\'">💭 Thinking</span><div class="t-body" style="display:none">' + escapeHtml(b.text) + '</div></div>';
+              blockParts.push('<div class="thinking-block"><span class="thinking-toggle" onclick="this.parentElement.querySelector(\'.t-body\').style.display=this.parentElement.querySelector(\'.t-body\').style.display===\'none\'?\'block\':\'none\'">💭 Thinking</span><div class="t-body" style="display:none">' + escapeHtml(b.text) + '</div></div>');
             }
             hasNonTool = true;
           }
         }
         // Per-turn token chips. Set for Antigravity (from the trajectory's
         // modelUsage) and for Claude (from each assistant message's
-        // message.usage, server-side) so every turn ends with an "X in | Y out"
-        // count — useful context-size reassurance.
+        // message.usage, server-side). Tier 2 now carries the live "working"
+        // signal, so a standalone token line below the turn is just noise
+        // (CCC-30). Merge the count into the END of the last tool-call line
+        // when there is one; only fall back to a standalone line for turns
+        // with no tool call to hang it on.
         if ((ev.tokens_in || ev.tokens_out || ev.tokens_thinking)) {
           const chipText = _formatAntigravityTokenChips(ev.tokens_in, ev.tokens_out, ev.tokens_thinking);
           if (chipText) {
             const chipTitle = 'Input:    ' + (Number(ev.tokens_in) || 0).toLocaleString() + ' tokens'
               + '\nOutput:   ' + (Number(ev.tokens_out) || 0).toLocaleString() + ' tokens'
               + '\nThinking: ' + (Number(ev.tokens_thinking) || 0).toLocaleString() + ' tokens';
-            html += '<div class="event-token-chips" title="' + escapeAttr(chipTitle) + '">' + escapeHtml(chipText) + '</div>';
+            if (lastToolPartIdx >= 0) {
+              const mergedChip = '<span class="event-token-chips is-merged" title="' + escapeAttr(chipTitle) + '">' + escapeHtml(chipText) + '</span>';
+              blockParts[lastToolPartIdx] = blockParts[lastToolPartIdx].replace(/<\/div>\s*$/, mergedChip + '</div>');
+            } else {
+              blockParts.push('<div class="event-token-chips" title="' + escapeAttr(chipTitle) + '">' + escapeHtml(chipText) + '</div>');
+            }
           }
         }
+        html += blockParts.join('');
         if (!hasNonTool) div.classList.add('tool-only');
         // Hide bare no-op acknowledgments ("No response requested." etc.):
         // filler an agent emits when the Claude Code harness resume-nudges an
