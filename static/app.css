@@ -1866,11 +1866,12 @@
     border-radius: 6px;
     background: var(--surface);
   }
-  /* When the conversation has a custom background, the solid surface fill on
-     the tool-call group stands out — drop it so the group blends into the
-     background (the border keeps the group's outline). */
+  /* When the conversation has a custom background, the solid surface fill AND
+     the border on the tool-call group stand out — drop both so the group
+     blends fully into the background. */
   .conv-pane.has-conv-bg .conversations-view .tool-call-group {
     background: transparent;
+    border: none;
   }
   .conversations-view .tool-call-group-header {
     cursor: pointer; user-select: none;
