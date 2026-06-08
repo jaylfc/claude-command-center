@@ -15083,6 +15083,11 @@
     //     work has started.
     //   - archived: same as before.
     const _sessionConvs = [];
+    // Dedup guard for the In Progress list (CCC-34): the same session can
+    // arrive twice in `convs` (e.g. an Antigravity session discovered from the
+    // app AND a CCC-spawned headless entry), which rendered two identical
+    // rows. Keep one row per session key, preferring the live / most-recent.
+    const _seenSessionKeys = new Map(); // session key -> index in _sessionConvs
     const _ghIssueConvs = [];
     const _readyToMergeConvs = [];
     const _readyToMergeByPr = new Map();   // pr_num -> { idx, conv }
@@ -15160,6 +15165,18 @@
       // UI, the user wants them VISIBLE in the main list AND in the
       // chat's indented list — with an "IN GROUP CHAT" badge to mark
       // them. Don't partition them out anymore.
+      // Dedup by session key — a duplicate replaces the kept row only when it
+      // is the better copy (live wins; otherwise the more recently modified).
+      const _dupKey = c.session_id || c.id || '';
+      if (_dupKey && _seenSessionKeys.has(_dupKey)) {
+        const _idx = _seenSessionKeys.get(_dupKey);
+        const _existing = _sessionConvs[_idx];
+        const _better = (!!c.is_live && !_existing.is_live)
+          || (!!c.is_live === !!_existing.is_live && (c.modified || 0) > (_existing.modified || 0));
+        if (_better) _sessionConvs[_idx] = c;
+        continue;
+      }
+      if (_dupKey) _seenSessionKeys.set(_dupKey, _sessionConvs.length);
       _sessionConvs.push(c);
     }
     const _renderRow = (c, opts = {}) => {
