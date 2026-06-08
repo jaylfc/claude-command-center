@@ -2505,6 +2505,14 @@ def _live_engine_session_ids():
     return result
 
 
+# A conversation written this recently still gets the precise (file-scanning)
+# liveness probe even if it's not in the cheap live-candidate set — covers
+# pool-model Codex, whose rollout changes but carries no resume-arg signal.
+# Codex itself treats <5min as "recently written" (session_live_status); 10min
+# is a safe backstop. Older, untouched rows skip the probe entirely.
+_LIVE_MTIME_WINDOW = 600
+
+
 def _archive_session_is_live(session_id):
     """A session is "live" if any sidecar marker exists for it (Claude only),
     OR a non-Claude engine CLI (codex/gemini/cursor/antigravity) is running it.
@@ -3526,6 +3534,18 @@ def find_all_conversations(
     except Exception:
         repo_pins = {}
 
+    # Liveness gate, built once. The cheap "could be live right now" set —
+    # Claude registry (one cached `ps`), engine resume-arg scan, sidecar marker
+    # files — instead of running _archive_session_is_live (which scans every
+    # Gemini/Codex file to classify the engine) for all ~1000 archive rows.
+    # Below, only sessions in this set or written within _LIVE_MTIME_WINDOW get
+    # the precise probe; the vast majority of rows are old and untouched and
+    # resolve to not-live for free. This is the dominant cost of the build.
+    try:
+        live_candidates = _discover_live_session_ids()
+    except Exception:
+        live_candidates = set()
+
     out = []
     seen_session_ids = set()
     _now = time.time()
@@ -3731,16 +3751,23 @@ def find_all_conversations(
             # worktree_dirty is a current-state signal (uncommitted edits
             # right now), not a per-session one. Use the cached probe
             # against the effective worktree, same as /api/sessions does.
+            # last-meaningful activity (fallback to file mtime) — gates both the
+            # worktree probe and the liveness probe to recently-active rows.
+            _last_ts = tail_meta.get("last_meaningful_ts") or stat.st_mtime
             worktree_dirty = False
             try:
                 # Only probe last-meaningful-ts'd sessions to keep this
                 # cheap; old archive rows rarely need this state.
-                _last_ts = tail_meta.get("last_meaningful_ts") or stat.st_mtime
                 if resolve_worktree_dirty and (_now - _last_ts) < (3 * 86400) and effective_cwd:
                     worktree_dirty = _worktree_dirty_cached(effective_cwd, _last_ts)
             except Exception:
                 worktree_dirty = False
-            is_live = _archive_session_is_live(session_id)
+            # Only plausibly-live sessions get the precise (Gemini/Codex
+            # file-scanning) liveness probe; stale rows are not live for free.
+            if session_id in live_candidates or (_now - _last_ts) < _LIVE_MTIME_WINDOW:
+                is_live = _archive_session_is_live(session_id)
+            else:
+                is_live = False
 
             # Sidecar overlay (Round 3): for live sessions, merge in the
             # sidecar's snapshot of "what is the agent doing right now"
@@ -4123,6 +4150,18 @@ def _rehydrate_archive_cached_rows(rows):
         pinned_list = []
     pinned_rank = _pinned_rank_map(pinned_list)
 
+    # Same liveness gate as the build path. This rehydrate runs on EVERY
+    # stale-cache serve — the path the dashboard hits on each load — so an
+    # ungated per-row _archive_session_is_live (which scans every Gemini/Codex
+    # file to classify the engine) for all ~1000 rows was the real recurring
+    # "10s to load" even when the response cache was warm. Probe only the cheap
+    # live-candidate set + recently-written rows; the rest are not live for free.
+    try:
+        live_candidates = _discover_live_session_ids()
+    except Exception:
+        live_candidates = set()
+    _now_rehydrate = time.time()
+
     hydrated = []
     for raw in rows or []:
         if not isinstance(raw, dict):
@@ -4150,7 +4189,11 @@ def _rehydrate_archive_cached_rows(rows):
             row["pinned"] = sid in pinned_rank
             row["pin_rank"] = pinned_rank.get(sid)
 
-            is_live = _archive_session_is_live(sid)
+            row_ts = row.get("mtime") or row.get("modified") or 0
+            if sid in live_candidates or (_now_rehydrate - row_ts) < _LIVE_MTIME_WINDOW:
+                is_live = _archive_session_is_live(sid)
+            else:
+                is_live = False
             row["is_live"] = is_live
             for k, v in _ARCHIVE_SIDECAR_DEFAULTS.items():
                 row[k] = copy.deepcopy(v)
@@ -6602,6 +6645,14 @@ _conv_meta_cache = {}
 _conv_meta_cache_dirty = False
 _conv_meta_cache_lock = threading.Lock()
 _CONV_META_SCHEMA_VERSION = 13
+
+# In-memory cache of the head-parse (first ~20 lines: session_id, timestamp,
+# git_branch, first_message, head_cwd) keyed by str(path) -> (cache_key, tuple),
+# where cache_key is (st_mtime_ns, st_size) — same invalidation as
+# _extract_tail_meta. The all-folders archive build opens and parses the head of
+# every conversation (~1390 files) on each load; archived transcripts never
+# change, so this collapses that to only the files that actually changed.
+_conv_head_cache = {}
 _CONV_META_COMPAT_SCHEMA_VERSIONS = {13}
 _CONV_META_CACHE_FILE = (
     Path.home() / ".claude" / "command-center" / "conv_meta_cache.json"
@@ -11766,7 +11817,9 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
         if _stem in pinned_out_sids:
             continue
 
-        # Peek at first 20 lines to extract metadata
+        # Peek at first 20 lines to extract metadata. Cached by (mtime_ns, size)
+        # like _extract_tail_meta — archived transcripts never change, so this
+        # turns ~1390 head opens-and-parses into a handful (only changed files).
         session_id = None
         timestamp = None
         git_branch = None
@@ -11775,49 +11828,66 @@ def find_conversations(repo_path, progress=None, include_old=True, live_sids=Non
 
         _t0 = time.perf_counter() if _PROFILE else 0
         try:
-            with open(f, "r") as fh:
-                for i, line in enumerate(fh):
-                    if i >= 20:
-                        break
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        ev = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    ev_type = ev.get("type", "")
-                    if not head_cwd:
-                        head_cwd = ev.get("cwd")
-
-                    if ev_type in ("file-history-snapshot", "progress", "system"):
-                        continue
-
-                    if ev_type == "user":
-                        if ev.get("isMeta"):
-                            continue
-                        if not session_id:
-                            session_id = ev.get("sessionId", "")
-                        if not timestamp:
-                            timestamp = ev.get("timestamp", "")
-                        if not git_branch:
-                            git_branch = ev.get("gitBranch", "")
-                        if not first_message:
-                            text = _extract_user_prompt_text(ev)
-                            if text:
-                                first_message = text
-
-                    if ev_type == "assistant" and not session_id:
-                        session_id = ev.get("sessionId", "")
-        except (OSError, UnicodeDecodeError):
+            _hst = f.stat()
+            _head_key = (_hst.st_mtime_ns, _hst.st_size)
+        except OSError:
+            _head_key = None
+        _hc = _conv_head_cache.get(str(f)) if _head_key is not None else None
+        if _hc is not None and _hc[0] == _head_key:
+            session_id, timestamp, git_branch, first_message, head_cwd = _hc[1]
             if _PROFILE:
                 _t_head += time.perf_counter() - _t0
                 _n_head += 1
-            continue
-        if _PROFILE:
-            _t_head += time.perf_counter() - _t0
-            _n_head += 1
+        else:
+            try:
+                with open(f, "r") as fh:
+                    for i, line in enumerate(fh):
+                        if i >= 20:
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        ev_type = ev.get("type", "")
+                        if not head_cwd:
+                            head_cwd = ev.get("cwd")
+
+                        if ev_type in ("file-history-snapshot", "progress", "system"):
+                            continue
+
+                        if ev_type == "user":
+                            if ev.get("isMeta"):
+                                continue
+                            if not session_id:
+                                session_id = ev.get("sessionId", "")
+                            if not timestamp:
+                                timestamp = ev.get("timestamp", "")
+                            if not git_branch:
+                                git_branch = ev.get("gitBranch", "")
+                            if not first_message:
+                                text = _extract_user_prompt_text(ev)
+                                if text:
+                                    first_message = text
+
+                        if ev_type == "assistant" and not session_id:
+                            session_id = ev.get("sessionId", "")
+            except (OSError, UnicodeDecodeError):
+                if _PROFILE:
+                    _t_head += time.perf_counter() - _t0
+                    _n_head += 1
+                continue
+            if _head_key is not None:
+                _conv_head_cache[str(f)] = (
+                    _head_key,
+                    (session_id, timestamp, git_branch, first_message, head_cwd),
+                )
+            if _PROFILE:
+                _t_head += time.perf_counter() - _t0
+                _n_head += 1
 
         # Drop generated helper sessions before spending any more work on
         # them (tail scan, cwd lookup, etc.). first_message peek above already
