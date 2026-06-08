@@ -4940,17 +4940,29 @@
       return;
     }
     if (_ttsPaused && _ttsUtterance) {
-      try { window.speechSynthesis.resume(); } catch (_) {}
+      // If the user selected a fresh paragraph while paused, speak THAT
+      // instead of resuming the old utterance (CCC-37). Otherwise resume.
+      const _freshSel = selectedConversationTtsData(paneId || activePaneId());
+      if (!_freshSel || !_freshSel.text.trim()) {
+        try { window.speechSynthesis.resume(); } catch (_) {}
+        _ttsPaused = false;
+        ttsButtons().forEach(btn => {
+          if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
+            btn.classList.remove('paused');
+            btn.title = 'Pause reading';
+            btn.setAttribute('aria-label', 'Pause reading');
+          }
+        });
+        updateTtsFloatingControl();
+        return;
+      }
+      // Fresh selection present — drop the paused utterance and fall through
+      // to the start path below, which reads selectedConversationTtsData first.
+      try { window.speechSynthesis.cancel(); } catch (_) {}
+      clearTtsHighlight();
+      _ttsActive = false;
       _ttsPaused = false;
-      ttsButtons().forEach(btn => {
-        if (ttsButtonPaneId(btn) === _ttsActivePaneId) {
-          btn.classList.remove('paused');
-          btn.title = 'Pause reading';
-          btn.setAttribute('aria-label', 'Pause reading');
-        }
-      });
-      updateTtsFloatingControl();
-      return;
+      _ttsUtterance = null;
     }
 
     _ttsLastCharIndex = 0;
