@@ -5452,7 +5452,11 @@
     const rawValue = asUserMessage ? taskNotificationPlainText(n) : rawText;
     const rawAttr = rawValue ? ' data-raw-text="' + escapeAttr(rawValue) + '"' : '';
     const cls = asUserMessage ? 'user-msg task-notification-card' : 'task-notification-card';
-    let html = '<div class="' + cls + '"' + rawAttr + '>';
+    // Full detail on hover — the one-line compact render hides the event/task-id
+    // rows (see .task-notification-event CSS) to stay out of the reader's way.
+    const tip = taskNotificationPlainText(n);
+    const tipAttr = tip ? ' title="' + escapeAttr(tip) + '"' : '';
+    let html = '<div class="' + cls + '"' + rawAttr + tipAttr + '>';
     html += '<div class="tn-kicker"><span>Task notification</span>'
       + (parts.kind ? '<span class="tn-kind">' + renderInline(parts.kind) + '</span>' : '')
       + '</div>';
