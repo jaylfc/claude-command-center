@@ -147,8 +147,8 @@ async function handleStats(_request, env) {
     const totals = await env.DB.prepare(
       "SELECT " +
       "  (SELECT COUNT(*) FROM opens) AS total_opens, " +
-      "  (SELECT COUNT(*) FROM pings) AS total_pings, " +
-      "  (SELECT COUNT(DISTINCT install_id) FROM pings) AS distinct_installs"
+      "  (SELECT COUNT(*) FROM pings WHERE install_id NOT LIKE '00000000%' AND install_id NOT LIKE '11111111%' AND install_id NOT LIKE '22222222%' AND install_id NOT LIKE '33333333%') AS total_pings, " +
+      "  (SELECT COUNT(DISTINCT install_id) FROM pings WHERE install_id NOT LIKE '00000000%' AND install_id NOT LIKE '11111111%' AND install_id NOT LIKE '22222222%' AND install_id NOT LIKE '33333333%') AS distinct_installs"
     ).first();
 
     const opensByDay = (await env.DB.prepare(
