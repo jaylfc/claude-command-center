@@ -11,7 +11,7 @@ Usage:
     PORT=9000 ./run.sh       # custom port
 """
 
-__version__ = "5.1.0"
+__version__ = "4.10.0"
 
 import ast
 import base64
@@ -550,14 +550,10 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
     # file in the directory we were really working in"). Authorization is
     # unchanged: the resolved path still passes the sandbox checks below — a
     # session-referenced file already satisfies _session_referenced_open_path.
-    # Bare names match on basename. Multi-segment relative paths (CCC-121:
-    # `deliverables/.../shots/x.png` rendered by a session whose cwd is
-    # elsewhere) match when a session-referenced absolute path ENDS with the
-    # full relative path — the transcript knows where the work really
-    # happened even when the session cwd doesn't.
-    if not resolved and session_id and target and not target.startswith("~") and not os.path.isabs(target):
+    # Restricted to slashless bare names so genuine relative paths keep their
+    # explicit root-relative meaning.
+    if not resolved and session_id and target and "/" not in target and not target.startswith("~"):
         want = os.path.basename(target)
-        rel_tail = "/" + target.strip().strip("/")
         try:
             referenced_paths, _cd_targets = _scan_session_tool_paths(session_id, max_events=2000)
         except Exception:
@@ -574,10 +570,7 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
                 cand = Path(normalized).expanduser()
             except (OSError, ValueError, RuntimeError):
                 continue
-            if "/" in target:
-                if not str(cand).endswith(rel_tail):
-                    continue
-            elif cand.name != want:
+            if cand.name != want:
                 continue
             tried.append(str(cand))
             if cand.exists():
@@ -586,42 +579,6 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
                 except (OSError, RuntimeError):
                     resolved = cand
                 break
-        # Second pass (CCC-121): tool-path scanning loses spaces, so the
-        # referenced path can be a truncated cousin of the real one. Join
-        # the relative target onto ancestor directories of everywhere the
-        # session demonstrably worked (cd targets + referenced-path parents)
-        # and take the first that exists. `..` segments are rejected so a
-        # crafted link can't climb out of those roots.
-        if not resolved and "/" in target and ".." not in target.split("/"):
-            roots = []
-
-            def _add_root(d):
-                d = str(d or "").rstrip("/")
-                if d and d != "/" and d not in roots:
-                    roots.append(d)
-
-            for raw in reversed(_cd_targets or []):
-                if isinstance(raw, str):
-                    _add_root(raw)
-            for raw in reversed(referenced_paths or []):
-                if not isinstance(raw, str):
-                    continue
-                parent = os.path.dirname(raw)
-                for _ in range(6):
-                    if not parent or parent == "/":
-                        break
-                    _add_root(parent)
-                    parent = os.path.dirname(parent)
-            rel = target.strip().strip("/")
-            for root in roots:
-                cand = Path(root).expanduser() / rel
-                tried.append(str(cand))
-                if cand.exists():
-                    try:
-                        resolved = cand.resolve(strict=False)
-                    except (OSError, RuntimeError):
-                        resolved = cand
-                    break
 
     if not resolved:
         return {"ok": False, "error": "not found", "tried": tried, "status": 404}
@@ -961,7 +918,6 @@ def _archive_load_begin():
         "codex":       {"key": "codex",       "label": "Codex / Gemini conversations",     "state": "pending", "detail": "Scanning sibling stores."},
         "cursor":      {"key": "cursor",      "label": "Cursor conversations",             "state": "pending", "detail": "Scanning ~/.cursor/projects/."},
         "antigravity": {"key": "antigravity", "label": "Antigravity conversations",        "state": "pending", "detail": "Scanning ~/.gemini/antigravity/brain/."},
-        "kilo":        {"key": "kilo",        "label": "Kilo Code conversations",          "state": "pending", "detail": "Scanning ~/.local/share/kilo/kilo.db."},
         "pr_states":   {"key": "pr_states",   "label": "Refreshing pull-request status",   "state": "pending", "detail": "gh pr view per known PR."},
         "issues":      {"key": "issues",      "label": "Refreshing GitHub issues",         "state": "pending", "detail": "gh issue list per repo."},
         "group_chats": {"key": "group_chats", "label": "Cross-repo group chats",           "state": "pending", "detail": "Reading sidecars."},
@@ -975,7 +931,7 @@ def _archive_load_begin():
             "started_at": now,
             "updated_at": now,
             "steps": steps,
-            "order": ["folders", "transcripts", "infer", "worktrees", "codex", "cursor", "antigravity", "kilo", "pr_states", "issues", "group_chats"],
+            "order": ["folders", "transcripts", "infer", "worktrees", "codex", "cursor", "antigravity", "pr_states", "issues", "group_chats"],
         })
 
 
@@ -1200,30 +1156,6 @@ def _short_model_alias(model):
     return alias.strip()
 
 
-def _cli_model_flag(model):
-    """Normalize a model string for use as a --model CLI argument.
-
-    The /model slash command accepts short aliases like ``sonnet-4-6``, but the
-    ``--model`` CLI flag requires the full prefixed ID ``claude-sonnet-4-6`` for
-    versioned 4.x models (the CLI rejects bare ``sonnet-4-6``).  The ``[1m]``
-    suffix is TUI-only; 1M context is enabled via ``--betas`` instead.
-    """
-    if not model:
-        return ""
-    m = model.strip()
-    for tail in ("[1m]", "[1M]"):
-        if m.endswith(tail):
-            m = m[: -len(tail)].strip()
-    if not m:
-        return ""
-    # Versioned aliases like 'sonnet-4-6', 'opus-4-8', 'haiku-4-5', 'fable-5'
-    # need the 'claude-' prefix for --model (the /model slash command accepts
-    # the bare alias, but the CLI flag does not for these models).
-    if not m.lower().startswith("claude-") and re.match(r"^(sonnet|opus|haiku|fable)-\d", m.lower()):
-        m = "claude-" + m
-    return m
-
-
 def _build_slash_model_command(model, context_1m):
     """Compose the `/model <alias>[1m]` text injected into a live Claude
     session. Returns an empty string if model is missing — caller should
@@ -1311,12 +1243,6 @@ _CODEX_FALLBACK_SLASH_COMMANDS = (
     {"name": "/title", "description": "Configure terminal title items"},
     {"name": "/vim", "description": "Toggle Vim mode"},
 )
-
-# Names only — for the input router's "is this actually a Codex TUI
-# command?" check. Anything slash-shaped but NOT in this set is foreign
-# text (e.g. a Claude skill invocation like /group-chat-checkin sent to a
-# Codex group-chat participant) and is delivered as a plain prompt.
-_CODEX_SLASH_NAME_SET = frozenset(c["name"] for c in _CODEX_FALLBACK_SLASH_COMMANDS)
 
 
 def _clean_slash_command_name(value):
@@ -2273,7 +2199,7 @@ def _clean_spawn_default_model(value):
 
 def _spawn_fallback_model_for_engine(engine):
     if engine == "claude":
-        return os.environ.get("CCC_CLAUDE_MODEL", "claude-fable-5")
+        return "opus"
     if engine == "codex":
         return os.environ.get("CCC_CODEX_MODEL", "gpt-5.5")
     if engine == "cursor":
@@ -2281,7 +2207,7 @@ def _spawn_fallback_model_for_engine(engine):
     if engine == "antigravity":
         return os.environ.get("CCC_ANTIGRAVITY_MODEL") or _antigravity_cli_configured_model()
     if engine == "kilo":
-        return os.environ.get("CCC_KILO_MODEL", "kilo/stepfun/step-3.7-flash:free")
+        return os.environ.get("CCC_KILO_MODEL", "stepfun/step-3.7-flash:free")
     return ""
 
 
@@ -4068,16 +3994,6 @@ def find_all_conversations(
     # transcripts under ~/.gemini/antigravity/brain/<uuid>/.
     try:
         out.extend(find_antigravity_conversations(
-            include_old=True,
-            repo_only=False,
-            limit=limit_per_folder,
-            resolve_pr_states=resolve_pr_states,
-            resolve_worktree_dirty=resolve_worktree_dirty,
-        ))
-    except Exception:
-        pass
-    try:
-        out.extend(find_kilo_conversations(
             include_old=True,
             repo_only=False,
             limit=limit_per_folder,
@@ -7504,57 +7420,12 @@ def _save_conversation_order(order):
     return order
 
 
-_archive_auto_sweep_last = 0.0
-_archive_grace: dict = {}  # sid → epoch of manual archive; sweep skips these for 10 min
-
-
-def _auto_unarchive_live_sessions(archived):
-    """Drop archived sids showing fresh activity (CCC-117).
-
-    A session that's actively writing its transcript doesn't belong in the
-    Archived bucket — auto-unarchive it. Perf gates: runs at most every 30s,
-    and only stats transcripts for archived sids that intersect the cheap
-    live-candidate set (never the whole archive). The grace map keeps a
-    just-archived-by-the-user session from bouncing straight back (its
-    transcript mtime is fresh from the kill/final writes).
-    """
-    global _archive_auto_sweep_last
-    now = time.time()
-    if not archived or now - _archive_auto_sweep_last < 30:
-        return archived
-    _archive_auto_sweep_last = now
-    try:
-        live = _discover_live_session_ids()
-    except Exception:
-        return archived
-    keep = []
-    changed = False
-    for sid in archived:
-        fresh = False
-        if sid in live and now - _archive_grace.get(sid, 0) > 600:
-            try:
-                path, _parser = _resolve_conversation_reader(sid)
-                fresh = path and path.is_file() and now - path.stat().st_mtime < 300
-            except (OSError, Exception):
-                fresh = False
-        if fresh:
-            changed = True
-            continue
-        keep.append(sid)
-    if changed:
-        try:
-            _save_archived_conversations(keep)
-        except Exception:
-            return archived
-    return keep
-
-
 def _load_archived_conversations():
     """Load list of archived session_ids from the side-car file."""
     try:
         data = json.loads(ARCHIVED_CONVERSATIONS_FILE.read_text())
         if isinstance(data, list):
-            return _auto_unarchive_live_sessions([s for s in data if isinstance(s, str)])
+            return [s for s in data if isinstance(s, str)]
     except (OSError, json.JSONDecodeError):
         pass
     return []
@@ -9305,21 +9176,14 @@ def open_session_in_codex_desktop(session_id, cwd=None):
     return {"ok": True, "url": url}
 
 
-def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_slash_commands=None,
-                                stop_headless=False):
+def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_slash_commands=None):
     """Open a new terminal window and run the resume command for this session.
 
     Idempotent: if a live claude process with a TTY already exists for this
     session, bring that terminal to the front instead of opening a new one.
     Prevents the "I clicked Launch and got two terminals" race.
 
-    Headless guard (CCC-96): if a live HEADLESS process owns this session
-    (live, no tty), refuse — resuming the same transcript in a terminal
-    while the headless process keeps appending forks the history ("amnesia"
-    when one of them is closed). The caller can retry with
-    stop_headless=True to SIGTERM the headless process first.
-
-    Returns {ok, terminal_app, command, error?, existing?, headless_live?}.
+    Returns {ok, terminal_app, command, error?, existing?}.
     """
     if not session_id:
         return {"ok": False, "error": "missing session_id"}
@@ -9331,55 +9195,6 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
     # Pre-check: is there already a live claude --resume on this session with a tty?
     try:
         existing = session_live_status(session_id, cwd) or {}
-        # Headless guard — live process, no terminal to focus. Launching a
-        # terminal resume now would give the transcript two writers.
-        if existing.get("live") and not existing.get("tty") and existing.get("pid"):
-            hpid = int(existing.get("pid"))
-            # bg-pty daemon process (registry kind "bg"): not a headless —
-            # it's attached to an open terminal pane. SIGTERM here would
-            # close the user's window mid-session. Refuse, even when the
-            # caller asked to stop a headless (CCC-104).
-            if existing.get("kind") == "bg":
-                return {
-                    "ok": False,
-                    "bg_live": True,
-                    "error": (
-                        "This session is open in a Claude Code background "
-                        "terminal (pid %d). Use that window — resuming from "
-                        "CCC would fork the conversation." % hpid
-                    ),
-                }
-            if not stop_headless:
-                return {
-                    "ok": False,
-                    "headless_live": True,
-                    "headless_pid": hpid,
-                    "error": (
-                        "A headless process (pid %d) is still running this session. "
-                        "Launching a terminal resume now would fork the conversation "
-                        "history. Stop the headless process first." % hpid
-                    ),
-                }
-            try:
-                os.kill(hpid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            # Wait briefly for it to exit so the resume sees the final
-            # transcript state, not a mid-write snapshot.
-            deadline = time.time() + 5.0
-            while time.time() < deadline:
-                try:
-                    os.kill(hpid, 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(0.2)
-            else:
-                return {
-                    "ok": False,
-                    "headless_live": True,
-                    "headless_pid": hpid,
-                    "error": "Headless process (pid %d) did not exit within 5s — not launching." % hpid,
-                }
         if existing.get("live") and existing.get("tty"):
             tty = existing.get("tty")
             term_app = existing.get("terminal_app") or _preferred_terminal_app()
@@ -9512,13 +9327,6 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
             return "ok"
             '''
         else:
-            command_sequence = slash_sequence(
-                "Terminal",
-                'tell application "Terminal"\n'
-                '          activate\n'
-                '          set frontmost of (first window whose id is winId) to true\n'
-                '        end tell',
-            )
             script = f'''
         set winId to 0
         tell application "Terminal"
@@ -9527,7 +9335,13 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
           set winId to id of window 1
         end tell
         delay 2.0
-        {command_sequence}
+        {slash_sequence(
+            "Terminal",
+            'tell application "Terminal"\n'
+            '          activate\n'
+            '          set frontmost of (first window whose id is winId) to true\n'
+            '        end tell',
+        )}
         return "ok"
         '''
 
@@ -12842,21 +12656,6 @@ def find_all_sessions(repo_path, progress=None, include_old=True):
         if progress:
             progress("antigravity", state="error", detail=f"Antigravity session scan failed: {exc}")
 
-    if progress:
-        progress("kilo", state="running", detail="Reading Kilo Code sessions.")
-    try:
-        conversations.extend(find_kilo_conversations(
-            repo_path=repo_path,
-            include_old=include_old,
-            repo_only=True,
-            progress=progress,
-        ))
-        if progress:
-            progress("kilo", state="done")
-    except Exception as exc:
-        if progress:
-            progress("kilo", state="error", detail=f"Kilo session scan failed: {exc}")
-
     # Add pkood agents — and merge in their linked claude-session card, if any.
     # Pkood spawns a claude process in a tmux pty, which produces a regular
     # ~/.claude/projects/*/*.jsonl file. Without dedup the kanban would show
@@ -13088,25 +12887,6 @@ def _resolve_conversation_path(conversation_id, repo_path=None):
       2. Global walk of ~/.claude/projects/*/ for session-derived calls.
       3. A canonical repo path when supplied, otherwise a harmless missing path.
     """
-    # Subagent transcripts (CCC-112 follow-up): newer Claude Code writes
-    # Task/Agent activity to <parent-sid>/subagents/agent-<taskid>.jsonl
-    # instead of inlining sidechain events in the parent JSONL. A composite
-    # id "<parent-sid>:agent-<taskid>" opens that file through the normal
-    # conversation pipeline (same event shape, same parser).
-    _sub = re.match(r"^([0-9a-fA-F-]{8,}):(agent-[0-9a-fA-F]+)$", str(conversation_id or ""))
-    if _sub:
-        parent, agent_name = _sub.group(1), _sub.group(2) + ".jsonl"
-        dirs = list(_conversation_dirs(repo_path)) if repo_path else []
-        if PROJECTS_ROOT.is_dir():
-            try:
-                dirs += [p for p in PROJECTS_ROOT.iterdir() if p.is_dir()]
-            except OSError:
-                pass
-        for d in dirs:
-            cand = d / parent / "subagents" / agent_name
-            if cand.is_file():
-                return cand
-        return PROJECTS_ROOT / "_missing" / agent_name
     name = conversation_id + ".jsonl"
     if repo_path:
         for d in _conversation_dirs(repo_path):
@@ -13362,12 +13142,6 @@ def parse_conversation(conversation_id, after_line=0, repo_path=None, use_cache=
         return {"events": events_copy, "last_line": result.get("last_line", 0)}
     if engine == "antigravity":
         result = _parse_antigravity_conversation(conversation_id, after_line=after_line)
-        _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
-        events_copy = list(result.get("events") or [])
-        events_copy.extend(_get_queued_events_for_session(conversation_id))
-        return {"events": events_copy, "last_line": result.get("last_line", 0)}
-    if engine == "kilo":
-        result = _parse_kilo_conversation(conversation_id, after_line=after_line)
         _conv_parse_cache_put(conversation_id, after_line, repo_path, result)
         events_copy = list(result.get("events") or [])
         events_copy.extend(_get_queued_events_for_session(conversation_id))
@@ -17931,7 +17705,7 @@ def _clean_pty_prompt_text(text):
     )
 
 
-def _inject_bg_agent_via_pty_socket(worker, text, session_id=None):
+def _inject_bg_agent_via_pty_socket(worker, text):
     """Send text to a live `claude agents` background session.
 
     The daemon PTY socket uses framed messages:
@@ -17985,71 +17759,12 @@ def _inject_bg_agent_via_pty_socket(worker, text, session_id=None):
             sock.close()
         except OSError:
             pass
-    # A successful socket write is NOT delivery (CCC-113): app-managed
-    # bg-pty daemons accept the connection and silently discard the input
-    # frames, so "ok" here used to mean "vanished without a trace". Confirm
-    # the text actually lands in the transcript before claiming success.
-    sid = session_id or worker.get("sessionId") or ""
-    if sid and not _transcript_gains_text(sid, clean_text):
-        _bg_pty_inject_failures[sid] = time.time()
-        return {
-            "ok": False,
-            "via": "bg-agent-pty",
-            "delivery_unconfirmed": True,
-            "pid": worker.get("pid"),
-            "error": (
-                "The input was written to the session's pty socket but never "
-                "appeared in its transcript — this app-managed terminal "
-                "ignores socket input. Type in its window instead."
-            ),
-        }
     return {
         "ok": True,
         "via": "bg-agent-pty",
         "pid": worker.get("pid"),
         "session_id": worker.get("sessionId"),
     }
-
-
-# sid → epoch of the last pty inject whose delivery could not be confirmed.
-# The queue watcher backs off such sessions so parked messages don't churn
-# through a known-broken channel every tick.
-_bg_pty_inject_failures: dict = {}
-
-
-def _transcript_gains_text(session_id, text, timeout_s=6.0):
-    """True once `text`'s first line shows up in the session transcript tail.
-
-    Polls the last 128KB of the JSONL for up to `timeout_s`. Callers queue
-    ahead of this when the session is busy, so a working channel lands the
-    text within a second or two of an idle inject.
-    """
-    needle = ""
-    for line in str(text or "").splitlines():
-        line = line.strip()
-        if line:
-            needle = line[:60]
-            break
-    if not needle:
-        return True
-    # JSONL stores the message JSON-encoded; escape so multi-byte and
-    # quote-bearing needles match the on-disk form.
-    needle_json = json.dumps(needle, ensure_ascii=False)[1:-1]
-    path = _resolve_conversation_path(session_id)
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            with open(path, "rb") as fh:
-                fh.seek(0, 2)
-                size = fh.tell()
-                fh.seek(max(0, size - 131072))
-                tail = fh.read().decode("utf-8", "replace")
-            if needle_json in tail:
-                return True
-        except OSError:
-            pass
-        time.sleep(1.0)
-    return False
 
 
 def _start_resume_queue_watcher() -> None:
@@ -18114,19 +17829,9 @@ def _start_resume_queue_watcher() -> None:
                     if status.get("live") and status.get("kind") == "bg":
                         if not _bg_agent_ready_for_input(sid, status):
                             continue
-                        # Channel recently proven broken (pty inject wrote ok
-                        # but nothing landed) — hold instead of churning the
-                        # queue through it every tick.
-                        if time.time() - _bg_pty_inject_failures.get(sid, 0) < 600:
-                            continue
                     if status.get("live") and not status.get("tty"):
                         spawn = _find_live_spawn_entry_for_session(sid)
                         if spawn is not None and _spawn_entry_active_tool_child(spawn):
-                            continue
-                        # Foreign live writer (not ours, no channel): hold the
-                        # queue until that process exits — injecting now would
-                        # spawn a parallel resume and fork the transcript.
-                        if spawn is None and status.get("kind") != "bg" and status.get("pid"):
                             continue
                     with _pending_terminal_input_lock:
                         queue = _pending_terminal_input_queue.get(sid, [])
@@ -18142,126 +17847,6 @@ def _start_resume_queue_watcher() -> None:
                 except Exception:
                     pass
     threading.Thread(target=_watcher, daemon=True, name="resume-queue-watcher").start()
-
-
-# ── UX-fixes queue worker nudge (CCC-100) ───────────────────────────────────
-# Periodically nudges idle queue-worker sessions with "continue" while their
-# project still has open tickets. Flood safety, in order of authority:
-#   1. Never nudge a session that is live AND busy (mid-turn, tool running,
-#      transcript recently written, or an AskUserQuestion pending).
-#   2. One ping per progress level: we remember the worker's highest closed
-#      ticket seq at ping time; if that number has not advanced since the
-#      last ping, no second ping is sent — a stuck or dead worker gets
-#      exactly one nudge, not a drumbeat.
-#   3. A minimum 10-minute gap between pings to the same session, even
-#      across progress levels.
-_UXQ_NUDGE_STATE_FILE = Path.home() / ".claude" / "command-center" / "uxq-nudge-state.json"
-_UXQ_NUDGE_INTERVAL_S = 120
-_UXQ_NUDGE_MIN_GAP_S = 600
-_UXQ_NUDGE_TEXT = "continue"
-_UXQ_NUDGE_LOOKBACK_S = 48 * 3600
-_UXQ_SESSION_ID_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
-
-
-def _uxq_nudge_load_state():
-    try:
-        with open(_UXQ_NUDGE_STATE_FILE) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def _uxq_nudge_save_state(state):
-    try:
-        _UXQ_NUDGE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(_UXQ_NUDGE_STATE_FILE) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp, _UXQ_NUDGE_STATE_FILE)
-    except OSError:
-        pass
-
-
-def _uxq_parse_ts(value):
-    try:
-        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00")).timestamp()
-    except (ValueError, TypeError):
-        return 0
-
-
-def _uxq_nudge_tick():
-    items = ux_fixes_queue.list_items()
-    now = time.time()
-    open_by_project = {}
-    workers = {}  # sid(lower) → {project, progress, last_ts}
-    for it in items:
-        proj = str(it.get("project") or "?")
-        if it.get("status") == "open":
-            open_by_project[proj] = open_by_project.get(proj, 0) + 1
-        sid = str(it.get("claimed_by") or "")
-        if not _UXQ_SESSION_ID_RE.match(sid):
-            continue
-        ts = _uxq_parse_ts(it.get("updated_at") or it.get("claimed_at"))
-        if not ts or (now - ts) > _UXQ_NUDGE_LOOKBACK_S:
-            continue
-        key = sid.lower()
-        w = workers.setdefault(key, {"project": proj, "progress": 0, "last_ts": 0})
-        if it.get("status") == "closed":
-            w["progress"] = max(w["progress"], int(it.get("seq") or 0))
-        if ts > w["last_ts"]:
-            w["last_ts"] = ts
-            w["project"] = proj
-    if not workers:
-        return
-    state = _uxq_nudge_load_state()
-    changed = False
-    for sid, w in workers.items():
-        if open_by_project.get(w["project"], 0) <= 0:
-            continue  # queue drained for this worker's project
-        st = state.get(sid) or {}
-        if st.get("pinged_at_progress") == w["progress"]:
-            continue  # no progress since the last ping — never re-ping (rule 2)
-        if st.get("pinged_at") and (now - float(st["pinged_at"])) < _UXQ_NUDGE_MIN_GAP_S:
-            continue  # rule 3
-        try:
-            status = session_live_status(sid, find_session_cwd(sid)) or {}
-        except Exception:
-            continue
-        if _pending_ask_user_question_for_session(sid):
-            continue
-        if status.get("live") and (
-            _session_status_is_busy(status)
-            or status.get("recently_written")
-            or (status.get("sidecar_status") == "active" and status.get("sidecar_in_flight"))
-        ):
-            continue  # working — leave it alone (rule 1)
-        try:
-            _inject_text_into_session(sid, _UXQ_NUDGE_TEXT)
-        except Exception:
-            continue
-        state[sid] = {
-            "pinged_at_progress": w["progress"],
-            "pinged_at": now,
-            "project": w["project"],
-        }
-        changed = True
-    if changed:
-        _uxq_nudge_save_state(state)
-
-
-def start_uxq_nudge_watcher():
-    def _watcher():
-        time.sleep(90)  # let the server finish booting before the first scan
-        while True:
-            try:
-                _uxq_nudge_tick()
-            except Exception:
-                pass
-            time.sleep(_UXQ_NUDGE_INTERVAL_S)
-    threading.Thread(target=_watcher, daemon=True, name="uxq-nudge-watcher").start()
 
 
 def _queue_codex_resume(session_id, text, pid=None):
@@ -18593,10 +18178,6 @@ _antigravity_cli_settings_lock = threading.Lock()
 
 
 _ANTIGRAVITY_MODEL_LABELS = {
-    "gemini-3-5-pro-high": "Gemini 3.5 Pro (High)",
-    "gemini-3-5-pro-medium": "Gemini 3.5 Pro (Medium)",
-    "gemini-3-5-pro-low": "Gemini 3.5 Pro (Low)",
-    "gemini-3-5-pro": "Gemini 3.5 Pro (High)",
     "gemini-3-5-flash-high": "Gemini 3.5 Flash (High)",
     "gemini-3-5-flash-medium": "Gemini 3.5 Flash (Medium)",
     "gemini-3-1-pro-high": "Gemini 3.1 Pro (High)",
@@ -18824,7 +18405,7 @@ def _resolve_kilo_bin():
         "code": "kilo_unavailable",
         "reason": (
             "Kilo Code CLI not found. Install Kilo Code, "
-            "`npm install -g @kilocode/cli`, or set CCC_KILO_BIN."
+            "`npm i -g kilo-code`, or set CCC_KILO_BIN."
         ),
     }
 
@@ -21541,13 +21122,7 @@ def _is_antigravity_session(session_id):
 
 
 def _is_kilo_session(session_id):
-    """Check if session_id corresponds to a Kilo Code session.
-
-    Matches both sessions CCC spawned (in-memory registry) and external
-    sessions discovered in Kilo's on-disk SQLite store — without the DB probe
-    a historical or terminal-launched Kilo session would be misclassified as
-    Claude and routed to the wrong transcript parser.
-    """
+    """Check if session_id corresponds to a Kilo Code session."""
     for s in _spawned_sessions:
         if s.get("engine") == "kilo" and (
             s.get("session_id") == session_id
@@ -21555,419 +21130,7 @@ def _is_kilo_session(session_id):
             or s.get("name") == session_id
         ):
             return True
-    if isinstance(session_id, str) and session_id.startswith("ses_"):
-        con = _kilo_connect()
-        if con is not None:
-            try:
-                row = con.execute(
-                    "SELECT 1 FROM session WHERE id=? LIMIT 1", (session_id,)
-                ).fetchone()
-                if row:
-                    return True
-            except sqlite3.Error:
-                pass
-            finally:
-                con.close()
     return False
-
-
-# ---------------------------------------------------------------------------
-# Kilo Code session ingestion (read-only).
-#
-# Kilo Code (OpenCode-derived) keeps its sessions in a SQLite DB at
-# ~/.local/share/kilo/kilo.db with tables session / message / part. Reading it
-# lets an externally-launched `kilo` appear on the board like a Claude or Codex
-# session. The DB is WAL-mode and written live by the `kilo serve` daemon; a
-# read-only-URI open can silently miss un-checkpointed WAL frames, so we open
-# the file normally and immediately set PRAGMA query_only=1 — the standard WAL
-# multi-reader path, which still cannot write to Kilo's DB.
-# ---------------------------------------------------------------------------
-
-KILO_LIVE_WINDOW_S = 180
-
-
-def _kilo_db_path():
-    p = Path.home() / ".local" / "share" / "kilo" / "kilo.db"
-    try:
-        return p if p.exists() else None
-    except OSError:
-        return None
-
-
-def _kilo_connect():
-    db = _kilo_db_path()
-    if not db:
-        return None
-    try:
-        con = sqlite3.connect(str(db), timeout=0.5)
-        con.execute("PRAGMA query_only=1")
-        con.row_factory = sqlite3.Row
-        return con
-    except sqlite3.Error:
-        return None
-
-
-def _kilo_model_str(raw):
-    """Kilo stores model as JSON {providerID, modelID}; render it as a string."""
-    if not raw:
-        return ""
-    try:
-        d = json.loads(raw) if isinstance(raw, str) else raw
-    except (ValueError, TypeError):
-        return str(raw)
-    if not isinstance(d, dict):
-        return str(raw)
-    mid = (d.get("modelID") or d.get("id") or "").strip()
-    prov = (d.get("providerID") or "").strip()
-    if prov and mid and "/" not in mid:
-        return f"{prov}/{mid}"
-    return mid or ""
-
-
-def _kilo_fetch_sessions(con, limit=None):
-    """Return one dict per row of Kilo's `session` table, newest first."""
-    try:
-        cols = {r["name"] for r in con.execute("PRAGMA table_info(session)")}
-    except sqlite3.Error:
-        return []
-    if "id" not in cols:
-        return []
-    sql = "SELECT * FROM session ORDER BY time_updated DESC"
-    if limit and limit > 0:
-        sql += f" LIMIT {int(limit)}"
-    out = []
-    try:
-        for r in con.execute(sql):
-            d = dict(r)
-            out.append({
-                "id": d.get("id") or "",
-                "cwd": d.get("directory") or "",
-                "title": (d.get("title") or "").strip(),
-                "model": _kilo_model_str(d.get("model")),
-                "agent": d.get("agent") or "",
-                "created": (d.get("time_created") or 0) / 1000.0,
-                "updated": (d.get("time_updated") or 0) / 1000.0,
-                "archived": bool(d.get("time_archived")),
-            })
-    except sqlite3.Error:
-        return out
-    return out
-
-
-def _kilo_first_user_text(con, sid):
-    """First user-message text for a Kilo session (for the card preview)."""
-    try:
-        msg = con.execute(
-            "SELECT id FROM message WHERE session_id=? "
-            "AND json_extract(data,'$.role')='user' ORDER BY time_created LIMIT 1",
-            (sid,),
-        ).fetchone()
-        if not msg:
-            return ""
-        for p in con.execute(
-            "SELECT data FROM part WHERE message_id=? "
-            "AND json_extract(data,'$.type')='text' ORDER BY time_created",
-            (msg["id"],),
-        ):
-            try:
-                txt = (json.loads(p["data"]) or {}).get("text") or ""
-            except (ValueError, TypeError):
-                txt = ""
-            if txt.strip():
-                return txt.strip()
-    except sqlite3.Error:
-        pass
-    return ""
-
-
-def _kilo_last_assistant_text(con, sid):
-    """Last assistant text-part for a Kilo session (card subtitle / state)."""
-    try:
-        for m in con.execute(
-            "SELECT id FROM message WHERE session_id=? "
-            "AND json_extract(data,'$.role')='assistant' ORDER BY time_created DESC LIMIT 8",
-            (sid,),
-        ):
-            texts = []
-            for p in con.execute(
-                "SELECT data FROM part WHERE message_id=? "
-                "AND json_extract(data,'$.type')='text' ORDER BY time_created",
-                (m["id"],),
-            ):
-                try:
-                    t = (json.loads(p["data"]) or {}).get("text") or ""
-                except (ValueError, TypeError):
-                    t = ""
-                if t.strip():
-                    texts.append(t.strip())
-            if texts:
-                return "\n".join(texts)
-    except sqlite3.Error:
-        pass
-    return ""
-
-
-def find_kilo_conversations(
-    repo_path=None,
-    include_old=True,
-    repo_only=True,
-    progress=None,
-    limit=None,
-    resolve_pr_states=True,
-    resolve_worktree_dirty=True,
-):
-    """Discover external Kilo Code sessions from ~/.local/share/kilo/kilo.db."""
-    con = _kilo_connect()
-    if con is None:
-        return []
-    try:
-        sessions = _kilo_fetch_sessions(con, limit=limit)
-        if not sessions:
-            return []
-        if repo_only:
-            repo_path = resolve_repo_path(repo_path)
-            repo_path_obj = Path(repo_path)
-        try:
-            repo_pins = _load_repo_pins()
-        except Exception:
-            repo_pins = {}
-        try:
-            name_overrides = _load_session_name_overrides()
-        except Exception:
-            name_overrides = {}
-        try:
-            archived_set = set(_load_archived_conversations())
-        except Exception:
-            archived_set = set()
-        try:
-            verified_set = set(_load_verified_conversations())
-        except Exception:
-            verified_set = set()
-        try:
-            last_interactions = _load_last_interactions()
-        except Exception:
-            last_interactions = {}
-
-        cutoff = _session_scan_cutoff_ts(include_old)
-        max_rows = _session_scan_file_limit(include_old)
-        git_top_cache = {}
-        now = time.time()
-        out = []
-        for s in sessions:
-            sid = s.get("id")
-            if not sid:
-                continue
-            cwd = s.get("cwd") or ""
-            pinned = repo_pins.get(sid)
-            pinned_repo = False
-            if repo_only:
-                if pinned and pinned != repo_path:
-                    continue
-                if pinned == repo_path:
-                    pinned_repo = True
-                elif not _codex_cwd_matches_repo(cwd, repo_path_obj, git_top_cache):
-                    continue
-            modified = s.get("updated") or s.get("created") or 0
-            freshness = max(modified, last_interactions.get(sid) or 0)
-            if not include_old and cutoff > 0 and freshness < cutoff:
-                continue
-            if not include_old and max_rows > 0 and len(out) >= max_rows:
-                continue
-            title = _strip_ccc_session_state_instruction(s.get("title") or "").strip()
-            first_message = _strip_ccc_session_state_instruction(
-                _kilo_first_user_text(con, sid)
-            ).strip()
-            # Kilo titles untouched conversations "New session - <iso>"; treat
-            # those as not-AI-summarised so the ✨ glyph doesn't show.
-            kilo_ai_title = title if (title and not title.startswith("New session")) else None
-            display_name = (
-                name_overrides.get(sid)
-                or _truncate_session_name(title if kilo_ai_title else "")
-                or (first_message[:80] if first_message else None)
-                or (title[:80] if title else "Kilo session")
-            )
-            effective_cwd = _first_existing_dir(cwd, pinned) or cwd
-            try:
-                cwd_exists = bool(effective_cwd and Path(effective_cwd).is_dir())
-            except OSError:
-                cwd_exists = False
-            folder_path = pinned or cwd or effective_cwd or ""
-            if folder_path:
-                _git_root = _find_git_root(folder_path)
-                folder_label = _resolve_dir_case(_git_root or folder_path)
-            else:
-                folder_label = "Kilo"
-            _wt_worktree_label = None
-            _wt_idx = folder_label.find("-wt-")
-            if _wt_idx > 0:
-                _wt_worktree_label = folder_label[_wt_idx + 4:]
-                folder_label = folder_label[:_wt_idx]
-            last_assistant_text = _kilo_last_assistant_text(con, sid)
-            is_live = (now - modified) < KILO_LIVE_WINDOW_S
-            out.append({
-                "id": sid,
-                "session_id": sid,
-                "source": "kilo",
-                "engine": "kilo",
-                "timestamp": "",
-                "branch": "",
-                "git_branch": "",
-                "first_message": first_message[:200],
-                "display_name": display_name,
-                "ai_title": kilo_ai_title,
-                "name_overridden": bool(name_overrides.get(sid)),
-                "last_prompt": first_message[:200],
-                "size": 0,
-                "modified": modified,
-                "modified_human": time.strftime("%Y-%m-%d %H:%M", time.localtime(modified)) if modified else "",
-                "mtime": modified,
-                "jsonl_path": "",
-                "folder_label": folder_label,
-                "folder_path": folder_path,
-                "worktree_label": _wt_worktree_label,
-                "session_cwd": effective_cwd,
-                "session_cwd_exists": cwd_exists,
-                "session_cwd_is_worktree": bool(
-                    effective_cwd and (Path(effective_cwd) / ".git").is_file()
-                ),
-                "worktree_dirty": (
-                    _worktree_dirty_cached(effective_cwd, modified)
-                    if resolve_worktree_dirty and effective_cwd else False
-                ),
-                "effective_branch": None,
-                "effective_kind": None,
-                "has_edit": False,
-                "has_commit": False,
-                "has_push": False,
-                "last_edit_pos": 0,
-                "last_commit_pos": 0,
-                "last_push_pos": 0,
-                "last_event_type": None,
-                "pending_tool": None,
-                "pending_file": None,
-                "pending_tool_ts": 0,
-                "last_assistant_text": last_assistant_text,
-                "tail_issue_number": None,
-                "tail_pr_number": None,
-                "tail_pr_url": None,
-                "pr_state": None,
-                "session_state": _parse_session_state(last_assistant_text),
-                "archived": sid in archived_set or bool(s.get("archived")),
-                "verified": sid in verified_set,
-                "pinned_repo": pinned_repo,
-                "last_interacted": last_interactions.get(sid),
-                "is_live": is_live,
-                "spawn_pid": None,
-                "needs_approval": False,
-                "needs_approval_message": "",
-                "model": s.get("model") or "",
-                "reasoning_effort": "",
-            })
-    finally:
-        con.close()
-    out.sort(key=lambda x: x.get("last_interacted") or x.get("modified") or 0, reverse=True)
-    return out
-
-
-def _parse_kilo_conversation(session_id, after_line=0):
-    """Build a CCC transcript event list from a Kilo session's messages/parts."""
-    con = _kilo_connect()
-    if con is None:
-        return {"events": [], "last_line": 0}
-    events = []
-    line = 0
-    try:
-        msgs = con.execute(
-            "SELECT id, data FROM message WHERE session_id=? ORDER BY time_created",
-            (session_id,),
-        ).fetchall()
-        for m in msgs:
-            try:
-                md = json.loads(m["data"]) if m["data"] else {}
-            except (ValueError, TypeError):
-                md = {}
-            role = md.get("role")
-            tc = (md.get("time") or {}).get("created")
-            ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(tc / 1000.0)) if tc else ""
-            try:
-                parts = con.execute(
-                    "SELECT data FROM part WHERE message_id=? ORDER BY time_created",
-                    (m["id"],),
-                ).fetchall()
-            except sqlite3.Error:
-                parts = []
-            pdatas = []
-            for p in parts:
-                try:
-                    pdatas.append(json.loads(p["data"]) if p["data"] else {})
-                except (ValueError, TypeError):
-                    pdatas.append({})
-            if role == "user":
-                text = "\n".join(
-                    p.get("text", "") for p in pdatas if p.get("type") == "text"
-                ).strip()
-                if not text:
-                    continue
-                line += 1
-                events.append({
-                    "line": line, "ts": ts, "type": "user_text",
-                    "text": text, "images": [],
-                })
-            elif role == "assistant":
-                blocks = []
-                tool_results = []
-                for p in pdatas:
-                    ptype = p.get("type")
-                    if ptype in ("text", "reasoning"):
-                        t = p.get("text") or ""
-                        if t.strip():
-                            blocks.append({"kind": "text", "text": t})
-                    elif ptype == "tool":
-                        st = p.get("state") or {}
-                        inp = st.get("input") or {}
-                        detail = (
-                            inp.get("command")
-                            or inp.get("description")
-                            or st.get("title")
-                            or (json.dumps(inp)[:200] if inp else "")
-                        )
-                        blocks.append({
-                            "kind": "tool_use",
-                            "name": p.get("tool", ""),
-                            "detail": str(detail)[:200],
-                            "id": p.get("callID", ""),
-                            "command": inp.get("command"),
-                            "command_kind": None,
-                        })
-                        out_text = st.get("output")
-                        if out_text is not None:
-                            tool_results.append({
-                                "text": str(out_text)[:800],
-                                "tool_use_id": p.get("callID", ""),
-                                "is_error": st.get("status") == "error",
-                            })
-                if blocks:
-                    line += 1
-                    events.append({
-                        "line": line, "ts": ts, "type": "assistant",
-                        "message_id": f"kilo-{line}", "blocks": blocks,
-                    })
-                for tr in tool_results:
-                    line += 1
-                    events.append({
-                        "line": line, "ts": ts, "type": "tool_result",
-                        "text": tr["text"], "tool_use_id": tr["tool_use_id"],
-                        "is_error": tr["is_error"],
-                    })
-    except sqlite3.Error:
-        pass
-    finally:
-        con.close()
-    if after_line and after_line > 0:
-        visible = [e for e in events if e["line"] > after_line]
-    else:
-        visible = events
-    return {"events": visible, "last_line": line}
 
 
 def _load_antigravity_transcript(session_id):
@@ -23377,212 +22540,6 @@ def _antigravity_step_usage(usage):
     return out
 
 
-def _proto_bytes_to_str(val):
-    if isinstance(val, bytes):
-        try:
-            return val.decode("utf-8", "ignore")
-        except Exception:
-            return ""
-    if isinstance(val, str):
-        return val
-    return ""
-
-
-def _parse_proto(data):
-    fields = {}
-    pos = 0
-    while pos < len(data):
-        try:
-            # Decode varint for key
-            val = 0
-            shift = 0
-            while True:
-                b = data[pos]
-                val |= (b & 0x7f) << shift
-                pos += 1
-                shift += 7
-                if not (b & 0x80):
-                    break
-            key = val
-        except IndexError:
-            break
-        wire_type = key & 0x7
-        field_num = key >> 3
-        
-        if wire_type == 0:  # Varint
-            try:
-                val = 0
-                shift = 0
-                while True:
-                    b = data[pos]
-                    val |= (b & 0x7f) << shift
-                    pos += 1
-                    shift += 7
-                    if not (b & 0x80):
-                        break
-                fields.setdefault(field_num, []).append(val)
-            except IndexError:
-                break
-        elif wire_type == 1:  # 64-bit
-            if pos + 8 > len(data):
-                break
-            val = data[pos:pos+8]
-            pos += 8
-            fields.setdefault(field_num, []).append(val)
-        elif wire_type == 2:  # Length-delimited
-            try:
-                val = 0
-                shift = 0
-                while True:
-                    b = data[pos]
-                    val |= (b & 0x7f) << shift
-                    pos += 1
-                    shift += 7
-                    if not (b & 0x80):
-                        break
-                length = val
-            except IndexError:
-                break
-            if pos + length > len(data):
-                break
-            val = data[pos:pos+length]
-            pos += length
-            
-            sub = None
-            if len(val) > 0:
-                try:
-                    sub = _parse_proto(val)
-                except Exception:
-                    pass
-            if sub and len(sub) > 0 and max(sub.keys()) < 1000:
-                fields.setdefault(field_num, []).append(sub)
-            else:
-                fields.setdefault(field_num, []).append(val)
-        elif wire_type == 5:  # 32-bit
-            if pos + 4 > len(data):
-                break
-            val = data[pos:pos+4]
-            pos += 4
-            fields.setdefault(field_num, []).append(val)
-        else:
-            break
-    return fields
-
-
-def _antigravity_db_path(session_id):
-    if not session_id:
-        return None
-    sid = str(session_id).strip()
-    if not _SESSION_UUID_RE.match(sid):
-        return None
-    for folder in (ANTIGRAVITY_CLI_CONVERSATIONS, ANTIGRAVITY_CONVERSATIONS):
-        candidate = folder / f"{sid}.db"
-        if candidate.is_file():
-            return candidate
-    return None
-
-
-def _antigravity_db_trajectory_steps(session_id):
-    db_path = _antigravity_db_path(session_id)
-    if not db_path:
-        return []
-    
-    steps = []
-    conn = None
-    try:
-        import sqlite3
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
-        cursor = conn.cursor()
-        
-        # 1. Load gen_metadata mapping
-        cursor.execute("SELECT idx, data FROM gen_metadata;")
-        gen_map = {}
-        for gen_idx, gen_data in cursor.fetchall():
-            if gen_data:
-                try:
-                    gen_map[gen_idx] = _parse_proto(gen_data)
-                except Exception:
-                    pass
-                    
-        # 2. Walk through steps table
-        cursor.execute("SELECT idx, metadata FROM steps;")
-        for idx, metadata_blob in cursor.fetchall():
-            if not metadata_blob:
-                continue
-            try:
-                parsed_step_meta = _parse_proto(metadata_blob)
-            except Exception:
-                continue
-                
-            model_usage = None
-            
-            # Look up field 20 -> field 3 (gen_metadata index)
-            field_20 = parsed_step_meta.get(20)
-            if field_20 and isinstance(field_20, list) and isinstance(field_20[0], dict):
-                sub_20 = field_20[0]
-                gen_idx_list = sub_20.get(3)
-                if gen_idx_list:
-                    gen_idx = gen_idx_list[0]
-                    if gen_idx in gen_map:
-                        gen_data = gen_map[gen_idx]
-                        
-                        # Extract model name
-                        model_name = ""
-                        for fnum in (21, 19):
-                            m_list = gen_data.get(fnum)
-                            if m_list:
-                                model_name = _proto_bytes_to_str(m_list[0])
-                                if model_name:
-                                    break
-                                    
-                        # Extract token counts
-                        tokens_in = 0
-                        tokens_out = 0
-                        tokens_thinking = 0
-                        cache_read = 0
-                        cache_create = 0
-                        
-                        field_1 = gen_data.get(1)
-                        if field_1 and isinstance(field_1, list) and isinstance(field_1[0], dict):
-                            sub_1 = field_1[0]
-                            field_4 = sub_1.get(4)
-                            if field_4 and isinstance(field_4, list) and isinstance(field_4[0], dict):
-                                usage = field_4[0]
-                                tokens_in = usage.get(2, [0])[0]
-                                tokens_out = usage.get(3, [0])[0]
-                                tokens_thinking = usage.get(10, [0])[0]
-                                cache_read = usage.get(5, [0])[0]
-                                cache_create = usage.get(9, [0])[0]
-                                
-                        model_usage = {
-                            "model": model_name,
-                            "inputTokens": tokens_in,
-                            "outputTokens": tokens_out,
-                            "thinkingTokens": tokens_thinking,
-                            "cacheReadTokens": cache_read,
-                            "cacheCreationTokens": cache_create,
-                        }
-            
-            step_entry = {
-                "stepIndex": idx,
-                "metadata": {}
-            }
-            if model_usage:
-                step_entry["metadata"]["modelUsage"] = model_usage
-            steps.append(step_entry)
-            
-    except Exception:
-        pass
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
-                
-    return steps
-
-
 def _antigravity_trajectory_steps(session_id):
     """Fetch GetCascadeTrajectory and return its raw `steps` list (or [])."""
     result = _antigravity_app_rpc(
@@ -23591,7 +22548,7 @@ def _antigravity_trajectory_steps(session_id):
         timeout=5,
     )
     if not result.get("ok"):
-        return _antigravity_db_trajectory_steps(session_id)
+        return []
     trajectory = (result.get("response") or {}).get("trajectory") or {}
     steps = trajectory.get("steps") or []
     return steps if isinstance(steps, list) else []
@@ -25005,7 +23962,7 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, m
             "code": claude_bin.get("code", "claude_unavailable"),
         }
 
-    model_to_use = _cli_model_flag(_spawn_model_for_engine("claude", model) or "opus")
+    model_to_use = _spawn_model_for_engine("claude", model) or "opus"
     cmd = [
         claude_bin["bin"], "-p", "--verbose",
         "--input-format", "stream-json",
@@ -25267,7 +24224,7 @@ def spawn_session_kilo(prompt, name=None, cwd=None, repo_path=None, worktree=Fal
     session_name = _slugify(name or prompt) or "unnamed"
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     log_filename = f"spawn-kilo-{session_name}-{timestamp}.log"
-    model_to_use = _spawn_model_for_engine("kilo", model) or os.environ.get("CCC_KILO_MODEL", "kilo/stepfun/step-3.7-flash:free")
+    model_to_use = _spawn_model_for_engine("kilo", model) or os.environ.get("CCC_KILO_MODEL", "stepfun/step-3.7-flash:free")
     if model_to_use:
         _set_session_model(log_filename[:-4], model_to_use, False)
     log_dir = repo_log_dir(repo_for_logs)
@@ -25312,11 +24269,10 @@ def spawn_session_kilo(prompt, name=None, cwd=None, repo_path=None, worktree=Fal
         spawned_at=timestamp, command_summary=prompt[:200],
         fifo=None, engine="kilo", repo_path=repo_for_logs, model=model_to_use,
     )
-    resp = {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path), "via": "kilo-spawn"}
-    if worktree_path:
-        resp["worktree_path"] = worktree_path
-        resp["worktree_branch"] = worktree_branch
-    return _finalize_spawn_response(resp, entry, ctx)
+    return _finalize_spawn_response(
+        {"ok": True, "pid": proc.pid, "name": session_name, "log": str(log_path), "via": "kilo-spawn"},
+        entry, ctx,
+    )
 
 
 _COLOR_PALETTE = [
@@ -25868,39 +24824,6 @@ def _session_has_live_terminal(session_id, exclude_pid=None):
     return False
 
 
-def _bg_pty_entry_for_session(session_id):
-    """Registry entry for a live Claude bg-pty-daemon process on `session_id`.
-
-    Claude Code's background pty host (registry `kind: "bg"`) runs the REPL
-    with no controlling tty, but the session IS attached to an open terminal
-    pane. Returns {pid, kind, status, ...} or None. Distinct from both a CCC
-    headless spawn and a tty terminal — callers must never SIGTERM these (it
-    would close the user's open window).
-    """
-    if not session_id or not SESSIONS_REGISTRY.is_dir():
-        return None
-    try:
-        session_files = list(SESSIONS_REGISTRY.iterdir())
-    except OSError:
-        return None
-    for f in session_files:
-        if not f.name.endswith(".json") or not f.is_file():
-            continue
-        try:
-            data = json.loads(f.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if data.get("sessionId") != session_id or data.get("kind") != "bg":
-            continue
-        try:
-            pid = int(data.get("pid"))
-        except (TypeError, ValueError):
-            continue
-        if _pid_is_engine_process(pid, "claude"):
-            return data
-    return None
-
-
 def _start_headless_staleness_watcher() -> None:
     """GH #71 (mechanism 5) — always-on server-side reaper.
 
@@ -26003,23 +24926,15 @@ def resume_session_headless(session_id, text):
     ]
     cmd.extend(_claude_session_state_args())
     # Per-session override (set via the click-to-switch picker). Resume
-    # would otherwise inherit the previously-recorded model.
-    #
-    # CCC-55: the `[1m]` suffix is a TUI-only affordance for the interactive
-    # `/model` slash command — it is NOT a valid `--model` value. Spawning
-    # `claude -p --model opus-4-8[1m]` is rejected with "There's an issue with
-    # the selected model (opus-4-8[1m]). It may not exist." In headless mode
-    # the 1M context window is enabled via the `context-1m-2025-08-07` beta
-    # header (`--betas`), not a model-id suffix. Use _cli_model_flag() which
-    # also expands versioned short aliases (e.g. sonnet-4-6 → claude-sonnet-4-6)
-    # since the --model flag does not accept bare versioned aliases for 4.x models.
+    # would otherwise inherit the previously-recorded model. The `[1m]`
+    # suffix flips the 1M-context variant when supported.
     override = _get_session_override(session_id)
     if override and override.get("model"):
-        alias = _cli_model_flag(override["model"])  # strips [1m], normalizes to full ID
+        alias = _short_model_alias(override["model"])
+        if override.get("context_1m"):
+            alias += "[1m]"
         if alias:
             cmd.extend(["--model", alias])
-        if override.get("context_1m"):
-            cmd.extend(["--betas", "context-1m-2025-08-07"])
 
     log_fh = open(log_path, "w")
     fifo_path, child_stdin_fd = _make_stdin_fifo(log_path)
@@ -26341,11 +25256,6 @@ def _pid_is_engine_process(pid, engine):
         return False
     first = parts[0].rsplit("/", 1)[-1]
     if first == engine:
-        return True
-    # Native Claude builds run as the versioned binary
-    # (~/.local/share/claude/versions/2.1.173) — basename never equals
-    # "claude", which made bg-pty daemon sessions invisible (CCC-104).
-    if engine == "claude" and _process_comm_is_claude(parts[0]):
         return True
     if engine == "cursor" and first == "cursor-agent":
         return True
@@ -26781,19 +25691,7 @@ def _group_chat_inject_text(chat_path: str, topic: str, mode: str, sid: str) -> 
     the chat file for actual content.
     """
     safe_topic = (topic or "").replace('"', '\\"')
-    # No leading "/" (CCC-108): the slash form only dispatches in a live
-    # Claude TUI. Codex and headless Claude receive it as literal text —
-    # Codex's router used to bounce it outright, and headless models read
-    # it as a malformed command rather than an instruction. Both engines
-    # have the group-chat-checkin skill installed (~/.claude/skills and
-    # ~/.codex/skills), so an explicit invoke-the-skill instruction works
-    # on every transport, TUI included.
-    text = (
-        "Group-chat check-in: invoke your group-chat-checkin skill with "
-        f'chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}". '
-        "If you cannot invoke skills, read the chat file at that path and "
-        "follow its instructions."
-    )
+    text = f'/group-chat-checkin chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
     snapshot = _group_chat_latest_message_snapshot(chat_path)
     if snapshot:
         # Keep just the first line — the `## <ts> — <author>` heading —
@@ -28160,12 +27058,10 @@ def _group_chat_add_participant(raw_path: str, session_id: str, display_name: st
     # to be live again.
     _register_coordination(real_path)
 
-    # Existing participants get the check-in instruction too (CCC-114): the
-    # join link doubles as a "go read the chat now" nudge, so re-adding is
-    # idempotent for membership but still delivers the check-in.
-    text = _group_chat_inject_text(real_path, topic, mode, sid)
-    inject_result = _inject_text_into_session(sid, text)
+    inject_result = {"ok": True, "skipped": "already a participant"}
     if not already:
+        text = _group_chat_inject_text(real_path, topic, mode, sid)
+        inject_result = _inject_text_into_session(sid, text)
         added_label = name_map.get(sid) or display_name or sid
         _group_chat_log_system(real_path, f"added `{added_label}` ({sid[:8]})")
     _group_chat_update_header_if_changed(real_path, force_write=True)
@@ -28284,13 +27180,8 @@ def compact_session_context(session_id, *, terminal_app=None, _from_terminal_que
     # mid-turn run isn't abandoned.
     def _launch_terminal_compact(note):
         backup_path = _backup_jsonl_before_compact(sid)
-        # stop_headless: this path only runs when the headless is IDLE, and
-        # the whole point is to retire it in favor of the terminal — kill it
-        # cleanly instead of tripping the CCC-96 fork guard ("/compact
-        # failed: headless still running").
         launched = launch_terminal_for_session(
             sid, cwd, term_app, post_slash_commands=["/compact"],
-            stop_headless=True,
         )
         if launched.get("ok"):
             launched["via"] = "terminal-launch-headless"
@@ -28390,7 +27281,6 @@ def compact_session_context(session_id, *, terminal_app=None, _from_terminal_que
         cwd,
         terminal_app,
         post_slash_commands=["/compact"],
-        stop_headless=True,
     )
     if launched.get("ok"):
         launched["via"] = "terminal-launch"
@@ -28432,14 +27322,6 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
     term_app = status.get("terminal_app")
     has_tty = bool(tty) and tty != "??"
     is_cursor = _is_cursor_session(session_id)
-    # Codex: only its OWN TUI commands need a live interactive terminal.
-    # Slash-shaped text that isn't one (e.g. /group-chat-checkin from the
-    # group-chat flow) is just prompt text — route it through the normal
-    # resume path instead of bouncing "requires live TUI" (CCC-107).
-    if is_codex and slash_command:
-        _first_tok = text.strip().split(None, 1)[0]
-        if _first_tok not in _CODEX_SLASH_NAME_SET:
-            slash_command = False
     if is_codex and slash_command:
         if status.get("live") and has_tty:
             if not _from_terminal_queue and _terminal_input_queue_has_pending(session_id):
@@ -28522,24 +27404,7 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
                 queued_status["status"] = queued_status.get("status") or "busy"
                 return _queue_terminal_input(session_id, text, queued_status)
         worker = _find_live_bg_agent_entry_for_session(session_id)
-        result = _inject_bg_agent_via_pty_socket(worker, text, session_id=session_id)
-        # Unconfirmed delivery (app-managed terminal that eats socket input):
-        # park the message instead of dropping it — it drains when the bg
-        # process exits (resume path) or a working channel appears.
-        if isinstance(result, dict) and result.get("delivery_unconfirmed"):
-            queued_status = dict(status or {})
-            queued_status["status"] = "bg-undeliverable"
-            queued = _queue_terminal_input(session_id, text, queued_status)
-            queued["ok"] = True
-            queued["delivery_unconfirmed"] = True
-            queued["original_error"] = result.get("error")
-            queued["note"] = (
-                "CCC can't reach this Claude-app terminal — your message is "
-                "parked and sends when the app session closes. To act on it "
-                "now, type it in the Claude app window."
-            )
-            return queued
-        return result
+        return _inject_bg_agent_via_pty_socket(worker, text)
     if is_codex:
         return resume_session_codex(session_id, text)
     if _is_gemini_session(session_id):
@@ -28607,28 +27472,6 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
                 "via": "spawn-fifo",
                 "error": "session input pipe is busy",
             }
-        # Fork guard: a live claude we did NOT spawn and cannot drive (no
-        # tty to keystroke, no FIFO, not the bg-pty shape handled above —
-        # e.g. a daemon-hosted interactive session). Spawning a parallel
-        # `claude --resume` here puts TWO writers on one JSONL and forks
-        # the transcript — the root cause of the post-/compact amnesia
-        # (resume/compact then follow the stale leaf). Queue instead; the
-        # queue drains once the process exits or becomes reachable.
-        if status.get("live") and status.get("pid") and not has_tty:
-            queued_status = dict(status or {})
-            queued_status["status"] = queued_status.get("status") or "foreign-live-writer"
-            queued = _queue_terminal_input(session_id, text, queued_status)
-            queued["foreign_live_writer"] = True
-            queued["original_error"] = (
-                "A live claude process (pid %s) already owns this session but "
-                "CCC has no channel to it." % status.get("pid")
-            )
-            queued["note"] = (
-                "Queued — another process is running this session. Your "
-                "message sends when it finishes (resuming in parallel would "
-                "fork the conversation history)."
-            )
-            return queued
         return _maybe_queue_on_invalid_cwd(
             session_id, text, status, resume_session_headless(session_id, text),
         )
@@ -34165,18 +33008,6 @@ _HISTORY_INDEX_PATH = Path.home() / ".claude-index" / "index.db"
 _history_conn = None
 _history_conn_lock = threading.Lock()       # guards connection open / reset
 
-# Self-freshening search: each /api/search-history request kicks a throttled
-# background incremental ingest so search content tracks live transcripts
-# without any manual re-index. The gap keeps search-as-you-type from
-# stampeding the indexer; the first search after server start always ingests.
-try:
-    _HISTORY_AUTO_INGEST_GAP_SEC = max(
-        30.0,
-        float(os.environ.get("CCC_HISTORY_AUTO_INGEST_SEC", "120")),
-    )
-except ValueError:
-    _HISTORY_AUTO_INGEST_GAP_SEC = 120.0
-
 # A single sqlite3.Connection cannot be used concurrently from multiple
 # threads. check_same_thread=False only silences Python's guard — it does NOT
 # serialise access, and overlapping .execute() on one shared handle raises
@@ -34620,66 +33451,6 @@ def get_cached_plan_usage():
 
 _STATS_FILE_CACHE = {}        # str(path) -> {"mtime", "size", "agg"}
 _STATS_CACHE_LOCK = threading.Lock()
-_STATS_FILE_CACHE_DIRTY = False
-_STATS_FILE_CACHE_SCHEMA = 1
-_STATS_FILE_CACHE_FILE = (
-    Path.home() / ".claude" / "command-center" / "stats_file_cache.json"
-)
-
-
-def _load_stats_file_cache():
-    """Load per-transcript stats aggregates from disk on startup.
-
-    Without this the in-memory cache is empty after every restart, so the
-    first /api/stats (Stats overlay) cold-parses every transcript (~1200 files
-    ≈ 40s) AND that CPU-bound parse holds the GIL, freezing the whole server
-    for its duration. Persisting means a restart only re-parses the handful of
-    transcripts that changed; entries are (mtime,size)-keyed so stale ones
-    self-invalidate in _stats_get_file_agg.
-    """
-    if not _STATS_FILE_CACHE_FILE.is_file():
-        return
-    try:
-        with _STATS_FILE_CACHE_FILE.open("r") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError, ValueError):
-        return
-    if not isinstance(data, dict) or data.get("schema_version") != _STATS_FILE_CACHE_SCHEMA:
-        return
-    entries = data.get("entries")
-    if not isinstance(entries, dict):
-        return
-    keep = {
-        k: v for k, v in entries.items()
-        if isinstance(v, dict) and "mtime" in v and "size" in v and "agg" in v
-    }
-    with _STATS_CACHE_LOCK:
-        _STATS_FILE_CACHE.update(keep)
-
-
-def _save_stats_file_cache():
-    """Atomic write of _STATS_FILE_CACHE when dirty. Must be called OUTSIDE
-    _STATS_CACHE_LOCK (it acquires the lock; compute_global_stats holds it for
-    the whole build, so call this after that returns)."""
-    global _STATS_FILE_CACHE_DIRTY
-    with _STATS_CACHE_LOCK:
-        if not _STATS_FILE_CACHE_DIRTY:
-            return
-        snapshot = {
-            "schema_version": _STATS_FILE_CACHE_SCHEMA,
-            "entries": dict(_STATS_FILE_CACHE),
-        }
-        _STATS_FILE_CACHE_DIRTY = False
-    try:
-        _STATS_FILE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _STATS_FILE_CACHE_FILE.with_suffix(".tmp")
-        with tmp.open("w") as f:
-            json.dump(snapshot, f)
-        tmp.replace(_STATS_FILE_CACHE_FILE)
-    except OSError as e:
-        with _STATS_CACHE_LOCK:
-            _STATS_FILE_CACHE_DIRTY = True
-        print(f"  [stats-file-cache] save failed: {e}")
 
 # Token equivalent of "The Lord of the Rings" — ~576k words × ~1.25 tokens/word.
 # Used for the whimsical comparison line at the bottom of the stats overlay.
@@ -34800,8 +33571,6 @@ def _stats_get_file_agg(path):
         return cached["agg"]
     agg = _stats_aggregate_file(path)
     _STATS_FILE_CACHE[key] = {"mtime": st.st_mtime, "size": st.st_size, "agg": agg}
-    global _STATS_FILE_CACHE_DIRTY
-    _STATS_FILE_CACHE_DIRTY = True
     return agg
 
 
@@ -35912,12 +34681,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 days = None
             else:
                 days = 30
-            result = compute_global_stats(days=days)
-            # Persist the per-file aggregates so the next restart doesn't
-            # cold-parse every transcript again (called outside the build's
-            # _STATS_CACHE_LOCK).
-            _save_stats_file_cache()
-            self.send_json(result)
+            self.send_json(compute_global_stats(days=days))
         elif path == "/api/plan-usage":
             self.send_json(get_cached_plan_usage())
         elif path in ("/api/sessions/spawned", "/api/spawned"):
@@ -35998,7 +34762,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(info)
         elif path == "/api/sessions/spawn-kilo/availability":
             info = _resolve_kilo_bin()
-            info["model"] = os.environ.get("CCC_KILO_MODEL", "kilo/stepfun/step-3.7-flash:free")
+            info["model"] = os.environ.get("CCC_KILO_MODEL", "stepfun/step-3.7-flash:free")
             self.send_json(info)
         elif path == "/api/loading-status":
             self.send_json(_session_load_snapshot())
@@ -36099,267 +34863,6 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # doesn't re-walk every JSONL. Atomic; only writes when dirty.
             _save_conv_meta_cache()
             self.send_json(convs)
-        elif path == "/api/throughput":
-            qs = urllib.parse.parse_qs(parsed.query)
-            session_id = (qs.get("session_id", [""])[0] or "").strip()
-            if not session_id:
-                self.send_json({"error": "Missing session_id"}, 400)
-                return
-            repo_path = (qs.get("repo_path", [""])[0] or "").strip() or None
-            
-            # Helper to preview text
-            def get_trig_prev(tev):
-                text = tev.get("text") or ""
-                if tev.get("type") == "tool_result":
-                    use_id = tev.get("tool_use_id") or ""
-                    prefix = f"Tool Result ({use_id}): " if use_id else "Tool Result: "
-                    return prefix + text[:300] + ("..." if len(text) > 300 else "")
-                return text[:300] + ("..." if len(text) > 300 else "")
-
-            def get_asst_prev(aev):
-                blocks = aev.get("blocks") or []
-                parts = []
-                for b in blocks:
-                    kind = b.get("kind") or ""
-                    if kind == "text":
-                        parts.append(b.get("text") or "")
-                    elif kind == "thinking":
-                        parts.append(f"[Thinking: {b.get('text') or ''}]")
-                    elif kind == "tool_use":
-                        parts.append(f"[Tool Use: {b.get('name') or ''}({b.get('detail') or ''})]")
-                full_text = "\n".join(parts)
-                return full_text[:4000] + ("..." if len(full_text) > 4000 else "")
-
-            turns = []
-
-            if session_id == "all_7_days":
-                try:
-                    # The 7-day filter only needs each conversation's mtime +
-                    # session_id + name. Skip the expensive resolve passes
-                    # (gh pr view per PR, git status per worktree, effective-
-                    # branch) that default to True — they were ~5s of pure
-                    # waste on this endpoint.
-                    all_c = find_all_conversations(
-                        resolve_pr_states=False,
-                        resolve_effective=False,
-                        resolve_worktree_dirty=False,
-                    )
-                except Exception as e:
-                    self.send_json({"error": f"Failed to list conversations: {str(e)}"}, 500)
-                    return
-                
-                cutoff = time.time() - 7 * 86400
-                recent_sids = []
-                for c in all_c:
-                    t = c.get("last_interacted") or c.get("modified") or c.get("mtime") or 0
-                    if t >= cutoff:
-                        if repo_path:
-                            try:
-                                if Path(c.get("folder_path") or "").resolve(strict=False) != Path(repo_path).resolve(strict=False):
-                                    continue
-                            except Exception:
-                                continue
-                        recent_sids.append((c.get("session_id"), c.get("display_name") or c.get("name") or "Untitled"))
-                
-                all_events = []
-                for sid, name in recent_sids:
-                    try:
-                        conv = parse_conversation(sid, repo_path=repo_path)
-                        events = conv.get("events") or []
-                        for i in range(len(events)):
-                            if events[i].get("type") == "assistant":
-                                if not events[i].get("tokens_in") and not events[i].get("tokens_out"):
-                                    has_later_assistant = False
-                                    result_ev = None
-                                    for k in range(i + 1, len(events)):
-                                        nxt = events[k]
-                                        if nxt.get("type") == "user_text":
-                                            break
-                                        if nxt.get("type") == "assistant":
-                                            has_later_assistant = True
-                                            break
-                                        if nxt.get("type") == "result":
-                                            result_ev = nxt
-                                            break
-                                    if result_ev and not has_later_assistant:
-                                        usage = result_ev.get("token_usage")
-                                        if usage and isinstance(usage, dict):
-                                            events[i]["tokens_in"] = usage.get("input_tokens") or 0
-                                            events[i]["tokens_out"] = usage.get("output_tokens") or 0
-                        for ev in events:
-                            ev["session_id"] = sid
-                            ev["session_name"] = name
-                        all_events.extend(events)
-                    except Exception:
-                        pass
-                
-                events_by_session = {}
-                for ev in all_events:
-                    sid = ev.get("session_id")
-                    if sid:
-                        events_by_session.setdefault(sid, []).append(ev)
-                
-                all_extracted_turns = []
-                for sid, evs in events_by_session.items():
-                    session_name = evs[0].get("session_name") or "Untitled"
-                    for i, ev in enumerate(evs):
-                        if ev.get("type") == "assistant":
-                            trigger_ev = None
-                            for j in range(i - 1, -1, -1):
-                                prev = evs[j]
-                                if prev.get("type") in ("user_text", "tool_result"):
-                                    trigger_ev = prev
-                                    break
-                            if trigger_ev:
-                                t_start = _stats_parse_ts(trigger_ev.get("ts"))
-                                t_end = _stats_parse_ts(ev.get("ts"))
-                                if t_start and t_end:
-                                    dur_sec = (t_end - t_start).total_seconds()
-                                    if dur_sec < 1.0:
-                                        dur_sec = 1.0
-                                    tokens_in = ev.get("tokens_in") or 0
-                                    tokens_out = ev.get("tokens_out") or 0
-                                    
-                                    in_tps = tokens_in / dur_sec if dur_sec > 0 else 0.0
-                                    out_tps = tokens_out / dur_sec if dur_sec > 0 else 0.0
-                                    total_tps = (tokens_in + tokens_out) / dur_sec if dur_sec > 0 else 0.0
-                                    
-                                    all_extracted_turns.append({
-                                        "session_id": sid,
-                                        "session_name": session_name,
-                                        "trigger_type": trigger_ev.get("type"),
-                                        "trigger_preview": get_trig_prev(trigger_ev),
-                                        "assistant_preview": get_asst_prev(ev),
-                                        "t_start": trigger_ev.get("ts"),
-                                        "t_end": ev.get("ts"),
-                                        "dur_sec": dur_sec,
-                                        "tokens_in": tokens_in,
-                                        "tokens_out": tokens_out,
-                                        "in_tps": in_tps,
-                                        "out_tps": out_tps,
-                                        "total_tps": total_tps,
-                                    })
-                
-                all_extracted_turns.sort(key=lambda t: t["t_start"] or "")
-                for idx, t in enumerate(all_extracted_turns):
-                    turns.append({
-                        "turn_index": idx + 1,
-                        "session_id": t["session_id"],
-                        "session_name": t["session_name"],
-                        "trigger_type": t["trigger_type"],
-                        "trigger_preview": t["trigger_preview"],
-                        "assistant_preview": t["assistant_preview"],
-                        "t_start": t["t_start"],
-                        "t_end": t["t_end"],
-                        "dur_sec": round(t["dur_sec"], 2),
-                        "tokens_in": t["tokens_in"],
-                        "tokens_out": t["tokens_out"],
-                        "in_tps": round(t["in_tps"], 2),
-                        "out_tps": round(t["out_tps"], 2),
-                        "total_tps": round(t["total_tps"], 2),
-                        "in_tpm": round(t["in_tps"] * 60.0, 2),
-                        "out_tpm": round(t["out_tps"] * 60.0, 2),
-                        "total_tpm": round(t["total_tps"] * 60.0, 2),
-                    })
-            else:
-                try:
-                    conv = parse_conversation(session_id, repo_path=repo_path)
-                except Exception as e:
-                    self.send_json({"error": f"Failed to parse conversation: {str(e)}"}, 500)
-                    return
-                events = conv.get("events") or []
-                # Pre-process events to map Codex token_usage from "result" events to the last "assistant" event
-                for i in range(len(events)):
-                    if events[i].get("type") == "assistant":
-                        if not events[i].get("tokens_in") and not events[i].get("tokens_out"):
-                            has_later_assistant = False
-                            result_ev = None
-                            for k in range(i + 1, len(events)):
-                                nxt = events[k]
-                                if nxt.get("type") == "user_text":
-                                    break
-                                if nxt.get("type") == "assistant":
-                                    has_later_assistant = True
-                                    break
-                                if nxt.get("type") == "result":
-                                    result_ev = nxt
-                                    break
-                            if result_ev and not has_later_assistant:
-                                usage = result_ev.get("token_usage")
-                                if usage and isinstance(usage, dict):
-                                    events[i]["tokens_in"] = usage.get("input_tokens") or 0
-                                    events[i]["tokens_out"] = usage.get("output_tokens") or 0
-                for i, ev in enumerate(events):
-                    if ev.get("type") == "assistant":
-                        trigger_ev = None
-                        for j in range(i - 1, -1, -1):
-                            prev = events[j]
-                            if prev.get("type") in ("user_text", "tool_result"):
-                                trigger_ev = prev
-                                break
-                        if trigger_ev:
-                            t_start = _stats_parse_ts(trigger_ev.get("ts"))
-                            t_end = _stats_parse_ts(ev.get("ts"))
-                            if t_start and t_end:
-                                dur_sec = (t_end - t_start).total_seconds()
-                                if dur_sec < 1.0:
-                                    dur_sec = 1.0
-                                tokens_in = ev.get("tokens_in") or 0
-                                tokens_out = ev.get("tokens_out") or 0
-                                
-                                # calculate speeds
-                                in_tps = tokens_in / dur_sec if dur_sec > 0 else 0.0
-                                out_tps = tokens_out / dur_sec if dur_sec > 0 else 0.0
-                                total_tps = (tokens_in + tokens_out) / dur_sec if dur_sec > 0 else 0.0
-                                
-                                turns.append({
-                                    "turn_index": len(turns) + 1,
-                                    "trigger_type": trigger_ev.get("type"),
-                                    "trigger_preview": get_trig_prev(trigger_ev),
-                                    "assistant_preview": get_asst_prev(ev),
-                                    "t_start": trigger_ev.get("ts"),
-                                    "t_end": ev.get("ts"),
-                                    "dur_sec": round(dur_sec, 2),
-                                    "tokens_in": tokens_in,
-                                    "tokens_out": tokens_out,
-                                    "in_tps": round(in_tps, 2),
-                                    "out_tps": round(out_tps, 2),
-                                    "total_tps": round(total_tps, 2),
-                                    "in_tpm": round(in_tps * 60.0, 2),
-                                    "out_tpm": round(out_tps * 60.0, 2),
-                                    "total_tpm": round(total_tps * 60.0, 2),
-                                })
-            
-            total_turns = len(turns)
-            turns_with_tokens = sum(1 for t in turns if t["tokens_in"] > 0 or t["tokens_out"] > 0)
-            total_active_sec = sum(t["dur_sec"] for t in turns)
-            total_in = sum(t["tokens_in"] for t in turns)
-            total_out = sum(t["tokens_out"] for t in turns)
-            total_tok = total_in + total_out
-            
-            avg_in_tps = total_in / total_active_sec if total_active_sec > 0 else 0.0
-            avg_out_tps = total_out / total_active_sec if total_active_sec > 0 else 0.0
-            avg_total_tps = total_tok / total_active_sec if total_active_sec > 0 else 0.0
-            
-            self.send_json({
-                "ok": True,
-                "session_id": session_id,
-                "summary": {
-                    "total_turns": total_turns,
-                    "turns_with_tokens": turns_with_tokens,
-                    "total_active_duration_sec": round(total_active_sec, 2),
-                    "total_input_tokens": total_in,
-                    "total_output_tokens": total_out,
-                    "total_tokens": total_tok,
-                    "avg_input_tps": round(avg_in_tps, 2),
-                    "avg_output_tps": round(avg_out_tps, 2),
-                    "avg_total_tps": round(avg_total_tps, 2),
-                    "avg_input_tpm": round(avg_in_tps * 60.0, 2),
-                    "avg_output_tpm": round(avg_out_tps * 60.0, 2),
-                    "avg_total_tpm": round(avg_total_tps * 60.0, 2),
-                },
-                "turns": turns,
-            })
         elif path == "/api/morning/sessions":
             # Morning-spawned sessions may live in ANY project slug under
             # ~/.claude/projects/ (spawn cwd determines the slug). Scan all
@@ -36672,23 +35175,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     status["terminal_present"] = bool(
                         _session_has_live_terminal(sid, exclude_pid=status.get("headless_pid"))
                     )
-                    # Claude Code's bg-pty daemon (registry kind "bg") hosts the
-                    # REPL with NO controlling tty, yet the session is attached
-                    # to an open terminal pane — without this it read as
-                    # "no headless/terminal process" and dormant (CCC-104).
-                    if not status["terminal_present"] and not status["headless_present"]:
-                        _bg = _bg_pty_entry_for_session(sid)
-                        if _bg:
-                            status["bg_present"] = True
-                            status["bg_pid"] = _bg.get("pid")
                 except Exception:
                     pass
             self.send_json(status)
-        elif re.match(r"^/api/conversations/(?:[a-f0-9-]+|ses_[A-Za-z0-9]+)/files$", path):
+        elif re.match(r"^/api/conversations/[a-f0-9-]+/files$", path):
             conv_id = path.split("/")[-2]
             payload = _extract_files_from_conversation(conv_id)
             self.send_json(payload)
-        elif re.match(r"^/api/conversations/(?:[a-f0-9-]+(?::agent-[a-f0-9]+)?|ses_[A-Za-z0-9]+)/stream$", path):
+        elif re.match(r"^/api/conversations/[a-f0-9-]+/stream$", path):
             conv_id = path.split("/")[-2]
             qs = urllib.parse.parse_qs(parsed.query)
             after_line = int(qs.get("after", ["0"])[0])
@@ -36711,7 +35205,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif re.match(r"^/api/session/[a-f0-9-]+/spawn-stream$", path):
             sid = path.split("/")[-2]
             self._stream_spawn_deltas(sid)
-        elif re.match(r"^/api/conversations/(?:[a-f0-9-]+(?::agent-[a-f0-9]+)?|ses_[A-Za-z0-9]+)$", path):
+        elif re.match(r"^/api/conversations/[a-f0-9-]+$", path):
             conv_id = path.split("/")[-1]
             qs = urllib.parse.parse_qs(parsed.query)
             after_line = int(qs.get("after", ["0"])[0])
@@ -37108,22 +35602,6 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
                 self.wfile.write(body)
-        elif path == "/throughput.html" or path == "/throughput":
-            try:
-                body = (STATIC_DIR / "throughput.html").read_bytes()
-            except OSError as e:
-                self.send_json({"error": "throughput.html missing", "detail": str(e)}, 500)
-                return
-            body, enc = self._maybe_gzip(body, "text/html; charset=utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store, must-revalidate")
-            self.send_header("Content-Length", str(len(body)))
-            if enc:
-                self.send_header("Content-Encoding", enc)
-                self.send_header("Vary", "Accept-Encoding")
-            self.end_headers()
-            self.wfile.write(body)
         elif path == "/group-chat-live.html":
             # Standalone group-chat live view. Keep this as a narrow route
             # instead of allowing arbitrary /static/*.html files.
@@ -37227,18 +35705,6 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not q:
                 self.send_json({"results": []})
             else:
-                # Self-freshening index: every search kicks a throttled
-                # incremental ingest in the background (only re-reads
-                # transcripts that changed since the last pass). This query
-                # is served from the current index immediately; new content
-                # is searchable moments later without any manual action.
-                if _hi_indexer is not None:
-                    try:
-                        _hi_indexer.maybe_ingest(
-                            min_gap_sec=_HISTORY_AUTO_INGEST_GAP_SEC
-                        )
-                    except Exception:
-                        pass  # freshness is best-effort; never break search
                 cwd_like = (qs.get("cwd", [""])[0] or "").strip() or None
                 since = (qs.get("since", [""])[0] or "").strip() or None
                 limit_raw = (qs.get("limit", ["20"])[0] or "20").strip()
@@ -37957,38 +36423,6 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # NOTE: we return 200 even on cancel — cancel isn't an error.
             # Real errors (macOS-only restriction, timeout) also get 200 with
             # {ok:false,error:...} so the UI has a single response shape.
-            return
-        if path == "/api/project/create":
-            # Create a brand-new project folder and register it as a known
-            # repo (CCC-82 "Start a new project" flow). Clamped to $HOME so
-            # a stray payload can't mkdir anywhere on disk.
-            length = int(self.headers.get("Content-Length", "0"))
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-            except (json.JSONDecodeError, ValueError):
-                body = {}
-            target = (body.get("path") or "").strip()
-            if not target:
-                self.send_json({"ok": False, "error": "missing 'path'"}, 400)
-                return
-            try:
-                p = Path(target).expanduser()
-                # Resolve the nearest existing ancestor to defeat ../ tricks
-                # while still allowing a not-yet-existing leaf.
-                resolved = p.parent.resolve() / p.name
-                home = Path.home().resolve()
-                if not str(resolved).startswith(str(home) + os.sep):
-                    self.send_json({"ok": False, "error": "path must be inside your home directory"}, 400)
-                    return
-                if resolved.exists():
-                    self.send_json({"ok": False, "error": f"already exists: {resolved}"}, 409)
-                    return
-                resolved.mkdir(parents=True)
-                registered = _append_custom_repo(str(resolved))
-            except (OSError, ValueError) as e:
-                self.send_json({"ok": False, "error": str(e)}, 400)
-                return
-            self.send_json({"ok": True, "path": registered, "repos": load_known_repos()})
             return
         if path == "/api/repo/add":
             # Persist a user-picked repo path so it appears in the picker and
@@ -39221,14 +37655,9 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 if sid in archived:
                     archived.remove(sid)
                     now_archived = False
-                    _archive_grace.pop(sid, None)
                 else:
                     archived.append(sid)
                     now_archived = True
-                    # Shield this deliberate archive from the auto-unarchive
-                    # sweep (CCC-117) — the kill below freshens the transcript
-                    # mtime, which would otherwise bounce it right back.
-                    _archive_grace[sid] = time.time()
                 _save_archived_conversations(archived)
                 # Archiving retires the session — drop any stale Notification-hook
                 # marker so the dashboard doesn't keep classifying it as Waiting
@@ -40153,11 +38582,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 for c in (payload.get("post_slash_commands") or [])
                 if str(c or "").strip().startswith("/")
             ]
-            self.send_json(launch_terminal_for_session(
-                sid, cwd, term_app,
-                post_slash_commands=post_cmds or None,
-                stop_headless=bool(payload.get("stop_headless")),
-            ))
+            self.send_json(launch_terminal_for_session(sid, cwd, term_app, post_slash_commands=post_cmds or None))
         elif path == "/api/jump-terminal":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
@@ -41619,23 +40044,20 @@ def write_port_file(bind_host):
     return url
 
 
-def _install_skill(name: str, skills_root: Path = None):
-    """Install (or refresh) a bundled skill into <skills_root>/<name>/SKILL.md
-    (default ~/.claude/skills). Idempotent — only writes when the source
-    differs from the destination."""
+def _install_skill(name: str):
+    """Install (or refresh) a bundled skill into ~/.claude/skills/<name>/SKILL.md.
+    Idempotent — only writes when the source differs from the destination."""
     import shutil
     src = CCC_ROOT / "skills" / f"{name}.md"
     if not src.exists():
         print(f"  [skill] source not found at {src}; skipping")
         return
-    if skills_root is None:
-        skills_root = Path.home() / ".claude" / "skills"
-    dst_dir = skills_root / name
+    dst_dir = Path.home() / ".claude" / "skills" / name
     dst = dst_dir / "SKILL.md"
     try:
         dst_dir.mkdir(parents=True, exist_ok=True)
         if dst.exists() and dst.read_bytes() == src.read_bytes():
-            print(f"  [skill] {name} already up to date ({skills_root})")
+            print(f"  [skill] {name} already up to date")
             return
         shutil.copy2(src, dst)
         print(f"  [skill] installed {name} -> {dst}")
@@ -41643,29 +40065,13 @@ def _install_skill(name: str, skills_root: Path = None):
         print(f"  [skill] could not install {name} ({e})")
 
 
-def _skill_install_roots():
-    """Skill destinations: always ~/.claude/skills; also ~/.codex/skills when
-    Codex is present (its home dir exists or its CLI resolves). Codex reads
-    the same agent-skills SKILL.md layout and ignores Claude-only frontmatter."""
-    roots = [Path.home() / ".claude" / "skills"]
-    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
-    try:
-        codex_present = codex_home.is_dir() or _resolve_codex_bin().get("available")
-    except Exception:
-        codex_present = False
-    if codex_present:
-        roots.append(codex_home / "skills")
-    return roots
-
-
 def install_orchestration_skill():
     """Install all bundled CCC skills. Skipped when CCC_SKIP_SKILL_INSTALL=1."""
     if os.environ.get("CCC_SKIP_SKILL_INSTALL", "").strip().lower() in ("1", "true", "yes", "on"):
         print("  [skill] install skipped (CCC_SKIP_SKILL_INSTALL=1)")
         return
-    for root in _skill_install_roots():
-        _install_skill("ccc-orchestration", root)
-        _install_skill("group-chat-checkin", root)
+    _install_skill("ccc-orchestration")
+    _install_skill("group-chat-checkin")
 
 
 def _raise_open_file_limit(min_soft=2048):
@@ -41908,11 +40314,11 @@ def _telemetry_detect_engines():
     try:
         if _resolve_antigravity_bin().get("available"):
             out.append("antigravity")
-    except Exception:
-        pass
     try:
         if _resolve_kilo_bin().get("available"):
             out.append("kilo")
+    except Exception:
+        pass
     except Exception:
         pass
     return out
@@ -42212,8 +40618,6 @@ def main():
     ).start()
     _load_conv_meta_cache()
     _load_cwd_relocation_cache()
-    _load_stats_file_cache()
-    start_uxq_nudge_watcher()
     try:
         _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
