@@ -18397,11 +18397,16 @@
         const procSlot = (currentSession && (isClaudeSource(currentSession.source) || currentSession.source === 'codex'))
           ? '<span class="ccc-breadcrumb-proc" data-role="ccc-breadcrumb-proc"></span>'
           : '';
+        // Proc slot (headless/terminal indication) sits right after the
+        // category, BEFORE the greedy title — otherwise the title's flex-grow
+        // pushes the pills past the breadcrumb's overflow:hidden clip edge and
+        // the terminal-vs-headless indication disappears (CCC-35). The title
+        // ellipsizes instead; it's secondary and also shown in the pane.
         breadcrumbEl.innerHTML = ''
           + (category ? '<span class="ccc-breadcrumb-category">' + escapeHtml(category) + '</span>' : '')
+          + procSlot
           + (title ? '<span class="ccc-breadcrumb-title">' + escapeHtml(title) + '</span>' : '')
           + (sizeBytes > 0 ? '<span class="ccc-breadcrumb-size" title="' + sizeBytes.toLocaleString() + ' bytes">' + escapeHtml(formatSize(sizeBytes)) + '</span>' : '')
-          + procSlot
           + popoutBtn;
         breadcrumbEl.hidden = false;
         updateConvProcessIndicator();
