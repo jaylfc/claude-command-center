@@ -17,7 +17,6 @@
     --accent: #ffd266;
     --good: #4ade80;
     --bar: #2563eb;
-    --bar-soft: #1d3a8a;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; }
@@ -26,10 +25,33 @@
   header { padding: 28px 22px 8px; max-width: 1080px; margin: 0 auto; }
   header h1 { margin: 0 0 6px; font-size: 24px; font-weight: 600; }
   header p { margin: 0; color: var(--ink-dim); }
+  .tabs {
+    max-width: 1080px;
+    margin: 18px auto 0;
+    padding: 0 22px;
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .tab {
+    background: none;
+    border: 0;
+    color: var(--ink-dim);
+    font: inherit;
+    font-weight: 500;
+    padding: 12px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab.active { color: var(--ink); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--ink); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
   .grid {
     max-width: 1080px;
     margin: 16px auto;
-    padding: 0 22px 60px;
+    padding: 0 22px 24px;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 14px;
@@ -56,7 +78,6 @@
   th { color: var(--ink-dim); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
   tr:last-child td { border-bottom: 0; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .bar { display: inline-block; vertical-align: middle; height: 8px; background: var(--bar); border-radius: 4px; margin-right: 8px; }
   .bar-track { background: var(--panel2); border-radius: 4px; height: 8px; overflow: hidden; min-width: 60px; }
   .bar-fill { height: 100%; background: var(--bar); }
   .muted { color: var(--ink-dim); font-size: 13px; }
@@ -64,9 +85,8 @@
   footer { max-width: 1080px; margin: 30px auto 60px; padding: 0 22px; color: var(--ink-dim); font-size: 13px; }
   footer code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; }
   .error { color: #ff6b6b; padding: 18px; }
-  h3.section { max-width: 1080px; margin: 24px auto 4px; padding: 0 22px; font-size: 14px; font-weight: 600; color: var(--ink); }
-  h3.section:first-of-type { margin-top: 14px; }
-  .muted-inline { color: var(--ink-dim); font-weight: 400; font-size: 13px; }
+  .tab-intro { max-width: 1080px; margin: 14px auto 0; padding: 0 22px; color: var(--ink-dim); font-size: 13px; }
+  .tab-intro code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -76,6 +96,11 @@
   <p>Live aggregate usage for Claude Command Center. <a href="/">← back to landing</a> · <a href="https://github.com/amirfish1/claude-command-center/blob/main/docs/telemetry.md">privacy contract</a></p>
 </header>
 
+<div class="tabs" role="tablist">
+  <button class="tab active" data-tab="opt-in" role="tab" aria-selected="true">Opt-in pings</button>
+  <button class="tab" data-tab="beacon" role="tab" aria-selected="false">Anonymous boot beacons</button>
+</div>
+
 <div id="root">
   <div class="grid"><div class="card wide muted">Loading…</div></div>
 </div>
@@ -83,45 +108,48 @@
 <footer>
   <p>
     Numbers come from <a href="https://github.com/amirfish1/claude-command-center/blob/main/infra/telemetry-worker/">our public Cloudflare Worker</a> over a public D1 aggregate query.
-    Anonymous open beacons fire once per CCC server boot (no install id, no identity).
-    Opt-in daily pings carry six fields per the <a href="https://github.com/amirfish1/claude-command-center/blob/main/docs/telemetry.md">contract</a>.
-    Source IP is dropped at the edge.
+    The raw source IP is never stored; the worker computes <code>SHA-256(utc_date || daily_secret || ip)</code> at the edge so we can count distinct IPs per day without being able to link the same machine across days.
     Cached at the edge for 5 minutes.
   </p>
 </footer>
 
 <script>
 const STATS_URL = "https://telemetry.claude-command-center.workers.dev/v1/stats";
+let _data = null;
 
 async function load() {
   const root = document.getElementById("root");
   try {
     const r = await fetch(STATS_URL, { cache: "no-store" });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    root.innerHTML = render(data);
+    _data = await r.json();
+    renderActiveTab();
   } catch (e) {
     root.innerHTML = `<div class="grid"><div class="card wide error">Could not load stats: ${e.message}</div></div>`;
   }
 }
 
-function render(d) {
+function renderActiveTab() {
+  if (!_data) return;
+  const active = document.querySelector(".tab.active").dataset.tab;
+  const root = document.getElementById("root");
+  root.innerHTML = active === "opt-in" ? renderOptIn(_data) : renderBeacon(_data);
+}
+
+function renderOptIn(d) {
   const t = d.totals || {};
-  const opens = d.opens_by_day || [];
   const pings = d.pings_by_day || [];
   const versions = d.versions || [];
   const platforms = d.platforms || [];
   const sessionsTodayAll = d.sessions_today_per_install || [];
-
   const today = pings[0] && pings[0].active_installs || 0;
-  const last7 = uniqueInstallsFromBuckets(pings.slice(0, 7));
   const last30 = uniqueInstallsFromBuckets(pings.slice(0, 30));
-  const opensToday = opens[0] && opens[0].boots || 0;
-  const opens7 = sumBuckets(opens.slice(0, 7), "boots");
-  const opens30 = sumBuckets(opens.slice(0, 30), "boots");
-
   return `
-    <h3 class="section">Opt-in daily pings <span class="muted-inline">(richer data: install id, version, engines, sessions today — only after user clicks Enable on the banner)</span></h3>
+    <p class="tab-intro">
+      Richer payload — install id, version, engines on PATH, last-active date, sessions in last 24h.
+      Fires once per UTC day, <strong>only after</strong> the user clicks <em>Enable</em> on the dashboard banner.
+      <code>CCC_TELEMETRY_DISABLED=1</code> kills it.
+    </p>
     <div class="grid">
       <div class="card">
         <h2>Distinct opt-in installs</h2>
@@ -143,33 +171,6 @@ function render(d) {
         <div class="stat-big">${t.total_pings ?? 0}</div>
         <div class="stat-sub">all-time count</div>
       </div>
-    </div>
-
-    <h3 class="section">Anonymous boot beacons <span class="muted-inline">(no identifier — fires every CCC server boot regardless of opt-in; killed by <code>CCC_TELEMETRY_DISABLED=1</code>)</span></h3>
-    <div class="grid">
-      <div class="card">
-        <h2>Boots today</h2>
-        <div class="stat-big">${opensToday}</div>
-        <div class="stat-sub">CCC servers that booted today</div>
-      </div>
-      <div class="card">
-        <h2>Boots last 7d</h2>
-        <div class="stat-big">${opens7}</div>
-        <div class="stat-sub">cannot dedup by user</div>
-      </div>
-      <div class="card">
-        <h2>Boots last 30d</h2>
-        <div class="stat-big">${opens30}</div>
-        <div class="stat-sub">cannot dedup by user</div>
-      </div>
-      <div class="card">
-        <h2>Total boots</h2>
-        <div class="stat-big">${t.total_opens ?? 0}</div>
-        <div class="stat-sub">all-time count</div>
-      </div>
-    </div>
-
-    <div class="grid">
 
       <div class="card wide">
         <h2>Opt-in active installs per day</h2>
@@ -177,17 +178,10 @@ function render(d) {
         <p class="muted">Same install pinging twice in a day counts once.</p>
       </div>
 
-      <div class="card wide">
-        <h2>Anonymous boots per day</h2>
-        ${dayBars(opens, "boots")}
-        <p class="muted">Every CCC server boot (incl. non-opt-in) sends one beacon. No identifier — these counts cannot be tied back to an install.</p>
-      </div>
-
       <div class="card">
         <h2>Versions in the wild</h2>
         ${rankTable(versions, "version", "installs")}
       </div>
-
       <div class="card">
         <h2>Platforms</h2>
         ${rankTable(platforms, "platform", "installs")}
@@ -210,10 +204,65 @@ function render(d) {
         <p class="muted">Only the first 8 chars of the install id are shown. Sessions = count of <code>~/.claude/projects/**/*.jsonl</code> files modified in the last 24h on that machine. Empty when the user is on schema v1 (pre-4.10.0).</p>
       </div>
 
-      <div class="card wide muted">
-        Updated ${escapeHtml(d.generated_at)}.
-        Cached at the edge for 5 minutes.
+      <div class="card wide muted">Updated ${escapeHtml(d.generated_at)}. Cached at the edge for 5 minutes.</div>
+    </div>
+  `;
+}
+
+function renderBeacon(d) {
+  const t = d.totals || {};
+  const opens = d.opens_by_day || [];
+  const opensToday = opens[0] && opens[0].boots || 0;
+  const ipsToday = opens[0] && (opens[0].distinct_ips ?? 0);
+  const opens7 = sumBuckets(opens.slice(0, 7), "boots");
+  const opens30 = sumBuckets(opens.slice(0, 30), "boots");
+  return `
+    <p class="tab-intro">
+      Fires once per CCC server boot. Three fields total — schema, version, platform — <strong>no install id</strong>.
+      We persist a daily-rotated <code>SHA-256(date || secret || ip)</code> so we can count distinct IPs per day without storing the raw IP or linking the same machine across days.
+      Not gated on opt-in (because no identifier). <code>CCC_TELEMETRY_DISABLED=1</code> kills it.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <h2>Boots today</h2>
+        <div class="stat-big">${opensToday}</div>
+        <div class="stat-sub">CCC servers booted today (incl. restarts)</div>
       </div>
+      <div class="card">
+        <h2>Distinct IPs today</h2>
+        <div class="stat-big">${ipsToday}</div>
+        <div class="stat-sub">unique sources, hashed daily salt</div>
+      </div>
+      <div class="card">
+        <h2>Boots last 7d</h2>
+        <div class="stat-big">${opens7}</div>
+        <div class="stat-sub">total boots</div>
+      </div>
+      <div class="card">
+        <h2>Boots last 30d</h2>
+        <div class="stat-big">${opens30}</div>
+        <div class="stat-sub">total boots</div>
+      </div>
+
+      <div class="card wide">
+        <h2>Boots + distinct IPs per day</h2>
+        <table>
+          <thead><tr><th>day</th><th class="num">boots</th><th class="num">distinct IPs</th><th></th></tr></thead>
+          <tbody>
+            ${opens.slice(0, 14).map(r => `
+              <tr>
+                <td class="muted">${escapeHtml(r.day)}</td>
+                <td class="num">${r.boots}</td>
+                <td class="num">${r.distinct_ips ?? "—"}</td>
+                <td><div class="bar-track" style="width:160px"><div class="bar-fill" style="width:${Math.round(100 * r.boots / Math.max(1, ...opens.map(x=>x.boots)))}%"></div></div></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+        <p class="muted">distinct IPs is empty (—) for rows captured before 2026-06-08 (the column didn't exist yet).</p>
+      </div>
+
+      <div class="card wide muted">Updated ${escapeHtml(d.generated_at)}. Cached at the edge for 5 minutes.</div>
     </div>
   `;
 }
@@ -223,7 +272,7 @@ function dayBars(rows, key) {
   const max = Math.max(1, ...rows.map(r => r[key]));
   return `
     <table>
-      <thead><tr><th>day</th><th>count</th><th></th></tr></thead>
+      <thead><tr><th>day</th><th class="num">count</th><th></th></tr></thead>
       <tbody>
         ${rows.slice(0, 14).map(r => `
           <tr>
@@ -267,6 +316,16 @@ function sumBuckets(rows, key) {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
+
+document.querySelectorAll(".tab").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(b => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-selected", b === btn ? "true" : "false");
+    });
+    renderActiveTab();
+  });
+});
 
 load();
 </script>

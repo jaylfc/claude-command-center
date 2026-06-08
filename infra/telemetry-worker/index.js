@@ -107,9 +107,28 @@ async function handlePing(request, env) {
   return new Response(null, { status: 204 });
 }
 
+// Daily-rotating IP hash. The raw IP is never persisted — only a
+// fixed-length SHA-256 of `(utc_date || server_secret || ip)`. Same IP
+// on the same UTC day produces the same hash (lets us COUNT DISTINCT
+// per day for "is this 1 person restarting 18 times or 18 people").
+// The salt secret is a Workers secret, not in code; the date rotates
+// every UTC midnight so the hash can't be used to track across days
+// even by us. See docs/telemetry.md.
+async function hashIpForToday(ip, env) {
+  if (!ip) return null;
+  const secret = env.IP_SALT_SECRET || "";
+  if (!secret) return null;  // Safer to store null than a guessable hash.
+  const today = new Date().toISOString().slice(0, 10);  // YYYY-MM-DD UTC
+  const enc = new TextEncoder();
+  const data = enc.encode(`${today}|${secret}|${ip}`);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function handleOpen(request, env) {
-  // eslint-disable-next-line no-unused-vars
-  const _droppedIp = request.headers.get("CF-Connecting-IP");
+  const ip = request.headers.get("CF-Connecting-IP");
   let body;
   try {
     body = await request.json();
@@ -118,13 +137,18 @@ async function handleOpen(request, env) {
   }
   const err = validateOpen(body);
   if (err) return new Response(err, { status: 400 });
+  let ipHash = null;
+  try {
+    ipHash = await hashIpForToday(ip, env);
+  } catch (_) { /* best-effort — never block the insert on hash failure */ }
   try {
     await env.DB.prepare(
-      "INSERT INTO opens (received_at, version, platform) VALUES (?, ?, ?)"
+      "INSERT INTO opens (received_at, version, platform, ip_hash) VALUES (?, ?, ?, ?)"
     ).bind(
       new Date().toISOString(),
       body.version,
       body.platform,
+      ipHash,
     ).run();
   } catch (_) {
     return new Response("", { status: 500 });
@@ -152,7 +176,8 @@ async function handleStats(_request, env) {
     ).first();
 
     const opensByDay = (await env.DB.prepare(
-      "SELECT substr(received_at, 1, 10) AS day, COUNT(*) AS boots " +
+      "SELECT substr(received_at, 1, 10) AS day, COUNT(*) AS boots, " +
+      "COUNT(DISTINCT ip_hash) AS distinct_ips " +
       "FROM opens GROUP BY day ORDER BY day DESC LIMIT 30"
     ).all()).results;
 

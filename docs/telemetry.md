@@ -76,6 +76,20 @@ It is still gated on the `CCC_TELEMETRY_DISABLED` env var — that single
 switch is the user's guarantee that no bytes leave the host from this
 process, regardless of opt-in state.
 
+The Worker computes `SHA-256(utc_date || daily_secret || source_ip)`
+and stores **only** that fixed-length hash. The raw IP is never written
+to disk. Because the secret rotates every UTC day, the same IP on two
+different days produces two different hashes — so we (the maintainer)
+**cannot link the same machine across days even with our own salt**.
+What we *can* do is `COUNT(DISTINCT ip_hash)` per UTC day to answer
+"is today's boot count from 1 machine restarting 18 times, or 18
+machines restarting once each." That's the only signal the hash
+provides; everything else is still aggregate.
+
+If you are uneasy about the hashed IP despite it being daily-rotated
+and un-reversible without the server secret, the same env var still
+kills the beacon entirely.
+
 If you are uneasy about the beacon despite it carrying no identity,
 set `CCC_TELEMETRY_DISABLED=1` before launching `server.py` / the
 `.app` / `./run.sh`; it kills both the daily ping and the boot beacon.
