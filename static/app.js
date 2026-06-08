@@ -33475,15 +33475,6 @@
         statusBadge = `<span class="onb-badge onb-badge-gray">✗ Not Installed</span>`;
       }
 
-      let actionHtml = '';
-      if (!cli.available) {
-        actionHtml = `<a href="${cli.signup_url}" target="_blank" class="onb-setup-action">🌐 Setup Guide &rarr;</a>`;
-      } else if (!cli.logged_in) {
-        actionHtml = `<button type="button" class="onb-setup-action" onclick="alert('Open your terminal and run: ${cli.login_instruction}')">🔑 Log In Command</button>`;
-      } else if (cli.email) {
-        actionHtml = `<span style="font-size: 12px; color: var(--text-muted);">${cli.email}</span>`;
-      }
-
       // Add a special "Antigravity has free tier" note if Antigravity is not installed or logged in
       let noteHtml = '';
       if (key === 'antigravity' && (!cli.available || !cli.logged_in)) {
@@ -33501,9 +33492,39 @@
         </div>
         <div class="onb-cli-status-badges">
           ${statusBadge}
-          ${actionHtml}
         </div>
       `;
+
+      // Build action element dynamically so onclick has closure access to showOpToast
+      const badgesContainer = item.querySelector('.onb-cli-status-badges');
+      if (badgesContainer) {
+        if (!cli.available) {
+          const link = document.createElement('a');
+          link.href = cli.signup_url;
+          link.target = '_blank';
+          link.className = 'onb-setup-action';
+          link.innerHTML = '🌐 Setup Guide &rarr;';
+          badgesContainer.appendChild(link);
+        } else if (!cli.logged_in) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'onb-setup-action';
+          btn.innerHTML = '🔑 Copy login';
+          btn.title = 'Copy the login command to clipboard';
+          btn.onclick = () => {
+            navigator.clipboard.writeText(cli.login_instruction);
+            showOpToast('Copied "' + cli.login_instruction + '" to clipboard! Run it in your terminal.', 'ok');
+          };
+          badgesContainer.appendChild(btn);
+        } else if (cli.email) {
+          const span = document.createElement('span');
+          span.style.fontSize = '12px';
+          span.style.color = 'var(--text-muted)';
+          span.textContent = cli.email;
+          badgesContainer.appendChild(span);
+        }
+      }
+
       listContainer.appendChild(item);
     });
 
@@ -33562,6 +33583,12 @@
     // If no active engines, default to Claude
     if (addedCount === 0 && select.options.length > 0) {
       select.options[0].selected = true;
+    }
+
+    // Toggle unconfigured warning block
+    const warning = document.getElementById('onbNoActiveEngineWarning');
+    if (warning) {
+      warning.style.display = addedCount === 0 ? 'block' : 'none';
     }
   }
 
