@@ -35815,6 +35815,13 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
             return
+        if path == "/api/onboarding/reset":
+            try:
+                _reset_onboarding()
+                self.send_json({"ok": True})
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
+            return
         if path == "/api/onboarding/login-terminal":
             try:
                 content_len = int(self.headers.get("Content-Length", 0) or 0)
@@ -39376,6 +39383,16 @@ def _launch_login_terminal(engine):
         return {"ok": True, "terminal_app": target, "command": command}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+def _reset_onboarding():
+    """Reset onboarding state by deleting onboarding.json."""
+    onboarding_file = COMMAND_CENTER_STATE_DIR / "onboarding.json"
+    if onboarding_file.is_file():
+        try:
+            onboarding_file.unlink()
+        except Exception:
+            pass
 
 
 def _complete_onboarding():

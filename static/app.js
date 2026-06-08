@@ -31654,6 +31654,19 @@
     if ($settingsPopover) $settingsPopover.classList.remove('open');
     openSpawnDefaultsModal();
   });
+  const $runOnboardingBtn = document.getElementById('runOnboardingBtn');
+  if ($runOnboardingBtn) $runOnboardingBtn.addEventListener('click', async () => {
+    if ($settingsPopover) $settingsPopover.classList.remove('open');
+    try {
+      await fetch('/api/onboarding/reset', { method: 'POST' });
+      const res = await fetch('/api/onboarding/status');
+      const data = await res.json();
+      showOnboarding(data);
+    } catch (err) {
+      console.error('Failed to trigger onboarding:', err);
+      showOpToast('Failed to trigger onboarding.', 'error');
+    }
+  });
   if ($spawnDefaultsBackdrop) $spawnDefaultsBackdrop.addEventListener('click', closeSpawnDefaultsModal);
   if ($spawnDefaultsCancelBtn) $spawnDefaultsCancelBtn.addEventListener('click', closeSpawnDefaultsModal);
   if ($spawnDefaultsSaveBtn) $spawnDefaultsSaveBtn.addEventListener('click', saveSpawnDefaultsDraft);
