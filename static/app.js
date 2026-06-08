@@ -33640,6 +33640,20 @@
 
     if (nextBtn) {
       nextBtn.onclick = async () => {
+        // If we're leaving the welcome step (step 0), capture the
+        // telemetry opt-in checkbox decision so we don't lose it if the
+        // user later skips. Fire-and-forget; postTelemetryOptIn already
+        // tolerates a missing endpoint, and we hide the standalone bar
+        // either way so the user isn't asked twice.
+        if (currentOnbStep === 0) {
+          const optInCheckbox = document.getElementById('onbTelemetryOptIn');
+          if (optInCheckbox && typeof postTelemetryOptIn === 'function') {
+            postTelemetryOptIn(!!optInCheckbox.checked);
+            if (typeof dismissTelemetryBar === 'function') {
+              dismissTelemetryBar();
+            }
+          }
+        }
         if (currentOnbStep < 2) {
           showOnbStep(currentOnbStep + 1);
         } else {
