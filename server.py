@@ -35182,6 +35182,24 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
                 self.wfile.write(body)
+        elif path == "/group-chat-live.html":
+            # Standalone group-chat live view. Keep this as a narrow route
+            # instead of allowing arbitrary /static/*.html files.
+            try:
+                body = (STATIC_DIR / "group-chat-live.html").read_bytes()
+            except OSError as e:
+                self.send_json({"error": "group-chat-live.html missing", "detail": str(e)}, 500)
+                return
+            body, enc = self._maybe_gzip(body, "text/html; charset=utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            if enc:
+                self.send_header("Content-Encoding", enc)
+                self.send_header("Vary", "Accept-Encoding")
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/sw.js":
             # Service workers are scoped by the URL they're served from, so
             # this MUST live at the origin root, not under /static/. Without

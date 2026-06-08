@@ -31393,6 +31393,19 @@
       catch (_) { /* function defined later in same scope; ignore early-click race */ }
     });
   }
+  const $sidebarGroupChatLiveBtn = document.getElementById('sidebarGroupChatLiveBtn');
+  if ($sidebarGroupChatLiveBtn) {
+    $sidebarGroupChatLiveBtn.addEventListener('click', () => {
+      const tmp = document.createElement('a');
+      tmp.href = '/group-chat-live.html';
+      tmp.target = '_blank';
+      tmp.rel = 'noopener noreferrer';
+      tmp.style.display = 'none';
+      document.body.appendChild(tmp);
+      tmp.click();
+      setTimeout(() => tmp.remove(), 0);
+    });
+  }
   // "Manage group chats" modal — lists every chat from _gcActiveChats
   // with a per-row pause / unpause toggle. Opens from the gear button
   // next to "+ New Group chat".
