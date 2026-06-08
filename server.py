@@ -5602,6 +5602,13 @@ def enqueue_annotation_ux_fixes_queue(
     # Durable record first — this is the source of truth a human refers to by
     # number and a second session can see. Never interrupts anyone.
     meta = meta if isinstance(meta, dict) else {}
+    # Only default repo_path to the CCC repo for CCC-origin captures. A product
+    # source (e.g. "bym") that omits repo_path must NOT be clobbered to CCC_ROOT,
+    # or repo-path-wins project routing misfiles the item as CCC.
+    _src = str(meta.get("source") or "ccc").lower()
+    _repo_path = str(meta.get("repo_path") or "")
+    if not _repo_path and _src in ("", "ccc"):
+        _repo_path = CCC_ROOT
     try:
         item = ux_fixes_queue.enqueue(
             note=meta.get("note") or text,
@@ -5612,7 +5619,7 @@ def enqueue_annotation_ux_fixes_queue(
             title=str(meta.get("title") or ""),
             selector=str(meta.get("selector") or ""),
             screenshot_path=str(meta.get("screenshot_path") or ""),
-            repo_path=str(meta.get("repo_path") or CCC_ROOT),
+            repo_path=_repo_path,
             lane=str(meta.get("lane") or "normal"),
         )
     except Exception as e:  # never lose a capture to a queue error
