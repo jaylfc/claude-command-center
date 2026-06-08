@@ -11973,14 +11973,20 @@
   function markSystemBlockquotes(html) {
     if (!html) return html;
     let out = html;
+    // "pinged …" entries are the orchestrator nudging an agent — a meaningful
+    // event the user wants to follow. Tag them with gc-system-ping so CSS can
+    // surface them (📨, less muting) instead of burying them with the noisier
+    // removed/re-injected lifecycle lines.
+    const _pingCls = (flat) => /pinged/i.test(flat) ? ' gc-system-ping' : '';
     if (out.indexOf('<blockquote') !== -1) {
       out = out.replace(/<blockquote\b([^>]*)>([\s\S]*?)<\/blockquote>/g, (full, attrs, inner) => {
         const flat = inner.replace(/<[^>]+>/g, '').trim();
         if (!/—\s*system[:\s]/i.test(flat)) return full;
         const cls = / class="([^"]*)"/.exec(attrs);
+        const newCls = 'gc-system-note' + _pingCls(flat);
         const newAttrs = cls
-          ? attrs.replace(/ class="([^"]*)"/, ' class="$1 gc-system-note"')
-          : attrs + ' class="gc-system-note"';
+          ? attrs.replace(/ class="([^"]*)"/, ' class="$1 ' + newCls + '"')
+          : attrs + ' class="' + newCls + '"';
         return `<blockquote${newAttrs}>${inner}</blockquote>`;
       });
     }
@@ -11988,7 +11994,7 @@
       out = out.replace(/<div>(\s*<em>[\s\S]*?<\/em>\s*)<\/div>/g, (full, inner) => {
         const flat = inner.replace(/<[^>]+>/g, '').trim();
         if (!/—\s*system[:\s]/i.test(flat)) return full;
-        return `<div class="gc-system-note">${inner}</div>`;
+        return `<div class="gc-system-note${_pingCls(flat)}">${inner}</div>`;
       });
     }
     return out;
@@ -12069,8 +12075,11 @@
       // get squeezed into one side; participant messages stagger.
       const side = isSystem ? 'full' : _sideForSpeaker(speaker);
       const color = isSystem ? 'muted' : _colorForSpeaker(speaker);
+      // A standalone "system: pinged …" message is a ping the user wants to
+      // see — flag it so it isn't muted with the rest of the lifecycle log.
+      const isPing = isSystem && /pinged/i.test(body);
 
-      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + '" data-speaker-side="' + side + '" data-speaker-color="' + color + '">'
+      html += '<article class="gc-message' + (isSystem ? ' gc-system' : '') + (isPing ? ' gc-system-ping-msg' : '') + '" data-speaker-side="' + side + '" data-speaker-color="' + color + '">'
         + '<div class="gc-message-meta">'
           + '<span class="gc-message-speaker">' + escapeHtml(speaker) + '</span>'
           + (when ? '<span class="gc-message-time">' + gcTimeChip(when) + '</span>' : '')

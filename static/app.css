@@ -10764,6 +10764,17 @@ body.status-pos-right .conv-sticky-header .csh-col-ask {
 .gc-message.gc-system {
   opacity: 0.62;
 }
+/* Ping messages: the user wants every orchestrator ping visible, so don't
+   bury these in the muted lifecycle log — full opacity + a 📨 marker. */
+.gc-message.gc-system.gc-system-ping-msg {
+  opacity: 1;
+}
+.gc-message.gc-system-ping-msg .gc-message-speaker::before {
+  content: "📨 ";
+}
+.gc-message.gc-system-ping-msg .gc-message-body {
+  color: var(--text-2);
+}
 .gc-message.gc-system .gc-message-body,
 .gc-message.gc-system .gc-message-speaker {
   font-size: 11.5px;
@@ -10785,6 +10796,19 @@ body.status-pos-right .conv-sticky-header .csh-col-ask {
 }
 .gc-message-body blockquote.gc-system-note em,
 .gc-message-body div.gc-system-note em { font-style: normal; }
+/* Pings (orchestrator nudging an agent) are the system events the user
+   actually wants to track — lift them out of the muted strip with an accent
+   border, a 📨 marker, and full opacity so every ping is visible in the chat. */
+.gc-message-body blockquote.gc-system-ping,
+.gc-message-body div.gc-system-ping {
+  border-left-color: var(--accent);
+  color: var(--text-2);
+  opacity: 1;
+}
+.gc-message-body blockquote.gc-system-ping::before,
+.gc-message-body div.gc-system-ping::before {
+  content: "📨 ";
+}
 /* Collapse the gap when several system notes stack — group reads as one
    muted strip of orchestrator activity rather than separate items. */
 .gc-message-body div.gc-system-note + div.gc-system-note,
