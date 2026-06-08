@@ -27158,6 +27158,14 @@
     const number = Number(item && item.number);
     return Number.isFinite(number) && number > 0 ? number : 0;
   }
+  // A ticket left claimed/in_progress for longer than this is treated as
+  // parked, not "currently being worked" — so it stops driving the progress
+  // chip (CCC-33: a long-parked CCC-10 was showing as the current fix).
+  const UX_FIXES_ACTIVE_CLAIM_MS = 30 * 60 * 1000;
+  function _uxFixesClaimedAtMs(item) {
+    const t = Date.parse((item && item.claimed_at) || '');
+    return Number.isFinite(t) ? t : 0;
+  }
   function _setUxFixesQueueMeta(items) {
     const byClaimedSession = new Map();
     const projectMaxSeq = new Map();
@@ -27169,9 +27177,13 @@
       if ((item.status || '') !== 'in_progress') continue;
       const sid = _normalizeUxFixesSessionId(item.claimed_by);
       if (!sid) continue;
+      // "Current" = the ticket this session most RECENTLY claimed, not the
+      // highest seq — otherwise a freshly-claimed low-seq fix loses to a stale
+      // parked one, and a parked ticket can masquerade as the active fix.
+      const claimedAt = _uxFixesClaimedAtMs(item);
       const prev = byClaimedSession.get(sid);
-      if (!prev || seq > prev.seq) {
-        byClaimedSession.set(sid, { seq, project, ref: item.ref || '', lane: item.lane || 'normal' });
+      if (!prev || claimedAt > prev.claimedAt) {
+        byClaimedSession.set(sid, { seq, project, ref: item.ref || '', lane: item.lane || 'normal', claimedAt });
       }
     }
     uxFixesQueueMeta = { projectMaxSeq, byClaimedSession };
@@ -27184,6 +27196,9 @@
     if (!sid || !uxFixesQueueMeta || !uxFixesQueueMeta.byClaimedSession) return null;
     const current = uxFixesQueueMeta.byClaimedSession.get(sid);
     if (!current) return null;
+    // Stale claim → the session is between tickets / the claim is parked.
+    // Don't render a frozen "(10/33)"; just drop the chip until a fresh claim.
+    if (current.claimedAt && (Date.now() - current.claimedAt) > UX_FIXES_ACTIVE_CLAIM_MS) return null;
     const total = Number((uxFixesQueueMeta.projectMaxSeq || new Map()).get(current.project) || 0);
     if (!Number.isFinite(total) || total <= 0) return null;
     return { current: current.seq, total, lane: current.lane || 'normal', project: current.project, ref: current.ref };
