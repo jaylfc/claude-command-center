@@ -2746,13 +2746,22 @@
     $view.appendChild(el);
     if (fresh || !_optimisticAgentStart) _optimisticAgentStart = Date.now();
     _startOptimisticAgeTicker($view);
+    _armOptimisticAgentSafetyTimer($view, 60000);
+  }
+  // CCC-57: safety timeout for the optimistic Sending…/Thinking… indicator. Real
+  // tool/response data clears it via clearOptimisticAgentIndicator, so this is
+  // only a backstop for when nothing lands. The old flat 60s removed the
+  // "🧠 Thinking…" signal mid-think — Opus routinely thinks longer than a
+  // minute before its first tool/token, so the user saw nothing. Reset to a
+  // longer window when thinking begins (see setOptimisticAgentThinking).
+  function _armOptimisticAgentSafetyTimer($view, ms) {
     if (_optimisticAgentTimer) clearTimeout(_optimisticAgentTimer);
     _optimisticAgentTimer = setTimeout(() => {
-      const stale = $view.querySelector('.conv-live-tool-inline.optimistic');
+      const stale = $view && $view.querySelector('.conv-live-tool-inline.optimistic');
       if (stale) stale.remove();
       _optimisticAgentTimer = null;
       _stopOptimisticAgeTicker();
-    }, 60000);
+    }, ms);
   }
   function clearOptimisticAgentIndicator($view) {
     const el = ($view || document).querySelector('.conv-live-tool-inline.optimistic');
@@ -2775,6 +2784,10 @@
     el.classList.add('is-thinking');
     const tool = el.querySelector('.cl-tool');
     if (tool) tool.innerHTML = '🧠 Thinking&hellip;';
+    // CCC-57: now that we're actually thinking, give it room — a long think
+    // (>60s) should keep showing "Thinking…", not vanish. Real activity still
+    // clears it sooner via clearOptimisticAgentIndicator.
+    _armOptimisticAgentSafetyTimer($view, 600000);
   }
 
   function isCommandActivityTool(tool) {
