@@ -27441,11 +27441,23 @@ def _set_session_model(session_id, model, context_1m):
         payload["inject_error"] = result.get("error")
         return payload
     if spawn is not None:
-        ok = _write_stream_json_user_message(spawn, slash)
-        payload["applied"] = "live" if ok else "queued"
-        payload["via"] = "spawn-fifo"
-        if not ok:
-            payload["inject_error"] = "FIFO write failed"
+        # CCC-54 follow-up: a headless `claude -p` does NOT process slash
+        # commands. Writing "/model X[1m]" over the stream-json FIFO just makes
+        # it answer "/model isn't available in this environment" — the model
+        # never changes and the transcript gets a confusing error. A headless
+        # model is fixed at spawn via `--model`, so switching means respawning.
+        # The override is already persisted; retire the current headless (now if
+        # idle, deferred to idle if busy — never mid-turn) so the next turn does
+        # a fresh `--resume` on the new model (resume_session_headless reads the
+        # override and passes `--model alias[1m]`).
+        retired = _retire_idle_headless_for_session(
+            session_id, reason="model-switch", defer_if_busy=True)
+        payload["applied"] = "queued"
+        payload["via"] = "respawn-on-next-turn"
+        if retired.get("retired"):
+            payload["retired_headless_pid"] = retired.get("pid")
+        elif retired.get("deferred"):
+            payload["headless_retire_deferred"] = True
         return payload
     payload["applied"] = "queued"
     return payload
