@@ -193,11 +193,17 @@ def full_questions(tool_input):
             if isinstance(opt, dict):
                 label = opt.get("label") or ""
                 description = opt.get("description") or ""
+                preview = opt.get("preview") or ""
             else:
                 label = str(opt or "")
                 description = ""
+                preview = ""
             if label:
-                options.append({"label": label, "description": description})
+                options.append({
+                    "label": label,
+                    "description": description,
+                    "preview": preview,
+                })
         out.append({
             "header": q.get("header") or "",
             "question": q.get("question") or "",
