@@ -4829,6 +4829,12 @@
           } else {
             showOpToast('<strong>Microphone access blocked.</strong> To fix this:<br>1. Click the lock/settings icon next to the browser URL bar.<br>2. Set <strong>Microphone</strong> to <strong>Allow</strong>.<br>3. Reload the page.', 'error');
           }
+        } else if (event.error === 'service-not-allowed') {
+          if (typeof isCccMacApp === 'function' && isCccMacApp()) {
+            showOpToast('<strong>Speech recognition service blocked.</strong> To fix this:<br>1. Open <strong>System Settings &gt; Privacy &amp; Security &gt; Speech Recognition</strong>.<br>2. Toggle <strong>Command Center for Claude+</strong> ON.<br>3. Restart the application.', 'error');
+          } else {
+            showOpToast('<strong>Speech recognition service blocked.</strong> Please check your browser or operating system Speech/Dictation restrictions.', 'error');
+          }
         } else if (event.error !== 'aborted') {
           showOpToast('Speech recognition error: ' + event.error, 'error');
         }
@@ -13601,7 +13607,7 @@
     // a transient hiccup. 12s gives enough time to notice + comprehend
     // without being annoyingly modal.
     const isPersistent = kind === 'error'
-      && (/cwd is gone/i.test(msg) || /macOS blocked/i.test(msg) || /usage limit|get cursor pro/i.test(msg) || /mic/i.test(msg));
+      && (/cwd is gone/i.test(msg) || /macOS blocked/i.test(msg) || /usage limit|get cursor pro/i.test(msg) || /mic|speech|service/i.test(msg));
     setTimeout(() => toast.remove(), isPersistent ? 12000 : (kind === 'error' ? 5000 : 3000));
   }
 

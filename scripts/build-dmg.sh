@@ -198,6 +198,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<EOF
   <key>SUEnableAutomaticChecks</key><true/>
   <key>SUScheduledCheckInterval</key><integer>3600</integer>
   <key>NSMicrophoneUsageDescription</key><string>Command Center requires microphone access to dictate speech into conversation and group chat text inputs.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Command Center requires speech recognition permission to dictate spoken words into text inputs.</string>
 </dict>
 </plist>
 EOF
