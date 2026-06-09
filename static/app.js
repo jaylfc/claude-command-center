@@ -12518,6 +12518,45 @@
       /^#{2,3}[ \t]+(.+?(?:—[ \t]+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b|system(?::|\b)).*|.*\([0-9a-fA-F]{8}\)))[ \t]*$/gm
     ));
 
+    // Pre-pass: extract speaker per match for receipt chips (CCC-62).
+    // Mirrors the speaker-parse logic in the main loop below.
+    const _parseSpeaker = (heading) => {
+      let s = heading;
+      if (/\s+—\s+/.test(s)) {
+        const p = s.split(/\s+—\s+/); p.shift(); s = p.length ? p.join(' — ') : s;
+      } else {
+        s = s.replace(/\s*\([0-9a-fA-F]{8}\)\s*$/, '').replace(/`/g, '').trim() || s;
+      }
+      return s;
+    };
+    const _prePass = matches.map(m => {
+      const s = _parseSpeaker((m[1] || '').trim());
+      return { speaker: s, isSystem: /^\s*system\b/i.test(s) };
+    });
+    const _allNonSysSet = new Set();
+    _prePass.forEach(p => { if (!p.isSystem) _allNonSysSet.add(p.speaker); });
+    const _allNonSys = Array.from(_allNonSysSet);
+    // For each message index, which non-system speakers have a post AFTER it?
+    const _speakersAfter = _prePass.map((_, idx) => {
+      const after = new Set();
+      for (let j = idx + 1; j < _prePass.length; j++) {
+        if (!_prePass[j].isSystem) after.add(_prePass[j].speaker);
+      }
+      return after;
+    });
+    const _gcReceiptHtml = (idx, curSpeaker) => {
+      if (_allNonSys.length < 2) return '';
+      const after = _speakersAfter[idx];
+      return '<div class="gc-message-receipts">'
+        + _allNonSys.map(p => {
+            if (p === curSpeaker) return '';
+            const initials = p.replace(/\(.*?\)/g, '').trim().split(/\s+/).slice(0, 2).map(w => w[0] || '').join('').toUpperCase() || '?';
+            const responded = after.has(p);
+            return `<span class="gc-receipt-avatar${responded ? ' is-responded' : ' is-quiet'}" title="${escapeAttr(p) + (responded ? ' — responded after' : ' — no reply yet')}">${escapeHtml(initials)}</span>`;
+          }).join('')
+        + '</div>';
+    };
+
     let firstSpeaker = '';
     let lastSpeaker = '';
 
@@ -12606,6 +12645,7 @@
         + '<div class="gc-message-body assistant-text">'
           + (body ? markSystemBlockquotes(renderMarkdown(body)) : '<em class="gc-message-empty">(no text)</em>')
         + '</div>'
+        + (isSystem ? '' : _gcReceiptHtml(i, speaker))
       + '</article>';
     }
 
@@ -25830,6 +25870,71 @@
       $convSearch.focus();
     });
   }
+
+  // CCC-66: Horizontal-drag gesture on the conv view → "Collapse up to here".
+  // Drag ≥40% of pane width, mostly horizontal (|dx|>|dy|×2), ≥60px to trigger.
+  (function _initConvCollapseGesture() {
+    let _startX = 0, _startY = 0, _anchorEl = null, _activeTip = null;
+    function _clearTip() {
+      if (_activeTip) { try { _activeTip.remove(); } catch (_) {} _activeTip = null; }
+    }
+    function _inConvView(el) {
+      return !!(el && el.closest && el.closest('.conversations-view, #conversationsView'));
+    }
+    function _doCollapse(anchor) {
+      const $view = anchor.closest('.conversations-view, #conversationsView');
+      if (!$view) return;
+      const events = Array.from($view.querySelectorAll(':scope > .event'));
+      const idx = events.indexOf(anchor);
+      if (idx < 1) return;
+      const toFold = events.slice(0, idx);
+      const count = toFold.length;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'conv-collapsed-section';
+      const toggle = document.createElement('button');
+      toggle.type = 'button'; toggle.className = 'conv-collapse-toggle';
+      toggle.innerHTML = '<span class="conv-collapse-chevron">▶</span> '
+        + count + ' earlier message' + (count === 1 ? '' : 's') + ' folded';
+      const inner = document.createElement('div');
+      inner.className = 'conv-collapsed-inner'; inner.style.display = 'none';
+      toFold.forEach(el => inner.appendChild(el));
+      wrapper.appendChild(toggle); wrapper.appendChild(inner);
+      $view.insertBefore(wrapper, anchor);
+      toggle.addEventListener('click', () => {
+        const open = inner.style.display !== 'none';
+        inner.style.display = open ? 'none' : '';
+        toggle.querySelector('.conv-collapse-chevron').textContent = open ? '▶' : '▼';
+      });
+    }
+    document.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || !_inConvView(e.target)) return;
+      _startX = e.clientX; _startY = e.clientY; _clearTip();
+      _anchorEl = e.target.closest && e.target.closest('.event');
+    }, { passive: true });
+    document.addEventListener('pointerup', (e) => {
+      if (e.button !== 0 || !_anchorEl || !_inConvView(e.target)) { _anchorEl = null; return; }
+      const anchor = _anchorEl; _anchorEl = null;
+      const dx = e.clientX - _startX;
+      const dy = Math.abs(e.clientY - _startY);
+      const $view = anchor.closest('.conversations-view, #conversationsView');
+      const paneW = $view ? $view.offsetWidth : 0;
+      if (paneW && Math.abs(dx) >= paneW * 0.4 && Math.abs(dx) >= dy * 2 && Math.abs(dx) >= 60) {
+        const tip = document.createElement('div');
+        tip.className = 'conv-collapse-tip';
+        tip.innerHTML = 'Collapse up to this point?'
+          + ' <button type="button" class="conv-collapse-yes">Fold ↑</button>'
+          + ' <button type="button" class="conv-collapse-dismiss">✕</button>';
+        anchor.appendChild(tip); _activeTip = tip;
+        tip.querySelector('.conv-collapse-yes').addEventListener('click', (ev) => {
+          ev.stopPropagation(); _doCollapse(anchor); _clearTip();
+        });
+        tip.querySelector('.conv-collapse-dismiss').addEventListener('click', (ev) => {
+          ev.stopPropagation(); _clearTip();
+        });
+        setTimeout(() => _clearTip(), 6000);
+      }
+    }, { passive: true });
+  })();
 
   // Conversation search filter
   // Debounce the local filter re-render. Rendering the full sidebar
