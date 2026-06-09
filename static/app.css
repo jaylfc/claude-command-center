@@ -1002,6 +1002,19 @@
   }
   .md-table th { background: var(--surface); font-weight: 600; color: var(--text); }
   .md-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  /* CCC-47: collapsed /context tables. Summary is a quiet one-liner; the
+     table inside keeps its normal styling once expanded. */
+  details.ctx-usage-details { margin: 6px 0; }
+  details.ctx-usage-details > summary {
+    cursor: pointer; list-style: none;
+    font-size: 12px; color: var(--text-muted);
+    padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px;
+    display: inline-flex; align-items: center; gap: 6px; user-select: none;
+  }
+  details.ctx-usage-details > summary::-webkit-details-marker { display: none; }
+  details.ctx-usage-details > summary::before { content: '▸'; font-size: 10px; }
+  details.ctx-usage-details[open] > summary::before { content: '▾'; }
+  details.ctx-usage-details > summary:hover { color: var(--text); border-color: var(--accent, #58a6ff); }
   .md-code {
     font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
     background: rgba(110,118,129,0.2); padding: 1px 5px;

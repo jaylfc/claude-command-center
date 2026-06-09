@@ -5771,6 +5771,12 @@
     const lines = text.split('\n');
     const out = [];
     let i = 0;
+    // CCC-47: `/context` dumps a "## Context Usage" heading, the headline
+    // "Tokens: X / 1m (Y%)" line, then two long tables (usage by category +
+    // MCP tools). The user only cares about the headline number — collapse
+    // every table that follows the heading into a <details> so the long
+    // tables stop dominating the message.
+    let inCtxReport = false;
     while (i < lines.length) {
       const line = lines[i];
       if (/^\s*<task-notification\b/i.test(line)) {
@@ -5835,13 +5841,22 @@
           html += '</tr>';
         }
         html += '</tbody></table>';
-        out.push(html);
+        if (inCtxReport) {
+          // Collapsed by default; summary keeps the column names + row count
+          // so the user knows what's tucked away without expanding.
+          const summary = (header.join(' / ') || 'table') + ' · ' + rows.length + ' rows';
+          out.push('<details class="ctx-usage-details"><summary>'
+            + escapeHtml(summary) + '</summary>' + html + '</details>');
+        } else {
+          out.push(html);
+        }
         continue;
       }
       // Headers
       const h = line.match(/^(#{1,6})\s+(.+)$/);
       if (h) {
         const level = h[1].length;
+        if (/context\s+usage/i.test(h[2])) inCtxReport = true;
         out.push('<h' + level + ' class="md-h">' + renderInline(h[2]) + '</h' + level + '>');
         i++;
         continue;
