@@ -648,14 +648,7 @@
   // Back to the foreground → refresh the paused background pollers once rather
   // than waiting up to a full interval for fresh data. The heavy sessions/
   // issues pollers catch up on their own next tick.
-  // CCC-46: bind window 'focus' and 'pageshow' too, not just visibilitychange.
-  // While the CCC dashboard is occluded/unfocused the liveStatus poll is paused
-  // (document.hidden) — so a relayed question that arrives while you're in the
-  // terminal doesn't surface until you return. visibilitychange alone proved
-  // unreliable for window-level focus in the WKWebView app, leaving the card
-  // "stuck" until an unrelated interaction woke a poll. These extra triggers
-  // make returning to the dashboard (by any means) immediately re-poll + mount.
-  function _resumeForegroundPollers() {
+  document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     // Instantly correct the (now-stale) "checked ago" label on return, before
     // the async refreshLiveStatus fetch lands — so the user never sees a frozen
@@ -668,10 +661,7 @@
     try { if (typeof pollVercelDeploy === 'function') pollVercelDeploy(); } catch (_) {}
     try { if (typeof pollLocalhost === 'function') pollLocalhost(); } catch (_) {}
     try { if (typeof refreshWorktreesBadge === 'function') refreshWorktreesBadge(); } catch (_) {}
-  }
-  document.addEventListener('visibilitychange', _resumeForegroundPollers);
-  window.addEventListener('focus', _resumeForegroundPollers);
-  window.addEventListener('pageshow', _resumeForegroundPollers);
+  });
   window.cccPollers = {
     names: ['liveStatus','liveToolStrip','gcReader','pkoodTail','codexLog','worktreesBadge','hiStatus','issues','archiveProgress','gcActive','peer','sessionsList','vercelDeploy','localhost'],
     off(n) { window.__pollersOff[n] = true; return this.list(); },
@@ -918,28 +908,15 @@
   // Pause periodic sidebar/poller work while the user is in a text field or
   // the Cmd+F find bar is open (find steals focus into the transcript when
   // pollers re-render the list mid-search).
-  // Typing recency for the periodic-work pause. The old guard paused on
-  // FOCUS — any cursor parked in a textarea froze every interval-driven
-  // poller indefinitely (the group-chat reader never refreshed while the
-  // user's cursor sat in its composer, CCC-110). Pause only while the user
-  // is ACTIVELY typing: within 1.5s of a real keystroke in a text control.
-  let _lastTextKeyTs = 0;
-  document.addEventListener('keydown', (ev) => {
-    const t = ev.target;
-    if (!t || !t.tagName) return;
-    const isText = t.tagName === 'TEXTAREA'
-      || (t.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/.test((t.type || 'text').toLowerCase()));
-    if (isText) _lastTextKeyTs = Date.now();
-  }, true);
   function shouldPausePeriodicUiWork() {
     const findModal = document.getElementById('chatFindModal');
     if (findModal && findModal.style.display !== 'none') return true;
     const ae = document.activeElement;
     if (!ae) return false;
-    const isTextControl = ae.tagName === 'TEXTAREA'
-      || (ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/.test((ae.type || 'text').toLowerCase()));
-    if (!isTextControl) return false;
-    return Date.now() - _lastTextKeyTs < 1500;
+    if (ae.tagName === 'TEXTAREA') return true;
+    if (ae.tagName !== 'INPUT') return false;
+    const t = (ae.type || 'text').toLowerCase();
+    return /^(text|search|email|url|tel|password)$/.test(t);
   }
   // Sidebar list renders must still run while #convSearch is focused —
   // otherwise the debounced filter never paints until blur/Enter (the
@@ -999,12 +976,6 @@
   const CONV_POPOUT_REPO_PATH = (_bootUrlParams.get('repo_path') || '').trim();
   if (CONV_POPOUT_MODE && document.body) {
     document.body.classList.add('conversation-popout');
-    // Subagent transcripts (composite <parent>:agent-<id> ids) are read-only
-    // — there is no process to send to, and when embedded as a per-Task tab
-    // lane the host pane already has a composer (CCC-113: "double input box").
-    if (CONV_POPOUT_TARGET.includes(':agent-')) {
-      document.body.classList.add('subagent-readonly');
-    }
   }
   // Flow popout: same shape, different surface — when set, the page boots
   // straight into the Flow view and CSS hides every other piece of chrome.
@@ -2156,8 +2127,6 @@
         headlessPid: data.headless_pid || null,
         headlessStale: !!data.headless_stale,
         terminalPresent: !!data.terminal_present,
-        bgPresent: !!data.bg_present,
-        bgPid: data.bg_pid || null,
       };
       // Timestamp of this successful status read — drives the "checked Xs ago"
       // freshness label on the conversation top-bar process indicator.
@@ -2259,27 +2228,6 @@
     questions: null,     // questions array currently rendered
     selections: null,    // per-question state: { picked:Set<int>, custom:string }
   };
-  // CCC-46: nonce of the question we most recently answered. Survives the
-  // _relayedQuestionState reset on close. The relay request file lingers a
-  // moment after /api/answer-question (the blocking hook clears it on its own
-  // poll), so /api/question keeps returning the just-answered question as
-  // "pending" briefly — without this guard the poll re-mounts the modal and
-  // flashes the question the user already answered.
-  let _lastAnsweredQuestionNonce = null;
-  // Debug hook: read the live relay-card state from the console to diagnose a
-  // "card won't appear" report (is `fetching` wedged? which nonce/session?).
-  try {
-    window.__cccRelayState = function () {
-      return {
-        sessionId: _relayedQuestionState.sessionId,
-        nonce: _relayedQuestionState.nonce,
-        fetching: _relayedQuestionState.fetching,
-        fetchStartedAt: _relayedQuestionState.fetchStartedAt || null,
-        lastAnswered: _lastAnsweredQuestionNonce,
-        cardEl: !!_relayedQuestionInlineEl(),
-      };
-    };
-  } catch (_) {}
 
   function _relayedQuestionInlineEl() {
     return document.querySelector('[data-role="ccc-inline-question"]');
@@ -2311,38 +2259,18 @@
   // history. Idempotent + re-applied on each render (the transcript rebuilds
   // the inline blocks without the hide class).
   function _syncLiveQuestionDuplicateHide() {
-    // Clear every prior hide across the WHOLE document first — the conv pane
-    // can hold more than one `.conversations-view` (split view, the popout
-    // reader), and a stale hide in any of them must be cleared.
-    document.querySelectorAll('.is-live-question-dup').forEach(function (n) {
+    const cardEl = _relayedQuestionInlineEl();
+    const view = (cardEl && cardEl.closest('.conversations-view'))
+      || (typeof getConvView === 'function' ? getConvView() : null);
+    if (!view) return;
+    view.querySelectorAll('.is-live-question-dup').forEach(function (n) {
       n.classList.remove('is-live-question-dup');
     });
-    // CCC-46/CCC-55: hide the inline transcript copy of the question that the
-    // relayed answer card is currently answering. Earlier versions scoped the
-    // search to ONE `.conversations-view` (the active pane, or the card's
-    // closest ancestor). When the card and the inline block live in DIFFERENT
-    // conversations-view nodes — which the layout does have (the CCC-55 anchor
-    // was `.conversations-view:nth-of-type(2)`) — the hide searched the wrong
-    // view, found nothing, and the question rendered twice. Fix: match the
-    // pending question by CONTENT (header + question text) and hide its inline
-    // copy wherever it lives. Content-matching also leaves answered/historical
-    // questions and other panes' questions visible.
-    const sid = currentSession && currentSession.id;
-    const relayActive = sid && _relayedQuestionState && _relayedQuestionState.sessionId === sid;
-    if (!relayActive) return;
-    const qs = _relayedQuestionState.questions || [];
-    if (!qs.length) return;
-    const SEP = '';
-    const keys = new Set(qs.map(function (q) {
-      return ((q.header || '').trim() + SEP + (q.question || '').trim());
-    }));
-    document.querySelectorAll('.conversations-view .ask-user-block').forEach(function (blk) {
-      const h = (blk.querySelector('.ask-user-header') || {}).textContent || '';
-      const q = (blk.querySelector('.ask-user-question-text') || {}).textContent || '';
-      if (keys.has(h.trim() + SEP + q.trim())) {
-        (blk.closest('.tool-call') || blk).classList.add('is-live-question-dup');
-      }
-    });
+    if (!cardEl) return;
+    const blocks = view.querySelectorAll('.ask-user-block');
+    if (!blocks.length) return;
+    const last = blocks[blocks.length - 1];
+    (last.closest('.tool-call') || last).classList.add('is-live-question-dup');
   }
 
   // Called each poll tick. Decides whether to fetch/show/close the inline
@@ -2358,39 +2286,16 @@
       }
       return;
     }
-    // CCC-46: do NOT blanket-skip when a card is already up for this session.
-    // The old `sessionId === sid && cardEl` early-return never checked the
-    // nonce, so when a NEW question arrived on the same session the poll never
-    // re-fetched and the card kept showing the PREVIOUS question ("we were not
-    // seeing the last question"). We always re-fetch; showRelayedQuestionInline
-    // rebuilds only when the nonce changed, so an in-progress answer to the
-    // SAME question is never clobbered.
-    // Avoid stacking fetches — but never let a wedged `fetching` flag block
-    // mounts forever. If a fetch has been "in flight" longer than 8s (its 4s
-    // abort timeout plus slack), force-reset and proceed: this is the
-    // belt-and-suspenders against the "card never appears until I reload/click"
-    // bug, which is a stuck `fetching:true` swallowing every poll.
-    if (_relayedQuestionState.fetching) {
-      var _age = _relayedQuestionState.fetchStartedAt
-        ? (Date.now() - _relayedQuestionState.fetchStartedAt) : 99999;
-      if (_age < 8000) return;
-      _relayedQuestionState.fetching = false;
-    }
+    // Already showing the card for this session — leave it be; the user
+    // is mid-answer and we don't want to clobber their selections.
+    if (_relayedQuestionState.sessionId === sid && _relayedQuestionInlineEl()) return;
+    // Avoid stacking fetches.
+    if (_relayedQuestionState.fetching) return;
     _relayedQuestionState.fetching = true;
-    _relayedQuestionState.fetchStartedAt = Date.now();
     const fetchedFor = sid;
-    // CCC-46: hard-timeout the fetch. A hung /api/question (server busy, lost
-    // connection) used to leave `fetching` stuck true forever, so this poll
-    // stopped mounting the card until something else reset the flag — the
-    // intermittent "question card doesn't appear until I click" symptom. Abort
-    // after 4s so the flag always clears and the next 5s tick retries.
-    var _ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
-    var _to = setTimeout(function () { try { if (_ctrl) _ctrl.abort(); } catch (_) {} }, 4000);
-    fetch('/api/question?' + new URLSearchParams({ session_id: sid }).toString(),
-      _ctrl ? { signal: _ctrl.signal } : undefined)
+    fetch('/api/question?' + new URLSearchParams({ session_id: sid }).toString())
       .then(function (res) { return res.json().catch(function () { return {}; }); })
       .then(function (data) {
-        clearTimeout(_to);
         _relayedQuestionState.fetching = false;
         // Open session changed out from under us while fetching — bail.
         if (!currentSession || currentSession.id !== fetchedFor) return;
@@ -2399,17 +2304,11 @@
           if (_relayedQuestionInlineEl()) closeRelayedQuestionInline();
           return;
         }
-        // Just-answered question still reported pending (relay file not yet torn
-        // down) — don't re-mount it and flash the answered question.
-        if (data.nonce && data.nonce === _lastAnsweredQuestionNonce) {
-          if (_relayedQuestionInlineEl()) closeRelayedQuestionInline();
-          return;
-        }
         const questions = Array.isArray(data.questions) ? data.questions : [];
         if (!questions.length) return;
         showRelayedQuestionInline(fetchedFor, data.nonce || null, questions);
       })
-      .catch(function () { clearTimeout(_to); _relayedQuestionState.fetching = false; });
+      .catch(function () { _relayedQuestionState.fetching = false; });
   }
 
   function showRelayedQuestionInline(sessionId, nonce, questions) {
@@ -2447,10 +2346,6 @@
           + ' data-ccc-q="' + qi + '" data-ccc-opt="' + oi + '">'
           + '<span class="cl-question-option-label">' + escapeHtml(opt.label || '') + '</span>'
           + (opt.description ? '<span class="cl-question-option-desc">' + escapeHtml(opt.description) + '</span>' : '')
-          // CCC-46: the optional `preview` field — a richer block the native
-          // picker reveals on focus. Always in the DOM; CSS shows it when the
-          // option is selected so it doesn't bloat the list.
-          + (opt.preview ? '<span class="cl-question-option-preview">' + escapeHtml(opt.preview) + '</span>' : '')
           + '</button>'
           + '</li>';
       }).join('');
@@ -2468,11 +2363,17 @@
     modal.className = 'ccc-inline-question';
     modal.setAttribute('data-role', 'ccc-inline-question');
     modal.setAttribute('data-session-id', sessionId);
-    // CCC-46: no preamble block here. The card now flows inline directly under
-    // the assistant text that introduced the question, so repeating that lead-in
-    // (liveStatus.questionPreamble) inside the card just duplicated it on screen.
+    // CCC-46: surface the lead-in context (the assistant text that preceded
+    // the question) so the user isn't answering blind. liveStatus.questionPreamble
+    // is populated by /api/session-status; render it as a scrollable context
+    // block above the options when present.
+    const _preamble = (liveStatus && liveStatus.questionPreamble || '').trim();
+    const ctxHtml = _preamble
+      ? '<div class="ccc-iq-context">' + escapeHtml(_preamble) + '</div>'
+      : '';
     modal.innerHTML =
       '<div class="ccc-iq-title">Session is asking a question</div>' +
+      ctxHtml +
       '<div class="ccc-q-blocks">' + blocksHtml + '</div>' +
       '<div class="ccc-q-error"></div>' +
       '<div class="ccc-q-actions">' +
@@ -2601,9 +2502,6 @@
       .then(function (data) {
         _relayedQuestionState.submitting = false;
         if (data && data.ok) {
-          // Remember what we answered so the poll doesn't re-mount it while the
-          // relay request file is still being torn down server-side.
-          _lastAnsweredQuestionNonce = _relayedQuestionState.nonce || _lastAnsweredQuestionNonce;
           closeRelayedQuestionModal();
           return;
         }
@@ -2767,33 +2665,13 @@
     $view.appendChild(el);
     if (fresh || !_optimisticAgentStart) _optimisticAgentStart = Date.now();
     _startOptimisticAgeTicker($view);
-    _armOptimisticAgentSafetyTimer($view, 60000);
-    // CCC-79: only ONE of the many inject ACK branches advanced this to
-    // "🧠 Thinking…" (markPendingSendDelivered) — codex/cursor/antigravity
-    // resumes and slow `claude --resume` spawns kept it on "Sending…" for
-    // many seconds, so the user "never sees Thinking". Auto-advance after
-    // 1.5s; failure paths remove the indicator entirely, which wins.
-    setTimeout(() => {
-      const still = $view.querySelector('.conv-live-tool-inline.optimistic');
-      if (still && !still.classList.contains('is-thinking')) {
-        setOptimisticAgentThinking($view);
-      }
-    }, 1500);
-  }
-  // CCC-57: safety timeout for the optimistic Sending…/Thinking… indicator. Real
-  // tool/response data clears it via clearOptimisticAgentIndicator, so this is
-  // only a backstop for when nothing lands. The old flat 60s removed the
-  // "🧠 Thinking…" signal mid-think — Opus routinely thinks longer than a
-  // minute before its first tool/token, so the user saw nothing. Reset to a
-  // longer window when thinking begins (see setOptimisticAgentThinking).
-  function _armOptimisticAgentSafetyTimer($view, ms) {
     if (_optimisticAgentTimer) clearTimeout(_optimisticAgentTimer);
     _optimisticAgentTimer = setTimeout(() => {
-      const stale = $view && $view.querySelector('.conv-live-tool-inline.optimistic');
+      const stale = $view.querySelector('.conv-live-tool-inline.optimistic');
       if (stale) stale.remove();
       _optimisticAgentTimer = null;
       _stopOptimisticAgeTicker();
-    }, ms);
+    }, 60000);
   }
   function clearOptimisticAgentIndicator($view) {
     const el = ($view || document).querySelector('.conv-live-tool-inline.optimistic');
@@ -2810,16 +2688,12 @@
   // never resurrects one already cleared by the response landing (state:
   // sending → thinking → done). Cleared by clearOptimisticAgentIndicator when
   // the real response/activity arrives.
-  function setOptimisticAgentThinking($view, label) {
+  function setOptimisticAgentThinking($view) {
     const el = ($view || document).querySelector('.conv-live-tool-inline.optimistic');
     if (!el) return;
     el.classList.add('is-thinking');
     const tool = el.querySelector('.cl-tool');
-    if (tool) tool.innerHTML = label || '🧠 Thinking&hellip;';
-    // CCC-57: now that we're actually thinking, give it room — a long think
-    // (>60s) should keep showing "Thinking…", not vanish. Real activity still
-    // clears it sooner via clearOptimisticAgentIndicator.
-    _armOptimisticAgentSafetyTimer($view, 600000);
+    if (tool) tool.innerHTML = '🧠 Thinking&hellip;';
   }
 
   function isCommandActivityTool(tool) {
@@ -3013,34 +2887,6 @@
 
   document.addEventListener('click', handleLiveQuestionActionClick);
 
-  // Antigravity "Push input" button inside the live tool strip. Uses
-  // delegation because the button is inside innerHTML-replaced content.
-  document.addEventListener('click', async (ev) => {
-    const btn = ev.target.closest('.cl-agy-wake-btn');
-    if (!btn) return;
-    ev.stopPropagation();
-    const sid = currentSession && currentSession.id;
-    if (!sid || (currentSession.source !== 'antigravity')) return;
-    btn.disabled = true;
-    btn.textContent = '…';
-    const AGY_WAKE = 'Status check: your last action has not returned for a while. If you are stuck, describe what you were waiting on and continue with the next concrete step.';
-    try {
-      const res = await fetch('/api/inject-input', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sid, text: AGY_WAKE }),
-      });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || 'push failed');
-      showOpToast('Wake message pushed to Antigravity session.');
-      setTimeout(refreshConversationList, 2000);
-    } catch (err) {
-      showOpToast('Push failed: ' + (err.message || 'unknown'), 'error');
-      btn.disabled = false;
-      btn.textContent = 'Push input';
-    }
-  });
-
   function updateLiveStripOffset($view, strip) {
     if (!$view) return;
     if (!strip) {
@@ -3059,25 +2905,14 @@
   // 1s ticker can skip ALL work (no querySelectorAll, no innerHTML) on the
   // common idle path where no session is live.
   let _liveStripShown = false;
-  let _liveStripLastLiveTime = 0;
-  // Last keystroke in a text-editing control. The strip ticker pauses only
-  // while the user is ACTIVELY typing — pausing on mere focus starved the
-  // indicator forever for users who park their cursor in the composer
-  // while watching the transcript ("never see Working between tools").
-  let _liveStripLastKeyTs = 0;
-  document.addEventListener('keydown', (e) => {
-    const t = e.target;
-    if (t && (t.tagName === 'TEXTAREA'
-      || (t.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(t.type || 'text'))
-      || t.isContentEditable)) {
-      _liveStripLastKeyTs = Date.now();
-    }
-  }, true);
   function updateLiveToolStrip() {
-    // Skip only while the user is actively typing (keystroke in the last
-    // 1.5s). The per-tick querySelectorAll + innerHTML write can stall
-    // keystrokes on a deep conv view; the strip catches up next tick.
-    if (Date.now() - _liveStripLastKeyTs < 1500) {
+    // Skip while the user is typing into a textarea / text input. This
+    // runs on a 1s ticker; each pass does a document.querySelectorAll
+    // plus an innerHTML write that can stall typing by tens of ms on
+    // a deep conv view. The strip catches up on the next tick.
+    const _ae = document.activeElement;
+    if (_ae && (_ae.tagName === 'TEXTAREA'
+      || (_ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_ae.type || 'text')))) {
       return;
     }
     const $view = (typeof getConvView === 'function') ? getConvView() : null;
@@ -3088,21 +2923,6 @@
     // Tear the indicator down once on the live->idle transition, then do
     // zero DOM work each tick until a session goes live again.
     if (!liveStatus.live) {
-      // Brief "✓ Done" flash for ~4s after session goes idle
-      const _doneAge = _liveStripLastLiveTime ? (Date.now() - _liveStripLastLiveTime) : 9999999;
-      if (_doneAge < 4000) {
-        document.querySelectorAll('.conv-live-tool-strip').forEach(n => n.remove());
-        let _doneInline = $view.querySelector('.conv-live-tool-inline:not(.optimistic)');
-        if (!_doneInline) {
-          _doneInline = document.createElement('div');
-          _doneInline.className = 'conv-live-tool-inline';
-          $view.appendChild(_doneInline);
-        }
-        _doneInline.className = 'conv-live-tool-inline is-done';
-        _doneInline.innerHTML = '<span class="cl-done-check">✓</span><span class="cl-tool">Done</span>';
-        _liveStripShown = true;
-        return;
-      }
       if (_liveStripShown) {
         document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(n => n.remove());
         updateLiveStripOffset($view, null);
@@ -3110,8 +2930,6 @@
       }
       return;
     }
-    // Track last-seen-live timestamp for the Done flash
-    _liveStripLastLiveTime = Date.now();
     document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(node => {
       if (node.parentElement !== $view) node.remove();
     });
@@ -3125,41 +2943,11 @@
     const ts = liveStatus.sidecarTs || 0;
     const ageSec = ts ? Math.max(0, Math.floor(Date.now() / 1000 - ts)) : 9999;
     const isQuestion = tool === 'AskUserQuestion' || !!liveStatus.questionWaiting;
-    // CCC-46: a HEADLESS question (no tty) is owned by the relayed answer modal
-    // — it routes through /api/answer-question and handles multi-question. This
-    // live-strip card answers by typing into the composer + sendToTerminal,
-    // which is correct for a TERMINAL session but goes to the ether for a
-    // headless relay. Suppress the strip's question card for headless questions
-    // entirely (not just while the modal is mounted) — otherwise it flashes the
-    // just-answered question in the gap between the modal closing and the server
-    // clearing question_waiting. Terminal questions (tty present) keep the card.
-    const _headlessQuestion = isQuestion && !liveStatus.tty;
-    // "Generating" needs evidence of an ACTIVE turn, not just a live TTY —
-    // an idle session with an open terminal is `live` too, and used to show
-    // a permanent "Generating…" (CCC-81). sidecar_status flips off at turn
-    // end; the age cap covers a stale sidecar that never got cleared.
-    const isGenerating = liveStatus.live && !tool
-      && liveStatus.sidecarStatus === 'active' && ageSec < 120;
-    const shouldShow = (liveStatus.live && tool && liveStatus.sidecarStatus === 'active'
-      && (ageSec < 300 || isQuestion) && !_headlessQuestion)
-      || isGenerating;
+    const shouldShow = liveStatus.live && tool && liveStatus.sidecarStatus === 'active' && (ageSec < 300 || isQuestion);
     if (!shouldShow) {
       if (inline) inline.remove();
       updateLiveStripOffset($view, null);
       _liveStripShown = false;
-      return;
-    }
-    // "Generating…" — session is live but no tool is executing yet/anymore
-    if (isGenerating) {
-      if (!inline) {
-        inline = document.createElement('div');
-        inline.className = 'conv-live-tool-inline';
-        $view.appendChild(inline);
-      }
-      inline.className = 'conv-live-tool-inline is-generating';
-      inline.innerHTML = '<span class="cl-pulse"></span><span class="cl-tool">Generating…</span>';
-      inline.title = 'Session is live — model is generating';
-      _liveStripShown = true;
       return;
     }
     // Real data arrived — drop the optimistic placeholder (right pane)
@@ -3178,18 +2966,12 @@
     const detailHtml = isQuestion
       ? liveQuestionDetailHtml(file)
       : (shortFile ? ' <span class="cl-file' + liveActivityDetailClass(tool) + '">' + escapeHtml(shortFile) + '</span>' : '');
-    // Antigravity wake button: appears when the session is live-AGY and the
-    // in-flight tool has been running for > 60s. One click pushes the wake
-    // text via /api/inject-input without requiring the user to type anything.
-    const isAgySession = currentSession && currentSession.source === 'antigravity';
-    const showWakeBtn = isAgySession && inFlight && !isQuestion && ageSec > 60;
     const html =
         '<span class="cl-pulse"></span>'
       + '<span class="cl-tool">' + (inFlight && !isQuestion ? '▶ ' : '') + escapeHtml(toolLabel) + '</span>'
       + (isQuestion ? '' : detailHtml)
       + '<span class="cl-age">' + ageLbl + '</span>'
-      + (isQuestion ? detailHtml : '')
-      + (showWakeBtn ? '<button type="button" class="cl-agy-wake-btn" title="Session looks stuck — push a wake message to Antigravity">Push input</button>' : '');
+      + (isQuestion ? detailHtml : '');
     updateLiveStripOffset($view, null);
     // Inline indicator at the bottom of the transcript. Re-append on every
     // refresh so it stays the last child even when new events have
@@ -3353,9 +3135,6 @@
     if (sid || currentConversation !== '__new__') {
       const _cic = document.getElementById('convInputContext');
       if (_cic) _cic.classList.remove('is-new-session');
-      // Return the CWD picker row + quick chips home if the new-session
-      // chooser borrowed them (see _adoptCwdControlsIntoChooser, CCC-86).
-      try { _restoreCwdControlsToInputBar(); } catch (_) {}
     }
     setCopyableSessionId($convSessionId, sid);
     updateConvOverflowButton();
@@ -3391,28 +3170,7 @@
           cwd: currentSession.cwd,
         }),
       });
-      let data = await res.json();
-      // CCC-96: a live headless process owns this session. Launching a
-      // terminal resume now would fork the history. Offer to stop it first.
-      if (!data.ok && data.headless_live) {
-        const go = confirm(
-          'A headless process (pid ' + data.headless_pid + ') is still running this session.\n\n'
-          + 'Launching a terminal now would fork the conversation history.\n\n'
-          + 'Stop the headless process and then launch in the terminal?'
-        );
-        if (go) {
-          const res2 = await fetch('/api/launch-terminal', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              session_id: currentSession.id,
-              cwd: currentSession.cwd,
-              stop_headless: true,
-            }),
-          });
-          data = await res2.json();
-        }
-      }
+      const data = await res.json();
       if (data.ok) {
         setActionButtonText(btn, 'Launched!');
         setTimeout(() => {
@@ -3528,7 +3286,6 @@
   const $convSteerBtn = document.getElementById('convSteerBtn');
   const $convCompactBtn = document.getElementById('convCompactBtn');
   const $convTtsBtn = document.getElementById('convTtsBtn');
-  const $convMicBtn = document.getElementById('convMicBtn');
   const $convEscBtn = document.getElementById('convEscBtn');
   const $convTtyLabel = document.getElementById('convTtyLabel');
   const $convCodexAppSrv = document.getElementById('convCodexAppSrv');
@@ -3761,15 +3518,6 @@
       } else if (live) {
         $convTtyLabel.textContent = liveStatus.tty;
         $convInput.placeholder = 'Send to terminal...';
-      } else if (liveStatus.live && liveStatus.bgPresent) {
-        // Live in a Claude-app-managed terminal (no system tty): not dormant
-        // — the process is up, CCC just has no input channel to it (CCC-115).
-        $convTtyLabel.textContent = 'Claude app';
-        $convInput.placeholder = 'Session is open in the Claude app — messages park until it closes…';
-      } else if (liveStatus.live && liveStatus.pid) {
-        // Live process without a tty (e.g. CCC headless): also not dormant.
-        $convTtyLabel.textContent = 'headless';
-        $convInput.placeholder = 'Send to headless…';
       } else {
         $convTtyLabel.textContent = 'dormant';
         $convInput.placeholder = 'Resume and send…';
@@ -4335,7 +4083,7 @@
   // cancel the not-acknowledged timer (delivery is confirmed, so it can't be
   // "lost"). The normal JSONL dedupe removes the echo once the durable event
   // renders (state 3).
-  function markPendingSendDelivered(pending, data) {
+  function markPendingSendDelivered(pending) {
     if (!pending || !pending.entry) return;
     if (pending.entry.timer) { clearTimeout(pending.entry.timer); pending.entry.timer = null; }
     const div = pending.element;
@@ -4350,16 +4098,10 @@
       note.className = 'send-delivered-note';
       div.appendChild(note);
     }
-    // Fresh headless boot (resumed without reused, CCC-119): the agent isn't
-    // merely "picking it up" — a new process is loading the whole transcript
-    // first, which can take a while on big sessions. Say so.
-    const waking = !!(data && data.resumed && !data.reused);
-    note.textContent = waking
-      ? '⏻ Waking the headless agent — it reloads the conversation first, so the reply can take a minute.'
-      : '✓ Delivered — waiting for Claude to pick it up.';
+    note.textContent = '✓ Delivered — waiting for Claude to pick it up.';
     // Tier 2: the agent now has the message — advance the live turn status from
-    // "Sending…" to "🧠 Thinking…" (or "Waking up…"). Clears when the response lands.
-    setOptimisticAgentThinking(div.parentNode, waking ? '⏻ Waking up headless&hellip;' : null);
+    // "Sending…" to "🧠 Thinking…". Clears when the response lands.
+    setOptimisticAgentThinking(div.parentNode);
   }
 
   function isCursorUsageLimitFailure(data, reason) {
@@ -4635,34 +4377,6 @@
       return;
     }
     if (!text) return;
-    // Join link (CCC-98): `ccc:join-gc:<chat id or path>` pasted into any
-    // session's composer joins THAT session to the group chat instead of
-    // being sent to the agent as text.
-    const _joinMatch = text.match(/^ccc:join-gc:(\S+)$/);
-    if (_joinMatch && currentSession.id) {
-      const ref = _joinMatch[1];
-      const body = { session_id: currentSession.id };
-      if (ref.indexOf('/') !== -1 || ref.indexOf('~') === 0) body.chat_path = ref;
-      else body.chat_id = ref;
-      try {
-        const jr = await fetch('/api/group-chat/add', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const jd = await jr.json().catch(() => ({}));
-        if (jr.ok && jd.ok) {
-          showOpToast('Session joined the group chat', 'success');
-          $input.value = '';
-          clearInputDraftForConversation(draftConversation);
-        } else {
-          showOpToast('Join failed: ' + ((jd && jd.error) || ('HTTP ' + jr.status)), 'error');
-        }
-      } catch (err) {
-        showOpToast('Join failed: ' + ((err && err.message) || 'network'), 'error');
-      }
-      return;
-    }
     // New-session mode: input doubles as the prompt for a fresh spawn.
     if (currentConversation === '__new__') {
       if (_ttsActive) await stopTextToSpeech();
@@ -4819,7 +4533,7 @@
           // did nothing, leaving the echo stuck in the ambiguous italic
           // "sending…" state until transcript dedup happened to match it (or
           // never did). Confirm it now: "delivered, awaiting Claude".
-          markPendingSendDelivered(pendingSend, data);
+          markPendingSendDelivered(pendingSend);
         }
       } else {
         const reason = formatInjectFailure(data, res.status);
@@ -4891,184 +4605,6 @@
     // Keep the floating playback control (shown when reading a conversation
     // that isn't the focused one) in sync with the current state.
     updateTtsFloatingControl();
-    if (typeof updateTopbarTtsControl === 'function') updateTopbarTtsControl();
-  }
-
-  // ── Speech-to-Text (STT) Speech Recognition ──
-  let _sttRecognition = null;
-  let _sttRecording = false;
-  let _sttActivePaneId = null;
-  let _sttActiveConvId = null;
-  let _sttPreText = '';
-  let _sttPostText = '';
-  let _sttCommittedIndex = 0;
-  let _sttResultsLength = 0;
-  let _sttUpdatingText = false;
-
-  function micButtons() {
-    return Array.from(document.querySelectorAll('.conv-input-bar .mic-btn, .gc-reader .mic-btn'));
-  }
-
-  function micButtonPaneId(btn) {
-    if (btn && btn.closest && btn.closest('.gc-reader')) return 'gc';
-    const pane = btn && btn.closest && btn.closest('.conv-pane');
-    return pane && pane.dataset ? pane.dataset.paneId : 'p1';
-  }
-
-  function toggleSpeechRecognition(paneId) {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      showOpToast('Your browser does not support speech recognition.', 'error');
-      return;
-    }
-
-    if (_sttRecording) {
-      const samePane = (paneId === _sttActivePaneId);
-      stopSpeechRecognition();
-      if (samePane) return;
-    }
-
-    _sttActivePaneId = paneId;
-    _sttActiveConvId = currentConversation;
-    _sttCommittedIndex = 0;
-    _sttResultsLength = 0;
-    _sttUpdatingText = false;
-
-    let textarea = null;
-    if (paneId === 'gc') {
-      textarea = document.getElementById('gcHumanInput');
-    } else {
-      textarea = composerInputForPane(paneId) || $convInput;
-    }
-
-    if (!textarea) {
-      showOpToast('Input target not found.', 'error');
-      return;
-    }
-
-    const start = textarea.selectionStart || 0;
-    const end = textarea.selectionEnd || 0;
-    const val = textarea.value || '';
-    _sttPreText = val.slice(0, start);
-    _sttPostText = val.slice(end);
-
-    try {
-      _sttRecognition = new SpeechRecognition();
-      _sttRecognition.continuous = true;
-      _sttRecognition.interimResults = true;
-      _sttRecognition.lang = 'en-US';
-
-      _sttRecognition.onstart = () => {
-        _sttRecording = true;
-        updateMicButtonsState();
-      };
-
-      _sttRecognition.onresult = (event) => {
-        _sttResultsLength = event.results.length;
-
-        // Commit final results
-        for (let i = _sttCommittedIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            let text = event.results[i][0].transcript;
-            if (_sttPreText && !/[\s.,!?;:]$/.test(_sttPreText) && !/^\s/.test(text)) {
-              _sttPreText += ' ';
-            }
-            _sttPreText += text;
-            _sttCommittedIndex = i + 1;
-          }
-        }
-
-        // Gather interim results
-        let interimText = '';
-        for (let i = _sttCommittedIndex; i < event.results.length; ++i) {
-          let text = event.results[i][0].transcript;
-          if ((_sttPreText || interimText) && 
-              !/[\s.,!?;:]$/.test(_sttPreText + interimText) && 
-              !/^\s/.test(text)) {
-            interimText += ' ';
-          }
-          interimText += text;
-        }
-
-        _sttUpdatingText = true;
-        textarea.value = _sttPreText + interimText + _sttPostText;
-        textarea.selectionStart = textarea.selectionEnd = _sttPreText.length + interimText.length;
-        textarea.focus();
-        textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        setTimeout(() => { _sttUpdatingText = false; }, 0);
-      };
-
-      _sttRecognition.onerror = (event) => {
-        if (event.error === 'not-allowed') {
-          if (typeof isCccMacApp === 'function' && isCccMacApp()) {
-            showOpToast('<strong>Microphone access blocked.</strong> To fix this:<br>1. Open <strong>System Settings &gt; Privacy &amp; Security &gt; Microphone</strong>.<br>2. Toggle <strong>Command Center for Claude+</strong> ON.<br>3. Restart the application.', 'error');
-          } else {
-            showOpToast('<strong>Microphone access blocked.</strong> To fix this:<br>1. Click the lock/settings icon next to the browser URL bar.<br>2. Set <strong>Microphone</strong> to <strong>Allow</strong>.<br>3. Reload the page.', 'error');
-          }
-        } else if (event.error === 'service-not-allowed') {
-          if (typeof isCccMacApp === 'function' && isCccMacApp()) {
-            showOpToast('<strong>Speech recognition service blocked.</strong> To fix this:<br>1. Open <strong>System Settings &gt; Privacy &amp; Security &gt; Speech Recognition</strong>.<br>2. Toggle <strong>Command Center for Claude+</strong> ON.<br>3. Restart the application.', 'error');
-          } else {
-            showOpToast('<strong>Speech recognition service blocked.</strong> Please check your browser or operating system Speech/Dictation restrictions.', 'error');
-          }
-        } else if (event.error !== 'aborted') {
-          showOpToast('Speech recognition error: ' + event.error, 'error');
-        }
-        stopSpeechRecognition();
-      };
-
-      _sttRecognition.onend = () => {
-        _sttRecording = false;
-        updateMicButtonsState();
-      };
-
-      _sttRecognition.start();
-    } catch (err) {
-      showOpToast('Could not start speech recognition: ' + err.message, 'error');
-      stopSpeechRecognition();
-    }
-  }
-
-  function stopSpeechRecognition() {
-    if (_sttRecognition) {
-      try {
-        _sttRecognition.stop();
-      } catch (_) {}
-      _sttRecognition = null;
-    }
-    _sttRecording = false;
-    updateMicButtonsState();
-  }
-
-  function _handleSttUserInteraction(e) {
-    if (!_sttRecording || _sttUpdatingText) return;
-    const target = e.target;
-    if (!target) return;
-    const isTextarea = (target.tagName === 'TEXTAREA');
-    const isTextInput = (target.tagName === 'INPUT' && target.type === 'text');
-    if (!isTextarea && !isTextInput) return;
-
-    const val = target.value || '';
-    const start = target.selectionStart || 0;
-    const end = target.selectionEnd || 0;
-    _sttPreText = val.slice(0, start);
-    _sttPostText = val.slice(end);
-    _sttCommittedIndex = _sttResultsLength;
-  }
-  document.addEventListener('focusin', _handleSttUserInteraction);
-  document.addEventListener('click', _handleSttUserInteraction);
-  document.addEventListener('input', _handleSttUserInteraction);
-  document.addEventListener('keydown', _handleSttUserInteraction);
-
-  function updateMicButtonsState() {
-    micButtons().forEach(btn => {
-      const paneId = micButtonPaneId(btn);
-      const isRecordingThis = _sttRecording && (paneId === _sttActivePaneId);
-      btn.classList.toggle('recording', isRecordingThis);
-      btn.setAttribute('aria-pressed', isRecordingThis ? 'true' : 'false');
-      btn.title = isRecordingThis ? 'Stop recording speech' : 'Record speech to input';
-      btn.setAttribute('aria-label', isRecordingThis ? 'Stop recording speech' : 'Record speech to input');
-    });
   }
 
   let _ttsUtterance = null;
@@ -5321,7 +4857,6 @@
     _ttsActiveConvId = null;
     setTtsButtonsBusy(false);
     setTtsButtonsState(false, false);
-    if (typeof updateTopbarTtsControl === 'function') updateTopbarTtsControl();
   }
 
   // Reset TTS state whenever the conversation BEING READ grows a fresh
@@ -5363,45 +4898,6 @@
       toggle.title = _ttsPaused ? 'Resume reading' : 'Pause reading';
       toggle.setAttribute('aria-label', _ttsPaused ? 'Resume reading' : 'Pause reading');
       toggle.classList.toggle('is-paused', !!_ttsPaused);
-    }
-    if (typeof updateTopbarTtsControl === 'function') updateTopbarTtsControl();
-  }
-
-  // ── Topbar TTS control ───────────────────────────────────────────────────
-  // A compact inline control in the global topbar (left of Annotate) that
-  // mirrors play/pause/stop state regardless of which conversation is focused.
-  // Unlike the floating widget this is always in-layout — it just hides when
-  // TTS is idle.
-  function updateTopbarTtsControl() {
-    const el = document.getElementById('topbarTtsControl');
-    if (!el) return;
-    const playing = !!(_ttsActive || _ttsPaused);
-    el.hidden = !playing;
-    el.classList.toggle('is-paused', !!_ttsPaused);
-    const label = el.querySelector('.tts-topbar-label');
-    if (label) label.textContent = _ttsPaused ? 'Paused' : 'Reading…';
-    const toggle = el.querySelector('.tts-topbar-toggle');
-    if (toggle) {
-      toggle.title = _ttsPaused ? 'Resume reading' : 'Pause reading';
-      toggle.setAttribute('aria-label', _ttsPaused ? 'Resume reading' : 'Pause reading');
-      toggle.classList.toggle('is-paused', !!_ttsPaused);
-    }
-  }
-
-  function _wireTopbarTtsControl() {
-    const el = document.getElementById('topbarTtsControl');
-    if (!el) return;
-    const toggle = el.querySelector('.tts-topbar-toggle');
-    const stop = el.querySelector('.tts-topbar-stop');
-    if (toggle) {
-      toggle.addEventListener('mousedown', (ev) => ev.preventDefault());
-      toggle.addEventListener('click', () => {
-        readLastMessageAloud(_ttsActivePaneId || activePaneId());
-      });
-    }
-    if (stop) {
-      stop.addEventListener('mousedown', (ev) => ev.preventDefault());
-      stop.addEventListener('click', () => { stopTextToSpeech(); updateTopbarTtsControl(); });
     }
   }
 
@@ -5664,10 +5160,6 @@
     $convTtsBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
     $convTtsBtn.addEventListener('click', () => readLastMessageAloud('p1'));
   }
-  if ($convMicBtn) {
-    $convMicBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
-    $convMicBtn.addEventListener('click', () => toggleSpeechRecognition('p1'));
-  }
   // Live rate knob — see #convTtsRate in index.html. Drag while playback
   // is active to change the rate in real time; the change cancels the
   // current utterance and restarts from the most recent word boundary
@@ -5746,7 +5238,6 @@
   _syncTtsRateUi();
   _refreshTtsRateBtns();
   _wireTtsFloatingControl();
-  _wireTopbarTtsControl();
   // Textarea autosize: grow up to ~10 rows then scroll. Reset to one row
   // on every input so deletions shrink the box too. Mirrors Omnara's
   // behavior — typing more than one line expands the composer in place.
@@ -6270,27 +5761,11 @@
       html += '<div class="tn-event">' + renderInline(n.event) + '</div>';
     }
     if (n.taskId) {
-      // Subagent transcripts live in <parent>/subagents/agent-<taskid>.jsonl;
-      // the composite conv id "<parent>:agent-<taskid>" opens one read-only
-      // in a popout through the normal conversation pipeline (CCC-112).
-      html += '<div class="tn-meta"><span>Task <code>' + escapeHtml(n.taskId) + '</code></span>'
-        + '<button type="button" class="tn-view-transcript" data-task-id="' + escapeAttr(n.taskId) + '"'
-        + ' title="Open this agent\'s full transcript in a popout">↗ agent transcript</button></div>';
+      html += '<div class="tn-meta"><span>Task <code>' + escapeHtml(n.taskId) + '</code></span></div>';
     }
     html += '</div>';
     return html;
   }
-  document.addEventListener('click', (ev) => {
-    const btn = ev.target && ev.target.closest && ev.target.closest('.tn-view-transcript');
-    if (!btn) return;
-    ev.stopPropagation();
-    const sid = (typeof currentConversation === 'string' && currentConversation) || '';
-    const taskId = btn.getAttribute('data-task-id') || '';
-    if (!sid || !taskId) return;
-    const conv = sid + ':agent-' + taskId;
-    window.open('/?ccc_popout=conversation&conv=' + encodeURIComponent(conv), '_blank',
-      'width=900,height=800');
-  });
 
   function renderMarkdown(text) {
     const lines = text.split('\n');
@@ -6606,7 +6081,7 @@
     );
   }
 
-  const INLINE_CODE_PATH_RE = /^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh|png|jpe?g|gif|webp|svg|bmp|pdf|txt|csv|log|toml|xml|swift|rb|go|rs|java|c|h|cpp|mp4|mov|webm))$/;
+  const INLINE_CODE_PATH_RE = /^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/;
   function _isPlaceholderPathToken(token) {
     return String(token || '').indexOf('...') !== -1;
   }
@@ -7349,15 +6824,6 @@
   }
   function syncActivePaneChrome(activeConvId) {
     const activePid = activePaneId();
-    const newConvId = (arguments.length > 0 && activeConvId !== undefined) ? activeConvId : currentConversation;
-    if (typeof _sttRecording !== 'undefined' && _sttRecording) {
-      const isGc = (_sttActivePaneId === 'gc');
-      const paneChanged = (_sttActivePaneId !== activePid);
-      const convChanged = (!isGc && _sttActiveConvId !== newConvId);
-      if (paneChanged || convChanged) {
-        stopSpeechRecognition();
-      }
-    }
     document.querySelectorAll('.conv-pane').forEach(el => {
       el.classList.toggle('is-active', el.getAttribute('data-pane-id') === activePid);
     });
@@ -7365,7 +6831,6 @@
     if ($convList) {
       $convList.querySelectorAll('.conv-item').forEach(el => {
         el.classList.toggle('active', el.dataset.id === convId);
-        el.classList.remove('mobile-tapped');
       });
     }
     if ($kanbanBoard) {
@@ -8750,9 +8215,7 @@
     const savedObjects = JSON.parse(localStorage.getItem('ccc-flow-custom-objects') || '[]');
     if (Array.isArray(savedObjects)) flowCustomObjects = savedObjects;
   } catch (_) {}
-  // 0.15 floor lets a large board fit on screen; below that nodes are
-  // illegible and hit-targets break down (CCC-73 asked for deeper zoom-out).
-  const FLOW_ZOOM_MIN = 0.15;
+  const FLOW_ZOOM_MIN = 0.45;
   const FLOW_ZOOM_MAX = 2.25;
   const FLOW_CANVAS_PAD_RATIO = 0.30;
   const FLOW_CANVAS_PAD_MIN_PX = 260;
@@ -9227,9 +8690,6 @@
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="expand-all">Expand all</button>'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="organize" title="Keep all objects in place, line up session children below each parent — most recent leftmost.">Organize</button>'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="organize-plus" title="Run Organize, then apply your recorded Flow layout preferences.">Organize+</button>'
-      +   (_flowOrganizeUndoSnapshot
-            ? '<button type="button" class="flow-toolbar-btn" data-flow-action="undo-organize" title="Restore every node to where it was before the last Organize.">Undo organize</button>'
-            : '')
       +   '<button type="button" class="flow-toolbar-btn' + recordActive + '" data-flow-action="record-organize" aria-pressed="' + recordPressed + '" title="' + escapeAttr(recordTitle) + '">' + escapeHtml(recordLabel) + '</button>'
       + '</div>'
       + '<div class="flow-toolbar-divider"></div>'
@@ -9735,14 +9195,6 @@
     if (c.source === 'backlog' || c.source === 'github_pr') return false;
     const pinnedInFlow = isFlowPinned(c);
     if (c.archived && !flowIncludeArchived && !pinnedInFlow) return false;
-    // The 1d/7d toolbar window must bite on the flow board too. The list
-    // filter exempts every list-pinned row from recency, and a curated
-    // flow board is mostly pinned rows — so the filter looked dead
-    // (CCC-74). Here only an explicit flow-pin keeps an old row visible.
-    if (showRecentOnly && !pinnedInFlow) {
-      const cutoff = recencyCutoffSec();
-      if (cutoff && flowRowTime(c) < cutoff) return false;
-    }
     const col = classifyKanbanColumn(c);
     if (col === 'backlog') return false;
     if (col === 'archived' && !flowIncludeArchived && !pinnedInFlow) return false;
@@ -9918,34 +9370,12 @@
   //     dragged them — fixed by treating each cluster as its own
   //     placement unit instead of a derived offset of its chain root.
   // ──────────────────────────────────────────────────────────────────
-  // Pre-Organize snapshot of every node position so the layout can be
-  // restored with one click (CCC-76). One level deep — a second Organize
-  // overwrites it with the newer "before".
-  let _flowOrganizeUndoSnapshot = null;
-  function undoFlowOrganize() {
-    if (!_flowOrganizeUndoSnapshot) return;
-    flowNodePositions = _flowOrganizeUndoSnapshot;
-    _flowOrganizeUndoSnapshot = null;
-    persistFlowNodePositions();
-    try {
-      const $s = document.getElementById('convSearch');
-      const convs = (typeof filterConversations === 'function')
-        ? filterConversations($s ? $s.value : '')
-        : (conversationsData || []);
-      if (typeof renderSidebar === 'function') renderSidebar(convs);
-    } catch (_) {}
-    if (typeof showOpToast === 'function') showOpToast('Organize undone — previous layout restored.', 'info');
-  }
-
   function organizeFlowSessions(targetEl, opts) {
     const board = targetEl || document.getElementById('flowBoard');
     if (!board) return;
     const world = board.querySelector('.flow-world') || board.querySelector('.flow-canvas');
     const canvas = board.querySelector('.flow-canvas');
     if (!world || !canvas) return;
-    try {
-      _flowOrganizeUndoSnapshot = JSON.parse(JSON.stringify(flowNodePositions || {}));
-    } catch (_) { _flowOrganizeUndoSnapshot = null; }
     const convsById = {};
     if (typeof conversationsData !== 'undefined' && Array.isArray(conversationsData)) {
       conversationsData.forEach(c => { if (c && c.id) convsById[c.id] = c; });
@@ -11062,14 +10492,6 @@
   async function openFlowNodeInspector(node) {
     const payload = flowInspectorPayloadFromNode(node);
     if (!payload) return;
-    return openFlowNodeInspectorForPayload(payload);
-  }
-
-  // Same inspector, entered from a plain payload instead of a Flow-board DOM
-  // node — lets the sidebar's by-objects group headers open the object's MD
-  // doc exactly like clicking the node in Flow (CCC-93).
-  async function openFlowNodeInspectorForPayload(payload) {
-    if (!payload) return;
     if (typeof stopGroupChatReader === 'function') {
       try { stopGroupChatReader({ rerenderSidebar: false }); } catch (_) {}
     }
@@ -11486,14 +10908,8 @@
         accentSeed = (parentRec && parentRec.accentSeed) || accentSeed;
       }
       const accentStyle = accentSeed ? flowAccentStyle(accentSeed) : '';
-      // Archived nodes wear a green ✓ badge (CSS ::before — can't carry its
-      // own tooltip). Explain it on the node so hovering answers "what are
-      // these checkmarks?" (CCC-75).
-      const nodeTitle = (rec.className || '').indexOf('is-archived') !== -1
-        ? ' title="Archived (done) session — the ✓ marks it complete. Shown because ‘Include archived’ is on or it’s pinned to the board."'
-        : '';
       return '<div class="flow-node ' + escapeAttr(rec.className) + selectedClass + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
-        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath + dataGcPath + dataGcId + dataGcMode + nodeTitle
+        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath + dataGcPath + dataGcId + dataGcMode
         + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;' + accentStyle + '">'
         + deleteBtn
         + addBtn
@@ -11923,8 +11339,6 @@
     });
     const organizeBtn = targetEl && targetEl.querySelector('[data-flow-action="organize"]');
     if (organizeBtn) organizeBtn.addEventListener('click', () => organizeFlowSessions(targetEl));
-    const undoOrganizeBtn = targetEl && targetEl.querySelector('[data-flow-action="undo-organize"]');
-    if (undoOrganizeBtn) undoOrganizeBtn.addEventListener('click', () => undoFlowOrganize());
     const organizePlusBtn = targetEl && targetEl.querySelector('[data-flow-action="organize-plus"]');
     if (organizePlusBtn) organizePlusBtn.addEventListener('click', () => applyFlowOrganizePlus(targetEl));
     const recordOrganizeBtn = targetEl && targetEl.querySelector('[data-flow-action="record-organize"]');
@@ -12251,15 +11665,6 @@
             redrawFlowLinks(targetEl);
             return;
           }
-          // Flow popout: every click target below renders into the right-
-          // side reader pane (#conversationsView). With the reader toggled
-          // off that pane is CSS-hidden, so taps looked like they did
-          // nothing (CCC-77). Auto-open the reader on first use.
-          if (FLOW_POPOUT_MODE && !flowPopoutReaderEnabled()
-              && (node.dataset.flowKind === 'session' || node.dataset.flowKind === 'repo'
-                  || node.dataset.flowKind === 'object' || node.dataset.flowKind === 'group-chat')) {
-            setFlowPopoutReaderEnabled(true);
-          }
           if (node.dataset.flowKind === 'session' && node.dataset.id) {
             targetEl.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
             node.classList.add('active');
@@ -12319,11 +11724,7 @@
     if ($flow) $flow.style.display = 'none';
     if ($convList) $convList.style.display = '';
     const $search = document.getElementById('convSearch');
-    // Thread opts through — renderArchiveList re-checks the typing-pause
-    // guard, and without `force` a user-initiated render (e.g. the rename
-    // commit, which runs while the rename input still holds focus) is
-    // silently suppressed, leaving the title stuck in edit mode (CCC-72).
-    try { renderArchiveList($search ? $search.value : '', opts); } catch (_) {}
+    try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
   }
 
   // Coalesce poller-driven sidebar re-renders. liveStatus (5s), sessionsList
@@ -12969,82 +12370,7 @@
     // "Human", or "system" (lifecycle entries the orchestrator appends).
     // Capturing all three lets us style system lines without scattering
     // them through the previous participant's message body.
-    // CCC-60: speaker headings come in TWO styles and we must split on both,
-    // or a post in the unrecognised style gets absorbed into the previous
-    // speaker's bubble ("a new response is lumped with a previous response"):
-    //   A) `## <ts> — <8hex>: NAME emoji`  (group-chat-checkin posts, Human)
-    //   B) `### \`NAME\` (<8hex>)`          (CCC-relayed agent posts)
-    // The 8-hex participant hash (after `— ` or inside trailing `(…)`) is the
-    // reliable boundary signal in either case.
-    const matches = Array.from(text.matchAll(
-      /^#{2,3}[ \t]+(.+?(?:—[ \t]+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b|system(?::|\b)).*|.*\([0-9a-fA-F]{8}\)))[ \t]*$/gm
-    ));
-
-    // Pre-pass: extract speaker per match for receipt chips (CCC-62).
-    // Mirrors the speaker-parse logic in the main loop below.
-    const _parseSpeaker = (heading) => {
-      let s = heading;
-      if (/\s+—\s+/.test(s)) {
-        const p = s.split(/\s+—\s+/); p.shift(); s = p.length ? p.join(' — ') : s;
-      } else {
-        s = s.replace(/\s*\([0-9a-fA-F]{8}\)\s*$/, '').replace(/`/g, '').trim() || s;
-      }
-      return s;
-    };
-    const _prePass = matches.map(m => {
-      const s = _parseSpeaker((m[1] || '').trim());
-      return { speaker: s, isSystem: /^\s*system\b/i.test(s) };
-    });
-    const _allNonSysSet = new Set();
-    _prePass.forEach(p => { if (!p.isSystem) _allNonSysSet.add(p.speaker); });
-    const _allNonSys = Array.from(_allNonSysSet);
-    // For each message index, which non-system speakers have a post AFTER it?
-    const _speakersAfter = _prePass.map((_, idx) => {
-      const after = new Set();
-      for (let j = idx + 1; j < _prePass.length; j++) {
-        if (!_prePass[j].isSystem) after.add(_prePass[j].speaker);
-      }
-      return after;
-    });
-    const _gcReceiptHtml = (idx, curSpeaker) => {
-      if (_allNonSys.length < 2) return '';
-      const after = _speakersAfter[idx];
-      return '<div class="gc-message-receipts">'
-        + _allNonSys.map(p => {
-            if (p === curSpeaker) return '';
-            const initials = p.replace(/\(.*?\)/g, '').trim().split(/\s+/).slice(0, 2).map(w => w[0] || '').join('').toUpperCase() || '?';
-            const responded = after.has(p);
-            return `<span class="gc-receipt-avatar${responded ? ' is-responded' : ' is-quiet'}" title="${escapeAttr(p) + (responded ? ' — responded after' : ' — no reply yet')}">${escapeHtml(initials)}</span>`;
-          }).join('')
-        + '</div>';
-    };
-
-    // CCC-109: explicit "who was alerted and when" per message. The
-    // orchestrator appends `> _<ts> — system: pinged \`NAME\` (8hex)_`
-    // blockquotes into the segment of the message that triggered them, so
-    // parsing the raw segment body attributes each alert to its message.
-    const _gcAlertsHtml = (rawBody) => {
-      const out = [];
-      const re = /^>\s*_(.+?)\s+—\s+system:\s*pinged\s+(.+?)_?\s*$/gm;
-      let m;
-      while ((m = re.exec(rawBody))) {
-        const ts = (m[1] || '').trim();
-        const tm = (ts.match(/\b(\d{2}:\d{2}(?::\d{2})?)\b/) || [])[1] || ts;
-        const names = (m[2] || '')
-          .replace(/\s*\([0-9a-fA-F]{8}\)/g, '')
-          .replace(/`/g, '')
-          .replace(/_+\s*$/, '')
-          .trim();
-        if (names) out.push({ ts, tm, names });
-      }
-      if (!out.length) return '';
-      return '<div class="gc-message-alerts">'
-        + out.map(a =>
-            '<span class="gc-alert-chip" title="' + escapeAttr('Alerted at ' + a.ts) + '">'
-            + '📨 alerted <strong>' + escapeHtml(a.names) + '</strong> · ' + escapeHtml(a.tm)
-            + '</span>').join('')
-        + '</div>';
-    };
+    const matches = Array.from(text.matchAll(/^##\s+(.+?—\s+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b|system(?::|\b)).*)$/gm));
 
     let firstSpeaker = '';
     let lastSpeaker = '';
@@ -13099,18 +12425,9 @@
       const body = rawBody
         .replace(/^\s*---\s*$/gm, '')
         .trim();
-      // Format A ("<ts> — speaker") splits on the em-dash; format B
-      // ("`name` (hash)") has no dash — derive the speaker by stripping the
-      // trailing (hash) and backticks, and has no timestamp.
-      let when = '';
-      let speaker = heading;
-      if (/\s+—\s+/.test(heading)) {
-        const parts = heading.split(/\s+—\s+/);
-        when = parts.length > 1 ? parts.shift() : '';
-        speaker = parts.length ? parts.join(' — ') : heading;
-      } else {
-        speaker = heading.replace(/\s*\([0-9a-fA-F]{8}\)\s*$/, '').replace(/`/g, '').trim() || heading;
-      }
+      const parts = heading.split(/\s+—\s+/);
+      const when = parts.length > 1 ? parts.shift() : '';
+      const speaker = parts.length ? parts.join(' — ') : heading;
       const isSystem = /^\s*system\b/i.test(speaker);
 
       if (!isSystem) {
@@ -13134,8 +12451,6 @@
         + '<div class="gc-message-body assistant-text">'
           + (body ? markSystemBlockquotes(renderMarkdown(body)) : '<em class="gc-message-empty">(no text)</em>')
         + '</div>'
-        + (isSystem ? '' : _gcAlertsHtml(rawBody))
-        + (isSystem ? '' : _gcReceiptHtml(i, speaker))
       + '</article>';
     }
 
@@ -13153,94 +12468,6 @@
     }
 
     return html;
-  }
-
-  // ── Add-participant picker (CCC-97) ──────────────────────────────────
-  // One shared, keyboard-first picker for every "add a session to this
-  // chat" surface: sidebar chat rows, the reader header, group chat panes.
-  // Shows the 10 most recently active sessions up front (name, repo, when);
-  // typing filters; ↑/↓ + Enter or click adds via /api/group-chat/add.
-  function openGcParticipantPicker(chatRef) {
-    if (!chatRef || (!chatRef.chat_id && !chatRef.chat_path)) return;
-    const existing = document.getElementById('gcAddPartModal');
-    if (existing) existing.remove();
-    const candidates = (conversationsData || [])
-      .filter(c => c && (c.session_id || c.id)
-        && c.source !== 'backlog' && c.source !== 'github_pr' && !c.archived)
-      .sort((a, b) => (b.modified || 0) - (a.modified || 0));
-    const engineEmoji = (c) => (
-      c.source === 'codex' ? '🟦' : c.source === 'antigravity' || c.source === 'gemini' ? '✨'
-      : c.source === 'cursor' ? '🖱️' : '🤖');
-    const rowTitle = (c) => (c.display_name || c.ai_title
-      || firstSentenceOf(cleanIssuePrompt(c.first_message || '') || '', 48) || '(untitled)');
-    const modal = document.createElement('div');
-    modal.id = 'gcAddPartModal';
-    modal.className = 'gc-addpart-modal';
-    modal.innerHTML =
-      '<div class="gc-addpart-card">'
-      + '<div class="gc-addpart-title">Add participant</div>'
-      + '<input type="text" class="gc-addpart-search" placeholder="Search sessions… (↑↓ + Enter)" autocomplete="off" spellcheck="false">'
-      + '<div class="gc-addpart-list"></div>'
-      + '</div>';
-    document.body.appendChild(modal);
-    const input = modal.querySelector('.gc-addpart-search');
-    const list = modal.querySelector('.gc-addpart-list');
-    let filtered = [];
-    let sel = 0;
-    const close = () => { modal.remove(); document.removeEventListener('keydown', onKey, true); };
-    const paint = () => {
-      const q = (input.value || '').trim().toLowerCase();
-      filtered = (q
-        ? candidates.filter(c => (rowTitle(c) + ' ' + (c.folder_label_chip || '') + ' ' + (c.session_id || '')).toLowerCase().indexOf(q) !== -1)
-        : candidates).slice(0, q ? 25 : 10);
-      sel = Math.max(0, Math.min(sel, filtered.length - 1));
-      list.innerHTML = filtered.map((c, i) =>
-        '<div class="gc-addpart-row' + (i === sel ? ' is-selected' : '') + '" data-idx="' + i + '">'
-        + '<span class="gc-addpart-emoji">' + engineEmoji(c) + '</span>'
-        + '<span class="gc-addpart-name">' + escapeHtml(rowTitle(c)) + '</span>'
-        + (c.folder_label_chip ? '<span class="gc-addpart-repo">' + escapeHtml(c.folder_label_chip) + '</span>' : '')
-        + '<span class="gc-addpart-when">' + escapeHtml(c.modified ? timeAgo(c.modified * 1000) : '') + '</span>'
-        + '</div>'
-      ).join('') || '<div class="gc-addpart-empty">No matching sessions.</div>';
-    };
-    const add = async (c) => {
-      if (!c) return;
-      const sid = c.session_id || c.id;
-      close();
-      try {
-        const body = Object.assign({ session_id: sid }, chatRef);
-        const res = await fetch('/api/group-chat/add', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && data.ok) {
-          showOpToast('🎉 ' + rowTitle(c).slice(0, 40) + ' joined the chat', 'success');
-          _gcLastMtime = null;  // force the reader (if open) to repaint
-          if (typeof refreshConversationList === 'function') refreshConversationList();
-        } else {
-          showOpToast('Add failed: ' + ((data && data.error) || ('HTTP ' + res.status)), 'error');
-        }
-      } catch (err) {
-        showOpToast('Add failed: ' + ((err && err.message) || 'network'), 'error');
-      }
-    };
-    const onKey = (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); close(); }
-      else if (e.key === 'ArrowDown') { e.preventDefault(); sel++; paint(); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); sel--; paint(); }
-      else if (e.key === 'Enter') { e.preventDefault(); add(filtered[sel]); }
-    };
-    document.addEventListener('keydown', onKey, true);
-    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
-    list.addEventListener('click', (e) => {
-      const row = e.target.closest('[data-idx]');
-      if (row) add(filtered[Number(row.dataset.idx)]);
-    });
-    input.addEventListener('input', () => { sel = 0; paint(); });
-    paint();
-    input.focus();
   }
 
   function openGroupChatReader(chatPath, topic, mode, includeHuman, chatId) {
@@ -13304,12 +12531,6 @@
       + '<div class="gc-reader-header">'
         + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
         + '<span class="gc-mode-badge">' + modeSafe + '</span>'
-        + '<button type="button" class="gc-join-link-btn" id="gcAddPartBtn"'
-        + ' title="Add a participant — search recent sessions, Enter to add">'
-        + '＋ Add participant</button>'
-        + '<button type="button" class="gc-join-link-btn" id="gcJoinLinkBtn"'
-        + ' title="Copy a join link — paste it into any session\'s composer in CCC and that session joins this chat">'
-        + '🔗 Join link</button>'
       + '</div>'
       + '<div class="gc-reader-sticky-meta" id="gcReaderStickyMeta" style="display:none;">'
         + '<div class="csh-col">'
@@ -13330,14 +12551,6 @@
                 + '<path d="M11 5 6 9H3v6h3l5 4V5Z"></path>'
                 + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path>'
                 + '<path d="M18.5 5.5a9 9 0 0 1 0 13"></path>'
-              + '</svg>'
-            + '</button>'
-            + '<button class="mic-btn gc-mic-btn" id="gcMicBtn" type="button" title="Record speech to input" aria-label="Record speech to input" aria-pressed="false">'
-              + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
-                + '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>'
-                + '<path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>'
-                + '<line x1="12" y1="19" x2="12" y2="23"></line>'
-                + '<line x1="8" y1="23" x2="16" y2="23"></line>'
               + '</svg>'
             + '</button>'
             + '<button id="gcSendBtn" class="gc-send-btn" type="button" title="Send (Enter)" aria-label="Send to group chat">'
@@ -13377,27 +12590,6 @@
       _gcReaderHiddenRailItems = true;
     }
 
-    // Join link (CCC-98): copies a token any session's composer accepts.
-    // Sending `ccc:join-gc:<id>` from a session joins that session to this
-    // chat (intercepted in the composer send path).
-    const gcAddPartBtn = document.getElementById('gcAddPartBtn');
-    if (gcAddPartBtn) {
-      gcAddPartBtn.addEventListener('click', () => {
-        openGcParticipantPicker(_gcReaderId ? { chat_id: _gcReaderId } : { chat_path: _gcReaderPath });
-      });
-    }
-    const gcJoinBtn = document.getElementById('gcJoinLinkBtn');
-    if (gcJoinBtn) {
-      gcJoinBtn.addEventListener('click', async () => {
-        const token = 'ccc:join-gc:' + (_gcReaderId || _gcReaderPath || '');
-        try {
-          await navigator.clipboard.writeText(token);
-          showOpToast('Join link copied — paste it into any session’s composer and send', 'success');
-        } catch (_) {
-          prompt('Copy this join link, then paste it into any session’s composer:', token);
-        }
-      });
-    }
     if (includeHuman) {
       const gcSendBtn = document.getElementById('gcSendBtn');
       const gcHumanInput = document.getElementById('gcHumanInput');
@@ -13408,14 +12600,6 @@
         gcTtsBtn.addEventListener('click', (ev) => {
           ev.preventDefault();
           readLastMessageAloud(activePaneId());
-        });
-      }
-      const gcMicBtn = document.getElementById('gcMicBtn');
-      if (gcMicBtn) {
-        gcMicBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
-        gcMicBtn.addEventListener('click', (ev) => {
-          ev.preventDefault();
-          toggleSpeechRecognition('gc');
         });
       }
       if (gcHumanInput) {
@@ -13833,7 +13017,7 @@
       // participant's session. Useful when one agent has gone quiet
       // (last spoken 3h ago, last mentioned 2m ago, etc.) and you want
       // to wake it up specifically without nudging everyone.
-      html += `<button type="button" class="gco-nudge-btn" data-gc-nudge="${escapeAttr(sid)}" data-gc-nudge-name="${escapeAttr(name)}" title="Re-inject the /group-chat prompt into ${escapeAttr(name)}'s session — wakes this agent specifically.">Nudge</button>`;
+      html += `<button type="button" class="gco-nudge-btn" data-gc-nudge="${escapeAttr(sid)}" title="Re-inject the /group-chat prompt into ${escapeAttr(name)}'s session — wakes this agent specifically.">Nudge</button>`;
 
       html += `</div>`;
     }
@@ -13867,15 +13051,6 @@
           if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
           btn.textContent = 'Nudged ✓';
           if (typeof showOpToast === 'function') showOpToast('Nudged ' + (sid.slice(0, 8)), 'success');
-          const _nudgedName = btn.getAttribute('data-gc-nudge-name') || sid.slice(0, 8);
-          const _gcBodyEl = document.getElementById('gcReaderBody');
-          if (_gcBodyEl) {
-            const _notice = document.createElement('div');
-            _notice.className = 'gc-nudge-notice';
-            _notice.textContent = '↗ Pinged ' + _nudgedName;
-            _gcBodyEl.appendChild(_notice);
-            setTimeout(() => { if (_notice.parentElement) _notice.remove(); }, 8000);
-          }
         } catch (err) {
           btn.textContent = 'Nudge failed';
           if (typeof showOpToast === 'function') showOpToast('Nudge failed: ' + (err && err.message || 'unknown'), 'error');
@@ -13943,31 +13118,6 @@
     return `<span class="gco-time" title="${escapeAttr(String(s))}">${escapeHtml(rel)}</span>`;
   }
 
-  // "↓ New posts" pill — shown when fresh content lands while the reader is
-  // scrolled up (CCC-110). The content IS already refreshed; this is the
-  // affordance that says so. Click scrolls to bottom; reaching the bottom
-  // by hand removes it too.
-  function _gcShowNewPostsPill(body) {
-    const host = body.parentElement || body;
-    if (host.querySelector('.gc-new-posts-pill')) return;
-    const pill = document.createElement('button');
-    pill.type = 'button';
-    pill.className = 'gc-new-posts-pill';
-    pill.textContent = '↓ New posts';
-    pill.addEventListener('click', () => {
-      body.scrollTop = body.scrollHeight;
-      pill.remove();
-    });
-    const onScroll = () => {
-      if (body.scrollHeight - body.scrollTop <= body.clientHeight + 40) {
-        pill.remove();
-        body.removeEventListener('scroll', onScroll);
-      }
-    };
-    body.addEventListener('scroll', onScroll);
-    host.appendChild(pill);
-  }
-
   async function pollGroupChatReader() {
     if (!_gcReaderPath && !_gcReaderId) return;
     const body = document.getElementById('gcReaderBody');
@@ -13996,7 +13146,6 @@
         updateOrchestratorPanel(data, data.content);
 
         if (atBottom) body.scrollTop = body.scrollHeight;
-        else if (!isFirstLoad) _gcShowNewPostsPill(body);
         
         // Trigger scroll listener to update Viewing Poster immediately
         body.dispatchEvent(new CustomEvent('scroll'));
@@ -14036,7 +13185,6 @@
     try {
       await ccPostJson('/api/group-chat/post', { path: _gcReaderPath, id: _gcReaderId, text });
       if (input) input.value = '';
-      _gcLastMtime = null;  // force re-render even if file mtime hasn't updated yet
       await pollGroupChatReader();
     } catch (err) {
       showOpToast('Send failed: ' + err.message, 'error');
@@ -14100,7 +13248,7 @@
     // a transient hiccup. 12s gives enough time to notice + comprehend
     // without being annoyingly modal.
     const isPersistent = kind === 'error'
-      && (/cwd is gone/i.test(msg) || /macOS blocked/i.test(msg) || /usage limit|get cursor pro/i.test(msg) || /mic|speech|service/i.test(msg));
+      && (/cwd is gone/i.test(msg) || /macOS blocked/i.test(msg) || /usage limit|get cursor pro/i.test(msg));
     setTimeout(() => toast.remove(), isPersistent ? 12000 : (kind === 'error' ? 5000 : 3000));
   }
 
@@ -15750,11 +14898,7 @@
     }
     const headOn = !!ls.headlessPresent;
     const stale = headOn && !!ls.headlessStale;
-    // bg-pty daemon (Claude Code background terminal): no controlling tty,
-    // but the session IS attached to an open terminal pane — light the
-    // terminal pill instead of reporting "no process" (CCC-104).
-    const bgOn = !!ls.bgPresent;
-    const termOn = !!ls.terminalPresent || bgOn;
+    const termOn = !!ls.terminalPresent;
     const pill = (on, warn, label, title) =>
       '<span class="ccc-proc-pill ' + (on ? (warn ? 'is-stale' : 'is-on') : 'is-off') + '"'
       + ' title="' + escapeHtml(title) + '">'
@@ -15764,12 +14908,9 @@
           ? 'A CCC-spawned headless agent is running but STALE — another writer advanced the transcript; it will be auto-retired'
           : 'A CCC-spawned headless agent is running (pid ' + (ls.headlessPid || '?') + ')')
       : 'No CCC-spawned headless agent for this session';
-    const termTitle = bgOn
-      ? 'This session runs in a terminal managed by the Claude Code app (pid ' + (ls.bgPid || '?') + '). '
-        + 'It has no system tty, so CCC cannot type into it — interact in the Claude Code window.'
-      : (termOn
-          ? 'A live terminal (TTY) is attached to this session'
-          : 'No live terminal attached to this session');
+    const termTitle = termOn
+      ? 'A live terminal (TTY) is attached to this session'
+      : 'No live terminal attached to this session';
     const ago = _procCheckedAgoLabel(_lastStatusCheckedAt);
     const clock = _procCheckedClock(_lastStatusCheckedAt);
     const checkedTitle = clock
@@ -15791,7 +14932,7 @@
       + ' title="' + escapeHtml(headPillTitle) + '">'
       + '<span class="ccc-proc-dot"></span>' + escapeHtml(headLabel) + '</span>';
     el.innerHTML = headPill
-      + pill(termOn, false, bgOn ? 'terminal · Claude app' : 'terminal', termTitle)
+      + pill(termOn, false, 'terminal', termTitle)
       + (ago ? '<span class="ccc-proc-checked" title="' + escapeHtml(checkedTitle) + '">checked ' + escapeHtml(ago) + (clock ? ' · ' + escapeHtml(clock) : '') + '</span>' : '')
       + '<button type="button" class="ccc-proc-refresh" title="Refresh this session\'s headless / terminal state now" aria-label="Refresh state">↻</button>';
   }
@@ -16652,13 +15793,7 @@
         } else {
           prCls = 'pushed';    prGlyph = '';   prTitle = 'PR opened by this session';
         }
-        // For github_pr rows: make the chip a button that opens GitHub directly
-        // (the row click now opens an in-pane PR detail, not GitHub).
-        if (isGithubPrRow && c.tail_pr_url) {
-          signals += '<button type="button" class="conv-signal ' + prCls + '" data-role="pr-external-link" data-pr-url="' + escapeAttr(c.tail_pr_url) + '" title="Open PR #' + c.tail_pr_number + ' on GitHub ↗">' + prGlyph + 'PR #' + c.tail_pr_number + ' ↗</button>';
-        } else {
-          signals += '<span class="conv-signal ' + prCls + '" title="' + prTitle + '">' + prGlyph + 'PR #' + c.tail_pr_number + '</span>';
-        }
+        signals += '<span class="conv-signal ' + prCls + '" title="' + prTitle + '">' + prGlyph + 'PR #' + c.tail_pr_number + '</span>';
         if (Array.isArray(c.pr_notes)) {
           for (const note of c.pr_notes) {
             if (!note || !note.label) continue;
@@ -16791,6 +15926,7 @@
         + '<span class="drag-handle" data-role="drag">&#10495;</span>'
         + '<div class="conv-title-row">'
           + '<div class="conv-main-row">'
+            + sessionIconHtml
             + leftFolderChipHtml
             + titleFolderChipHtml
             + '<div class="conv-title ' + titleClass + '" data-role="title" title="Click to open; click again to rename">' + escapeHtml(title) + '</div>'
@@ -16804,13 +15940,9 @@
             // Both share the same screen real estate, so the row stays
             // narrow and there's no per-row layout shift between hover
             // states (CSS uses `position: absolute` for one of them).
-            // Engine icon (Claude/Codex/Antigravity…) rides at the FAR
-            // right, past the elapsed time — experimental placement, easy
-            // to walk back by moving sessionIconHtml before the chips.
             + '<span class="conv-row-end">'
             +   '<span class="conv-rel" data-role="rel" title="Last activity">' + escapeHtml(rel) + '</span>'
             +   '<span class="conv-row-actions">' + wakeBtn + mergeBtn + startBtn + pinBtn + archiveBtn + '</span>'
-            +   sessionIconHtml
             + '</span>'
           + '</div>'
         + '</div>'
@@ -16864,20 +15996,6 @@
       catch (_) { return 'project'; }
     })();
     const _shouldGroupByFolder = _hasFolderChips && _ipGrouping === 'project';
-    // "By objects" (CCC-83): group In Progress rows under the Flow object
-    // each session is parented to on the Flow board (nearest object
-    // ancestor via flowNodeParents). Sessions not attached to any object
-    // fall into a trailing flat list.
-    const _shouldGroupByObjects = _ipGrouping === 'objects';
-    // Per-row folder chips knob. '' = auto (hidden in by-objects mode where
-    // the group header already names the container, shown elsewhere);
-    // 'show'/'hide' = explicit user choice via the header knob.
-    const _ipRowChipsPref = (() => {
-      try { return localStorage.getItem('ccc-inprogress-row-chips') || ''; }
-      catch (_) { return ''; }
-    })();
-    const _ipRowChipsOn = _ipRowChipsPref === 'show'
-      || (_ipRowChipsPref === '' && !_shouldGroupByObjects);
     const _pinRankValue = (c) => {
       const rank = Number(c && c.pin_rank);
       return Number.isFinite(rank) ? rank : 0;
@@ -17011,20 +16129,8 @@
       return visibleCards.map(c => _renderRow(c, opts)).join('')
         + _ghIssueShowMoreHtml(key, hiddenCount, expanded);
     };
-    // CCC-61: surface UUID/id-search hits in their own labelled box at the very
-    // top (the user asked for "a dedicated box — one click to open"), instead of
-    // bare rows that blend into whatever section follows. Reuses the repo-search
-    // section chrome so it reads as a distinct result group.
     const _idSearchRowsHtml = _idSearchConvs.length
-      ? '<div class="conv-repo-search-section conv-id-search-section" data-role="id-search-section">'
-        + '<div class="conv-repo-search-header">'
-        +   '<span class="conv-repo-search-label">ID match</span>'
-        +   '<span class="conv-repo-search-hint">' + _idSearchConvs.length + ' — click to open</span>'
-        + '</div>'
-        + '<div class="conv-repo-search-list">'
-        + _idSearchConvs.map(c => _renderRow(c)).join('')
-        + '</div>'
-        + '</div>'
+      ? _idSearchConvs.map(c => _renderRow(c)).join('')
       : '';
     const _repoSearchRowsHtml = (() => {
       if (!_repoSearchActive) return '';
@@ -17190,11 +16296,6 @@
                   ? 'Enable orchestration — resume nudging participants'
                   : 'Disable orchestration — stop nudges and token use for this chat') + '">'
           +     (isPaused ? '▶' : '⏸') + '</button>'
-          +   '<button type="button" class="conv-ingroupchat-addpart-btn"'
-          +     ' data-role="ingroupchat-add-participant"'
-          +     ' data-gc-id="' + escapeHtml(chatId) + '"'
-          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
-          +     ' title="Add a participant — search sessions and press Enter">＋</button>'
           +   '<button type="button" class="conv-ingroupchat-rename-btn"'
           +     ' data-role="ingroupchat-rename"'
           +     ' data-gc-id="' + escapeHtml(chatId) + '"'
@@ -17223,89 +16324,7 @@
         };
       });
     let _activeRowsHtml;
-    if (_shouldGroupByObjects) {
-      // Resolve a session to its grouping node (CCC-83 + CCC-88):
-      //  - nearest explicit Flow-object ancestor → that object;
-      //  - explicit chain that tops out at a repo node → that repo
-      //    ("repo as top object");
-      //  - no explicit Flow parent → the session's own repo, since on the
-      //    board sessions cluster under their repo by default;
-      //  - nothing resolvable → Unclassified.
-      const _groupForSession = (c) => {
-        let node = flowNodeKey('session', c.session_id || c.id);
-        for (let hop = 0; hop < 6; hop++) {
-          const parent = flowNodeParents[node];
-          if (!parent) break;
-          if (parent.indexOf('object:') === 0) {
-            const oid = parent.slice(7);
-            const obj = (flowCustomObjects || []).find(o => o && o.id === oid);
-            return { node: parent, title: (obj && obj.title) || 'Object' };
-          }
-          if (parent.indexOf('repo:') === 0) {
-            return { node: parent, title: _pathLeaf(parent.slice(5)) || parent.slice(5) };
-          }
-          node = parent;
-        }
-        const repoPath = c.folder_path || '';
-        if (repoPath) {
-          return { node: flowNodeKey('repo', repoPath), title: c.folder_label_chip || _pathLeaf(repoPath) || repoPath };
-        }
-        return null;
-      };
-      const _byObject = new Map();
-      const _unclassified = [];
-      for (const c of _visibleSessionConvs) {
-        const grp = _groupForSession(c);
-        if (!grp) { _unclassified.push(c); continue; }
-        if (!_byObject.has(grp.node)) _byObject.set(grp.node, { title: grp.title, cards: [] });
-        _byObject.get(grp.node).cards.push(c);
-      }
-      // Every custom object gets a group row even with zero sessions
-      // (CCC-92) — a fresh "+ object" target must be visible to drag into.
-      for (const obj of (flowCustomObjects || [])) {
-        if (!obj || !obj.id) continue;
-        const node = flowNodeKey('object', obj.id);
-        if (!_byObject.has(node)) _byObject.set(node, { title: obj.title || 'Object', cards: [] });
-      }
-      // User-pinned manual order (drag a group header above/below another).
-      // Purely cosmetic; nodes without a saved rank sort by the default
-      // rule (custom objects first, then freshest) below the ranked ones.
-      let _objOrder = {};
-      try { _objOrder = JSON.parse(localStorage.getItem('ccc-objects-order') || '{}'); } catch (_) {}
-      const _objEntries = Array.from(_byObject.entries()).sort((a, b) => {
-        const aRank = Number.isFinite(_objOrder[a[0]]) ? _objOrder[a[0]] : Infinity;
-        const bRank = Number.isFinite(_objOrder[b[0]]) ? _objOrder[b[0]] : Infinity;
-        if (aRank !== bRank) return aRank - bRank;
-        // Custom objects above repo-derived groups, then freshest first.
-        const aObj = a[0].indexOf('object:') === 0 ? 0 : 1;
-        const bObj = b[0].indexOf('object:') === 0 ? 0 : 1;
-        if (aObj !== bObj) return aObj - bObj;
-        const aMax = a[1].cards.reduce((m, c) => Math.max(m, c.modified || 0), 0);
-        const bMax = b[1].cards.reduce((m, c) => Math.max(m, c.modified || 0), 0);
-        return bMax - aMax;
-      });
-      const _renderObjGroup = (nodeId, title, cards) => {
-        // Stable per-node hue so each group keeps its color across renders.
-        let hash = 0;
-        for (let i = 0; i < nodeId.length; i++) hash = ((hash << 5) - hash + nodeId.charCodeAt(i)) | 0;
-        const hue = Math.abs(hash) % 360;
-        const collapsed = _isFolderGroupCollapsed('inprogress', nodeId);
-        const attrs = ' data-object-drop="' + escapeAttr(nodeId) + '"';
-        const body = cards.length
-          ? cards.map(c => _renderRow(c, { suppressFolderChip: !_ipRowChipsOn })).join('')
-          : '<div class="conv-object-empty-hint">Empty — drag sessions here.</div>';
-        return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
-          + _folderGroupHeaderHtml('inprogress', title, cards.length, hue, '', nodeId, attrs)
-          + body
-          + '</div>';
-      };
-      let _objGroupsHtml = _objEntries.map(([nodeId, group]) =>
-        _renderObjGroup(nodeId, group.title, group.cards)).join('');
-      if (_unclassified.length) {
-        _objGroupsHtml += _renderObjGroup('unclassified', 'Unclassified', _unclassified);
-      }
-      _activeRowsHtml = _objGroupsHtml + (_gcItems || []).map(it => it.html).join('');
-    } else if (_shouldGroupByFolder) {
+    if (_shouldGroupByFolder) {
       // Group cards by folder; preserve folder order by the most
       // recent card in each group (freshest folder appears first).
       const _byFolder = new Map();
@@ -17434,20 +16453,10 @@
         ? '<span class="conv-grouping-toggle" data-role="grouping-toggle">'
             + '<span class="grouping-opt' + (_ipGrouping === 'project' ? ' is-active' : '') + '" data-grouping="project">by project</span>'
             + '<span class="grouping-opt' + (_ipGrouping === 'time' ? ' is-active' : '') + '" data-grouping="time">by time</span>'
-            + '<span class="grouping-opt' + (_ipGrouping === 'objects' ? ' is-active' : '') + '" data-grouping="objects" title="Group by the Flow object each session is attached to on the Flow board">by objects</span>'
           + '</span>'
         : '';
-      // "+ object" (CCC-92): create a new (possibly empty) Flow object that
-      // immediately appears as a group row in by-objects mode. Replaced the
-      // chips knob — chips stay on the auto default (hidden in by-objects).
-      const _ipAddObjectBtn = (_hasFolderChips && _shouldGroupByObjects)
-        ? '<span class="conv-grouping-toggle conv-add-object" data-role="ip-add-object"'
-          + ' title="Create a new Flow object — appears as an empty group you can drag sessions into">'
-          + '<span class="grouping-opt">+ object</span>'
-          + '</span>'
-        : '';
-      const _ipTools = (_ipWindowToggle || _ipGroupingToggle || _ipAddObjectBtn)
-        ? '<span class="conv-inprogress-tools">' + _ipAddObjectBtn + _ipWindowToggle + _ipGroupingToggle + '</span>'
+      const _ipTools = (_ipWindowToggle || _ipGroupingToggle)
+        ? '<span class="conv-inprogress-tools">' + _ipWindowToggle + _ipGroupingToggle + '</span>'
         : '';
       // Count display: sessions in window + active group chats. Title
       // attribute spells both out so a hover explains the headline number.
@@ -17749,41 +16758,10 @@
         + '<div class="conv-archived-list">' + _arcRows + '</div>'
         + '</div>';
     }
-    // Tabs (CCC-85): GH Issues / Ready to merge / In progress / Archived
-    // are tabs now, one section visible at a time. Search result rows
-    // (id/repo search) always render above the active tab's content.
-    const _sidebarTab = (() => {
-      try {
-        const t = localStorage.getItem('ccc-sidebar-tab');
-        return (t === 'issues' || t === 'merge' || t === 'inprogress' || t === 'archived') ? t : 'inprogress';
-      } catch (_) { return 'inprogress'; }
-    })();
-    const _tabDefs = [
-      ['issues', 'Issues', (_ghIssueConvs && _ghIssueConvs.length) || 0],
-      ['merge', 'Merge', (_readyToMergeConvs && _readyToMergeConvs.length) || 0],
-      ['inprogress', 'Active', ((_visibleSessionConvs && _visibleSessionConvs.length) || 0) + ((_gcItems && _gcItems.length) || 0)],
-      ['archived', 'Archived', _arcCount || 0],
-    ];
-    const _tabBarHtml = '<div class="conv-tab-bar" data-role="conv-tab-bar">'
-      + _tabDefs.map(([k, label, n]) =>
-        '<button type="button" class="conv-tab' + (k === _sidebarTab ? ' is-active' : '') + '" data-conv-tab="' + k + '">'
-        + escapeHtml(label)
-        + (n ? '<span class="conv-tab-count">' + n + '</span>' : '')
-        + '</button>').join('')
-      + '</div>';
-    const _tabEmpty = (what) => '<div class="archive-empty-state">No ' + what + '.</div>';
-    // The active tab's section always renders EXPANDED — a tab opening
-    // onto a collapsed (zero-height) section reads as broken. Only the
-    // top-level section wrapper is forced open; folder groups inside
-    // keep their own collapse state.
-    const _forceOpen = (html, cls) => html
-      .replace(cls + ' collapsed', cls)
-      .replace('aria-expanded="false"', 'aria-expanded="true"');
-    const _tabBody = _sidebarTab === 'issues' ? (_forceOpen(_ghIssuesHtml, 'conv-ghissues-section') || _tabEmpty('open issues'))
-      : _sidebarTab === 'merge' ? (_forceOpen(_readyToMergeHtml, 'conv-readytomerge-section') || _tabEmpty('PRs waiting to merge'))
-      : _sidebarTab === 'archived' ? (_forceOpen(_archivedHtml, 'conv-archived-section') || _tabEmpty('archived sessions'))
-      : (_forceOpen(_inProgressHtml, 'conv-inprogress-section') || _tabEmpty('in-progress sessions'));
-    const _convListHtml = _tabBarHtml + _idSearchRowsHtml + _repoSearchRowsHtml + _tabBody;
+    // Order: GH Issues (to start) → Ready to merge (action) → In
+    // progress (which now also contains the group-chat rows at the
+    // top) → Archived.
+    const _convListHtml = _idSearchRowsHtml + _repoSearchRowsHtml + _ghIssuesHtml + _readyToMergeHtml + _inProgressHtml + _archivedHtml;
     // Flicker guard. The 10s bulk-sessions poll and the 5s live-status tick both
     // re-run this render constantly. The wholesale innerHTML reset below tears
     // down and rebuilds every row, which the user sees as the whole list
@@ -17997,7 +16975,6 @@
         if (ev.target.closest('[data-role="ingroupchat-rename"]')) return;
         if (ev.target.closest('[data-role="ingroupchat-clear"]')) return;
         if (ev.target.closest('[data-role="ingroupchat-pause"]')) return;
-        if (ev.target.closest('[data-role="ingroupchat-add-participant"]')) return;
         const path = row.dataset.gcPath;
         const chatId = row.dataset.gcId || null;
         const topic = row.dataset.gcTopic || '';
@@ -18032,16 +17009,6 @@
         const chatId = btn.dataset.gcId || null;
         const currentTopic = btn.dataset.gcTopic || '';
         if (path || chatId) renameGroupChat(path, currentTopic, chatId);
-      });
-    });
-    // ＋ participant on the chat row (CCC-97) — opens the shared picker.
-    $convList.querySelectorAll('[data-role="ingroupchat-add-participant"]').forEach(btn => {
-      btn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        ev.preventDefault();
-        const chatId = btn.dataset.gcId || null;
-        const path = btn.dataset.gcPath || null;
-        if (chatId || path) openGcParticipantPicker(chatId ? { chat_id: chatId } : { chat_path: path });
       });
     });
     $convList.querySelectorAll('[data-role="ingroupchat-clear"]').forEach(btn => {
@@ -18198,7 +17165,7 @@
       $inProgressToggle.addEventListener('click', (ev) => {
         // The grouping toggle (project / time) lives inside this header
         // button — its own listener stops propagation, but be defensive.
-        if (ev.target.closest('[data-role="grouping-toggle"], [data-role="window-toggle"], [data-role="ip-add-object"]')) return;
+        if (ev.target.closest('[data-role="grouping-toggle"], [data-role="window-toggle"]')) return;
         ev.stopPropagation();
         const section = $inProgressToggle.closest('[data-role="inprogress-section"]');
         if (!section) return;
@@ -18225,123 +17192,6 @@
         renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
-    // "+ object" (CCC-92): create an empty Flow object inline.
-    const $ipAddObject = $convList.querySelector('[data-role="ip-add-object"]');
-    if ($ipAddObject) {
-      $ipAddObject.addEventListener('click', async (ev) => {
-        ev.stopPropagation();
-        const title = ((await promptModal('Object name', 'New object')) || '').trim();
-        if (!title) return;
-        const now = Date.now();
-        const id = 'obj-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
-        flowCustomObjects.unshift({ id, title, created_at: now, updated_at: now });
-        persistFlowCustomObjects();
-        renderArchiveList(document.getElementById('convSearch')?.value || '');
-      });
-    }
-    // Sidebar tab bar (CCC-85): switch the visible section.
-    const $convTabBar = $convList.querySelector('[data-role="conv-tab-bar"]');
-    if ($convTabBar) {
-      $convTabBar.addEventListener('click', (ev) => {
-        const tab = ev.target.closest('[data-conv-tab]');
-        if (!tab) return;
-        ev.stopPropagation();
-        try { localStorage.setItem('ccc-sidebar-tab', tab.getAttribute('data-conv-tab')); } catch (_) {}
-        renderArchiveList(document.getElementById('convSearch')?.value || '', { force: true });
-      });
-    }
-    // By-objects drag-to-reparent (CCC-88): drop a session row on an object
-    // (or repo / Unclassified) group header to move it there. Mirrors a
-    // Flow-board drag without leaving the sidebar; writes the same
-    // flowNodeParents map the board reads.
-    $convList.querySelectorAll('[data-object-drop]').forEach(hdr => {
-      // Group headers are themselves draggable: drop on another header's
-      // top/bottom third to order above/below (cosmetic, persisted in
-      // ccc-objects-order), middle third to nest under it on the Flow
-      // board (flowNodeParents only — never touches the repo or disk).
-      hdr.setAttribute('draggable', 'true');
-      hdr.addEventListener('dragstart', (ev) => {
-        ev.stopPropagation();
-        _draggedObjectNode = hdr.getAttribute('data-object-drop') || '';
-        try { ev.dataTransfer.effectAllowed = 'move'; } catch (_) {}
-        try { ev.dataTransfer.setData('text/plain', 'ccc-objnode:' + _draggedObjectNode); } catch (_) {}
-        hdr.classList.add('dragging');
-      });
-      hdr.addEventListener('dragend', () => {
-        _draggedObjectNode = '';
-        hdr.classList.remove('dragging');
-        $convList.querySelectorAll('[data-object-drop]').forEach(n =>
-          n.classList.remove('is-drop-target', 'drop-above', 'drop-below'));
-      });
-      const dropZoneOf = (ev) => {
-        const rect = hdr.getBoundingClientRect();
-        const y = (ev.clientY - rect.top) / Math.max(1, rect.height);
-        return y < 0.33 ? 'above' : (y > 0.67 ? 'below' : 'nest');
-      };
-      hdr.addEventListener('dragover', (ev) => {
-        if (!_draggedObjectNode && !dragHasConversationPayload(ev)) return;
-        ev.preventDefault();
-        ev.dataTransfer.dropEffect = 'move';
-        hdr.classList.remove('is-drop-target', 'drop-above', 'drop-below');
-        if (_draggedObjectNode) {
-          if (_draggedObjectNode === hdr.getAttribute('data-object-drop')) return;
-          const zone = dropZoneOf(ev);
-          hdr.classList.add(zone === 'above' ? 'drop-above' : (zone === 'below' ? 'drop-below' : 'is-drop-target'));
-        } else {
-          hdr.classList.add('is-drop-target');
-        }
-      });
-      hdr.addEventListener('dragleave', () => hdr.classList.remove('is-drop-target', 'drop-above', 'drop-below'));
-      hdr.addEventListener('drop', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        hdr.classList.remove('is-drop-target', 'drop-above', 'drop-below');
-        const target = hdr.getAttribute('data-object-drop');
-        const raw = ev.dataTransfer ? ev.dataTransfer.getData('text/plain') : '';
-        // ── Group-header drop: reorder or nest ──
-        if (raw && raw.indexOf('ccc-objnode:') === 0) {
-          const dragged = raw.slice(12);
-          if (!dragged || dragged === target) return;
-          const zone = dropZoneOf(ev);
-          if (zone === 'nest' && target !== 'unclassified' && dragged !== 'unclassified') {
-            // Cycle guard: refuse if target is a descendant of dragged.
-            let n = target, cyclic = false;
-            for (let hop = 0; hop < 8 && n; hop++) {
-              if (n === dragged) { cyclic = true; break; }
-              n = flowNodeParents[n];
-            }
-            if (cyclic) { showOpToast('That would make a loop — not nesting.', 'error'); return; }
-            flowNodeParents[dragged] = target;
-            persistFlowNodeParents();
-            showOpToast('Nested under ' + (hdr.textContent || '').trim().slice(0, 40), 'success');
-          } else {
-            // Reorder: rebuild ranks from current DOM order, splice dragged
-            // around the target. Cosmetic only.
-            const ids = Array.from($convList.querySelectorAll('[data-object-drop]'))
-              .map(n => n.getAttribute('data-object-drop'))
-              .filter(id => id && id !== dragged);
-            const at = ids.indexOf(target);
-            if (at === -1) return;
-            ids.splice(zone === 'above' ? at : at + 1, 0, dragged);
-            const order = {};
-            ids.forEach((id, i) => { order[id] = i; });
-            try { localStorage.setItem('ccc-objects-order', JSON.stringify(order)); } catch (_) {}
-          }
-          renderArchiveList(document.getElementById('convSearch')?.value || '');
-          return;
-        }
-        // ── Session-row drop: reparent the session under this group ──
-        const convId = readConvIdFromDrop(ev);
-        if (!convId) return;
-        const row = (conversationsData || []).find(x => x.id === convId) || {};
-        const sid = row.session_id || convId;
-        const key = flowNodeKey('session', sid);
-        if (target === 'unclassified') delete flowNodeParents[key];
-        else flowNodeParents[key] = target;
-        persistFlowNodeParents();
-        renderArchiveList(document.getElementById('convSearch')?.value || '');
-      });
-    });
     const $windowToggle = $convList.querySelector('[data-role="window-toggle"]');
     if ($windowToggle) {
       $windowToggle.addEventListener('click', (ev) => {
@@ -18379,30 +17229,7 @@
         if (arrowEl) arrowEl.textContent = wasCollapsed ? '▸' : '▾';
         hdr.setAttribute('aria-expanded', String(!wasCollapsed));
       };
-      // By-objects headers (CCC-93): the chevron collapses; clicking the
-      // NAME opens the object's MD doc in the same inspector Flow uses.
-      // Plain folder headers keep whole-header collapse.
-      const objNode = hdr.getAttribute('data-object-drop') || '';
-      const opensInspector = objNode && objNode !== 'unclassified';
-      hdr.addEventListener('click', (ev) => {
-        if (opensInspector && !ev.target.closest('.conv-folder-group-arrow')) {
-          ev.stopPropagation();
-          let payload = null;
-          if (objNode.indexOf('object:') === 0) {
-            const oid = objNode.slice(7);
-            const obj = (flowCustomObjects || []).find(o => o && o.id === oid);
-            payload = { kind: 'object', object_id: oid, title: (obj && obj.title) || 'Object', repo_path: '' };
-          } else if (objNode.indexOf('repo:') === 0) {
-            const rp = objNode.slice(5);
-            payload = { kind: 'repo', repo_path: rp, title: _pathLeaf(rp) || rp };
-          }
-          if (payload && typeof openFlowNodeInspectorForPayload === 'function') {
-            openFlowNodeInspectorForPayload(payload);
-            return;
-          }
-        }
-        toggleFolderGroup(ev);
-      });
+      hdr.addEventListener('click', toggleFolderGroup);
       hdr.addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
         ev.preventDefault();
@@ -18431,14 +17258,6 @@
       });
       _refreshShipStatus(repo);
     });
-    // github_pr row: ↗ chip button opens GitHub directly (row click opens in-pane).
-    $convList.querySelectorAll('[data-role="pr-external-link"]').forEach(btn => {
-      btn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        const url = btn.getAttribute('data-pr-url');
-        if (url) window.open(url, '_blank', 'noopener');
-      });
-    });
     $convList.querySelectorAll('.conv-item').forEach(el => {
       if (el.dataset.role === 'archived-gc-row' || !el.dataset.id) return;
       el.addEventListener('mouseenter', () => {
@@ -18447,20 +17266,6 @@
       el.addEventListener('mouseleave', () => {
         _convPrefetchCancel(el.dataset.id);
       });
-      el.addEventListener('touchstart', () => {
-        if (isMobile()) {
-          el.classList.add('mobile-active-tap');
-        }
-      }, { passive: true });
-      el.addEventListener('touchend', () => {
-        el.classList.remove('mobile-active-tap');
-      }, { passive: true });
-      el.addEventListener('touchmove', () => {
-        el.classList.remove('mobile-active-tap');
-      }, { passive: true });
-      el.addEventListener('touchcancel', () => {
-        el.classList.remove('mobile-active-tap');
-      }, { passive: true });
       el.addEventListener('click', (ev) => {
         // Ignore clicks that started the inline editor, archive button,
         // the context-% badge (its own confirm-and-/compact handler runs
@@ -18484,11 +17289,11 @@
           selectedListIds.clear();
           updateCoordToolbar();
         }
-        if (isMobile()) {
-          $convList.querySelectorAll('.conv-item.mobile-tapped').forEach(n => n.classList.remove('mobile-tapped'));
-          el.classList.add('mobile-tapped');
-        }
         const row = conversationsData.find(c => c.id === el.dataset.id);
+        if (row && row.source === 'github_pr') {
+          if (row.tail_pr_url) window.open(row.tail_pr_url, '_blank');
+          return;
+        }
         selectConversation(el.dataset.id);
       });
       attachDragHandlers(el);
@@ -19134,25 +17939,7 @@
       return;
     }
     openConversationPopout(convId, null, null);
-    _advanceMainAfterPopout(convId);
   });
-
-  // The popped-out conversation now lives in its own window — move the main
-  // window on to the neighboring conversation so it isn't showing a
-  // duplicate of what the user just split off (CCC-118). DOM order matches
-  // what the user sees in the sidebar (grouping included).
-  function _advanceMainAfterPopout(convId) {
-    try {
-      const items = [...document.querySelectorAll('.conv-item[data-id]')]
-        .filter(el => el.offsetParent && el.dataset.id);
-      const idx = items.findIndex(el => el.dataset.id === convId);
-      if (idx < 0) return;
-      const next = items[idx + 1] || items[idx - 1];
-      if (next && next.dataset.id && next.dataset.id !== convId) {
-        selectConversation(next.dataset.id);
-      }
-    } catch (_) {}
-  }
 
   function startExternalConversationDrag(convId, repoPath) {
     if (CONV_POPOUT_MODE || !convId) return;
@@ -19178,11 +17965,6 @@
     if (!st || st.droppedInside || st.cancelled) return;
     if (st.leftWindow || pointOutsideViewport(ev)) {
       openConversationPopout(st.convId, st.repoPath, st.screenPoint || screenPointFromDragEvent(ev));
-      // Same advance as the breadcrumb popout button (CCC-118) — but only
-      // when the dragged conversation is the one the main pane is showing.
-      if (typeof currentConversation === 'string' && currentConversation === st.convId) {
-        _advanceMainAfterPopout(st.convId);
-      }
     }
   }
 
@@ -19204,8 +17986,6 @@
   }, true);
 
   let dragSourceId = null;
-  // Object/group header currently being dragged in the by-objects sidebar.
-  let _draggedObjectNode = '';
 
   function attachDragHandlers(el) {
     el.addEventListener('dragstart', (ev) => {
@@ -19669,13 +18449,6 @@
           setTimeout(() => toast.remove(), 3500);
         } catch (err) { /* swallow */ }
       }
-      // Swap the title element back in place BEFORE asking for a render.
-      // The re-render below repaints the whole list anyway, but if it gets
-      // suppressed for any reason the row must not be left stuck in edit
-      // mode (CCC-72). Optimistically show the saved name.
-      if (save && input.value.trim()) titleEl.textContent = input.value.trim();
-      if (input.parentNode) input.replaceWith(titleEl);
-      if (editBtn) editBtn.style.display = '';
       // Re-render with force: the rename input itself is a text input,
       // and on blur focus may have moved to the search box (also a text
       // input). Either case trips shouldPauseSidebarRender, which would
@@ -19785,14 +18558,7 @@
         // last checked. (The Compact button lives in the input box now.) Filled
         // imperatively by updateConvProcessIndicator() so the "checked Xs ago"
         // label stays fresh between full breadcrumb rebuilds. Claude-only.
-        // Read via window: `currentSession` is a window-property shim
-        // installed much later in this file (Object.defineProperty over
-        // splitState). The popout's top-level updatePaneHeader call runs
-        // BEFORE that shim exists, and a bare identifier read of a
-        // not-yet-defined global throws ReferenceError — killing the boot
-        // IIFE and leaving the popout stuck on its spinner (CCC-71).
-        const _cs = window.currentSession;
-        const procSlot = (_cs && (isClaudeSource(_cs.source) || _cs.source === 'codex' || _cs.source === 'antigravity'))
+        const procSlot = (currentSession && (isClaudeSource(currentSession.source) || currentSession.source === 'codex' || currentSession.source === 'antigravity'))
           ? '<span class="ccc-breadcrumb-proc" data-role="ccc-breadcrumb-proc"></span>'
           : '';
         // Proc slot (headless/terminal indication) sits right after the
@@ -19800,23 +18566,8 @@
         // pushes the pills past the breadcrumb's overflow:hidden clip edge and
         // the terminal-vs-headless indication disappears (CCC-35). The title
         // ellipsizes instead; it's secondary and also shown in the pane.
-        // UX-fixes worker badge (CCC-90): when this row is one of the
-        // queue-worker sessions (same detection as the sidebar's x/y chip),
-        // put a designer-pen badge + progress right in the top bar.
-        let uxBadge = '';
-        try {
-          const prog = (typeof _uxFixesQueueProgressForRow === 'function' && row)
-            ? _uxFixesQueueProgressForRow(row) : null;
-          if (prog) {
-            const lbl = (prog.kind === 'done' ? '✓ ' : '') + '(' + prog.current + '/' + prog.total + ')';
-            uxBadge = '<span class="ccc-breadcrumb-ux" title="UX-fixes queue worker — '
-              + (prog.kind === 'done' ? 'last fixed' : 'working') + ' ' + escapeAttr(prog.ref || '') + '">'
-              + '✍️ UX ' + escapeHtml(lbl) + '</span>';
-          }
-        } catch (_) {}
         breadcrumbEl.innerHTML = ''
           + (category ? '<span class="ccc-breadcrumb-category">' + escapeHtml(category) + '</span>' : '')
-          + uxBadge
           + procSlot
           + (title ? '<span class="ccc-breadcrumb-title">' + escapeHtml(title) + '</span>' : '')
           + (sizeBytes > 0 ? '<span class="ccc-breadcrumb-size" title="' + sizeBytes.toLocaleString() + ' bytes">' + escapeHtml(formatSize(sizeBytes)) + '</span>' : '')
@@ -20917,9 +19668,6 @@
     stopConvStream(paneId);
     stopSpawnStream();
     stopCodexLogPoller();
-    // Rescue the new-session chooser's adopted CWD controls before this
-    // selection wipes the conv view they were moved into (CCC-86).
-    try { _restoreCwdControlsToInputBar(); } catch (_) {}
     // If a group chat reader was active, tear it down so its 3s polling
     // stops and the standard input bar is restored. The reader was
     // rendered INTO #conversationsView so the surrounding pane structure
@@ -21395,170 +20143,21 @@
     ffcUpdateSidebar(data);
   }
 
-  // ── Files panel ⇄ UX-fixes queue view ────────────────────────────────
-  // When the selected session is a UX-fixes-queue worker (same detection
-  // as the x/y progress chip), the Files container can flip to a Queue
-  // view listing every ticket: ref, first 30 chars of the note, status.
-  // Queue is the DEFAULT for those sessions; the header toggle flips back.
-  let _filesViewChoice = '';       // '' auto | 'files' | 'queue'
-  let _filesViewChoiceConv = null; // conv the explicit choice belongs to
-  let _uxqItemsCache = { ts: 0, items: [] };
-  let _ffcLastSidebarData = null;
-  function _isUxqWorkerSession() {
-    try {
-      const row = (conversationsData || []).find(x => x.id === currentConversation);
-      return !!(row && typeof _uxFixesQueueProgressForRow === 'function'
-        && _uxFixesQueueProgressForRow(row));
-    } catch (_) { return false; }
-  }
-  function _filesViewEffective() {
-    // An explicit pick only sticks for the conversation it was made in.
-    if (_filesViewChoice && _filesViewChoiceConv === currentConversation) return _filesViewChoice;
-    return _isUxqWorkerSession() ? 'queue' : 'files';
-  }
-  async function _fetchUxqItems() {
-    if (Date.now() - _uxqItemsCache.ts < 15000) return _uxqItemsCache.items;
-    try {
-      const res = await fetch('/api/ux-fixes/list', { cache: 'no-store' });
-      const data = await res.json().catch(() => ({}));
-      const items = Array.isArray(data && data.items) ? data.items : [];
-      _uxqItemsCache = { ts: Date.now(), items };
-    } catch (_) { /* keep stale cache */ }
-    return _uxqItemsCache.items;
-  }
-  // Project this worker session serves (e.g. "BYM", "CCC") — from the same
-  // progress record that drives the x/y chip. Scopes the queue view so a
-  // BYM worker sees only BYM tickets (CCC-99).
-  function _uxqWorkerProject() {
-    try {
-      const row = (conversationsData || []).find(x => x.id === currentConversation);
-      const prog = row && typeof _uxFixesQueueProgressForRow === 'function'
-        ? _uxFixesQueueProgressForRow(row) : null;
-      return (prog && prog.project && prog.project !== '?') ? prog.project : '';
-    } catch (_) { return ''; }
-  }
-  function _renderQueueListInFilesPanel() {
-    const $queue = document.getElementById('sidebarQueueList');
-    if (!$queue) return;
-    _fetchUxqItems().then(items => {
-      if (_filesViewEffective() !== 'queue') return;  // flipped while fetching
-      const proj = _uxqWorkerProject();
-      const scoped = proj ? items.filter(it => (it.project || '') === proj) : items;
-      const rows = scoped.slice().reverse();  // newest first
-      $queue.innerHTML = rows.map(it => {
-        const noteFull = String(it.note || '');
-        const note = noteFull.length > 30 ? noteFull.slice(0, 30) + '…' : noteFull;
-        const status = it.status || 'open';
-        const ref = it.ref || ('#' + (it.number || '?'));
-        return '<div class="fq-row is-' + escapeAttr(status) + '" data-ref="' + escapeAttr(ref)
-          + '" title="' + escapeAttr(noteFull) + '\n\nClick to jump to the first mention of ' + escapeAttr(ref) + ' in the conversation.">'
-          + '<span class="fq-ref">' + escapeHtml(ref) + '</span>'
-          + '<span class="fq-note">' + escapeHtml(note) + '</span>'
-          + '<span class="fq-status">' + escapeHtml(status) + '</span>'
-          + '</div>';
-      }).join('') || '<div class="fq-empty">Queue is empty.</div>';
-      const $count = document.getElementById('filesCount');
-      if ($count && _filesViewEffective() === 'queue') $count.textContent = rows.length;
-    });
-  }
-  // Jump the conversation pane to the first mention of a ticket ref
-  // (CCC-105). The loaded tail may not include the first mention — when a
-  // "Load earlier" banner is present, pull the full transcript first so
-  // "first occurrence" means the real one, not the first in the window.
-  async function _uxqJumpToRef(ref) {
-    if (!ref) return;
-    const paneId = activePaneId();
-    const $view = getConvViewForPane(paneId) || $conversationsView;
-    if (!$view) return;
-    const findFirst = () => {
-      for (const ev of $view.querySelectorAll('.event')) {
-        if ((ev.textContent || '').includes(ref)) return ev;
-      }
-      return null;
-    };
-    const pane = paneByPaneId(paneId);
-    if (pane && $view.querySelector('.conv-load-earlier')) {
-      const overlay = _showConvLoading($view, 'Loading history to find ' + ref + '…');
-      pane.wantFull = true; pane.lastLine = 0;
-      try { await fetchConversationEvents(paneId); } catch (_) {}
-      overlay.remove();
-    }
-    const hit = findFirst();
-    if (!hit) { showOpToast('No mention of ' + ref + ' in this conversation'); return; }
-    hit.scrollIntoView({ block: 'center' });
-    hit.classList.add('uxq-jump-hit');
-    setTimeout(() => { hit.classList.remove('uxq-jump-hit'); }, 2400);
-  }
-  {
-    const $queueList = document.getElementById('sidebarQueueList');
-    if ($queueList) {
-      $queueList.addEventListener('click', (ev) => {
-        const row = ev.target && ev.target.closest && ev.target.closest('.fq-row[data-ref]');
-        if (row) _uxqJumpToRef(row.getAttribute('data-ref'));
-      });
-    }
-  }
-  // Sync panel chrome to the effective mode. Returns true when the panel is
-  // in queue mode (caller then keeps the panel visible even with 0 files).
-  function _applyFilesViewMode() {
-    const $panel = document.getElementById('filesPanel');
-    const $files = document.getElementById('sidebarFilesList');
-    const $queue = document.getElementById('sidebarQueueList');
-    const $toggle = document.getElementById('filesViewToggle');
-    const $search = document.getElementById('filesSearchInput');
-    const $label = $panel && $panel.querySelector('.files-title-label');
-    if (!$panel || !$files || !$queue) return false;
-    const uxq = _isUxqWorkerSession();
-    const mode = uxq ? _filesViewEffective() : 'files';
-    if ($toggle) {
-      $toggle.style.display = uxq ? '' : 'none';
-      $toggle.querySelectorAll('[data-fv]').forEach(b =>
-        b.classList.toggle('is-active', b.getAttribute('data-fv') === mode));
-    }
-    const queueMode = mode === 'queue';
-    $files.style.display = queueMode ? 'none' : '';
-    $queue.style.display = queueMode ? '' : 'none';
-    if ($search) $search.style.display = queueMode ? 'none' : '';
-    if ($label) $label.textContent = queueMode ? 'Queue' : 'Files';
-    if (queueMode) {
-      $panel.style.display = '';
-      _renderQueueListInFilesPanel();
-    }
-    return queueMode;
-  }
-  {
-    const $fvToggle = document.getElementById('filesViewToggle');
-    if ($fvToggle) {
-      $fvToggle.addEventListener('click', (ev) => {
-        const b = ev.target.closest('[data-fv]');
-        if (!b) return;
-        _filesViewChoice = b.getAttribute('data-fv');
-        _filesViewChoiceConv = currentConversation;
-        _uxqItemsCache.ts = 0;  // fresh fetch on flip
-        ffcUpdateSidebar(_ffcLastSidebarData);
-      });
-    }
-  }
-
   function ffcUpdateSidebar(data) {
-    _ffcLastSidebarData = data;
     const $panel = document.getElementById('filesPanel');
     const $count = document.getElementById('filesCount');
     const $list = document.getElementById('sidebarFilesList');
     if (!$panel || !$count || !$list) return;
-    const _queueMode = _applyFilesViewMode();
 
     if (!data || !data.count) {
-      if (!_queueMode) {
-        $panel.style.display = 'none';
-        $count.textContent = '';
-      }
+      $panel.style.display = 'none';
       $list.innerHTML = '';
+      $count.textContent = '';
       return;
     }
 
     $panel.style.display = '';
-    if (!_queueMode) $count.textContent = data.count;
+    $count.textContent = data.count;
     $list.innerHTML = '';
 
     // Flatten all categories
@@ -22075,73 +20674,23 @@
     const state = _convPaneTabState(view);
     if (!state) return;
     view.dataset.activeTab = state.active;
-    const onTask = state.active !== 'master';
     for (const el of view.children) {
       const t = el.dataset && el.dataset.tab;
-      if (!t) {
-        // Untagged chrome (sticky header, banners) stays visible. Untagged
-        // CONTENT (JSONL-rendered events/groups) is the master lane — hide
-        // it while a task tab is active so the subagent lane stands alone.
-        if (el.matches && el.matches('.event, .tool-call-group, .stream-bubble, .conv-load-earlier')) {
-          el.style.display = onTask ? 'none' : '';
-        }
-        continue;
-      }
+      if (!t) continue;  // untagged elements (sticky header, banners) always visible
       el.style.display = (t === state.active) ? '' : 'none';
     }
-  }
-  // Subagent lane for tasks discovered from the JSONL (no spawn stream):
-  // an embedded conversation popout on the composite id — full renderer,
-  // no second code path. Created lazily on first tab activation.
-  function _convPaneEnsureJsonlTaskLane(view, taskId) {
-    const key = 'task-' + taskId;
-    for (const el of view.children) {
-      if (el.dataset && el.dataset.tab === key) return;
-    }
-    const sid = (typeof currentConversation === 'string' && currentConversation) || '';
-    if (!sid) return;
-    const lane = document.createElement('div');
-    lane.dataset.tab = key;
-    lane.className = 'conv-subagent-lane';
-    const conv = sid + ':agent-' + taskId;
-    lane.innerHTML = '<iframe class="conv-subagent-frame" title="Subagent transcript"'
-      + ' src="/?ccc_popout=conversation&conv=' + encodeURIComponent(conv) + '"></iframe>';
-    view.appendChild(lane);
-  }
-  // Register tabs for every task-notification card rendered from the JSONL.
-  // Newer Claude Code keeps subagent transcripts in sibling files, so these
-  // tasks never flow through the spawn stream that normally seeds tabs.
-  function _convPaneSyncJsonlTaskTabs(view) {
-    const state = _convPaneTabState(view);
-    if (!state) return;
-    let added = false;
-    view.querySelectorAll('.tn-view-transcript[data-task-id]').forEach(btn => {
-      const tid = btn.getAttribute('data-task-id');
-      if (!tid || state.tasks[tid]) return;
-      const card = btn.closest('.task-notification-card');
-      const headline = card && card.querySelector('.tn-summary');
-      const label = ((headline && headline.textContent) || ('Task ' + tid.slice(-6))).trim().slice(0, 28);
-      state.tasks[tid] = { label, lastSeen: Date.now(), closeTimer: null, completed: true, jsonl: true };
-      added = true;
-    });
-    if (added) _convPaneRenderTabStrip(view);
   }
   function _convPaneActivateTab(view, tabKey) {
     const state = _convPaneTabState(view);
     if (!state) return;
     if (state.active === tabKey) return;
     state.active = tabKey;
-    if (tabKey.startsWith('task-')) {
-      const t = state.tasks[tabKey.slice(5)];
-      if (t && t.jsonl) _convPaneEnsureJsonlTaskLane(view, tabKey.slice(5));
-    }
     _convPaneRenderTabStrip(view);
     _convPaneApplyActiveTab(view);
-    // Switching AWAY from a completed task arms its auto-close. JSONL-fed
-    // tabs are historical reads — they never auto-close.
+    // Switching AWAY from a completed task arms its auto-close.
     for (const tid of Object.keys(state.tasks)) {
       const t = state.tasks[tid];
-      if (!t.completed || t.jsonl) continue;
+      if (!t.completed) continue;
       const tabKeyT = 'task-' + tid;
       if (state.active !== tabKeyT && !t.closeTimer) {
         t.closeTimer = setTimeout(() => _convPaneCloseSubagentTab(view, tid), 5 * 1000);
@@ -22788,7 +21337,7 @@
   // If earlier history exists, a "Load earlier" banner loads the whole thing on
   // demand. Live `after=` polling is unaffected (tail returns the real
   // last_line, so streamed events keep appending from there).
-  const CONV_TAIL_LINES = 400;
+  const CONV_TAIL_LINES = 150;
 
   function _ensureLoadEarlierStyle() {
     if (document.getElementById('__convLoadEarlierStyle')) return;
@@ -22890,36 +21439,12 @@
       return;
     }
     banner.addEventListener('click', loadEarlier);
-    // Auto-load once the banner scrolls into view — but only as a response
-    // to a deliberate scroll-UP with real overflow. Two traps to avoid:
-    // (1) observe() fires immediately with the CURRENT state, so a short
-    // tail (banner already visible) used to load on open; (2) any trackpad
-    // twitch counted as "scrolled", so the load still fired "immediately
-    // when clicking a conversation". Now: arm only on an upward wheel
-    // tick, and the observer callback additionally requires the transcript
-    // to actually overflow the pane — a short tail never auto-loads (the
-    // banner stays clickable for that).
+    // Auto-load once the banner scrolls into view (scroll up → history fills in).
     if ('IntersectionObserver' in window) {
-      // rootMargin extends the trigger zone ~2 screens above the visible top,
-      // so history prefetches while the user is still scrolling up — by the
-      // time they reach the top, it's already there.
       const io = new IntersectionObserver((entries) => {
-        const overflows = $view.scrollHeight > $view.clientHeight + 40;
-        if (overflows && entries.some((e) => e.isIntersecting)) { io.disconnect(); loadEarlier(); }
-      }, { root: $view, rootMargin: '1600px 0px 0px 0px', threshold: 0 });
-      let armed = false;
-      const armIfUpward = (ev) => {
-        if (armed) return;
-        const up = (ev.type === 'wheel' && ev.deltaY < 0)
-          || (ev.type === 'touchmove' && $view.scrollTop <= 4);
-        if (!up) return;
-        armed = true;
-        $view.removeEventListener('wheel', armIfUpward);
-        $view.removeEventListener('touchmove', armIfUpward);
-        io.observe(banner);
-      };
-      $view.addEventListener('wheel', armIfUpward, { passive: true });
-      $view.addEventListener('touchmove', armIfUpward, { passive: true });
+        if (entries.some((e) => e.isIntersecting)) { io.disconnect(); loadEarlier(); }
+      }, { root: $view, threshold: 0.05 });
+      io.observe(banner);
     }
     $view.insertBefore(banner, $view.firstChild);
   }
@@ -22944,13 +21469,6 @@
         $view.innerHTML = _renderBacklogDetail(c);
         return;
       }
-    }
-    // github_pr rows are synthetic (no real session transcript).
-    // Render an in-pane PR detail card; the ↗ chip on the row opens GitHub.
-    const githubPrCard = (conversationsData || []).find(x => x.id === id && x.source === 'github_pr');
-    if (githubPrCard) {
-      $view.innerHTML = _renderGithubPrDetail(githubPrCard);
-      return;
     }
     // Pending spawn placeholders render the submitted prompt immediately.
     // Fire-and-watch engines switch to their spawn log once the POST returns
@@ -22998,7 +21516,7 @@
         if (convLastLine === 0) {
           $view.innerHTML = '';
         }
-        if (renderConversationEvents(data.events, fetchPaneId, { initialLoad: _freshOpen }) !== false) {
+        if (renderConversationEvents(data.events, fetchPaneId) !== false) {
           convLastLine = data.last_line;
         }
         if (_freshOpen && !_wantFull && data && data.truncated_before) {
@@ -23085,48 +21603,6 @@
       + '<div style="margin-top:18px;line-height:1.55;color:var(--text);">' + bodyHtml + '</div>'
       + '</div>';
   }
-  function _renderGithubPrDetail(c) {
-    const prNum = c.tail_pr_number;
-    const prUrl = c.tail_pr_url;
-    const title = c.display_name || c.ai_title || (prNum ? 'PR #' + prNum : 'Pull Request');
-    const branch = c.worktree_label ? ('wt-' + c.worktree_label) : '';
-    const ps = (c.pr_state || '').toUpperCase();
-    let stateChip = '';
-    if (ps === 'MERGED') {
-      stateChip = '<span class="conv-signal pr-merged" style="font-weight:600;">✓ merged</span>';
-    } else if (ps === 'CLOSED') {
-      stateChip = '<span class="conv-signal pr-closed" style="font-weight:600;">× closed</span>';
-    } else {
-      stateChip = '<span class="conv-signal pr-open" style="font-weight:600;">↗ open</span>';
-    }
-    let notesHtml = '';
-    if (Array.isArray(c.pr_notes)) {
-      for (const note of c.pr_notes) {
-        if (!note || !note.label) continue;
-        const noteCls = note.kind === 'danger' ? 'pr-note-danger' : 'pr-note';
-        notesHtml += '<span class="conv-signal ' + noteCls + '" title="' + escapeAttr(note.title || note.label) + '">' + escapeHtml(note.label) + '</span>';
-      }
-    }
-    const ghLink = prUrl
-      ? '<a href="' + escapeHtml(prUrl) + '" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:12px;margin-left:auto;">Open on GitHub ↗</a>'
-      : '';
-    const firstMsg = c.first_message
-      ? '<div style="margin-top:18px;line-height:1.55;color:var(--text);">' + renderMarkdown(String(c.first_message).slice(0, 600)) + '</div>'
-      : '';
-    const lastSummary = c.last_assistant_text
-      ? '<div style="margin-top:10px;font-size:12.5px;color:var(--text-muted);line-height:1.5;">' + escapeHtml(String(c.last_assistant_text).slice(0, 200)) + '…</div>'
-      : '';
-    return '<div class="backlog-detail" style="padding:24px 28px;max-width:780px;">'
-      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">'
-      +   stateChip + notesHtml + ghLink
-      + '</div>'
-      + '<h2 style="margin:0 0 4px;font-size:18px;line-height:1.35;">' + escapeHtml(title) + '</h2>'
-      + (prNum ? '<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">PR #' + escapeHtml(String(prNum)) + (branch ? ' · ' + escapeHtml(branch) : '') + '</div>' : '')
-      + firstMsg
-      + lastSummary
-      + '</div>';
-  }
-
   // Sticky-header dynamic ask tracker. The .conv-sticky-header normally
   // shows the first user message ("Original ask"). As the user scrolls past
   // later user messages, this state machine swaps the sticky's body to
@@ -24038,8 +22514,7 @@
         + (engine === 'antigravity' ? '' : '\n\nClick to change model');
       const modelInner = escapeHtml(shortModel)
         + (isOneM ? ' <span class="wp-model-1m">1M</span>' : '')
-        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '')
-        + ' <span class="wp-model-chevron">&#x25be;</span>';
+        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '');
       if (engine === 'antigravity') {
         modelPill = ' <span class="wp-model-pill is-static" title="' + escapeHtml(modelTip) + '">'
           + modelInner
@@ -24183,20 +22658,14 @@
   // sonnet support the 1M-context beta header; haiku does not).
   const MODEL_OPTIONS_BY_ENGINE = {
     claude: [
-      { id: 'fable-5',    label: 'fable-5',    oneM: false },
-      { id: 'sonnet-4-8', label: 'sonnet-4-8', oneM: true },
       { id: 'opus-4-8',   label: 'opus-4-8',   oneM: true },
       { id: 'opus-4-7',   label: 'opus-4-7',   oneM: true },
-      { id: 'sonnet-4-7', label: 'sonnet-4-7', oneM: true },
       { id: 'sonnet-4-6', label: 'sonnet-4-6', oneM: true },
-      { id: 'haiku-4-8',  label: 'haiku-4-8',  oneM: false },
       { id: 'haiku-4-5',  label: 'haiku-4-5',  oneM: false },
     ],
     codex: [
       { id: 'gpt-5.5',      label: 'gpt-5.5 (default)' },
       { id: 'gpt-5-codex',  label: 'gpt-5-codex' },
-      { id: 'o4',           label: 'o4' },
-      { id: 'o4-mini',      label: 'o4-mini' },
       { id: 'o3',           label: 'o3' },
       { id: 'o3-mini',      label: 'o3-mini' },
     ],
@@ -24209,16 +22678,10 @@
       { id: 'composer-2.5',                  label: 'composer-2.5' },
     ],
     gemini: [
-      { id: 'gemini-3.5-pro',   label: 'gemini-3.5-pro' },
-      { id: 'gemini-3.5-flash', label: 'gemini-3.5-flash' },
-      { id: 'gemini-3.1-pro',   label: 'gemini-3.1-pro' },
       { id: 'gemini-2.5-pro',   label: 'gemini-2.5-pro' },
       { id: 'gemini-2.5-flash', label: 'gemini-2.5-flash' },
     ],
     antigravity: [
-      { id: 'Gemini 3.5 Pro (High)', label: 'Gemini 3.5 Pro (High)' },
-      { id: 'Gemini 3.5 Pro (Medium)', label: 'Gemini 3.5 Pro (Medium)' },
-      { id: 'Gemini 3.5 Pro (Low)', label: 'Gemini 3.5 Pro (Low)' },
       { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)' },
       { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash (Medium)' },
       { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
@@ -24228,12 +22691,9 @@
       { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B (Medium)' },
     ],
     kilo: [
-      { id: 'kilo/stepfun/step-3.8-flash:free', label: 'step-3.8-flash (free)' },
       { id: 'kilo/stepfun/step-3.7-flash:free', label: 'step-3.7-flash (free, default)' },
-      { id: 'kilo/anthropic/claude-sonnet-4.8', label: 'claude-sonnet-4.8' },
       { id: 'kilo/anthropic/claude-opus-4.8',   label: 'claude-opus-4.8' },
       { id: 'kilo/anthropic/claude-sonnet-4.6', label: 'claude-sonnet-4.6' },
-      { id: 'kilo/openai/gpt-6.0',              label: 'gpt-6.0' },
       { id: 'kilo/openai/gpt-5.5',              label: 'gpt-5.5' },
     ],
   };
@@ -24412,85 +22872,9 @@
       });
   }
 
-  // The Claude `/model` menu, replicated 1:1 from Claude Code's native picker.
-  // Each row carries the bare alias in `id` plus its 1M / legacy flags. Numbers
-  // mirror the native keyboard shortcuts (1-7).
-  const CLAUDE_MODEL_MENU = [
-    { id: 'fable-5',    label: 'Fable 5',    num: '1' },
-    { id: 'opus-4-8',   label: 'Opus 4.8',   num: '2' },
-    { id: 'opus-4-8',   label: 'Opus 4.8',   num: '3', context_1m: true },
-    { id: 'sonnet-4-6', label: 'Sonnet 4.6', num: '4' },
-    { id: 'haiku-4-5',  label: 'Haiku 4.5',  num: '5' },
-    { id: 'opus-4-7',   label: 'Opus 4.7',   num: '6', legacy: true },
-    { id: 'opus-4-7',   label: 'Opus 4.7',   num: '7', legacy: true, context_1m: true },
-    { id: 'opus-4-6',   label: 'Opus 4.6',   num: '8', legacy: true },
-  ];
-  // Claude Code's current shipped default model. Shown in the menu's top
-  // "· Default" row.
-  const CLAUDE_DEFAULT_MODEL = 'fable-5';
-
-  // Map a model alias/id to the menu's friendly label ("opus-4-8" → "Opus 4.8").
-  function _claudeFriendlyModelName(id) {
-    const n = _normalizeModelId(id);
-    const m = n.match(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/);
-    if (m) return m[1][0].toUpperCase() + m[1].slice(1) + ' ' + m[2] + '.' + m[3];
-    const f = n.match(/^fable-(\d+)$/);
-    if (f) return 'Fable ' + f[1];
-    const bare = n.match(/^(opus|sonnet|haiku|fable)$/);
-    if (bare) return bare[1][0].toUpperCase() + bare[1].slice(1);
-    return id || n;
-  }
-
-  function _buildClaudeModelMenuHtml(currentNorm, currentIs1M) {
-    const defNorm = _normalizeModelId(CLAUDE_DEFAULT_MODEL);
-    const defaultActive = currentNorm === defNorm && !currentIs1M;
-    const defLabel = _claudeFriendlyModelName(CLAUDE_DEFAULT_MODEL);
-    let html = ''
-      + '<div class="mp-header">'
-      +   '<span class="mp-header-title">Models</span>'
-      +   '<span class="mp-keys"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>I</kbd></span>'
-      + '</div>'
-      + '<button type="button" class="mp-row mp-default-row' + (defaultActive ? ' active' : '') + '"'
-      +   ' data-mp-reset data-model="' + escapeHtml(CLAUDE_DEFAULT_MODEL) + '">'
-      +   '<span class="mp-name">' + escapeHtml(defLabel) + '</span>'
-      +   '<span class="mp-default-tag"> · Default</span>'
-      +   '<span class="mp-check">' + (defaultActive ? '✓' : '') + '</span>'
-      + '</button>'
-      + '<div class="mp-divider"></div>';
-    CLAUDE_MODEL_MENU.forEach((opt) => {
-      const ctx1m = !!opt.context_1m;
-      const isActive = _normalizeModelId(opt.id) === currentNorm && ctx1m === !!currentIs1M;
-      html += '<button type="button" class="mp-row mp-claude-row' + (isActive ? ' active' : '') + '"'
-        + ' data-model="' + escapeHtml(opt.id) + '"'
-        + ' data-ctx1m="' + (ctx1m ? '1' : '0') + '">'
-        + '<span class="mp-name">' + escapeHtml(opt.label) + (ctx1m ? ' (1M context)' : '') + '</span>'
-        + (opt.legacy ? '<span class="mp-legacy">Legacy</span>' : '')
-        + '<span class="mp-check">' + (isActive ? '✓' : '') + '</span>'
-        + '<span class="mp-num">' + escapeHtml(opt.num) + '</span>'
-        + '</button>';
-    });
-    // Fast mode exists only on Opus models (4.6/4.7/4.8) — hide the toggle
-    // elsewhere (Fable, Sonnet, Haiku) so users can't trigger an
-    // "invalid mode" error from the CLI.
-    if (/^opus-/.test(currentNorm)) {
-      html += '<div class="mp-divider"></div>'
-        + '<div class="mp-section">Fast mode</div>'
-        + '<button type="button" class="mp-row mp-fast-row" data-mp-fast>'
-        +   '<span class="mp-name">Enable fast mode</span>'
-        +   '<span class="mp-switch" data-mp-switch></span>'
-        + '</button>';
-    }
-    html += '<div class="mp-status" data-mp-status></div>';
-    return html;
-  }
-
   function closeModelPicker() {
     closePlanUsagePopover();
     if (_modelPickerEl) {
-      if (_modelPickerEl.__mpNumberHandler) {
-        document.removeEventListener('keydown', _modelPickerEl.__mpNumberHandler, true);
-        _modelPickerEl.__mpNumberHandler = null;
-      }
       _modelPickerEl.remove();
       _modelPickerEl = null;
     }
@@ -24512,32 +22896,27 @@
     const currentNorm = _normalizeModelId(currentModel);
 
     const pop = document.createElement('div');
-    pop.className = 'model-picker-pop open' + (engine === 'claude' ? ' mp-claude' : '');
-    let html;
-    if (engine === 'claude') {
-      html = _buildClaudeModelMenuHtml(currentNorm, currentIs1M);
-    } else {
-      html = '<div class="mp-header">Switch model — ' + escapeHtml(engine) + '</div>';
-      options.forEach((opt) => {
-        const isActive = _normalizeModelId(opt.id) === currentNorm;
-        const oneM = !!opt.oneM;
-        const oneMOn = isActive && currentIs1M;
-        html += '<button type="button" class="mp-row' + (isActive ? ' active' : '') + '" data-model="' + escapeHtml(opt.id) + '">'
-          + escapeHtml(opt.label || opt.id);
-        if (oneM) {
-          html += '<span class="mp-1m-toggle' + (oneMOn ? ' on' : '') + '" data-1m-toggle title="1M context (anthropic-beta: context-1m)">1M</span>';
-        }
-        html += '</button>';
-      });
-      html += '<div class="mp-divider"></div>';
-      html += '<div class="mp-other">'
-        + '<input type="text" placeholder="Other model…" data-mp-other-input>'
-        + '<button type="button" data-mp-other-apply>Apply</button>'
-        + '</div>';
-      html += '<div class="mp-divider"></div>';
-      html += '<button type="button" class="mp-row mp-reset" data-mp-reset>↺ Reset to session default</button>';
-      html += '<div class="mp-status" data-mp-status></div>';
-    }
+    pop.className = 'model-picker-pop open';
+    let html = '<div class="mp-header">Switch model — ' + escapeHtml(engine) + '</div>';
+    options.forEach((opt) => {
+      const isActive = _normalizeModelId(opt.id) === currentNorm;
+      const oneM = !!opt.oneM;
+      const oneMOn = isActive && currentIs1M;
+      html += '<button type="button" class="mp-row' + (isActive ? ' active' : '') + '" data-model="' + escapeHtml(opt.id) + '">'
+        + escapeHtml(opt.label || opt.id);
+      if (oneM) {
+        html += '<span class="mp-1m-toggle' + (oneMOn ? ' on' : '') + '" data-1m-toggle title="1M context (anthropic-beta: context-1m)">1M</span>';
+      }
+      html += '</button>';
+    });
+    html += '<div class="mp-divider"></div>';
+    html += '<div class="mp-other">'
+      + '<input type="text" placeholder="Other model…" data-mp-other-input>'
+      + '<button type="button" data-mp-other-apply>Apply</button>'
+      + '</div>';
+    html += '<div class="mp-divider"></div>';
+    html += '<button type="button" class="mp-row mp-reset" data-mp-reset>↺ Reset to session default</button>';
+    html += '<div class="mp-status" data-mp-status></div>';
     pop.innerHTML = html;
 
     // Anchor: prefer below the pill, but flip ABOVE if the popup would
@@ -24601,9 +22980,7 @@
       }
     }
 
-    // Selectable model rows. The Claude default row carries data-mp-reset and is
-    // wired separately (it clears the override rather than pinning a model).
-    pop.querySelectorAll('.mp-row[data-model]:not([data-mp-reset])').forEach((row) => {
+    pop.querySelectorAll('.mp-row[data-model]').forEach((row) => {
       row.addEventListener('click', (ev) => {
         const t = ev.target;
         if (t && t.matches && t.matches('[data-1m-toggle]')) {
@@ -24614,50 +22991,11 @@
           return;
         }
         const model = row.dataset.model;
-        // Claude rows encode 1M on the row itself (data-ctx1m); other engines
-        // use the inline 1M chip.
-        let oneM;
-        if (row.dataset.ctx1m != null) {
-          oneM = row.dataset.ctx1m === '1';
-        } else {
-          const oneMChip = row.querySelector('[data-1m-toggle]');
-          oneM = !!(oneMChip && oneMChip.classList.contains('on'));
-        }
+        const oneMChip = row.querySelector('[data-1m-toggle]');
+        const oneM = !!(oneMChip && oneMChip.classList.contains('on'));
         applyModel(model, oneM);
       });
     });
-
-    // Claude menu: number keys 1-7 select rows; Fast-mode toggle injects /fast.
-    if (engine === 'claude') {
-      const claudeRows = Array.from(pop.querySelectorAll('.mp-claude-row[data-model]'));
-      pop.__mpNumberHandler = (ev) => {
-        if (ev.key >= '1' && ev.key <= '9') {
-          const row = claudeRows.find((r) => r.querySelector('.mp-num') && r.querySelector('.mp-num').textContent === ev.key);
-          if (row) { ev.preventDefault(); ev.stopPropagation(); row.click(); }
-        }
-      };
-      document.addEventListener('keydown', pop.__mpNumberHandler, true);
-      const fastRow = pop.querySelector('[data-mp-fast]');
-      if (fastRow) {
-        fastRow.addEventListener('click', async () => {
-          const sw = fastRow.querySelector('[data-mp-switch]');
-          setStatus('Toggling fast mode…');
-          try {
-            const data = await postInjectInput(sid, '/fast', 'enqueue');
-            if (data && data.ok === false) {
-              // Leave the switch where it was — the CLI rejected the toggle
-              // (e.g. model without a fast tier).
-              setStatus(data.error || 'Fast mode unavailable for this model', 'err');
-              return;
-            }
-            if (sw) sw.classList.toggle('on');
-            setStatus('Fast mode toggled ✓', 'ok');
-          } catch (_) {
-            setStatus('Network error', 'err');
-          }
-        });
-      }
-    }
     const otherInput = pop.querySelector('[data-mp-other-input]');
     const otherApply = pop.querySelector('[data-mp-other-apply]');
     if (otherApply && otherInput) {
@@ -25089,17 +23427,6 @@
     let raw = String(command || '').replace(/\s+/g, ' ').trim();
     if (!raw) return '';
     raw = raw.replace(/^Shell command:\s*/i, '').trim();
-    // Skip no-information wrapper segments — `cd X && real-cmd` should
-    // summarize as the real command, not "Completed cd" (CCC-120). Strip
-    // leading cd/pushd/export/source/set/unset segments up to the next
-    // && or ; as long as something runs after them.
-    for (let guard = 0; guard < 6; guard++) {
-      const m = raw.match(/^(?:cd|pushd|export|source|set|unset)\b[^&;|]*(?:&&|;)\s*/);
-      if (!m) break;
-      const rest = raw.slice(m[0].length).trim();
-      if (!rest) break;
-      raw = rest;
-    }
     const words = splitShellWords(raw);
     if (!words.length) return raw.length > 40 ? raw.slice(0, 39) + '…' : raw;
     const cmd = _pathBase(words[0]);
@@ -25524,7 +23851,7 @@
     }
   }
 
-  function renderConversationEvents(events, paneId, opts) {
+  function renderConversationEvents(events, paneId) {
     if (!Array.isArray(events)) return true;  // defensive: backlog/unknown responses
     // Do not defer transcript rendering while the composer is focused.
     // Steer/send keeps focus in the input; deferring used to advance
@@ -25541,11 +23868,7 @@
     // already rendered). If found, reset TTS so the play/pause button
     // re-arms to read the new message on next click instead of resuming
     // the prior message mid-sentence.
-    // Skip TTS rearm on initial load (view just cleared and re-populated on
-    // conv select). We only want to stop playback when a genuinely NEW turn
-    // streams in while the user is already watching — not when every event
-    // "appears new" because the DOM was freshly wiped.
-    if (!(opts && opts.initialLoad) && typeof resetTtsOnNewTurn === 'function') {
+    if (typeof resetTtsOnNewTurn === 'function') {
       for (const ev of events) {
         if (ev.type !== 'assistant' && ev.type !== 'result') continue;
         if (ev.line != null) {
@@ -25764,21 +24087,16 @@
           const postTokens = Number(compact.post_tokens || 0);
           const duration = _formatCompactDuration(compact.duration_ms);
           const trigger = compact.trigger ? String(compact.trigger) : 'manual';
-          const triggerLabel = trigger === 'auto' ? 'automatic' : trigger;
           let compactText = 'Compacted context';
           if (preTokens || postTokens) {
             compactText += ': ' + _formatTokens(preTokens) + ' -> ' + _formatTokens(postTokens);
           }
-          compactText += ' (' + triggerLabel + (duration ? ', ' + duration : '') + ')';
-          const compactTip = trigger === 'auto'
-            ? 'The conversation neared its context-window limit, so Claude automatically summarized the older history into a short recap and continued from there. Nothing is lost from the transcript on disk — only the model’s working memory was condensed.'
-            : 'The conversation history was summarized into a short recap to free up context-window space (/compact). The full transcript on disk is untouched — only the model’s working memory was condensed.';
+          compactText += ' (' + trigger + (duration ? ', ' + duration : '') + ')';
           div.classList.add('system-compact');
           div.innerHTML = '<span class="label">System</span>'
             + '<span class="line-num">L' + ev.line + '</span>'
             + tsSpan(ev.ts)
-            + '<span class="system-compact-text" title="' + escapeAttr(compactTip) + '">' + escapeHtml(compactText)
-            + ' <span class="system-compact-help" aria-hidden="true">?</span></span>';
+            + '<span class="system-compact-text">' + escapeHtml(compactText) + '</span>';
         } else {
           div.innerHTML = '<span class="label">System</span>'
             + '<span class="line-num">L' + ev.line + '</span>'
@@ -25957,9 +24275,7 @@
             // at one. Pushed as a separate part AFTER lastToolPartIdx so the
             // per-turn token chip still merges into the tool-call line, not the
             // image.
-            // CCC-122: Codex views images through its own `view_image` tool
-            // (and antigravity reads them via view_file) — same inline render.
-            if (isFileToolName(b.name) || /^view_(?:image|file)$/i.test(String(b.name || ''))) {
+            if (isFileToolName(b.name)) {
               const imgHtml = inlineToolImageHtml(detail);
               if (imgHtml) blockParts.push(imgHtml);
             }
@@ -26086,28 +24402,21 @@
             // CSS ::before never renders. Plain outputs bake the prefix into
             // their <pre>; structured code previews rely on the group stamp.
             const _toolTs = eventStamp(ev.ts) || nowStamp();
-            // CCC-46: a relayed AskUserQuestion answer comes back through a
-            // PreToolUse `deny` reason ("User answered the question…"), which
-            // Claude Code records as an is_error tool_result. It's a SUCCESS,
-            // not an error — don't paint it red / "Tool error".
-            const _answerConfirm = /^User answered the question/.test(text);
-            const _isErr = !!ev.is_error && !_answerConfirm;
-            const commandSucceeded = !_isErr && isSuccessfulCommandToolResult(last, text);
+            const commandSucceeded = !ev.is_error && isSuccessfulCommandToolResult(last, text);
             if (commandSucceeded) last.classList.add('tool-call-ok');
-            if (!_isErr && isRoutineSuccessfulToolResult(last, text)) {
+            if (!ev.is_error && isRoutineSuccessfulToolResult(last, text)) {
               last.classList.add('tool-call-ok');
               stampCurrentToolGroup(_toolTs);
               updateToolGroupLabel(_currentToolGroup);
               continue;
             }
-            const codePreview = (_isErr || _answerConfirm) ? null : renderToolCodePreview(last, text);
+            const codePreview = ev.is_error ? null : renderToolCodePreview(last, text);
             const out = codePreview || document.createElement('pre');
             if (codePreview) {
               out.dataset.renderTs = _toolTs;
             } else {
-              out.className = 'tool-result-output' + (_isErr ? ' is-error' : '')
-                + (_answerConfirm ? ' is-answer-confirm' : '');
-              out.dataset.resultLabel = _answerConfirm ? 'Answer sent' : toolResultOutputLabel(last, _isErr);
+              out.className = 'tool-result-output' + (ev.is_error ? ' is-error' : '');
+              out.dataset.resultLabel = toolResultOutputLabel(last, ev.is_error);
               out.dataset.renderTs = _toolTs;
               // textContent for safety, then if the text has URLs swap to
               // an escaped+linkified innerHTML so they're one-click. The
@@ -26153,14 +24462,6 @@
           _currentToolCount = 0;
         }
         _currentToolGroup.querySelector('.tool-call-group-body').appendChild(div);
-        // CCC-46: an AskUserQuestion carries the question + chosen answer —
-        // important context. Expand its group on the spot so it never hides
-        // behind a truncated "Question: … Options: Location…" collapse.
-        if (div.querySelector('.tool-call.ask-user-question')) {
-          _currentToolGroup.classList.remove('collapsed');
-          var _qArrow = _currentToolGroup.querySelector('.tcg-arrow');
-          if (_qArrow) _qArrow.textContent = '▼';
-        }
         // Bump both stamps to this tool's own ts so the visible group
         // header reflects when the latest tool actually ran. The header's
         // own data-render-ts is what the CSS ::before reads.
@@ -26182,18 +24483,6 @@
         $view.appendChild(div);
       }
     }
-    // Defensive sweep: a tool group whose body has no events renders as a
-    // "Ran 1 command" header over an empty box (CCC-80 — seen after live-
-    // stream races). It carries no information; drop it.
-    $view.querySelectorAll('.tool-call-group').forEach(g => {
-      if (!g.querySelector('.tool-call-group-body .event')) {
-        if (g === _currentToolGroup) { _currentToolGroup = null; _currentToolCount = 0; }
-        g.remove();
-      }
-    });
-    // Surface a tab per task-notification rendered from the JSONL — these
-    // subagents never pass through the spawn stream that normally seeds tabs.
-    try { _convPaneSyncJsonlTaskTabs($view); } catch (_) {}
     // Re-anchor the inline live-tool indicator at the bottom; new events
     // just appended would otherwise push past it.
     if (typeof updateLiveToolStrip === 'function') updateLiveToolStrip();
@@ -26260,19 +24549,6 @@
     // Re-hide the inline duplicate of a pending question after the transcript
     // rebuilds (it re-creates the .ask-user-block without the hide class).
     try { _syncLiveQuestionDuplicateHide(); } catch (_) {}
-    // CCC-46: an answered AskUserQuestion otherwise collapses into the fused
-    // "Ran 1 command ▶" group, truncated to "Question: … Options: Location…".
-    // The question (and which option was chosen) is important context to keep
-    // readable, so auto-expand any tool group that contains a question.
-    try {
-      $view.querySelectorAll('.tool-call-group.collapsed').forEach(function (g) {
-        if (g.querySelector('.tool-call.ask-user-question')) {
-          g.classList.remove('collapsed');
-          var _arrow = g.querySelector('.tcg-arrow');
-          if (_arrow) _arrow.textContent = '▼';
-        }
-      });
-    } catch (_) {}
     return true;
   }
 
@@ -26480,18 +24756,7 @@
     // History-only rows trail the local matches. Within themselves they
     // keep history-search BM25 order (already sorted by score in the
     // server response, so insertion order suffices).
-    // Favor NAME matches (CCC-78): a row whose title contains the query is
-    // a stronger hit than one that only matched transcript content. Stable
-    // partition so relative order within each band is preserved; session-id
-    // prioritization below still wins overall.
-    const _nameHit = c => {
-      const name = String(c.display_name || c.ai_title || '').toLowerCase();
-      return name.indexOf(qLower) !== -1;
-    };
-    const combined = localSorted.concat(synthetic).concat(syntheticRepo);
-    const byName = combined.filter(_nameHit);
-    const rest = combined.filter(c => !_nameHit(c));
-    return _prioritizeSessionIdMatches(byName.concat(rest), qLower);
+    return _prioritizeSessionIdMatches(localSorted.concat(synthetic).concat(syntheticRepo), qLower);
   }
 
   function _fetchHistoryAugment(query) {
@@ -27236,8 +25501,6 @@
       $convSearch.focus();
     });
   }
-
-
 
   // Conversation search filter
   // Debounce the local filter re-render. Rendering the full sidebar
@@ -29150,20 +27413,6 @@
     return String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, ' ');
   }
 
-  // Reject values that clearly are NOT a session identity before crediting
-  // work to them: CLI-flag typos ("--claimed-by") and bare ticket refs
-  // ("CCC-65") have both shown up in claimed_by/closed_by via mistyped close
-  // commands. Crediting those poisons the chip (see CCC-69).
-  function _uxFixesPlausibleSessionId(value) {
-    const s = String(value || '').trim();
-    if (!s) return false;
-    if (s.startsWith('-')) return false;             // mistyped CLI flag
-    if (/^[A-Za-z][A-Za-z0-9]*(-[A-Za-z0-9]+)*-\d+$/.test(s) && s.length <= 32) {
-      return false;                                   // looks like a ticket ref (PROJ-7)
-    }
-    return true;
-  }
-
   // Every identity a conversation row can be matched on (UUID + names).
   function _uxFixesRowIdentityKeys(c) {
     if (!c) return [];
@@ -29214,14 +27463,7 @@
         // Credit the CLOSER (a worker may close by ref without a prior claim),
         // falling back to the claimer. Without this, by-ref closes are
         // unattributed and the chip freezes at the last *claimed* ticket.
-        // Skip garbage identities (mistyped CLI flags like "--claimed-by",
-        // or ticket refs like "CCC-65" written where a session id belongs) —
-        // a polluted LATEST close would otherwise shadow the last properly
-        // attributed one and the chip falls back to a meaningless project
-        // (CCC-69: "✓ (1/1)" from a one-ticket preview project).
-        const rawSid = item.closed_by || item.claimed_by;
-        if (!_uxFixesPlausibleSessionId(rawSid)) continue;
-        const csid = _uxFixesIdentityKey(rawSid);
+        const csid = _uxFixesIdentityKey(item.closed_by || item.claimed_by);
         if (!csid) continue; // unclaimed close (e.g. a manual probe) → no row to credit
         const closedAt = _uxFixesClosedAtMs(item);
         const prevC = projectLastClosed.get(project);
@@ -29231,7 +27473,6 @@
         continue;
       }
       if (status !== 'in_progress') continue;
-      if (!_uxFixesPlausibleSessionId(item.claimed_by)) continue;
       const sid = _uxFixesIdentityKey(item.claimed_by);
       if (!sid) continue;
       // "Current" = the ticket this session most RECENTLY claimed, not the
@@ -29789,12 +28030,12 @@
     });
   }
 
-  function renderArchiveList(filter, opts) {
+  function renderArchiveList(filter) {
     const $list = document.getElementById('convList');
     if (!$list) return;
     if (_renameInProgress) return;
     if (deferSidebarRenderIfDragging()) return;
-    if (!(opts && opts.force) && shouldPauseSidebarRender()) return;
+    if (shouldPauseSidebarRender()) return;
     const q = (filter || '').trim().toLowerCase();
     const scrollState = _captureArchiveListScroll(q, $list);
     const _finishArchiveRender = () => {
@@ -30639,7 +28880,7 @@
     try { return normalizeSpawnDefaultEngine(localStorage.getItem('ccc.spawnEngine')); }
     catch (_) { return 'claude'; }
   }
-  let _defaultModelsByEngine = { claude: 'fable-5', codex: 'gpt-5.5', cursor: 'auto', antigravity: '', kilo: 'kilo/stepfun/step-3.7-flash:free' };
+  let _defaultModelsByEngine = { claude: 'opus', codex: 'gpt-5.5', cursor: 'auto', antigravity: '', kilo: 'kilo/stepfun/step-3.7-flash:free' };
   let _spawnDefaultsLoaded = false;
   let _spawnDefaultsSaveTimer = null;
   let _spawnDefaultsSaving = false;
@@ -31825,14 +30066,6 @@
 
   const WHATS_NEW_FEATURES = [
     {
-      id: 'fable-5',
-      title: 'Claude Fable 5 Support',
-      date: 'Jun 9, 2026',
-      tag: 'Models',
-      desc: '<p>CCC now supports <strong>Claude Fable 5</strong> — Anthropic\'s new top-tier model above Opus — everywhere a Claude model can be picked.</p><p>Fable 5 is the new <strong>default for spawned sessions</strong>, sits at the top of the redesigned model picker (a faithful replica of Claude Code\'s native <code>/model</code> menu, with number-key shortcuts and 1M-context variants), and live sessions can switch to it mid-conversation with one click.</p>',
-      mockup: '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--bg,#0d1117);font-size:12px;max-width:280px;"><div style="display:flex;justify-content:space-between;color:var(--text-muted);padding:2px 8px 8px;">Models <span style="font-size:10px;">⇧ ⌘ I</span></div><div style="padding:6px 8px;border-radius:5px;color:var(--text);">Fable 5 <span style="color:var(--text-muted);">· Default</span> <span style="float:right;">✓</span></div><div style="height:1px;background:var(--border);margin:5px 4px;"></div><div style="display:flex;justify-content:space-between;padding:5px 8px;color:var(--text);"><span>Fable 5</span><span style="color:var(--text-muted);">1</span></div><div style="display:flex;justify-content:space-between;padding:5px 8px;color:var(--text);"><span>Opus 4.8</span><span style="color:var(--text-muted);">2</span></div><div style="display:flex;justify-content:space-between;padding:5px 8px;color:var(--text);"><span>Opus 4.8 (1M context)</span><span style="color:var(--text-muted);">3</span></div><div style="display:flex;justify-content:space-between;padding:5px 8px;color:var(--text-muted);"><span>Opus 4.7 <span style="opacity:0.7;">Legacy</span></span><span>6</span></div></div>'
-    },
-    {
       id: 'subagent-tabs',
       title: 'Subagent Tabs',
       date: 'Jun 3, 2026',
@@ -32624,8 +30857,6 @@
       headless_pid: _ls.headlessPid || null,
       headless_stale: !!_ls.headlessStale,
       terminal_present: !!_ls.terminalPresent,
-      bg_present: !!_ls.bgPresent,
-      bg_pid: _ls.bgPid || null,
       tty: _ls.tty || null,
     };
     const payload = {
@@ -32706,7 +30937,7 @@
     const el = (ann && ann.element) || {};
     // Limits annContextForClipboard applies when building the stored text.
     const trunc = [];
-    if ((ann.note || '').length > 2000) trunc.push('note → first 2000 chars');
+    if ((ann.note || '').length > 500) trunc.push('note → first 500 chars');
     if ((el.selector || '').length > 200) trunc.push('selector → 200');
     if ((el.text || '').length > 160) trunc.push('element text → 160');
     if ((ann.url || '').length > 240) trunc.push('URL → 240');
@@ -32728,8 +30959,8 @@
         (trunc.length
           ? '<div class="ann-ux-warn">⚠ Stored truncated: ' + escapeHtml(trunc.join(', ')) + '</div>'
           : '') +
-        '<div class="ann-ux-preview-label">Exactly what the worker receives — edit before submitting if needed:</div>' +
-        '<textarea class="ann-ux-preview-text" rows="14" spellcheck="false"></textarea>' +
+        '<div class="ann-ux-preview-label">Exactly what the worker receives:</div>' +
+        '<textarea class="ann-ux-preview-text" readonly rows="14"></textarea>' +
         '<div class="ann-ux-preview-actions">' +
           '<button type="button" class="ann-btn" data-ux-copy>Copy</button>' +
           '<button type="button" class="ann-btn" data-ux-cancel>Cancel</button>' +
@@ -32744,21 +30975,17 @@
     document.addEventListener('keydown', onKey, true);
     modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
     modal.querySelector('[data-ux-copy]').addEventListener('click', async () => {
-      // Copy the LIVE textarea value — the user may have edited it.
-      try { await navigator.clipboard.writeText(textArea.value); showOpToast('Annotation copied', 'success'); }
+      try { await navigator.clipboard.writeText(promptText); showOpToast('Annotation copied', 'success'); }
       catch (_) { try { textArea.select(); document.execCommand('copy'); } catch (e) {} }
     });
     modal.querySelector('[data-ux-cancel]').addEventListener('click', close);
     modal.querySelector('[data-ux-submit]').addEventListener('click', () => {
-      const edited = textArea.value;
       close();
-      // Hand the (possibly edited) prompt to the submitter so what the
-      // user reviewed is exactly what the worker receives.
-      if (typeof onSubmit === 'function') onSubmit(edited);
+      if (typeof onSubmit === 'function') onSubmit();
     });
   }
 
-  async function annOpenUxFixesQueue(ann, closeFn, _errEl, textOverride) {
+  async function annOpenUxFixesQueue(ann, closeFn, _errEl) {
     if (!ann) return;
     // Close the editor up front — the user clicked the button and
     // doesn't need to stare at the modal while the fetch is in flight.
@@ -32775,9 +31002,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           annotation_id: ann.id || '',
-          text: (typeof textOverride === 'string' && textOverride.trim())
-            ? textOverride
-            : annUxFixesQueuePrompt(ann),
+          text: annUxFixesQueuePrompt(ann),
           note: ann.note || '',
           url: ann.url || '',
           title: ann.title || '',
@@ -32858,9 +31083,6 @@
     annotationState.editor = editor;
     annPositionEditor(editor, annotationState.rect);
     const noteEl = editor.querySelector('.ann-editor-note');
-    // Cmd-V image paste in the note (CCC-89): same uploader as the composer
-    // — pasted screenshots land as a path token the worker can open.
-    try { if (typeof attachImagePaste === 'function') attachImagePaste(noteEl); } catch (_) {}
     const errEl = editor.querySelector('.ann-editor-error');
     const saveBtn = editor.querySelector('[data-ann-save]');
     const cancelBtn = editor.querySelector('[data-ann-cancel]');
@@ -33031,7 +31253,7 @@
         // copy) instead of firing straight at the queue. The annotation is
         // already persisted; the overlay can close, the preview is its own modal.
         annStop();
-        annShowUxFixesPreview(ann, (editedText) => annOpenUxFixesQueue(ann, null, errEl, editedText));
+        annShowUxFixesPreview(ann, () => annOpenUxFixesQueue(ann, null, errEl));
       });
     }
     saveBtn.addEventListener('click', save);
@@ -33151,7 +31373,6 @@
     const previewImg = modal.querySelector('.ann-screen-preview');
     if (previewImg) previewImg.src = imgSrc;
     const noteEl = modal.querySelector('.ann-editor-note');
-    try { if (typeof attachImagePaste === 'function') attachImagePaste(noteEl); } catch (_) {}
     const errEl = modal.querySelector('.ann-editor-error');
     const saveBtn = modal.querySelector('[data-ann-screen-save]');
     const cancelBtn = modal.querySelector('[data-ann-screen-cancel]');
@@ -33286,7 +31507,7 @@
 
   function annContextForClipboard(ann) {
     const element = ann.element || {};
-    const lines = ['Annotation: ' + annClipText(ann.note || '', 2000)];
+    const lines = ['Annotation: ' + annClipText(ann.note || '', 500)];
     const anchors = [];
     if (ann.url) anchors.push('URL: ' + annClipText(ann.url, 240));
     if (ann.session_id) anchors.push('Session ID: ' + ann.session_id);
@@ -33306,8 +31527,7 @@
       bits.push(ls.live ? 'live' : 'not-live');
       if (ls.headless_present) bits.push('headless' + (ls.headless_pid ? ' pid ' + ls.headless_pid : '') + (ls.headless_stale ? ' (STALE)' : ''));
       if (ls.terminal_present) bits.push('terminal' + (ls.tty ? ' ' + ls.tty : ''));
-      if (ls.bg_present) bits.push('Claude-app terminal' + (ls.bg_pid ? ' pid ' + ls.bg_pid : ''));
-      if (!ls.headless_present && !ls.terminal_present && !ls.bg_present) bits.push('no headless/terminal process');
+      if (!ls.headless_present && !ls.terminal_present) bits.push('no headless/terminal process');
       anchors.push('Session state: ' + bits.join(' · '));
     }
     if (ann.screenshot_path) anchors.push('Screenshot: ' + ann.screenshot_path);
@@ -34016,40 +32236,15 @@
   }
   const $sidebarGroupChatLiveBtn = document.getElementById('sidebarGroupChatLiveBtn');
   if ($sidebarGroupChatLiveBtn) {
-    // One live window only (CCC-103): a NAMED window.open lets the browser
-    // reuse the existing tab/window; keeping the handle lets us focus it.
-    let _gcLiveWindow = null;
     $sidebarGroupChatLiveBtn.addEventListener('click', () => {
-      // Mac app shell (WKWebView): window.open('', name) surfaces as an
-      // about:blank/empty navigation that older shells hand to NSWorkspace —
-      // Finder then shows "The application can't be opened. -50". Use the
-      // plain named open there; the shell raises the popout on navigation.
-      if (window.__CCC_MAC_APP__) {
-        _gcLiveWindow = window.open('/group-chat-live.html', 'ccc-gc-live');
-        try { if (_gcLiveWindow) _gcLiveWindow.focus(); } catch (_) {}
-        return;
-      }
-      // Re-acquire the named window with an EMPTY url: window.open('', name)
-      // returns the existing window without navigating it. Opening with the
-      // real URL re-navigates (reloads) the live page, and the browser won't
-      // raise a window that's mid-reload — that's why "Live" didn't pop it
-      // to the front after a dashboard reload lost the handle.
-      let w = null;
-      try {
-        w = (_gcLiveWindow && !_gcLiveWindow.closed)
-          ? _gcLiveWindow
-          : window.open('', 'ccc-gc-live');
-      } catch (_) {}
-      if (!w) { _gcLiveWindow = window.open('/group-chat-live.html', 'ccc-gc-live'); return; }
-      _gcLiveWindow = w;
-      let blank = false;
-      try { blank = !/group-chat-live/.test(w.location.pathname); } catch (_) { blank = true; }
-      if (blank) {
-        try { w.location.replace('/group-chat-live.html'); } catch (_) {}
-      } else {
-        showOpToast('Live group chat window focused');
-      }
-      try { w.focus(); } catch (_) {}
+      const tmp = document.createElement('a');
+      tmp.href = '/group-chat-live.html';
+      tmp.target = '_blank';
+      tmp.rel = 'noopener noreferrer';
+      tmp.style.display = 'none';
+      document.body.appendChild(tmp);
+      tmp.click();
+      setTimeout(() => tmp.remove(), 0);
     });
   }
   // "Manage group chats" modal — lists every chat from _gcActiveChats
@@ -34447,14 +32642,6 @@
       if (isSpawnCwdMenuOpen()) renderSpawnCwdMenu(ev.target.value);
       renderSpawnCwdQuickChips();
       updateNewSessionCwdNotice();
-      // Keep the chooser's repo chips honest when the CWD is edited by
-      // hand (CCC-91): highlight the chip matching the typed path, clear
-      // the highlight when the path matches none of them.
-      const _cwdNow = normalizeSpawnCwdPath(ev.target.value);
-      document.querySelectorAll('.ns-repo-chip').forEach(b => {
-        b.classList.toggle('is-current',
-          normalizeSpawnCwdPath(b.getAttribute('data-ns-repo') || '') === _cwdNow);
-      });
       if (currentConversation === '__new__') updateInputBar();
     }
   }
@@ -34502,269 +32689,9 @@
     return normalizeSpawnCwdPath(sel && sel.value);
   }
 
-  // CCC-86: adopt the REAL spawn-cwd controls (input + ▾ menu + 📁 browse,
-  // plus the worktree toggle) from the bottom input-context strip into the
-  // chooser's card 1. Moving the live DOM nodes keeps every existing
-  // handler (menu, browse, persistence) wired — one folder control, not
-  // two. _restoreCwdControlsToInputBar puts them back when a session opens.
-  // Original DOM home of the composer (#convInputBar) while the new-session
-  // stage borrows it — captured at adopt time so restore is exact.
-  let _adoptedComposerHome = null;
-  function _adoptCwdControlsIntoChooser($view) {
-    const slot = $view && $view.querySelector('#nsCwdSlot');
-    const cic = document.getElementById('convInputContext');
-    if (!slot || !cic) return;
-    const row = cic.querySelector('.spawn-cwd-row');
-    const wt = cic.querySelector('.spawn-worktree-row');
-    if (row) slot.appendChild(row);
-    if (wt) slot.appendChild(wt);
-    cic.classList.add('cwd-controls-adopted');
-    // Also center the composer itself (CCC-87 follow-up: "I also meant the
-    // input box"). Move the live #convInputBar into the stage so the prompt
-    // sits with the chooser, mid-screen; all handlers ride along.
-    const composerSlot = $view.querySelector('#nsComposerSlot');
-    const bar = document.getElementById('convInputBar');
-    if (composerSlot && bar && !composerSlot.contains(bar)) {
-      _adoptedComposerHome = { parent: bar.parentElement, next: bar.nextElementSibling };
-      composerSlot.appendChild(bar);
-      bar.classList.add('is-centered-stage');
-    }
-  }
-  function _restoreCwdControlsToInputBar() {
-    const cic = document.getElementById('convInputContext');
-    if (!cic || !cic.classList.contains('cwd-controls-adopted')) return;
-    const slot = document.getElementById('nsCwdSlot');
-    const row = slot && slot.querySelector('.spawn-cwd-row');
-    const wt = slot && slot.querySelector('.spawn-worktree-row');
-    const usage = cic.querySelector('.wp-usage');
-    if (row) cic.insertBefore(row, usage || null);
-    if (wt) cic.insertBefore(wt, usage || null);
-    cic.classList.remove('cwd-controls-adopted');
-    const bar = document.getElementById('convInputBar');
-    if (bar && _adoptedComposerHome && _adoptedComposerHome.parent
-        && bar.parentElement !== _adoptedComposerHome.parent) {
-      bar.classList.remove('is-centered-stage');
-      _adoptedComposerHome.parent.insertBefore(bar, _adoptedComposerHome.next || null);
-    }
-    _adoptedComposerHome = null;
-  }
-
-  // Fun default project names for the New-project card. A random one is
-  // prefilled on entry; the 🎲 button rolls again. Slugify turns the
-  // pick into the ~/dev/<slug> folder suggestion.
-  const NS_FUN_PROJECT_NAMES = [
-    'turbo-walrus', 'quantum-falafel', 'midnight-mango', 'electric-hummus', 'rocket-pita',
-    'neon-cactus', 'disco-octopus', 'cosmic-bagel', 'turbo-pickle', 'laser-llama',
-    'funky-matzah', 'atomic-tahini', 'groovy-gecko', 'plasma-penguin', 'ninja-noodle',
-    'bionic-burrito', 'stealth-sabra', 'mega-meerkat', 'hyper-hoopoe', 'pixel-pomegranate',
-    'sneaky-shakshuka', 'dancing-dolphin', 'flying-falcon', 'silent-sphinx', 'rapid-raccoon',
-    'golden-golem', 'witty-wombat', 'zesty-zebra', 'cunning-camel', 'brave-burekas',
-    'lucky-lemur', 'magic-malabi', 'swift-swallow', 'bold-baklava', 'clever-couscous',
-    'mighty-mole', 'jolly-jackal', 'shiny-shekel', 'happy-halva', 'dapper-dingo',
-    'frozen-falcon', 'crimson-koala', 'velvet-viper', 'amber-antelope', 'cobalt-cricket',
-    'scarlet-sloth', 'indigo-ibex', 'emerald-emu', 'turquoise-tapir', 'magenta-mongoose',
-    'iron-dome-jr', 'startup-nation', 'desert-bloom', 'dead-sea-surfer', 'negev-ninja',
-    'galilee-glider', 'carmel-comet', 'jaffa-jet', 'eilat-eagle', 'masada-mainframe',
-    'silicon-shuk', 'hummus-engine', 'krembo-cloud', 'bamba-bot', 'bisli-blaster',
-    'sufganiyah-server', 'arak-attack', 'tahini-tornado', 'zaatar-zeppelin', 'labneh-launcher',
-    'moonshot-mule', 'gravity-goose', 'orbit-otter', 'comet-cobra', 'nebula-newt',
-    'stellar-stork', 'lunar-lobster', 'solar-salmon', 'astro-armadillo', 'galaxy-gibbon',
-    'warp-weasel', 'photon-phoenix', 'quark-quail', 'tensor-toucan', 'vector-vole',
-    'binary-bison', 'kernel-kiwi', 'syntax-squid', 'cache-cheetah', 'lambda-leopard',
-    'docker-duck', 'regex-rhino', 'pixel-panther', 'crypto-crab', 'neural-narwhal',
-    'fusion-ferret', 'matrix-marmot', 'cyber-seagull', 'data-dromedary', 'logic-lynx',
-  ];
-
-  // CCC-82: wire the front-and-center new-session chooser. Repo chips set
-  // the spawn CWD in place; the New-project card mkdirs via
-  // /api/project/create, registers the repo, points the CWD at it, and
-  // drops the user into the prompt ("what is this about?").
-  function _wireNewSessionChooser($view, paneId) {
-    if (!$view) return;
-    // Emphasis flip (CCC-94): the existing-folder card is the de-facto
-    // default (the CWD already points at a repo), so it starts highlighted
-    // and the new-project card dimmed. Interacting with either card flips
-    // the emphasis so the active choice is always the bright one.
-    const cardExisting = $view.querySelector('#nsCardExisting');
-    const cardNew = $view.querySelector('#nsCardNewProject');
-    const emphasize = (which) => {
-      if (!cardExisting || !cardNew) return;
-      cardExisting.classList.toggle('is-primary', which === 'existing');
-      cardExisting.classList.toggle('is-dimmed', which !== 'existing');
-      cardNew.classList.toggle('is-primary', which === 'new');
-      cardNew.classList.toggle('is-dimmed', which !== 'new');
-    };
-    if (cardNew) {
-      cardNew.addEventListener('focusin', () => emphasize('new'));
-      cardNew.addEventListener('click', () => emphasize('new'));
-    }
-    if (cardExisting) {
-      cardExisting.addEventListener('focusin', () => emphasize('existing'));
-      cardExisting.addEventListener('click', () => emphasize('existing'));
-    }
-    $view.querySelectorAll('[data-ns-repo]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        setSpawnCwdInputValue(btn.getAttribute('data-ns-repo') || '');
-        $view.querySelectorAll('.ns-repo-chip.is-current').forEach(b => b.classList.remove('is-current'));
-        btn.classList.add('is-current');
-        emphasize('existing');
-        const input = composerInputForPane(paneId) || $convInput;
-        if (input) input.focus();
-      });
-    });
-    const nameEl = $view.querySelector('#nsNewProjectName');
-    const createBtn = $view.querySelector('#nsNewProjectCreate');
-    const hintEl = $view.querySelector('#nsNewProjectHint');
-    if (!nameEl || !createBtn) return;
-    const slugify = s => String(s || '').trim().toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
-    // The ONE CWD field (CCC-102) is the adopted #spawnCwdPicker. The
-    // new-project name writes its ~/dev/<slug> suggestion there — but only
-    // while the field still holds our last auto-suggestion, so a manual
-    // edit is never clobbered.
-    let _lastAutoCwd = '';
-    const suggestCwd = () => {
-      const slug = slugify(nameEl.value);
-      const picker = document.getElementById('spawnCwdPicker');
-      if (!slug || !picker) return;
-      const cur = (picker.value || '').trim();
-      if (!_lastAutoCwd || cur === _lastAutoCwd || cur === '') {
-        _lastAutoCwd = '~/dev/' + slug;
-        setSpawnCwdInputValue(_lastAutoCwd);
-      }
-    };
-    nameEl.addEventListener('input', () => {
-      createBtn.disabled = !slugify(nameEl.value);
-      suggestCwd();
-    });
-    // Prefill a fun random name so the card is one click from working;
-    // the dice rolls a fresh one. The CWD suggestion is NOT pushed on
-    // prefill — only once the user engages with the card — so opening the
-    // stage doesn't hijack the CWD away from the default repo.
-    const rollName = () => {
-      const pick = NS_FUN_PROJECT_NAMES[Math.floor(Math.random() * NS_FUN_PROJECT_NAMES.length)];
-      nameEl.value = pick;
-      createBtn.disabled = false;
-      if (_lastAutoCwd) suggestCwd();  // re-suggest only if we already own the field
-    };
-    const diceBtn = $view.querySelector('#nsNewProjectDice');
-    if (diceBtn) diceBtn.addEventListener('click', () => { rollName(); nameEl.focus(); });
-    if (!nameEl.value) rollName();
-    nameEl.addEventListener('focus', () => suggestCwd());
-    const submit = async () => {
-      const target = (getSpawnCwd() || '').trim() || ('~/dev/' + slugify(nameEl.value));
-      if (!target || createBtn.disabled) return;
-      createBtn.disabled = true;
-      createBtn.textContent = 'Creating…';
-      try {
-        const res = await fetch('/api/project/create', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: target }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-        if (Array.isArray(data.repos)) repoListState.repos = data.repos;
-        populateSpawnCwdPicker();
-        setSpawnCwdInputValue(data.path);
-        showOpToast('Project folder created: ' + data.path, 'success');
-        if (hintEl) hintEl.textContent = '✓ Folder ready. Describe the project below and press Enter to start.';
-        const input = composerInputForPane(paneId) || $convInput;
-        if (input) {
-          input.placeholder = 'What is this project about? Describe it to start the first session…';
-          input.focus();
-        }
-      } catch (err) {
-        showOpToast('Could not create project: ' + ((err && err.message) || 'unknown'), 'error');
-        createBtn.disabled = false;
-      } finally {
-        createBtn.textContent = 'Create folder & start';
-      }
-    };
-    createBtn.addEventListener('click', submit);
-    nameEl.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); submit(); }
-    });
-  }
-
-  // ── "Extend CCC" recipe cards on the new-session stage ────────────────
-  // Driven by the `kind: "extension"` entries in static/templates.json —
-  // each card prefills the composer with a cookbook integration prompt the
-  // user runs inside their own app's repo (pick the folder via the chips
-  // above). Fetched once per page load; a failed fetch stashes [] so
-  // re-entering new-session mode doesn't retry on every open.
-  let _nsExtensionTemplates = null;
-  async function _loadNsExtensionTemplates() {
-    if (_nsExtensionTemplates !== null) return _nsExtensionTemplates;
-    try {
-      const res = await fetch('/static/templates.json', { cache: 'no-store' });
-      const data = await res.json();
-      const all = Array.isArray(data && data.templates) ? data.templates : [];
-      _nsExtensionTemplates = all.filter(t => t && t.kind === 'extension' && typeof t.prompt === 'string' && t.prompt.trim());
-    } catch (_) {
-      _nsExtensionTemplates = [];
-    }
-    return _nsExtensionTemplates;
-  }
-  function _renderNsExtensions($view, paneId) {
-    const wrap = $view.querySelector('#nsExtensionsWrap');
-    const grid = $view.querySelector('#nsExtensionsGallery');
-    if (!wrap || !grid) return;
-    _loadNsExtensionTemplates().then(templates => {
-      if (!templates.length) return;
-      // The stage may have been torn down while the fetch was in flight.
-      if (currentConversation !== '__new__' || !grid.isConnected) return;
-      grid.innerHTML = '';
-      templates.forEach(tpl => {
-        const card = document.createElement('button');
-        card.type = 'button';
-        card.className = 'nsm-gallery-card';
-        card.title = 'Click to fill the prompt below, then pick your app’s folder and press Enter';
-        const title = document.createElement('span');
-        title.className = 'nsm-gallery-card-title';
-        title.textContent = tpl.name || tpl.id;
-        const desc = document.createElement('span');
-        desc.className = 'nsm-gallery-card-desc';
-        desc.textContent = tpl.description || '';
-        card.appendChild(title);
-        card.appendChild(desc);
-        if (tpl.docs) {
-          const meta = document.createElement('span');
-          meta.className = 'nsm-gallery-card-meta';
-          const docsLink = document.createElement('a');
-          docsLink.className = 'nsm-gallery-chip';
-          docsLink.href = tpl.docs;
-          docsLink.target = '_blank';
-          docsLink.rel = 'noopener';
-          docsLink.textContent = 'recipe ↗';
-          // Keep the link from also firing the card's fill action.
-          docsLink.addEventListener('click', ev => ev.stopPropagation());
-          meta.appendChild(docsLink);
-          card.appendChild(meta);
-        }
-        card.addEventListener('click', () => {
-          const input = composerInputForPane(paneId) || $convInput;
-          if (!input) return;
-          input.value = tpl.prompt;
-          setInputDraftForKey(inputDraftKeyForConversation('__new__'), tpl.prompt);
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          moveInputCaretToEnd(input);
-          input.focus();
-          grid.querySelectorAll('.nsm-gallery-card.is-selected').forEach(el => el.classList.remove('is-selected'));
-          card.classList.add('is-selected');
-        });
-        grid.appendChild(card);
-      });
-      wrap.style.display = '';
-    });
-  }
-
   function enterNewSessionMode() {
     const initialPrompt = typeof arguments[0] === 'string' ? arguments[0] : null;
     const paneId = activePaneId();
-    // Rescue the adopted CWD controls before the innerHTML rebuild below
-    // destroys the slot they live in (re-entering new-session mode).
-    try { _restoreCwdControlsToInputBar(); } catch (_) {}
     rememberComposerDraftForPane(paneId);
     if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
       try { stopGroupChatReader({ rerenderSidebar: true }); } catch (_) {}
@@ -34802,54 +32729,11 @@
       const newSessionHelp = spawnEngine === 'antigravity'
         ? 'Type a prompt below and press Enter to spawn a headless Antigravity run with AGY print mode.'
         : 'Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.';
-      // Front-and-center folder choice (CCC-82/86/87): two explicit paths —
-      // existing folder/repo, or a brand-new project (name → suggested
-      // ~/dev/<slug> folder → create + start). Chips come from the same
-      // source as the bottom bar (recent spawn cwds, then known repos) so
-      // they're never falsely empty, and the real CWD picker row is
-      // ADOPTED into card 1 so there's one folder control, not two.
-      const chipOpts = (typeof spawnCwdQuickChipOptions === 'function')
-        ? spawnCwdQuickChipOptions(spawnCwd)
-        : [];
-      const extraOpts = (Array.isArray(spawnCwdOptions) ? spawnCwdOptions : [])
-        .filter(o => o && o.value && !chipOpts.some(c => c.value === o.value))
-        .slice(0, Math.max(0, 12 - chipOpts.length));
-      const repoChipsHtml = chipOpts.concat(extraOpts).map(o => {
-        const active = o.value === spawnCwd ? ' is-current' : '';
-        return '<button type="button" class="ns-repo-chip' + active + '" data-ns-repo="' + escapeAttr(o.value) + '" title="' + escapeAttr(o.value) + '">' + escapeHtml(o.label || o.value) + '</button>';
-      }).join('');
-      $view.innerHTML = '<div class="ns-stage">'
-        + '<div class="empty-state ns-hero" style="height:auto;flex-direction:column;gap:10px;text-align:center;">'
-        + '<div class="ns-hero-title">🚀 Start a new session</div>'
-        + '<div class="ns-choice-grid">'
-        +   '<div class="ns-choice-card is-primary" id="nsCardExisting">'
-        +     '<div class="ns-choice-title">1 · Existing folder / repo</div>'
-        +     '<div class="ns-repo-chips">' + (repoChipsHtml || '<span class="ns-muted">No folders yet — browse with 📁 below.</span>') + '</div>'
-        +   '</div>'
-        +   '<div class="ns-choice-card is-dimmed" id="nsCardNewProject">'
-        +     '<div class="ns-choice-title">2 · New project</div>'
-        +     '<span class="ns-name-row">'
-        +       '<input type="text" id="nsNewProjectName" class="ns-input" placeholder="Project name…" autocomplete="off" spellcheck="false">'
-        +       '<button type="button" id="nsNewProjectDice" class="ns-dice-btn" title="Roll another name">&#127922;</button>'
-        +     '</span>'
-        +     '<button type="button" id="nsNewProjectCreate" class="ns-create-btn" disabled>Create folder &amp; start</button>'
-        +     '<div class="ns-muted" id="nsNewProjectHint">Folder comes from the CWD field below — we create it, then you describe the project.</div>'
-        +   '</div>'
-        + '</div>'
+      $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
+        + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
+        + '<div style="font-size:12px;color:var(--text-muted);">CWD: <span id="newSessionCwdNotice" style="color:var(--text);" title="' + escapeAttr(spawnCwd) + '">' + escapeHtml(repoLabel) + '</span></div>'
         + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">' + escapeHtml(newSessionHelp) + '</div>'
-        // ONE CWD field (CCC-102): the spawn-cwd controls are adopted into
-        // this slot, directly above the prompt. Chips and the new-project
-        // name both write into it; it always shows the full effective path.
-        + '<div class="ns-cwd-slot ns-cwd-unified" id="nsCwdSlot"></div>'
-        + '<div class="ns-composer-slot" id="nsComposerSlot"></div>'
-        + '<div class="new-session-template-wrap" id="nsExtensionsWrap" style="display:none;">'
-        +   '<div class="new-session-template-title">Extend CCC · integration recipes</div>'
-        +   '<div class="nsm-gallery inline-new-session-templates" id="nsExtensionsGallery"></div>'
-        + '</div>'
-        + '</div></div>';
-      _wireNewSessionChooser($view, paneId);
-      _adoptCwdControlsIntoChooser($view);
-      _renderNsExtensions($view, paneId);
+        + '</div>';
     }
     if (typeof syncSpawnEngineDependentUi === 'function') syncSpawnEngineDependentUi();
     updateInputBar();
@@ -35644,22 +33528,10 @@
       }
     }
 
-    // "4/22" current-match counter in the find bar. Empty when no query;
-    // "0/0" when the query has no matches.
-    function chatFindUpdateCount() {
-      const el = document.getElementById('chatFindCount');
-      if (!el) return;
-      if (!$chatFindInput.value) { el.textContent = ''; return; }
-      el.textContent = _chatFindRanges.length
-        ? (_chatFindMatchIndex + 1) + '/' + _chatFindRanges.length
-        : '0/0';
-    }
-
     function chatFindClear() {
       _chatFindRanges = [];
       _chatFindMatchIndex = 0;
       _chatFindLastBuiltQuery = '';
-      chatFindUpdateCount();
       try {
         if (window.CSS && CSS.highlights) {
           if (CSS.highlights.has('chat-find')) CSS.highlights.delete('chat-find');
@@ -35749,7 +33621,6 @@
         }
       }
       chatFindPaint();
-      chatFindUpdateCount();
     }
     refreshChatFind = chatFindStep;
 
