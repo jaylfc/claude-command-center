@@ -7,14 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.12.0] - 2026-06-09
-
-### Added
-- Claude Fable 5 support: new top-tier model available in the model picker, set as the default for spawned Claude sessions, with live mid-session switching. The Claude model picker is now a faithful replica of Claude Code's native `/model` menu (number-key shortcuts, 1M-context variants, Fast mode toggle on Opus models).
-
-### Fixed
-- Fixed model switching failing with "There's an issue with the selected model": versioned aliases like `sonnet-4-6` are now expanded to full `claude-` IDs before being passed to the CLI's `--model` flag on spawn and resume.
-
 ## [4.11.0] - 2026-06-09
 
 ### Added
@@ -1634,8 +1626,7 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v4.12.0...HEAD
-[4.12.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.12.0
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v4.11.0...HEAD
 [4.11.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.11.0
 [4.10.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.10.0
 [4.9.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.9.0
