@@ -12474,7 +12474,16 @@
     // "Human", or "system" (lifecycle entries the orchestrator appends).
     // Capturing all three lets us style system lines without scattering
     // them through the previous participant's message body.
-    const matches = Array.from(text.matchAll(/^##\s+(.+?—\s+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b|system(?::|\b)).*)$/gm));
+    // CCC-60: speaker headings come in TWO styles and we must split on both,
+    // or a post in the unrecognised style gets absorbed into the previous
+    // speaker's bubble ("a new response is lumped with a previous response"):
+    //   A) `## <ts> — <8hex>: NAME emoji`  (group-chat-checkin posts, Human)
+    //   B) `### \`NAME\` (<8hex>)`          (CCC-relayed agent posts)
+    // The 8-hex participant hash (after `— ` or inside trailing `(…)`) is the
+    // reliable boundary signal in either case.
+    const matches = Array.from(text.matchAll(
+      /^#{2,3}[ \t]+(.+?(?:—[ \t]+(?:[0-9a-fA-F]{8}(?::|\b)|Human\b|system(?::|\b)).*|.*\([0-9a-fA-F]{8}\)))[ \t]*$/gm
+    ));
 
     let firstSpeaker = '';
     let lastSpeaker = '';
@@ -12529,9 +12538,18 @@
       const body = rawBody
         .replace(/^\s*---\s*$/gm, '')
         .trim();
-      const parts = heading.split(/\s+—\s+/);
-      const when = parts.length > 1 ? parts.shift() : '';
-      const speaker = parts.length ? parts.join(' — ') : heading;
+      // Format A ("<ts> — speaker") splits on the em-dash; format B
+      // ("`name` (hash)") has no dash — derive the speaker by stripping the
+      // trailing (hash) and backticks, and has no timestamp.
+      let when = '';
+      let speaker = heading;
+      if (/\s+—\s+/.test(heading)) {
+        const parts = heading.split(/\s+—\s+/);
+        when = parts.length > 1 ? parts.shift() : '';
+        speaker = parts.length ? parts.join(' — ') : heading;
+      } else {
+        speaker = heading.replace(/\s*\([0-9a-fA-F]{8}\)\s*$/, '').replace(/`/g, '').trim() || heading;
+      }
       const isSystem = /^\s*system\b/i.test(speaker);
 
       if (!isSystem) {
