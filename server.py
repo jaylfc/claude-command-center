@@ -25377,15 +25377,22 @@ def resume_session_headless(session_id, text):
     ]
     cmd.extend(_claude_session_state_args())
     # Per-session override (set via the click-to-switch picker). Resume
-    # would otherwise inherit the previously-recorded model. The `[1m]`
-    # suffix flips the 1M-context variant when supported.
+    # would otherwise inherit the previously-recorded model.
+    #
+    # CCC-55: the `[1m]` suffix is a TUI-only affordance for the interactive
+    # `/model` slash command — it is NOT a valid `--model` value. Spawning
+    # `claude -p --model opus-4-8[1m]` is rejected with "There's an issue with
+    # the selected model (opus-4-8[1m]). It may not exist." In headless mode
+    # the 1M context window is enabled via the `context-1m-2025-08-07` beta
+    # header (`--betas`), not a model-id suffix. So pass the bare alias and add
+    # the beta when the 1M variant is selected.
     override = _get_session_override(session_id)
     if override and override.get("model"):
-        alias = _short_model_alias(override["model"])
-        if override.get("context_1m"):
-            alias += "[1m]"
+        alias = _short_model_alias(override["model"])  # already strips any [1m]
         if alias:
             cmd.extend(["--model", alias])
+        if override.get("context_1m"):
+            cmd.extend(["--betas", "context-1m-2025-08-07"])
 
     log_fh = open(log_path, "w")
     fifo_path, child_stdin_fd = _make_stdin_fifo(log_path)
