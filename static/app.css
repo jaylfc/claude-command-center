@@ -3630,6 +3630,15 @@
     font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
   }
   #convList .conv-repo-search-label { color: var(--cyan); }
+  /* CCC-61: ID-match box — distinct accent so a UUID search result reads as a
+     dedicated, one-click box rather than a repo-match. */
+  #convList .conv-id-search-section {
+    border-left: 2px solid var(--accent, #58a6ff);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent, #58a6ff) 7%, transparent);
+  }
+  #convList > .conv-id-search-section:first-child { margin-top: 0; border-top: 0; padding-top: 4px; }
+  #convList .conv-id-search-section .conv-repo-search-label { color: var(--accent, #58a6ff); }
   #convList .conv-repo-search-name {
     color: var(--text); text-transform: none; letter-spacing: 0;
     font-weight: 600; font-size: 13px;

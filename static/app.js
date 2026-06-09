@@ -16220,8 +16220,20 @@
       return visibleCards.map(c => _renderRow(c, opts)).join('')
         + _ghIssueShowMoreHtml(key, hiddenCount, expanded);
     };
+    // CCC-61: surface UUID/id-search hits in their own labelled box at the very
+    // top (the user asked for "a dedicated box — one click to open"), instead of
+    // bare rows that blend into whatever section follows. Reuses the repo-search
+    // section chrome so it reads as a distinct result group.
     const _idSearchRowsHtml = _idSearchConvs.length
-      ? _idSearchConvs.map(c => _renderRow(c)).join('')
+      ? '<div class="conv-repo-search-section conv-id-search-section" data-role="id-search-section">'
+        + '<div class="conv-repo-search-header">'
+        +   '<span class="conv-repo-search-label">ID match</span>'
+        +   '<span class="conv-repo-search-hint">' + _idSearchConvs.length + ' — click to open</span>'
+        + '</div>'
+        + '<div class="conv-repo-search-list">'
+        + _idSearchConvs.map(c => _renderRow(c)).join('')
+        + '</div>'
+        + '</div>'
       : '';
     const _repoSearchRowsHtml = (() => {
       if (!_repoSearchActive) return '';
