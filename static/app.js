@@ -2999,6 +2999,7 @@
   // 1s ticker can skip ALL work (no querySelectorAll, no innerHTML) on the
   // common idle path where no session is live.
   let _liveStripShown = false;
+  let _liveStripLastLiveTime = 0;
   function updateLiveToolStrip() {
     // Skip while the user is typing into a textarea / text input. This
     // runs on a 1s ticker; each pass does a document.querySelectorAll
@@ -3017,6 +3018,21 @@
     // Tear the indicator down once on the live->idle transition, then do
     // zero DOM work each tick until a session goes live again.
     if (!liveStatus.live) {
+      // Brief "✓ Done" flash for ~4s after session goes idle
+      const _doneAge = _liveStripLastLiveTime ? (Date.now() - _liveStripLastLiveTime) : 9999999;
+      if (_doneAge < 4000) {
+        document.querySelectorAll('.conv-live-tool-strip').forEach(n => n.remove());
+        let _doneInline = $view.querySelector('.conv-live-tool-inline:not(.optimistic)');
+        if (!_doneInline) {
+          _doneInline = document.createElement('div');
+          _doneInline.className = 'conv-live-tool-inline';
+          $view.appendChild(_doneInline);
+        }
+        _doneInline.className = 'conv-live-tool-inline is-done';
+        _doneInline.innerHTML = '<span class="cl-done-check">✓</span><span class="cl-tool">Done</span>';
+        _liveStripShown = true;
+        return;
+      }
       if (_liveStripShown) {
         document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(n => n.remove());
         updateLiveStripOffset($view, null);
@@ -3024,6 +3040,8 @@
       }
       return;
     }
+    // Track last-seen-live timestamp for the Done flash
+    _liveStripLastLiveTime = Date.now();
     document.querySelectorAll('.conv-live-tool-strip, .conv-live-tool-inline:not(.optimistic)').forEach(node => {
       if (node.parentElement !== $view) node.remove();
     });
@@ -3046,12 +3064,27 @@
     // just-answered question in the gap between the modal closing and the server
     // clearing question_waiting. Terminal questions (tty present) keep the card.
     const _headlessQuestion = isQuestion && !liveStatus.tty;
-    const shouldShow = liveStatus.live && tool && liveStatus.sidecarStatus === 'active'
-      && (ageSec < 300 || isQuestion) && !_headlessQuestion;
+    const isGenerating = liveStatus.live && !tool;
+    const shouldShow = (liveStatus.live && tool && liveStatus.sidecarStatus === 'active'
+      && (ageSec < 300 || isQuestion) && !_headlessQuestion)
+      || isGenerating;
     if (!shouldShow) {
       if (inline) inline.remove();
       updateLiveStripOffset($view, null);
       _liveStripShown = false;
+      return;
+    }
+    // "Generating…" — session is live but no tool is executing yet/anymore
+    if (isGenerating) {
+      if (!inline) {
+        inline = document.createElement('div');
+        inline.className = 'conv-live-tool-inline';
+        $view.appendChild(inline);
+      }
+      inline.className = 'conv-live-tool-inline is-generating';
+      inline.innerHTML = '<span class="cl-pulse"></span><span class="cl-tool">Generating…</span>';
+      inline.title = 'Session is live — model is generating';
+      _liveStripShown = true;
       return;
     }
     // Real data arrived — drop the optimistic placeholder (right pane)
@@ -13139,7 +13172,7 @@
       // participant's session. Useful when one agent has gone quiet
       // (last spoken 3h ago, last mentioned 2m ago, etc.) and you want
       // to wake it up specifically without nudging everyone.
-      html += `<button type="button" class="gco-nudge-btn" data-gc-nudge="${escapeAttr(sid)}" title="Re-inject the /group-chat prompt into ${escapeAttr(name)}'s session — wakes this agent specifically.">Nudge</button>`;
+      html += `<button type="button" class="gco-nudge-btn" data-gc-nudge="${escapeAttr(sid)}" data-gc-nudge-name="${escapeAttr(name)}" title="Re-inject the /group-chat prompt into ${escapeAttr(name)}'s session — wakes this agent specifically.">Nudge</button>`;
 
       html += `</div>`;
     }
@@ -13173,6 +13206,15 @@
           if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
           btn.textContent = 'Nudged ✓';
           if (typeof showOpToast === 'function') showOpToast('Nudged ' + (sid.slice(0, 8)), 'success');
+          const _nudgedName = btn.getAttribute('data-gc-nudge-name') || sid.slice(0, 8);
+          const _gcBodyEl = document.getElementById('gcReaderBody');
+          if (_gcBodyEl) {
+            const _notice = document.createElement('div');
+            _notice.className = 'gc-nudge-notice';
+            _notice.textContent = '↗ Pinged ' + _nudgedName;
+            _gcBodyEl.appendChild(_notice);
+            setTimeout(() => { if (_notice.parentElement) _notice.remove(); }, 8000);
+          }
         } catch (err) {
           btn.textContent = 'Nudge failed';
           if (typeof showOpToast === 'function') showOpToast('Nudge failed: ' + (err && err.message || 'unknown'), 'error');
@@ -13307,6 +13349,7 @@
     try {
       await ccPostJson('/api/group-chat/post', { path: _gcReaderPath, id: _gcReaderId, text });
       if (input) input.value = '';
+      _gcLastMtime = null;  // force re-render even if file mtime hasn't updated yet
       await pollGroupChatReader();
     } catch (err) {
       showOpToast('Send failed: ' + err.message, 'error');
@@ -22648,7 +22691,8 @@
         + (engine === 'antigravity' ? '' : '\n\nClick to change model');
       const modelInner = escapeHtml(shortModel)
         + (isOneM ? ' <span class="wp-model-1m">1M</span>' : '')
-        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '');
+        + (queued ? ' <span class="wp-model-pending">→ next</span>' : '')
+        + ' <span class="wp-model-chevron">&#x25be;</span>';
       if (engine === 'antigravity') {
         modelPill = ' <span class="wp-model-pill is-static" title="' + escapeHtml(modelTip) + '">'
           + modelInner
@@ -22795,6 +22839,7 @@
       { id: 'sonnet-4-8', label: 'sonnet-4-8', oneM: true },
       { id: 'opus-4-8',   label: 'opus-4-8',   oneM: true },
       { id: 'opus-4-7',   label: 'opus-4-7',   oneM: true },
+      { id: 'sonnet-4-7', label: 'sonnet-4-7', oneM: true },
       { id: 'sonnet-4-6', label: 'sonnet-4-6', oneM: true },
       { id: 'haiku-4-8',  label: 'haiku-4-8',  oneM: false },
       { id: 'haiku-4-5',  label: 'haiku-4-5',  oneM: false },

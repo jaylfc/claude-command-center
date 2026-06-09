@@ -2193,6 +2193,7 @@
     font-size: 9px;
     font-weight: 700;
   }
+  .conv-input-context .wp-model-chevron { opacity: 0.45; font-size: 8px; vertical-align: middle; }
   /* Model picker popover — anchored under the wp-model-pill button. */
   .model-picker-pop {
     position: fixed; z-index: 9000;
@@ -6459,6 +6460,16 @@
     word-break: normal;
   }
   .conv-live-tool-inline .cl-age { color: var(--text-muted); font-size: 11px; margin-left: auto; flex: 0 0 auto; }
+  .conv-live-tool-inline.is-generating {
+    color: var(--text-muted); background: rgba(139,148,158,0.08); border-color: rgba(139,148,158,0.20);
+  }
+  .conv-live-tool-inline.is-generating .cl-pulse {
+    background: var(--text-muted); box-shadow: none; animation: pulse 1.6s infinite;
+  }
+  .conv-live-tool-inline.is-done {
+    color: var(--green, #3fb950); background: rgba(63,185,80,0.08); border-color: rgba(63,185,80,0.25);
+  }
+  .conv-live-tool-inline.is-done .cl-done-check { font-size: 11px; font-weight: 700; margin-right: 2px; }
   .conv-live-tool-strip .cl-question-detail,
   .conv-live-tool-inline .cl-question-detail {
     flex: 1 1 calc(100% - 16px);
@@ -8998,6 +9009,10 @@
 #gcReader.gc-drop-target {
   outline: 2px dashed var(--accent); outline-offset: -4px;
   background: rgba(88, 166, 255, 0.05);
+}
+.gc-nudge-notice {
+  color: var(--accent, #58a6ff); font-size: 11.5px; font-style: italic;
+  opacity: 0.75; padding: 4px 14px 8px; user-select: none;
 }
 
 /* Empty section: collapse the bottom padding so the lone header reads
