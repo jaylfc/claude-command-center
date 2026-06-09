@@ -23358,6 +23358,27 @@
     return words;
   }
 
+  // CCC-49: pull the "spicy" argument out of a command — the bare token that
+  // actually says what it's doing (the grep pattern, the find -name). Skips
+  // flags and the values of flags that take one, so `grep -A 3 foo` → "foo",
+  // not "3". Best-effort; it's a label, not a parser.
+  function shellSearchTerm(words) {
+    const valueFlags = new Set([
+      '-e', '-A', '-B', '-C', '-m', '-d', '-f', '-g',
+      '--include', '--exclude', '--include-dir', '--exclude-dir',
+      '--glob', '--type', '-t',
+    ]);
+    for (let k = 1; k < words.length; k++) {
+      const w = words[k];
+      if (w.startsWith('-')) {
+        if (valueFlags.has(w)) k++;   // skip the flag's value too
+        continue;
+      }
+      return w;                       // first bare arg = the search term
+    }
+    return '';
+  }
+
   function compactShellCommandLabel(command) {
     let raw = String(command || '').replace(/\s+/g, ' ').trim();
     if (!raw) return '';
@@ -23366,6 +23387,17 @@
     if (!words.length) return raw.length > 40 ? raw.slice(0, 39) + '…' : raw;
     const cmd = _pathBase(words[0]);
     const sub = words[1] && !words[1].startsWith('-') ? words[1] : '';
+    const _short = (s) => s.length > 28 ? s.slice(0, 27) + '…' : s;
+    // Search tools: the pattern is the meaningful part, not the bare verb.
+    if (['grep', 'egrep', 'fgrep', 'rg', 'ripgrep', 'ag', 'ack'].includes(cmd)) {
+      const term = shellSearchTerm(words);
+      return term ? cmd + ' ' + _short(term) : cmd;
+    }
+    if (cmd === 'find') {
+      const ni = words.indexOf('-name');
+      const pat = (ni >= 0 && words[ni + 1]) ? words[ni + 1] : sub;
+      return pat ? 'find ' + _short(pat) : cmd;
+    }
     if (cmd === 'git' && sub) return 'git ' + sub;
     if (cmd === 'gh' && sub) return 'gh ' + sub;
     if (cmd === 'npx' && sub) {
