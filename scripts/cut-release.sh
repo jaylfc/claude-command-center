@@ -92,9 +92,22 @@ if [ "$DRY_RUN" = 0 ]; then
     || { echo "${RED}version bump verification failed${NC}" >&2; exit 1; }
 fi
 
+# Landing page (ccc.amirfish.ai, served from docs/) — bump the DMG download
+# links so the "Download for Mac" CTA tracks the release. Only when a DMG is
+# actually built: a --skip-dmg source release has no DMG, so leave the links
+# on the previous version rather than point them at a 404.
+if [ "$SKIP_DMG" = 0 ]; then
+  run "sed -i '' -E 's#releases/download/v[0-9.]+/ccc-v[0-9.]+\.dmg#releases/download/v${VERSION}/ccc-v${VERSION}.dmg#g' docs/index.html"
+  run "sed -i '' -E 's#CCC v[0-9.]+\.dmg#CCC v${VERSION}.dmg#g' docs/index.html"
+  if [ "$DRY_RUN" = 0 ]; then
+    grep -q "ccc-v${VERSION}.dmg" docs/index.html \
+      || { echo "${RED}landing-page download bump failed (docs/index.html)${NC}" >&2; exit 1; }
+  fi
+fi
+
 # ── 4. Commit + tag + push ──────────────────────────────────────────────────
 step "4/9  Commit, tag, push main + tag"
-run "git add CHANGELOG.md pyproject.toml server.py changelog.d"
+run "git add CHANGELOG.md pyproject.toml server.py changelog.d docs/index.html"
 run "git commit -m 'chore(release): v${VERSION}' -m 'Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>'"
 run "git tag -a v${VERSION} -m 'v${VERSION}'"
 run "git push origin main"
