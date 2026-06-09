@@ -15998,7 +15998,13 @@
         } else {
           prCls = 'pushed';    prGlyph = '';   prTitle = 'PR opened by this session';
         }
-        signals += '<span class="conv-signal ' + prCls + '" title="' + prTitle + '">' + prGlyph + 'PR #' + c.tail_pr_number + '</span>';
+        // For github_pr rows: make the chip a button that opens GitHub directly
+        // (the row click now opens an in-pane PR detail, not GitHub).
+        if (isGithubPrRow && c.tail_pr_url) {
+          signals += '<button type="button" class="conv-signal ' + prCls + '" data-role="pr-external-link" data-pr-url="' + escapeAttr(c.tail_pr_url) + '" title="Open PR #' + c.tail_pr_number + ' on GitHub ↗">' + prGlyph + 'PR #' + c.tail_pr_number + ' ↗</button>';
+        } else {
+          signals += '<span class="conv-signal ' + prCls + '" title="' + prTitle + '">' + prGlyph + 'PR #' + c.tail_pr_number + '</span>';
+        }
         if (Array.isArray(c.pr_notes)) {
           for (const note of c.pr_notes) {
             if (!note || !note.label) continue;
@@ -17475,6 +17481,14 @@
       });
       _refreshShipStatus(repo);
     });
+    // github_pr row: ↗ chip button opens GitHub directly (row click opens in-pane).
+    $convList.querySelectorAll('[data-role="pr-external-link"]').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const url = btn.getAttribute('data-pr-url');
+        if (url) window.open(url, '_blank', 'noopener');
+      });
+    });
     $convList.querySelectorAll('.conv-item').forEach(el => {
       if (el.dataset.role === 'archived-gc-row' || !el.dataset.id) return;
       el.addEventListener('mouseenter', () => {
@@ -17507,10 +17521,6 @@
           updateCoordToolbar();
         }
         const row = conversationsData.find(c => c.id === el.dataset.id);
-        if (row && row.source === 'github_pr') {
-          if (row.tail_pr_url) window.open(row.tail_pr_url, '_blank');
-          return;
-        }
         selectConversation(el.dataset.id);
       });
       attachDragHandlers(el);
@@ -21687,6 +21697,13 @@
         return;
       }
     }
+    // github_pr rows are synthetic (no real session transcript).
+    // Render an in-pane PR detail card; the ↗ chip on the row opens GitHub.
+    const githubPrCard = (conversationsData || []).find(x => x.id === id && x.source === 'github_pr');
+    if (githubPrCard) {
+      $view.innerHTML = _renderGithubPrDetail(githubPrCard);
+      return;
+    }
     // Pending spawn placeholders render the submitted prompt immediately.
     // Fire-and-watch engines switch to their spawn log once the POST returns
     // a real pid; Claude placeholders stay on the optimistic "Sending..." pane
@@ -21820,6 +21837,48 @@
       + '<div style="margin-top:18px;line-height:1.55;color:var(--text);">' + bodyHtml + '</div>'
       + '</div>';
   }
+  function _renderGithubPrDetail(c) {
+    const prNum = c.tail_pr_number;
+    const prUrl = c.tail_pr_url;
+    const title = c.display_name || c.ai_title || (prNum ? 'PR #' + prNum : 'Pull Request');
+    const branch = c.worktree_label ? ('wt-' + c.worktree_label) : '';
+    const ps = (c.pr_state || '').toUpperCase();
+    let stateChip = '';
+    if (ps === 'MERGED') {
+      stateChip = '<span class="conv-signal pr-merged" style="font-weight:600;">✓ merged</span>';
+    } else if (ps === 'CLOSED') {
+      stateChip = '<span class="conv-signal pr-closed" style="font-weight:600;">× closed</span>';
+    } else {
+      stateChip = '<span class="conv-signal pr-open" style="font-weight:600;">↗ open</span>';
+    }
+    let notesHtml = '';
+    if (Array.isArray(c.pr_notes)) {
+      for (const note of c.pr_notes) {
+        if (!note || !note.label) continue;
+        const noteCls = note.kind === 'danger' ? 'pr-note-danger' : 'pr-note';
+        notesHtml += '<span class="conv-signal ' + noteCls + '" title="' + escapeAttr(note.title || note.label) + '">' + escapeHtml(note.label) + '</span>';
+      }
+    }
+    const ghLink = prUrl
+      ? '<a href="' + escapeHtml(prUrl) + '" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:12px;margin-left:auto;">Open on GitHub ↗</a>'
+      : '';
+    const firstMsg = c.first_message
+      ? '<div style="margin-top:18px;line-height:1.55;color:var(--text);">' + renderMarkdown(String(c.first_message).slice(0, 600)) + '</div>'
+      : '';
+    const lastSummary = c.last_assistant_text
+      ? '<div style="margin-top:10px;font-size:12.5px;color:var(--text-muted);line-height:1.5;">' + escapeHtml(String(c.last_assistant_text).slice(0, 200)) + '…</div>'
+      : '';
+    return '<div class="backlog-detail" style="padding:24px 28px;max-width:780px;">'
+      + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">'
+      +   stateChip + notesHtml + ghLink
+      + '</div>'
+      + '<h2 style="margin:0 0 4px;font-size:18px;line-height:1.35;">' + escapeHtml(title) + '</h2>'
+      + (prNum ? '<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">PR #' + escapeHtml(String(prNum)) + (branch ? ' · ' + escapeHtml(branch) : '') + '</div>' : '')
+      + firstMsg
+      + lastSummary
+      + '</div>';
+  }
+
   // Sticky-header dynamic ask tracker. The .conv-sticky-header normally
   // shows the first user message ("Original ask"). As the user scrolls past
   // later user messages, this state machine swaps the sticky's body to
