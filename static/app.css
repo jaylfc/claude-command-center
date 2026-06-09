@@ -8228,6 +8228,34 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.4);
     }
     .mobile-reload-btn:active { background: var(--accent); color: #fff; }
+
+    /* Mobile-specific conversation list item spacing and tap targets */
+    .conv-item {
+      padding-top: 12px !important;
+      padding-bottom: 12px !important;
+      margin-bottom: 6px !important;
+      position: relative;
+      touch-action: manipulation;
+      transition: background 0.1s ease, transform 0.1s ease;
+      -webkit-tap-highlight-color: rgba(188, 140, 255, 0.15);
+    }
+    .compact-rows .conv-item {
+      padding-top: 8px !important;
+      padding-bottom: 8px !important;
+      margin-bottom: 4px !important;
+    }
+    /* Immediate tap visual feedback on mobile */
+    .conv-item:active,
+    .conv-item.mobile-active-tap {
+      background-color: var(--surface-2) !important;
+      opacity: 0.85;
+      transform: scale(0.97);
+    }
+    .conv-item.mobile-tapped {
+      background-color: var(--surface-2) !important;
+      border-left-color: var(--purple) !important;
+      opacity: 0.95;
+    }
   }
 
   /* Prominent "+ New session" / "+ New Group chat" pair — sits in the slot

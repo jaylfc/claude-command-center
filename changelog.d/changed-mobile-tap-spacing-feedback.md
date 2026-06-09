@@ -1,0 +1,1 @@
+- Improved mobile tap target sizes and spacing for conversation list rows, and added instant tap/click feedback animations.
