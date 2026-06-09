@@ -22792,14 +22792,18 @@
   // sonnet support the 1M-context beta header; haiku does not).
   const MODEL_OPTIONS_BY_ENGINE = {
     claude: [
+      { id: 'sonnet-4-8', label: 'sonnet-4-8', oneM: true },
       { id: 'opus-4-8',   label: 'opus-4-8',   oneM: true },
       { id: 'opus-4-7',   label: 'opus-4-7',   oneM: true },
       { id: 'sonnet-4-6', label: 'sonnet-4-6', oneM: true },
+      { id: 'haiku-4-8',  label: 'haiku-4-8',  oneM: false },
       { id: 'haiku-4-5',  label: 'haiku-4-5',  oneM: false },
     ],
     codex: [
       { id: 'gpt-5.5',      label: 'gpt-5.5 (default)' },
       { id: 'gpt-5-codex',  label: 'gpt-5-codex' },
+      { id: 'o4',           label: 'o4' },
+      { id: 'o4-mini',      label: 'o4-mini' },
       { id: 'o3',           label: 'o3' },
       { id: 'o3-mini',      label: 'o3-mini' },
     ],
@@ -22812,10 +22816,16 @@
       { id: 'composer-2.5',                  label: 'composer-2.5' },
     ],
     gemini: [
+      { id: 'gemini-3.5-pro',   label: 'gemini-3.5-pro' },
+      { id: 'gemini-3.5-flash', label: 'gemini-3.5-flash' },
+      { id: 'gemini-3.1-pro',   label: 'gemini-3.1-pro' },
       { id: 'gemini-2.5-pro',   label: 'gemini-2.5-pro' },
       { id: 'gemini-2.5-flash', label: 'gemini-2.5-flash' },
     ],
     antigravity: [
+      { id: 'Gemini 3.5 Pro (High)', label: 'Gemini 3.5 Pro (High)' },
+      { id: 'Gemini 3.5 Pro (Medium)', label: 'Gemini 3.5 Pro (Medium)' },
+      { id: 'Gemini 3.5 Pro (Low)', label: 'Gemini 3.5 Pro (Low)' },
       { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)' },
       { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash (Medium)' },
       { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro (High)' },
@@ -22825,9 +22835,12 @@
       { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B (Medium)' },
     ],
     kilo: [
+      { id: 'kilo/stepfun/step-3.8-flash:free', label: 'step-3.8-flash (free)' },
       { id: 'kilo/stepfun/step-3.7-flash:free', label: 'step-3.7-flash (free, default)' },
+      { id: 'kilo/anthropic/claude-sonnet-4.8', label: 'claude-sonnet-4.8' },
       { id: 'kilo/anthropic/claude-opus-4.8',   label: 'claude-opus-4.8' },
       { id: 'kilo/anthropic/claude-sonnet-4.6', label: 'claude-sonnet-4.6' },
+      { id: 'kilo/openai/gpt-6.0',              label: 'gpt-6.0' },
       { id: 'kilo/openai/gpt-5.5',              label: 'gpt-5.5' },
     ],
   };

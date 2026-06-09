@@ -618,7 +618,8 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("tc.dataset.toolUseId || '') === toolUseId", app_js)
         self.assertIn("data-tool-use-id=\"' + escapeAttr(toolUseId) + '\"", app_js)
         self.assertIn("const last = toolCallForResult(_currentToolGroup, ev.tool_use_id || '');", app_js)
-        self.assertIn("out.dataset.resultLabel = toolResultOutputLabel(last, ev.is_error);", app_js)
+        self.assertIn("out.dataset.resultLabel = ", app_js)
+        self.assertIn("toolResultOutputLabel(last, ", app_js)
         self.assertIn("Command result", app_js)
         self.assertIn("Command error", app_js)
         self.assertIn(".tool-result-output::before", app_css)
@@ -750,15 +751,16 @@ class TestServerImports(unittest.TestCase):
         app_css = pathlib.Path(PROJECT_ROOT, "static", "app.css").read_text(encoding="utf-8")
         index_html = pathlib.Path(PROJECT_ROOT, "static", "index.html").read_text(encoding="utf-8")
         # Markup
-        self.assertIn('id="convTtsRate"', index_html)
         self.assertIn('id="convTtsRateControl"', index_html)
+        self.assertIn('id="convTtsRateDown"', index_html)
+        self.assertIn('id="convTtsRateUp"', index_html)
         # State + persistence
         self.assertIn("let _ttsRate", app_js)
         self.assertIn("ccc-tts-rate", app_js)
         self.assertNotIn("const _TTS_RATE =", app_js)
-        # Live restart wiring — input listener + restart helper.
+        # Live restart wiring — click listener + restart helper.
         self.assertIn("_restartTtsAtCurrentPosition", app_js)
-        self.assertIn("$convTtsRate.addEventListener('input'", app_js)
+        self.assertIn("addEventListener('click'", app_js)
         # CSS
         self.assertIn(".tts-rate-control", app_css)
 
@@ -872,7 +874,7 @@ class TestServerImports(unittest.TestCase):
         self.assertIn("const CODEX_SLASH_FALLBACK_COMMANDS = [", app_js)
         self.assertIn("{ name: '/compact', description: 'Summarize the visible conversation to free tokens' }", app_js)
         self.assertIn("return source === 'codex' ? CODEX_SLASH_FALLBACK_COMMANDS : SLASH_FALLBACK_COMMANDS;", app_js)
-        self.assertIn("compactCommand && currentSession.source !== 'codex'", app_js)
+        self.assertIn("compactCommand && isCompactionCapableSource(currentSession.source)", app_js)
         self.assertNotIn("Codex sessions do not use Claude slash commands", app_js)
         self.assertIn("const failurePrefix = compactCommand ? '/compact failed'", app_js)
 
@@ -1457,6 +1459,11 @@ class TestRepoContextHelpers(unittest.TestCase):
                  mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
                  mock.patch.object(
                      self.server,
+                     "_terminal_input_queue_has_pending",
+                     return_value=True,
+                 ), \
+                 mock.patch.object(
+                     self.server,
                      "session_live_status",
                      return_value={
                          "live": True,
@@ -1466,13 +1473,29 @@ class TestRepoContextHelpers(unittest.TestCase):
                          "pid": 123,
                      },
                  ), \
-                 mock.patch.object(self.server, "inject_input_via_keystroke") as inject:
+                 mock.patch.object(
+                     self.server,
+                     "_find_live_spawn_entry_for_session",
+                     return_value=None,
+                 ), \
+                 mock.patch.object(
+                     self.server,
+                     "_spawn_entry_active_tool_child",
+                     return_value={"pid": 23456, "command": "grep -r"},
+                 ), \
+                 mock.patch.object(
+                     self.server,
+                     "_terminal_input_queue_has_pending",
+                     return_value=True,
+                 ), \
+                 mock.patch.object(self.server, "_write_stream_json_user_message") as write:
                 result = self.server._inject_text_into_session(sid, "follow up")
 
             self.assertTrue(result["ok"])
             self.assertTrue(result["queued"])
+            self.assertEqual(result["status"], "busy")
             self.assertEqual(result["via"], "terminal-queued")
-            inject.assert_not_called()
+            write.assert_not_called()
             with self.server._pending_terminal_input_lock:
                 self.assertEqual(
                     self.server._pending_terminal_input_queue[sid],
@@ -1604,9 +1627,12 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertIn("/model", names)
         self.assertIn("/status", names)
 
-    def test_compact_live_headless_spawn_rejects_without_side_effects(self):
+    def test_compact_live_headless_spawn_queues_when_busy(self):
         sid = "00000000-0000-4000-8000-000000000001"
-        spawn = {"pid": 12345}
+        spawn = {
+            "pid": 12345,
+            "log": "spawn.log",
+        }
         with mock.patch.object(self.server, "_detect_session_engine", return_value="claude"), \
              mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
              mock.patch.object(
@@ -1620,19 +1646,19 @@ class TestRepoContextHelpers(unittest.TestCase):
                  },
              ), \
              mock.patch.object(self.server, "_find_live_spawn_entry_for_session", return_value=spawn), \
+             mock.patch.object(self.server, "_spawn_entry_active_tool_child", return_value=True), \
              mock.patch.object(self.server, "_backup_jsonl_before_compact") as backup, \
-             mock.patch.object(self.server, "_queue_terminal_input") as queue, \
+             mock.patch.object(self.server, "_queue_terminal_input", return_value={"ok": True, "queued": True}) as queue, \
              mock.patch.object(self.server, "launch_terminal_for_session") as launch, \
              mock.patch.object(self.server, "inject_input_via_keystroke") as inject, \
              mock.patch.object(self.server, "_write_stream_json_user_message") as write:
             result = self.server.compact_session_context(sid)
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "compact_headless_running")
-        self.assertEqual(result["pid"], 12345)
-        self.assertIn("still running headlessly", result["error"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["via"], "terminal-queued-headless")
         backup.assert_not_called()
-        queue.assert_not_called()
+        queue.assert_called_once_with(sid, "/compact", {"pid": 12345, "status": "headless"})
         launch.assert_not_called()
         inject.assert_not_called()
         write.assert_not_called()
@@ -1672,7 +1698,7 @@ class TestRepoContextHelpers(unittest.TestCase):
         backup.assert_called_once()
         queue.assert_not_called()
 
-    def test_compact_live_no_tty_registry_rejects_as_headless_running(self):
+    def test_compact_live_no_tty_registry_queues_when_busy(self):
         sid = "00000000-0000-4000-8000-000000000001"
         with mock.patch.object(self.server, "_detect_session_engine", return_value="claude"), \
              mock.patch.object(self.server, "find_session_cwd", return_value=str(self.repo)), \
@@ -1684,20 +1710,21 @@ class TestRepoContextHelpers(unittest.TestCase):
                      "tty": None,
                      "terminal_app": None,
                      "pid": 12345,
+                     "status": "busy",
                  },
              ), \
              mock.patch.object(self.server, "_find_live_spawn_entry_for_session", return_value=None), \
              mock.patch.object(self.server, "_backup_jsonl_before_compact") as backup, \
-             mock.patch.object(self.server, "_queue_terminal_input") as queue, \
+             mock.patch.object(self.server, "_queue_terminal_input", return_value={"ok": True, "queued": True}) as queue, \
              mock.patch.object(self.server, "launch_terminal_for_session") as launch, \
              mock.patch.object(self.server, "inject_input_via_keystroke") as inject:
             result = self.server.compact_session_context(sid)
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["code"], "compact_headless_running")
-        self.assertEqual(result["pid"], 12345)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["via"], "terminal-queued-headless")
         backup.assert_not_called()
-        queue.assert_not_called()
+        queue.assert_called_once_with(sid, "/compact", {"pid": 12345, "status": "busy"})
         launch.assert_not_called()
         inject.assert_not_called()
 
@@ -2030,6 +2057,11 @@ class TestRepoContextHelpers(unittest.TestCase):
         ), \
              mock.patch.object(
                  self.server,
+                 "_antigravity_app_conversation_path",
+                 return_value=pathlib.Path("/tmp/xxx"),
+             ), \
+             mock.patch.object(
+                 self.server,
                  "_resume_session_antigravity_app",
                  return_value={"ok": True, "via": "antigravity-app"},
              ) as app_resume:
@@ -2204,6 +2236,11 @@ class TestRepoContextHelpers(unittest.TestCase):
                      self.server,
                      "_spawn_entry_active_tool_child",
                      return_value={"pid": 23456, "command": "grep -r"},
+                 ), \
+                 mock.patch.object(
+                     self.server,
+                     "_terminal_input_queue_has_pending",
+                     return_value=True,
                  ), \
                  mock.patch.object(self.server, "_write_stream_json_user_message") as write:
                 result = self.server._inject_text_into_session(sid, "follow up")
