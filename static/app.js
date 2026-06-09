@@ -15260,7 +15260,23 @@
       _convDedupIdx.set(_k, _dedupedConvs.length);
       _dedupedConvs.push(c);
     }
+    // CCC-52: the folder picker (#convFolderFilter, titled "Filter
+    // conversations by folder") now actually filters the active list, not just
+    // groups it. When a specific folder is selected, drop cards whose repo path
+    // is outside that folder tree. Cards with no resolvable path are kept — we
+    // can't place them, so we don't hide them.
+    const _folderFilterPath = (archiveFolderFilter && archiveFolderFilter !== ARCHIVE_FOLDER_ALL)
+      ? String(archiveFolderFilter).replace(/\/+$/, '')
+      : '';
+    const _cardInFolder = (c) => {
+      if (!_folderFilterPath) return true;
+      const rp = (typeof rowRepoPath === 'function' ? rowRepoPath(c) : '') || '';
+      const a = String(rp).replace(/\/+$/, '');
+      if (!a) return true;
+      return a === _folderFilterPath || a.startsWith(_folderFilterPath + '/');
+    };
     for (const c of _dedupedConvs) {
+      if (!_cardInFolder(c)) continue;
       if (_repoSearchActive && _repoSearchActive.ids.has(c.session_id || c.id)) continue;
       // A UUID/prefix/substring search is a direct lookup; keep it above
       // pipeline sections and history-index matches.
@@ -15942,10 +15958,11 @@
     // chooses which active rows are shown; the project view groups every row
     // in that selected window.
     const _folderFilterEl = document.getElementById('convFolderFilter');
-    // Folder picker no longer filters — it only groups. Always show folder
-    // chips so sessions from other repos are clearly labelled regardless of
-    // which folder chip is active in the picker.
-    const _isSpecificFolderFilter = false;
+    // CCC-52: a specific folder selection now filters the list to that folder
+    // (see _folderFilterPath above), so the cross-repo chips are redundant and
+    // grouping collapses to the single folder. "All" keeps the multi-repo
+    // grouped view with chips.
+    const _isSpecificFolderFilter = !!_folderFilterPath;
     const _hasFolderChips = _sessionConvs.some(c => c.folder_label_chip);
     const _ipWindow = (() => {
       if (!_hasFolderChips) return 'all';
