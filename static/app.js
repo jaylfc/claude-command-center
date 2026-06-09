@@ -3423,6 +3423,7 @@
   const $convSteerBtn = document.getElementById('convSteerBtn');
   const $convCompactBtn = document.getElementById('convCompactBtn');
   const $convTtsBtn = document.getElementById('convTtsBtn');
+  const $convMicBtn = document.getElementById('convMicBtn');
   const $convEscBtn = document.getElementById('convEscBtn');
   const $convTtyLabel = document.getElementById('convTtyLabel');
   const $convCodexAppSrv = document.getElementById('convCodexAppSrv');
@@ -4744,6 +4745,124 @@
     updateTtsFloatingControl();
   }
 
+  // ── Speech-to-Text (STT) Speech Recognition ──
+  let _sttRecognition = null;
+  let _sttRecording = false;
+  let _sttActivePaneId = null;
+  let _sttPreText = '';
+  let _sttPostText = '';
+
+  function micButtons() {
+    return Array.from(document.querySelectorAll('.conv-input-bar .mic-btn, .gc-reader .mic-btn'));
+  }
+
+  function micButtonPaneId(btn) {
+    if (btn && btn.closest && btn.closest('.gc-reader')) return 'gc';
+    const pane = btn && btn.closest && btn.closest('.conv-pane');
+    return pane && pane.dataset ? pane.dataset.paneId : 'p1';
+  }
+
+  function toggleSpeechRecognition(paneId) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      showOpToast('Your browser does not support speech recognition.', 'error');
+      return;
+    }
+
+    if (_sttRecording) {
+      const samePane = (paneId === _sttActivePaneId);
+      stopSpeechRecognition();
+      if (samePane) return;
+    }
+
+    _sttActivePaneId = paneId;
+    let textarea = null;
+    if (paneId === 'gc') {
+      textarea = document.getElementById('gcHumanInput');
+    } else {
+      textarea = composerInputForPane(paneId) || $convInput;
+    }
+
+    if (!textarea) {
+      showOpToast('Input target not found.', 'error');
+      return;
+    }
+
+    const start = textarea.selectionStart || 0;
+    const end = textarea.selectionEnd || 0;
+    const val = textarea.value || '';
+    _sttPreText = val.slice(0, start);
+    _sttPostText = val.slice(end);
+
+    try {
+      _sttRecognition = new SpeechRecognition();
+      _sttRecognition.continuous = true;
+      _sttRecognition.interimResults = true;
+      _sttRecognition.lang = 'en-US';
+
+      _sttRecognition.onstart = () => {
+        _sttRecording = true;
+        updateMicButtonsState();
+      };
+
+      _sttRecognition.onresult = (event) => {
+        let recognitionText = '';
+        for (let i = 0; i < event.results.length; ++i) {
+          recognitionText += event.results[i][0].transcript;
+        }
+
+        let insertedText = recognitionText;
+        if (_sttPreText && !/[\s.,!?;:]$/.test(_sttPreText) && !/^\s/.test(insertedText)) {
+          insertedText = ' ' + insertedText;
+        }
+
+        textarea.value = _sttPreText + insertedText + _sttPostText;
+        textarea.selectionStart = textarea.selectionEnd = _sttPreText.length + insertedText.length;
+        textarea.focus();
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+
+      _sttRecognition.onerror = (event) => {
+        if (event.error !== 'aborted') {
+          showOpToast('Speech recognition error: ' + event.error, 'error');
+        }
+        stopSpeechRecognition();
+      };
+
+      _sttRecognition.onend = () => {
+        _sttRecording = false;
+        updateMicButtonsState();
+      };
+
+      _sttRecognition.start();
+    } catch (err) {
+      showOpToast('Could not start speech recognition: ' + err.message, 'error');
+      stopSpeechRecognition();
+    }
+  }
+
+  function stopSpeechRecognition() {
+    if (_sttRecognition) {
+      try {
+        _sttRecognition.stop();
+      } catch (_) {}
+      _sttRecognition = null;
+    }
+    _sttRecording = false;
+    updateMicButtonsState();
+  }
+
+  function updateMicButtonsState() {
+    micButtons().forEach(btn => {
+      const paneId = micButtonPaneId(btn);
+      const isRecordingThis = _sttRecording && (paneId === _sttActivePaneId);
+      btn.classList.toggle('recording', isRecordingThis);
+      btn.setAttribute('aria-pressed', isRecordingThis ? 'true' : 'false');
+      btn.title = isRecordingThis ? 'Stop recording speech' : 'Record speech to input';
+      btn.setAttribute('aria-label', isRecordingThis ? 'Stop recording speech' : 'Record speech to input');
+    });
+  }
+
   let _ttsUtterance = null;
   let _ttsTextMapping = [];
 
@@ -5296,6 +5415,10 @@
   if ($convTtsBtn) {
     $convTtsBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
     $convTtsBtn.addEventListener('click', () => readLastMessageAloud('p1'));
+  }
+  if ($convMicBtn) {
+    $convMicBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
+    $convMicBtn.addEventListener('click', () => toggleSpeechRecognition('p1'));
   }
   // Live rate knob — see #convTtsRate in index.html. Drag while playback
   // is active to change the rate in real time; the change cancels the
@@ -6960,6 +7083,9 @@
     return -1;
   }
   function syncActivePaneChrome(activeConvId) {
+    if (typeof _sttRecording !== 'undefined' && _sttRecording) {
+      stopSpeechRecognition();
+    }
     const activePid = activePaneId();
     document.querySelectorAll('.conv-pane').forEach(el => {
       el.classList.toggle('is-active', el.getAttribute('data-pane-id') === activePid);
@@ -12748,6 +12874,14 @@
                 + '<path d="M18.5 5.5a9 9 0 0 1 0 13"></path>'
               + '</svg>'
             + '</button>'
+            + '<button class="mic-btn gc-mic-btn" id="gcMicBtn" type="button" title="Record speech to input" aria-label="Record speech to input" aria-pressed="false">'
+              + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+                + '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>'
+                + '<path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>'
+                + '<line x1="12" y1="19" x2="12" y2="23"></line>'
+                + '<line x1="8" y1="23" x2="16" y2="23"></line>'
+              + '</svg>'
+            + '</button>'
             + '<button id="gcSendBtn" class="gc-send-btn" type="button" title="Send (Enter)" aria-label="Send to group chat">'
               + '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
                 + '<path d="M12 19 L12 5 M6 11 L12 5 L18 11"></path>'
@@ -12795,6 +12929,14 @@
         gcTtsBtn.addEventListener('click', (ev) => {
           ev.preventDefault();
           readLastMessageAloud(activePaneId());
+        });
+      }
+      const gcMicBtn = document.getElementById('gcMicBtn');
+      if (gcMicBtn) {
+        gcMicBtn.addEventListener('mousedown', (ev) => ev.preventDefault());
+        gcMicBtn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          toggleSpeechRecognition('gc');
         });
       }
       if (gcHumanInput) {

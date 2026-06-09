@@ -4214,6 +4214,52 @@
       0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
     transform: translateY(1px);
   }
+  .conv-input-bar .mic-btn {
+    width: 32px; height: 32px; flex-shrink: 0;
+    border-radius: 999px; border: 1px solid var(--border); cursor: pointer;
+    background: transparent; color: var(--text-muted);
+    line-height: 1; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+  }
+  .conv-input-bar .mic-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .conv-input-bar .mic-btn:active { transform: translateY(1px); }
+  .conv-input-bar .mic-btn.recording {
+    color: #fff;
+    border-color: var(--red);
+    background: var(--red);
+    box-shadow:
+      inset 0 2px 6px rgba(0,0,0,0.28),
+      0 0 0 2px color-mix(in srgb, var(--red) 22%, transparent);
+    transform: translateY(1px);
+    animation: ccc-mic-pulse 1.5s infinite;
+  }
+  .conv-input-bar .mic-btn svg { display: block; }
+  .conv-input-bar .mic-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  @keyframes ccc-mic-pulse {
+    0% {
+      box-shadow:
+        inset 0 2px 6px rgba(0,0,0,0.28),
+        0 0 0 0px color-mix(in srgb, var(--red) 40%, transparent);
+    }
+    70% {
+      box-shadow:
+        inset 0 2px 6px rgba(0,0,0,0.28),
+        0 0 0 6px color-mix(in srgb, var(--red) 0%, transparent);
+    }
+    100% {
+      box-shadow:
+        inset 0 2px 6px rgba(0,0,0,0.28),
+        0 0 0 0px color-mix(in srgb, var(--red) 0%, transparent);
+    }
+  }
   /* Live TTS rate knob — shown only while playback is active. The
      range input is intentionally narrow so it slots into the input
      bar without crowding the send buttons. */
@@ -8861,6 +8907,33 @@
   border-color: color-mix(in srgb, var(--red) 55%, transparent);
 }
 .gc-reader-input-row .tts-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.gc-reader-input-row .mic-btn {
+  width: 32px; height: 32px; flex-shrink: 0;
+  border-radius: 999px; border: 1px solid var(--border); cursor: pointer;
+  background: transparent; color: var(--text-muted);
+  line-height: 1; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.05s;
+}
+.gc-reader-input-row .mic-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.gc-reader-input-row .mic-btn:active { transform: translateY(1px); }
+.gc-reader-input-row .mic-btn.recording {
+  color: #fff;
+  border-color: var(--red);
+  background: var(--red);
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,0.28),
+    0 0 0 2px color-mix(in srgb, var(--red) 22%, transparent);
+  transform: translateY(1px);
+  animation: ccc-mic-pulse 1.5s infinite;
+}
+.gc-reader-input-row .mic-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
