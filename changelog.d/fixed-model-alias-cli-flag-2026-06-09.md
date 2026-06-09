@@ -1,1 +1,0 @@
-- Fixed model switching failing with "There's an issue with the selected model": versioned aliases like `sonnet-4-6` are now expanded to full `claude-` IDs before being passed to the CLI's `--model` flag on spawn and resume.
