@@ -23239,6 +23239,25 @@
     return parts.slice(-2).join('/');
   }
 
+  // CCC-50: a file tool (Read/Write/Edit) whose path is an image — render the
+  // image inline under the tool-call line, in addition to the existing
+  // hyperlinked path. Served by /api/local-image (absolute path, extension-
+  // gated; same loopback + same-origin posture as /api/open). msg-image gives
+  // it the existing click-to-lightbox handler for free; onerror drops the
+  // thumb if the path 403s or is gone, so a broken path leaves just the line.
+  function _isImagePathDetail(p) {
+    return /\.(?:png|jpe?g|gif|webp|bmp|svg)$/i.test(String(p || '').trim());
+  }
+  function inlineToolImageHtml(detail) {
+    const full = String((detail && detail.full) || '').trim();
+    if (!full || !_isImagePathDetail(full)) return '';
+    const src = '/api/local-image?path=' + encodeURIComponent(full);
+    return '<div class="tool-inline-image">'
+      + '<img class="msg-image" src="' + escapeAttr(src) + '"'
+      + ' alt="' + escapeAttr(compactPathDetail(full)) + '" loading="lazy"'
+      + ' onerror="var p=this.closest(&quot;.tool-inline-image&quot;); if(p) p.remove();"></div>';
+  }
+
   function formatToolCallDetail(name, detail) {
     const baseName = toolDisplayName(name);
     const full = String(detail || '').trim();
@@ -24227,6 +24246,14 @@
               + commandDisclosure
               + '</div>');
             lastToolPartIdx = blockParts.length - 1;
+            // CCC-50: render the image inline under file tool-calls that point
+            // at one. Pushed as a separate part AFTER lastToolPartIdx so the
+            // per-turn token chip still merges into the tool-call line, not the
+            // image.
+            if (isFileToolName(b.name)) {
+              const imgHtml = inlineToolImageHtml(detail);
+              if (imgHtml) blockParts.push(imgHtml);
+            }
           } else if (b.kind === 'text') {
             blockParts.push('<div class="assistant-text" dir="auto">' + renderMarkdown(b.text) + '</div>');
             hasNonTool = true;
