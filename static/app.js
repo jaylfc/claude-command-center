@@ -2433,17 +2433,11 @@
     modal.className = 'ccc-inline-question';
     modal.setAttribute('data-role', 'ccc-inline-question');
     modal.setAttribute('data-session-id', sessionId);
-    // CCC-46: surface the lead-in context (the assistant text that preceded
-    // the question) so the user isn't answering blind. liveStatus.questionPreamble
-    // is populated by /api/session-status; render it as a scrollable context
-    // block above the options when present.
-    const _preamble = (liveStatus && liveStatus.questionPreamble || '').trim();
-    const ctxHtml = _preamble
-      ? '<div class="ccc-iq-context">' + escapeHtml(_preamble) + '</div>'
-      : '';
+    // CCC-46: no preamble block here. The card now flows inline directly under
+    // the assistant text that introduced the question, so repeating that lead-in
+    // (liveStatus.questionPreamble) inside the card just duplicated it on screen.
     modal.innerHTML =
       '<div class="ccc-iq-title">Session is asking a question</div>' +
-      ctxHtml +
       '<div class="ccc-q-blocks">' + blocksHtml + '</div>' +
       '<div class="ccc-q-error"></div>' +
       '<div class="ccc-q-actions">' +
@@ -24552,6 +24546,14 @@
           _currentToolCount = 0;
         }
         _currentToolGroup.querySelector('.tool-call-group-body').appendChild(div);
+        // CCC-46: an AskUserQuestion carries the question + chosen answer —
+        // important context. Expand its group on the spot so it never hides
+        // behind a truncated "Question: … Options: Location…" collapse.
+        if (div.querySelector('.tool-call.ask-user-question')) {
+          _currentToolGroup.classList.remove('collapsed');
+          var _qArrow = _currentToolGroup.querySelector('.tcg-arrow');
+          if (_qArrow) _qArrow.textContent = '▼';
+        }
         // Bump both stamps to this tool's own ts so the visible group
         // header reflects when the latest tool actually ran. The header's
         // own data-render-ts is what the CSS ::before reads.
@@ -24639,6 +24641,19 @@
     // Re-hide the inline duplicate of a pending question after the transcript
     // rebuilds (it re-creates the .ask-user-block without the hide class).
     try { _syncLiveQuestionDuplicateHide(); } catch (_) {}
+    // CCC-46: an answered AskUserQuestion otherwise collapses into the fused
+    // "Ran 1 command ▶" group, truncated to "Question: … Options: Location…".
+    // The question (and which option was chosen) is important context to keep
+    // readable, so auto-expand any tool group that contains a question.
+    try {
+      $view.querySelectorAll('.tool-call-group.collapsed').forEach(function (g) {
+        if (g.querySelector('.tool-call.ask-user-question')) {
+          g.classList.remove('collapsed');
+          var _arrow = g.querySelector('.tcg-arrow');
+          if (_arrow) _arrow.textContent = '▼';
+        }
+      });
+    } catch (_) {}
     return true;
   }
 
