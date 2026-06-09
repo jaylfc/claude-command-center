@@ -567,7 +567,9 @@
   }
 
   /* Events */
-  .event { margin-bottom: 12px; padding: 10px 14px; border-radius: 6px; border-left: 3px solid transparent; }
+  /* CCC-51: condensed vertical rhythm — less dead space between turns so more
+     of the conversation fits on one screen. */
+  .event { margin-bottom: 7px; padding: 7px 14px; border-radius: 6px; border-left: 3px solid transparent; }
 
   .event.system {
     background: rgba(56, 139, 253, 0.08); border-left-color: var(--accent);
@@ -968,8 +970,8 @@
   }
 
   .assistant-text {
-    font-size: 15px; padding: 4px 0;
-    line-height: 1.5;
+    font-size: 15px; padding: 2px 0;
+    line-height: 1.45;
   }
   /* <session-state> block — slightly muted, italic body, with breathing
      room between rows. Each row keeps a small uppercase label
@@ -1027,7 +1029,7 @@
     color: var(--cyan);
   }
   .md-h {
-    margin: 12px 0 6px; font-weight: 600;
+    margin: 9px 0 5px; font-weight: 600;
     color: var(--text);
   }
   h1.md-h { font-size: 20px; }
