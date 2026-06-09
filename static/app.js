@@ -23523,13 +23523,18 @@
         + '<span class="mp-num">' + escapeHtml(opt.num) + '</span>'
         + '</button>';
     });
-    html += '<div class="mp-divider"></div>'
-      + '<div class="mp-section">Fast mode</div>'
-      + '<button type="button" class="mp-row mp-fast-row" data-mp-fast>'
-      +   '<span class="mp-name">Enable fast mode</span>'
-      +   '<span class="mp-switch" data-mp-switch></span>'
-      + '</button>'
-      + '<div class="mp-status" data-mp-status></div>';
+    // Fast mode exists only on Opus models (4.6/4.7/4.8) — hide the toggle
+    // elsewhere (Fable, Sonnet, Haiku) so users can't trigger an
+    // "invalid mode" error from the CLI.
+    if (/^opus-/.test(currentNorm)) {
+      html += '<div class="mp-divider"></div>'
+        + '<div class="mp-section">Fast mode</div>'
+        + '<button type="button" class="mp-row mp-fast-row" data-mp-fast>'
+        +   '<span class="mp-name">Enable fast mode</span>'
+        +   '<span class="mp-switch" data-mp-switch></span>'
+        + '</button>';
+    }
+    html += '<div class="mp-status" data-mp-status></div>';
     return html;
   }
 
@@ -23690,12 +23695,17 @@
       if (fastRow) {
         fastRow.addEventListener('click', async () => {
           const sw = fastRow.querySelector('[data-mp-switch]');
-          if (sw) sw.classList.toggle('on');
           setStatus('Toggling fast mode…');
           try {
             const data = await postInjectInput(sid, '/fast', 'enqueue');
-            setStatus(data && data.ok === false ? (data.error || 'Failed') : 'Fast mode toggled ✓',
-              data && data.ok === false ? 'err' : 'ok');
+            if (data && data.ok === false) {
+              // Leave the switch where it was — the CLI rejected the toggle
+              // (e.g. model without a fast tier).
+              setStatus(data.error || 'Fast mode unavailable for this model', 'err');
+              return;
+            }
+            if (sw) sw.classList.toggle('on');
+            setStatus('Fast mode toggled ✓', 'ok');
           } catch (_) {
             setStatus('Network error', 'err');
           }
