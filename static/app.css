@@ -7738,6 +7738,12 @@
   }
   .attention-row .att-sid:hover { background: rgba(88,166,255,0.18); color: var(--accent); }
   .attention-row .att-sid.copied { background: rgba(63,185,80,0.22); color: var(--green); }
+  /* CCC-48: recency chip — quiet, so it informs without competing with the name. */
+  .attention-row .att-age {
+    display: inline-block; vertical-align: middle;
+    font-size: 10px; font-weight: 500; color: var(--text-muted);
+    background: rgba(139,148,158,0.10); padding: 1px 5px; border-radius: 3px;
+  }
   .attention-row .att-where {
     grid-column: 1 / span 2; grid-row: 2;
     font-size: 10px; color: var(--text-muted);

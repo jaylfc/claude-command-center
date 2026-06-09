@@ -39194,10 +39194,17 @@ def compute_attention_items(repo_path, include_all=False):
     source = raw_all if include_all else raw_filtered
     source.sort(key=lambda i: (i["priority"], -i["_modified"]))
     out = []
+    # CCC-48: surface the activity timestamp so the dashboard can render a
+    # recency chip ("2h", "3d") on each card — the user wants to gauge at a
+    # glance how stale each item is, not just trust the hidden sort.
+    def _emit(it):
+        mod = it.pop("_modified", 0)
+        if mod:
+            it["modified"] = mod
+        return it
     if include_all:
         for it in source:
-            it.pop("_modified", None)
-            out.append(it)
+            out.append(_emit(it))
     else:
         MAX_TOTAL = 8
         MAX_BACKLOG = 3
@@ -39208,8 +39215,7 @@ def compute_attention_items(repo_path, include_all=False):
                 if backlog_count >= MAX_BACKLOG:
                     continue
                 backlog_count += 1
-            it.pop("_modified", None)
-            out.append(it)
+            out.append(_emit(it))
             if len(out) >= MAX_TOTAL:
                 break
     return {

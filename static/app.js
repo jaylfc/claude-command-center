@@ -7630,14 +7630,23 @@
         const sidChip = sid
           ? '<span class="att-sid" data-full="' + escapeHtml(sid) + '" title="' + escapeHtml(sid) + ' — click to copy">' + escapeHtml(shortSid) + '</span>'
           : '';
+        // CCC-48: recency chip so the user can gauge at a glance how stale
+        // each item is (the list is priority-then-recency sorted, but age was
+        // invisible before). `modified` is epoch seconds from the server.
+        const ageChip = it.modified
+          ? '<span class="att-age" title="Last activity ' + escapeHtml(new Date(it.modified * 1000).toLocaleString()) + '">'
+              + escapeHtml(timeAgo(it.modified * 1000)) + '</span>'
+          : '';
         // Verify button only makes sense for session rows. Backlog items
         // (needs_attention_label, open_backlog) don't have a session to verify.
+        // CCC-48: the tooltip now names the hidden side effect — verifying a
+        // LIVE session also replies "Yes" to whatever it last asked.
         const isSessionRow = !sid.startsWith('backlog-issue-');
         const verifyBtn = isSessionRow
-          ? '<button class="att-verify-btn" data-verify-sid="' + escapeHtml(sid) + '" title="Mark this session verified — moves card to Verified column and drops it from this list">&#10003; Verify</button>'
+          ? '<button class="att-verify-btn" data-verify-sid="' + escapeHtml(sid) + '" title="Mark this session verified: moves its card to the Verified column and drops it from this list. If the session is live and waiting, it also replies &quot;Yes&quot; to it.">&#10003; Verify</button>'
           : '';
         return '<div class="attention-row" data-sid="' + escapeHtml(sid) + '" data-kind="' + escapeHtml(kind) + '">'
-          + '<div class="att-name">' + sidChip + escapeHtml(it.name || '(untitled)') + '</div>'
+          + '<div class="att-name">' + sidChip + escapeHtml(it.name || '(untitled)') + (ageChip ? ' ' + ageChip : '') + '</div>'
           + '<span class="att-kind k-' + escapeHtml(kind) + '">' + escapeHtml(label) + '</span>'
           + '<span class="att-col-debug" title="Column the kanban classifier would place this in">col: ' + escapeHtml(classifiedCol) + '</span>'
           + '<div class="att-where">' + escapeHtml(it.where || '') + '</div>'
@@ -7658,6 +7667,17 @@
           const row = btn.closest('.attention-row');
           const conv = conversationsData.find(x => (x.session_id === fullSid) || (x.id === fullSid));
           const cardId = conv ? conv.id : fullSid;
+          // CCC-48: verifying a LIVE session has a side effect — it replies
+          // "Yes" to whatever the session last asked. That's a real message to
+          // a running agent, so confirm before doing it. A dormant session is
+          // harmless (just marks the card verified) — no confirm needed there.
+          const wouldReply = !!(conv && conv.is_live);
+          if (wouldReply && !window.confirm(
+              'Mark this session verified and reply "Yes" to it?\n\n'
+              + 'It\'s live and waiting, so verifying will also send "Yes" as your answer. '
+              + 'Cancel if you don\'t want to reply.')) {
+            return;
+          }
           btn.disabled = true;
           btn.textContent = 'Verifying…';
           try {
