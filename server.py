@@ -1157,6 +1157,30 @@ def _short_model_alias(model):
     return alias.strip()
 
 
+def _cli_model_flag(model):
+    """Normalize a model string for use as a --model CLI argument.
+
+    The /model slash command accepts short aliases like ``sonnet-4-6``, but the
+    ``--model`` CLI flag requires the full prefixed ID ``claude-sonnet-4-6`` for
+    versioned 4.x models (the CLI rejects bare ``sonnet-4-6``).  The ``[1m]``
+    suffix is TUI-only; 1M context is enabled via ``--betas`` instead.
+    """
+    if not model:
+        return ""
+    m = model.strip()
+    for tail in ("[1m]", "[1M]"):
+        if m.endswith(tail):
+            m = m[: -len(tail)].strip()
+    if not m:
+        return ""
+    # Versioned aliases like 'sonnet-4-6', 'opus-4-8', 'haiku-4-5' need the
+    # 'claude-' prefix for --model (the /model slash command accepts the bare
+    # alias, but the CLI flag does not for 4.x models).
+    if not m.lower().startswith("claude-") and re.match(r"^(sonnet|opus|haiku)-\d", m.lower()):
+        m = "claude-" + m
+    return m
+
+
 def _build_slash_model_command(model, context_1m):
     """Compose the `/model <alias>[1m]` text injected into a live Claude
     session. Returns an empty string if model is missing — caller should
@@ -18210,6 +18234,10 @@ _antigravity_cli_settings_lock = threading.Lock()
 
 
 _ANTIGRAVITY_MODEL_LABELS = {
+    "gemini-3-5-pro-high": "Gemini 3.5 Pro (High)",
+    "gemini-3-5-pro-medium": "Gemini 3.5 Pro (Medium)",
+    "gemini-3-5-pro-low": "Gemini 3.5 Pro (Low)",
+    "gemini-3-5-pro": "Gemini 3.5 Pro (High)",
     "gemini-3-5-flash-high": "Gemini 3.5 Flash (High)",
     "gemini-3-5-flash-medium": "Gemini 3.5 Flash (Medium)",
     "gemini-3-1-pro-high": "Gemini 3.1 Pro (High)",
@@ -24412,7 +24440,7 @@ def spawn_session(prompt, name=None, cwd=None, repo_path=None, worktree=False, m
             "code": claude_bin.get("code", "claude_unavailable"),
         }
 
-    model_to_use = _spawn_model_for_engine("claude", model) or "opus"
+    model_to_use = _cli_model_flag(_spawn_model_for_engine("claude", model) or "opus")
     cmd = [
         claude_bin["bin"], "-p", "--verbose",
         "--input-format", "stream-json",
@@ -25384,11 +25412,12 @@ def resume_session_headless(session_id, text):
     # `claude -p --model opus-4-8[1m]` is rejected with "There's an issue with
     # the selected model (opus-4-8[1m]). It may not exist." In headless mode
     # the 1M context window is enabled via the `context-1m-2025-08-07` beta
-    # header (`--betas`), not a model-id suffix. So pass the bare alias and add
-    # the beta when the 1M variant is selected.
+    # header (`--betas`), not a model-id suffix. Use _cli_model_flag() which
+    # also expands versioned short aliases (e.g. sonnet-4-6 → claude-sonnet-4-6)
+    # since the --model flag does not accept bare versioned aliases for 4.x models.
     override = _get_session_override(session_id)
     if override and override.get("model"):
-        alias = _short_model_alias(override["model"])  # already strips any [1m]
+        alias = _cli_model_flag(override["model"])  # strips [1m], normalizes to full ID
         if alias:
             cmd.extend(["--model", alias])
         if override.get("context_1m"):
