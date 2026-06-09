@@ -1,0 +1,1085 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230d1117'/><text x='32' y='48' text-anchor='middle' font-family='-apple-system,Helvetica,Arial,sans-serif' font-size='44' font-weight='700' fill='%2339d2c0'>⌘</text></svg>">
+<meta name="theme-color" content="#0d1117">
+<title>CCC — Token Throughput Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0d11;
+    --surface: #12161f;
+    --surface-card: rgba(22, 28, 41, 0.65);
+    --surface-hover: rgba(30, 38, 56, 0.8);
+    --border: rgba(48, 54, 61, 0.6);
+    --border-active: rgba(57, 210, 192, 0.4);
+    
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    
+    --accent: #39d2c0;
+    --accent-glow: rgba(57, 210, 192, 0.15);
+    --blue: #47a6ff;
+    --purple: #ab7dff;
+    --green: #3fb950;
+    --orange: #e3b341;
+    --red: #f85149;
+    
+    --font-display: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+  
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  body {
+    font-family: var(--font-ui);
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Scrollbars ── */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+  /* ── Header / Top bar ── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+  
+  .topbar-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  
+  .topbar-title h1 {
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 600;
+    background: linear-gradient(135deg, #fff 0%, var(--accent) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  
+  .badge-engine {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 20px;
+    background: rgba(57, 210, 192, 0.1);
+    color: var(--accent);
+    border: 1px solid rgba(57, 210, 192, 0.2);
+  }
+
+  .topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  
+  .btn {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: var(--font-ui);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  
+  .btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--text-muted);
+  }
+  
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #0d1117;
+    font-weight: 600;
+  }
+  
+  .btn-primary:hover {
+    background: #4ae8d5;
+    box-shadow: 0 0 12px rgba(57, 210, 192, 0.4);
+  }
+
+  /* ── Layout Panels ── */
+  .layout-container {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  
+  /* Left panel: Session list */
+  .sidebar {
+    width: 340px;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  
+  .search-container {
+    padding: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  
+  .search-input {
+    width: 100%;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  
+  .search-input:focus {
+    border-color: var(--accent);
+  }
+  
+  .session-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+  
+  .session-item {
+    display: flex;
+    flex-direction: column;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: 1px solid transparent;
+  }
+  
+  .session-item:hover {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: var(--border);
+  }
+  
+  .session-item.active {
+    background: rgba(57, 210, 192, 0.05);
+    border-color: var(--border-active);
+  }
+  
+  .session-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  
+  .session-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+  
+  .session-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* Right panel: Dashboard & Detail */
+  .workspace {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+    background: radial-gradient(circle at top right, rgba(57, 210, 192, 0.03), transparent 40%), var(--bg);
+  }
+  
+  /* Empty state */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+  }
+  
+  .empty-state-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--blue) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  
+  .empty-state h2 {
+    font-family: var(--font-display);
+    color: var(--text);
+    margin-bottom: 8px;
+    font-size: 20px;
+  }
+  
+  .empty-state p {
+    font-size: 13px;
+    max-width: 400px;
+    line-height: 1.5;
+  }
+  
+  /* Dashboard Grid */
+  .dashboard-header {
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+  }
+  
+  .dashboard-header h2 {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  
+  .dashboard-header .sid-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  
+  .metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  
+  .metric-card {
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 20px;
+    backdrop-filter: blur(8px);
+    transition: all 0.2s;
+  }
+  
+  .metric-card:hover {
+    background: var(--surface-hover);
+    border-color: var(--border-active);
+    transform: translateY(-2px);
+  }
+  
+  .metric-label {
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+  
+  .metric-value {
+    font-family: var(--font-display);
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.2;
+  }
+  
+  .metric-subtext {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+  
+  /* Visual Chart Container */
+  .chart-card {
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 24px;
+    backdrop-filter: blur(8px);
+  }
+  
+  .chart-card-header {
+    display: flex;
+    justify-content: justify;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  
+  .chart-title {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .chart-legend {
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+  }
+  
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+  }
+  
+  .legend-color {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+  }
+  
+  .chart-container {
+    width: 100%;
+    height: 320px;
+    position: relative;
+  }
+  
+  /* SVG Chart styles */
+  svg.throughput-svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  
+  /* Tooltip */
+  .chart-tooltip {
+    position: absolute;
+    background: rgba(13, 17, 23, 0.95);
+    border: 1px solid var(--border-active);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 11px;
+    color: var(--text);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    line-height: 1.4;
+  }
+
+  /* Turn List Section */
+  .section-title {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  
+  .turn-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .turn-card {
+    background: var(--surface-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: all 0.2s;
+  }
+  
+  .turn-card:hover {
+    border-color: rgba(255, 255, 255, 0.15);
+  }
+  
+  .turn-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    user-select: none;
+  }
+  
+  .turn-info-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  
+  .turn-index-badge {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.05);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+  }
+  
+  .turn-trigger-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+    font-family: var(--font-mono);
+  }
+  
+  .turn-trigger-badge.user_text {
+    background: rgba(71, 166, 255, 0.1);
+    color: var(--blue);
+  }
+  
+  .turn-trigger-badge.tool_result {
+    background: rgba(171, 125, 255, 0.1);
+    color: var(--purple);
+  }
+  
+  .turn-trigger-preview {
+    font-size: 12px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 320px;
+  }
+  
+  .turn-stats-summary {
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  
+  .turn-stat-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  
+  .turn-stat-value {
+    color: var(--text);
+    font-weight: 600;
+  }
+  
+  .turn-body {
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.15);
+    display: none;
+    flex-direction: column;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+  }
+  
+  .turn-body.expanded {
+    display: flex;
+  }
+  
+  .preview-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  
+  .preview-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  
+  .preview-content {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    max-height: 250px;
+    overflow-y: auto;
+  }
+  
+  .preview-content.trigger {
+    border-left: 3px solid var(--blue);
+  }
+  .preview-content.trigger.tool_result {
+    border-left: 3px solid var(--purple);
+  }
+  
+  .preview-content.response {
+    border-left: 3px solid var(--accent);
+  }
+</style>
+</head>
+<body>
+
+  <!-- Top Navigation Bar -->
+  <div class="topbar">
+    <div class="topbar-title">
+      <span class="icon">📈</span>
+      <h1>Token Throughput Analyzer</h1>
+      <span class="badge-engine" id="active-engine-badge">Engine: Auto</span>
+    </div>
+    <div class="topbar-actions">
+      <div class="refresh-indicator" id="refresh-indicator">
+        <span class="refresh-dot" id="refresh-dot"></span>
+        <span id="refresh-status-text">Status: Idle</span>
+      </div>
+      <button class="btn btn-primary" onclick="loadSessions()">
+        <span>🔄</span> Refresh Sessions
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Grid Layout -->
+  <div class="layout-container">
+    
+    <!-- Sidebar: list of sessions -->
+    <div class="sidebar">
+      <div class="search-container">
+        <input type="text" class="search-input" id="search-input" placeholder="Search sessions..." oninput="filterSessions()">
+      </div>
+      <div class="session-list" id="session-list">
+        <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 12px;">
+          Loading sessions...
+        </div>
+      </div>
+    </div>
+    
+    <!-- Main workspace content -->
+    <div class="workspace" id="workspace">
+      
+      <!-- Default Empty State -->
+      <div class="empty-state" id="empty-state">
+        <div class="empty-state-icon">📊</div>
+        <h2>Select a Session to Analyze</h2>
+        <p>Choose a session from the sidebar to inspect its active LLM turns, token usage details, and real-time processing throughput (TPM / TPS).</p>
+      </div>
+      
+      <!-- Loaded Session Dashboard -->
+      <div id="dashboard-content" style="display: none;">
+        
+        <!-- Header -->
+        <div class="dashboard-header">
+          <h2 id="session-title-label">Session Analysis</h2>
+          <div class="sid-label">ID: <span id="session-id-label">...</span></div>
+        </div>
+        
+        <!-- Metrics Cards -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">⏱️ Active LLM Duration</div>
+            <div class="metric-value" id="val-active-duration">0.0s</div>
+            <div class="metric-subtext" id="val-total-duration">Total session time: 0s</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">🔢 Total Tokens</div>
+            <div class="metric-value" id="val-total-tokens">0</div>
+            <div class="metric-subtext" id="val-token-split">In: 0 | Out: 0</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">🚀 Input Throughput</div>
+            <div class="metric-value" id="val-in-throughput">0 TPM</div>
+            <div class="metric-subtext" id="val-in-tps">0.0 tokens / sec</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">⚡ Output Throughput</div>
+            <div class="metric-value" id="val-out-throughput">0 TPM</div>
+            <div class="metric-subtext" id="val-out-tps">0.0 tokens / sec</div>
+          </div>
+        </div>
+        
+        <!-- SVG Line Chart Card -->
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div class="chart-title">
+              <span>📈</span> Token Throughput per Turn
+            </div>
+            <div class="chart-legend">
+              <div class="legend-item">
+                <span class="legend-color" style="background: var(--accent);"></span>
+                <span>Total TPM</span>
+              </div>
+            </div>
+          </div>
+          <div class="chart-container">
+            <svg class="throughput-svg" id="throughput-chart"></svg>
+            <div class="chart-tooltip" id="chart-tooltip"></div>
+          </div>
+        </div>
+        
+        <!-- Turns Detail Timeline -->
+        <div class="section-title">
+          <span>🗒️</span> Active LLM Turns
+        </div>
+        <div class="turn-list" id="turn-list">
+          <!-- Turns populated by JS -->
+        </div>
+        
+      </div>
+      
+    </div>
+    
+  </div>
+
+  <script>
+    let allSessions = [];
+    let activeSessionId = null;
+
+    // Format relative time (mtime age)
+    function formatTimeAge(ts) {
+      if (!ts) return 'Unknown';
+      const sec = Math.floor(Date.now() / 1000 - ts);
+      if (sec < 60) return 'Just now';
+      const min = Math.floor(sec / 60);
+      if (min < 60) return `${min}m ago`;
+      const hrs = Math.floor(min / 60);
+      if (hrs < 24) return `${hrs}h ago`;
+      const days = Math.floor(hrs / 24);
+      return `${days}d ago`;
+    }
+
+    // Refresh status indicator helper
+    function setStatus(text, fetching = false) {
+      const dot = document.getElementById('refresh-dot');
+      const label = document.getElementById('refresh-status-text');
+      label.textContent = `Status: ${text}`;
+      if (fetching) {
+        dot.classList.add('fetching');
+        dot.style.background = 'var(--orange)';
+      } else {
+        dot.classList.remove('fetching');
+        dot.style.background = 'var(--green)';
+      }
+    }
+
+    // Load session list from /api/conversations?all=true
+    async function loadSessions() {
+      setStatus('Loading sessions...', true);
+      try {
+        const res = await fetch('/api/conversations?all=1');
+        if (!res.ok) throw new Error('API failed');
+        const data = await res.json();
+        allSessions = data.conversations || data.sessions || [];
+        renderSessionList();
+        setStatus('Idle');
+      } catch (err) {
+        console.error(err);
+        setStatus('Error loading sessions');
+      }
+    }
+
+    // Render session items in sidebar
+    function renderSessionList() {
+      const listEl = document.getElementById('session-list');
+      listEl.innerHTML = '';
+      
+      const searchVal = document.getElementById('search-input').value.toLowerCase();
+      const filtered = allSessions.filter(s => {
+        const title = (s.name || s.title || s.session_id || '').toLowerCase();
+        return title.includes(searchVal);
+      });
+      
+      if (filtered.length === 0) {
+        listEl.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 12px;">No sessions found</div>`;
+        return;
+      }
+      
+      filtered.forEach(s => {
+        const sid = s.session_id;
+        const name = s.name || s.title || 'Untitled Session';
+        const ageText = formatTimeAge(s.modified);
+        const engine = s.engine || 'unknown';
+        
+        const item = document.createElement('div');
+        item.className = `session-item ${sid === activeSessionId ? 'active' : ''}`;
+        item.onclick = () => selectSession(s);
+        
+        item.innerHTML = `
+          <div class="session-item-header">
+            <span class="session-title" title="${name}">${name}</span>
+            <span class="badge-engine" style="font-size: 9px; padding: 1px 5px;">${engine}</span>
+          </div>
+          <div class="session-meta">
+            <span>${sid.substring(0, 8)}...</span>
+            <span>${ageText}</span>
+          </div>
+        `;
+        listEl.appendChild(item);
+      });
+    }
+
+    // Search input handler
+    function filterSessions() {
+      renderSessionList();
+    }
+
+    // Select session and load throughput data
+    async function selectSession(s) {
+      activeSessionId = s.session_id;
+      
+      // Update UI active class in list
+      renderSessionList();
+      
+      // Update engine badge
+      document.getElementById('active-engine-badge').textContent = `Engine: ${s.engine || 'Auto'}`;
+      
+      // Show loader
+      setStatus(`Loading throughput data for ${s.session_id.substring(0, 8)}...`, true);
+      
+      try {
+        const res = await fetch(`/api/throughput?session_id=${s.session_id}`);
+        if (!res.ok) throw new Error('API failed');
+        const data = await res.json();
+        
+        if (data.ok) {
+          renderDashboard(s, data);
+        } else {
+          alert(`Failed to load data: ${data.error || 'unknown error'}`);
+        }
+        setStatus('Idle');
+      } catch (err) {
+        console.error(err);
+        setStatus('Error loading throughput');
+      }
+    }
+
+    // Populate dashboard details
+    function renderDashboard(session, data) {
+      document.getElementById('empty-state').style.display = 'none';
+      document.getElementById('dashboard-content').style.display = 'block';
+      
+      // Header details
+      document.getElementById('session-title-label').textContent = session.name || session.title || 'Untitled Session';
+      document.getElementById('session-id-label').textContent = session.session_id;
+      
+      const summary = data.summary;
+      
+      // Cards values
+      const activeMin = Math.floor(summary.total_active_duration_sec / 60);
+      const activeSec = Math.round(summary.total_active_duration_sec % 60);
+      document.getElementById('val-active-duration').textContent = `${activeMin}m ${activeSec}s`;
+      document.getElementById('val-total-duration').textContent = `Turns with usage info: ${summary.turns_with_tokens} / ${summary.total_turns}`;
+      
+      document.getElementById('val-total-tokens').textContent = summary.total_tokens.toLocaleString();
+      document.getElementById('val-token-split').textContent = `In: ${summary.total_input_tokens.toLocaleString()} | Out: ${summary.total_output_tokens.toLocaleString()}`;
+      
+      document.getElementById('val-in-throughput').textContent = `${Math.round(summary.avg_input_tpm).toLocaleString()} TPM`;
+      document.getElementById('val-in-tps').textContent = `${summary.avg_input_tps.toFixed(1)} tokens / sec`;
+      
+      document.getElementById('val-out-throughput').textContent = `${Math.round(summary.avg_output_tpm).toLocaleString()} TPM`;
+      document.getElementById('val-out-tps').textContent = `${summary.avg_output_tps.toFixed(1)} tokens / sec`;
+      
+      // Draw Line Chart
+      drawChart(data.turns);
+      
+      // Render turns list
+      renderTurnsList(data.turns);
+    }
+
+    // Dynamic SVG Line chart drawer
+    function drawChart(turns) {
+      const svg = document.getElementById('throughput-chart');
+      if (!svg) return;
+      svg.innerHTML = '';
+      
+      // Get container width
+      const width = svg.clientWidth || 800;
+      const height = svg.clientHeight || 300;
+      const padding = { top: 20, right: 30, bottom: 40, left: 60 };
+      
+      // Extract data
+      const data = turns.map(t => ({
+        index: t.turn_index,
+        tpm: t.total_tpm,
+        in_tpm: t.in_tpm,
+        out_tpm: t.out_tpm,
+        dur: t.dur_sec,
+      }));
+      
+      if (data.length === 0) {
+        svg.innerHTML = `<text x="${width/2}" y="${height/2}" fill="var(--text-muted)" text-anchor="middle" font-size="13px">No throughput turns recorded</text>`;
+        return;
+      }
+      
+      // Scales
+      const maxTpm = Math.max(...data.map(d => d.tpm)) || 1000;
+      
+      const xScale = (index) => {
+        if (data.length <= 1) return padding.left + (width - padding.left - padding.right) / 2;
+        return padding.left + ((index - 1) / (data.length - 1)) * (width - padding.left - padding.right);
+      };
+      
+      const yScale = (tpm) => {
+        return height - padding.bottom - (tpm / (maxTpm * 1.1)) * (height - padding.top - padding.bottom);
+      };
+      
+      // Draw grid lines
+      const gridSteps = 5;
+      for (let i = 0; i <= gridSteps; i++) {
+        const val = (maxTpm / gridSteps) * i;
+        const y = yScale(val);
+        
+        // Line
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', padding.left);
+        line.setAttribute('y1', y);
+        line.setAttribute('x2', width - padding.right);
+        line.setAttribute('y2', y);
+        line.setAttribute('stroke', 'var(--border)');
+        line.setAttribute('stroke-dasharray', '4,4');
+        svg.appendChild(line);
+        
+        // Label
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', padding.left - 12);
+        text.setAttribute('y', y + 4);
+        text.setAttribute('fill', 'var(--text-muted)');
+        text.setAttribute('font-size', '10px');
+        text.setAttribute('text-anchor', 'end');
+        text.setAttribute('font-family', 'var(--font-mono)');
+        text.textContent = Math.round(val).toLocaleString();
+        svg.appendChild(text);
+      }
+      
+      // Gradient Definition
+      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+      defs.innerHTML = `
+        <linearGradient id="chart-area-grad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--accent)" stop-opacity="0.25"></stop>
+          <stop offset="100%" stop-color="var(--accent)" stop-opacity="0.0"></stop>
+        </linearGradient>
+      `;
+      svg.appendChild(defs);
+      
+      // Draw Area under curve
+      let pathD = '';
+      let areaD = `M ${xScale(1)} ${height - padding.bottom} `;
+      
+      data.forEach((d, idx) => {
+        const x = xScale(d.index);
+        const y = yScale(d.tpm);
+        if (idx === 0) {
+          pathD += `M ${x} ${y} `;
+          areaD += `L ${x} ${y} `;
+        } else {
+          pathD += `L ${x} ${y} `;
+          areaD += `L ${x} ${y} `;
+        }
+      });
+      
+      areaD += `L ${xScale(data.length)} ${height - padding.bottom} Z`;
+      
+      const areaPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      areaPath.setAttribute('d', areaD);
+      areaPath.setAttribute('fill', 'url(#chart-area-grad)');
+      svg.appendChild(areaPath);
+      
+      // Draw Line path
+      const linePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      linePath.setAttribute('d', pathD);
+      linePath.setAttribute('fill', 'none');
+      linePath.setAttribute('stroke', 'var(--accent)');
+      linePath.setAttribute('stroke-width', '2.5');
+      svg.appendChild(linePath);
+      
+      // Draw Points
+      data.forEach(d => {
+        const x = xScale(d.index);
+        const y = yScale(d.tpm);
+        
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', x);
+        circle.setAttribute('cy', y);
+        circle.setAttribute('r', '5');
+        circle.setAttribute('fill', 'var(--surface)');
+        circle.setAttribute('stroke', 'var(--accent)');
+        circle.setAttribute('stroke-width', '2');
+        circle.style.cursor = 'pointer';
+        circle.style.transition = 'all 0.15s';
+        
+        circle.addEventListener('mouseover', (e) => {
+          circle.setAttribute('r', '7');
+          circle.setAttribute('fill', 'var(--accent)');
+          showTooltip(e, `Turn #${d.index}<br>Throughput: <strong>${Math.round(d.tpm).toLocaleString()} TPM</strong><br>Duration: ${d.dur}s`);
+        });
+        
+        circle.addEventListener('mouseout', () => {
+          circle.setAttribute('r', '5');
+          circle.setAttribute('fill', 'var(--surface)');
+          hideTooltip();
+        });
+        
+        svg.appendChild(circle);
+      });
+      
+      // Render X labels
+      data.forEach(d => {
+        const x = xScale(d.index);
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', x);
+        text.setAttribute('y', height - padding.bottom + 18);
+        text.setAttribute('fill', 'var(--text-muted)');
+        text.setAttribute('font-size', '10px');
+        text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('font-family', 'var(--font-mono)');
+        text.textContent = `T${d.index}`;
+        svg.appendChild(text);
+      });
+    }
+
+    // Tooltip Helpers
+    const tooltip = document.getElementById('chart-tooltip');
+    function showTooltip(e, html) {
+      tooltip.innerHTML = html;
+      tooltip.style.opacity = '1';
+      
+      const containerRect = document.querySelector('.chart-container').getBoundingClientRect();
+      const left = e.clientX - containerRect.left + 15;
+      const top = e.clientY - containerRect.top - 15;
+      
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${top}px`;
+    }
+    
+    function hideTooltip() {
+      tooltip.style.opacity = '0';
+    }
+
+    // Render turns timeline list
+    function renderTurnsList(turns) {
+      const listEl = document.getElementById('turn-list');
+      listEl.innerHTML = '';
+      
+      if (turns.length === 0) {
+        listEl.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;">No details available</div>`;
+        return;
+      }
+      
+      turns.forEach(t => {
+        const card = document.createElement('div');
+        card.className = 'turn-card';
+        
+        const previewText = t.trigger_preview || 'Empty prompt';
+        
+        card.innerHTML = `
+          <div class="turn-header" onclick="toggleTurnExpanded(${t.turn_index})">
+            <div class="turn-info-left">
+              <span class="turn-index-badge">${t.turn_index}</span>
+              <span class="turn-trigger-badge ${t.trigger_type}">${t.trigger_type === 'user_text' ? 'PROMPT' : 'TOOL'}</span>
+              <span class="turn-trigger-preview" title="${previewText}">${previewText}</span>
+            </div>
+            <div class="turn-stats-summary">
+              <div class="turn-stat-item">
+                <span class="turn-stat-value">${t.dur_sec}s</span>
+                <span>duration</span>
+              </div>
+              <div class="turn-stat-item">
+                <span class="turn-stat-value">${Math.round(t.total_tpm).toLocaleString()}</span>
+                <span>TPM</span>
+              </div>
+              <div class="turn-stat-item">
+                <span class="turn-stat-value">${(t.tokens_in + t.tokens_out).toLocaleString()}</span>
+                <span>tokens</span>
+              </div>
+              <span class="chevron" id="chevron-${t.turn_index}">▼</span>
+            </div>
+          </div>
+          <div class="turn-body" id="turn-body-${t.turn_index}">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+              <div class="preview-box">
+                <div class="preview-label">Trigger Input (${t.trigger_type === 'user_text' ? 'User Prompt' : 'Tool Result'})</div>
+                <div class="preview-content trigger ${t.trigger_type}">${t.trigger_preview}</div>
+              </div>
+              <div class="preview-box">
+                <div class="preview-label">LLM Assistant Response</div>
+                <div class="preview-content response">${t.assistant_preview || '[Empty Response]'}</div>
+              </div>
+            </div>
+            <div style="display: flex; gap: 24px; margin-top: 8px; font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 12px;">
+              <div>🕒 Start: <strong>${new Date(t.t_start).toLocaleTimeString()}</strong></div>
+              <div>🕒 End: <strong>${new Date(t.t_end).toLocaleTimeString()}</strong></div>
+              <div>📥 Input: <strong>${t.tokens_in.toLocaleString()}</strong> tokens (${Math.round(t.in_tpm).toLocaleString()} TPM)</div>
+              <div>📤 Output: <strong>${t.tokens_out.toLocaleString()}</strong> tokens (${Math.round(t.out_tpm).toLocaleString()} TPM)</div>
+            </div>
+          </div>
+        `;
+        listEl.appendChild(card);
+      });
+    }
+
+    // Toggle turn body expand/collapse
+    function toggleTurnExpanded(index) {
+      const body = document.getElementById(`turn-body-${index}`);
+      const chev = document.getElementById(`chevron-${index}`);
+      if (body.classList.contains('expanded')) {
+        body.classList.remove('expanded');
+        chev.textContent = '▼';
+      } else {
+        body.classList.add('expanded');
+        chev.textContent = '▲';
+      }
+    }
+
+    // Window resize handler to redraw charts
+    window.addEventListener('resize', () => {
+      if (activeSessionId) {
+        // Redraw active chart
+        const activeSession = allSessions.find(s => s.session_id === activeSessionId);
+        if (activeSession) {
+          selectSession(activeSession);
+        }
+      }
+    });
+
+    // Boot
+    loadSessions();
+  </script>
+</body>
+</html>

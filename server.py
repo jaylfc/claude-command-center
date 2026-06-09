@@ -35350,6 +35350,113 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # doesn't re-walk every JSONL. Atomic; only writes when dirty.
             _save_conv_meta_cache()
             self.send_json(convs)
+        elif path == "/api/throughput":
+            qs = urllib.parse.parse_qs(parsed.query)
+            session_id = (qs.get("session_id", [""])[0] or "").strip()
+            if not session_id:
+                self.send_json({"error": "Missing session_id"}, 400)
+                return
+            repo_path = (qs.get("repo_path", [""])[0] or "").strip() or None
+            try:
+                conv = parse_conversation(session_id, repo_path=repo_path)
+            except Exception as e:
+                self.send_json({"error": f"Failed to parse conversation: {str(e)}"}, 500)
+                return
+            events = conv.get("events") or []
+            turns = []
+            for i, ev in enumerate(events):
+                if ev.get("type") == "assistant":
+                    trigger_ev = None
+                    for j in range(i - 1, -1, -1):
+                        prev = events[j]
+                        if prev.get("type") in ("user_text", "tool_result"):
+                            trigger_ev = prev
+                            break
+                    if trigger_ev:
+                        t_start = _stats_parse_ts(trigger_ev.get("ts"))
+                        t_end = _stats_parse_ts(ev.get("ts"))
+                        if t_start and t_end:
+                            dur_sec = (t_end - t_start).total_seconds()
+                            if dur_sec < 0:
+                                dur_sec = 0.0
+                            tokens_in = ev.get("tokens_in") or 0
+                            tokens_out = ev.get("tokens_out") or 0
+                            
+                            # calculate speeds
+                            in_tps = tokens_in / dur_sec if dur_sec > 0 else 0.0
+                            out_tps = tokens_out / dur_sec if dur_sec > 0 else 0.0
+                            total_tps = (tokens_in + tokens_out) / dur_sec if dur_sec > 0 else 0.0
+                            
+                            def get_trig_prev(tev):
+                                text = tev.get("text") or ""
+                                if tev.get("type") == "tool_result":
+                                    use_id = tev.get("tool_use_id") or ""
+                                    prefix = f"Tool Result ({use_id}): " if use_id else "Tool Result: "
+                                    return prefix + text[:300] + ("..." if len(text) > 300 else "")
+                                return text[:300] + ("..." if len(text) > 300 else "")
+
+                            def get_asst_prev(aev):
+                                blocks = aev.get("blocks") or []
+                                parts = []
+                                for b in blocks:
+                                    kind = b.get("kind") or ""
+                                    if kind == "text":
+                                        parts.append(b.get("text") or "")
+                                    elif kind == "thinking":
+                                        parts.append(f"[Thinking: {b.get('text') or ''}]")
+                                    elif kind == "tool_use":
+                                        parts.append(f"[Tool Use: {b.get('name') or ''}({b.get('detail') or ''})]")
+                                full_text = "\n".join(parts)
+                                return full_text[:4000] + ("..." if len(full_text) > 4000 else "")
+
+                            turns.append({
+                                "turn_index": len(turns) + 1,
+                                "trigger_type": trigger_ev.get("type"),
+                                "trigger_preview": get_trig_prev(trigger_ev),
+                                "assistant_preview": get_asst_prev(ev),
+                                "t_start": trigger_ev.get("ts"),
+                                "t_end": ev.get("ts"),
+                                "dur_sec": round(dur_sec, 2),
+                                "tokens_in": tokens_in,
+                                "tokens_out": tokens_out,
+                                "in_tps": round(in_tps, 2),
+                                "out_tps": round(out_tps, 2),
+                                "total_tps": round(total_tps, 2),
+                                "in_tpm": round(in_tps * 60.0, 2),
+                                "out_tpm": round(out_tps * 60.0, 2),
+                                "total_tpm": round(total_tps * 60.0, 2),
+                            })
+            
+            total_turns = len(turns)
+            turns_with_tokens = sum(1 for t in turns if t["tokens_in"] > 0 or t["tokens_out"] > 0)
+            total_active_sec = sum(t["dur_sec"] for t in turns)
+            total_in = sum(t["tokens_in"] for t in turns)
+            total_out = sum(t["tokens_out"] for t in turns)
+            total_tok = total_in + total_out
+            
+            avg_in_tps = total_in / total_active_sec if total_active_sec > 0 else 0.0
+            avg_out_tps = total_out / total_active_sec if total_active_sec > 0 else 0.0
+            avg_total_tps = total_tok / total_active_sec if total_active_sec > 0 else 0.0
+            
+            self.send_json({
+                "ok": True,
+                "session_id": session_id,
+                "summary": {
+                    "total_turns": total_turns,
+                    "turns_with_tokens": turns_with_tokens,
+                    "total_active_duration_sec": round(total_active_sec, 2),
+                    "total_input_tokens": total_in,
+                    "total_output_tokens": total_out,
+                    "total_tokens": total_tok,
+                    "avg_input_tps": round(avg_in_tps, 2),
+                    "avg_output_tps": round(avg_out_tps, 2),
+                    "avg_total_tps": round(avg_total_tps, 2),
+                    "avg_input_tpm": round(avg_in_tps * 60.0, 2),
+                    "avg_output_tpm": round(avg_out_tps * 60.0, 2),
+                    "avg_total_tpm": round(avg_total_tps * 60.0, 2),
+                },
+                "turns": turns,
+            })
         elif path == "/api/morning/sessions":
             # Morning-spawned sessions may live in ANY project slug under
             # ~/.claude/projects/ (spawn cwd determines the slug). Scan all
@@ -36089,6 +36196,22 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     self.send_header("Vary", "Accept-Encoding")
                 self.end_headers()
                 self.wfile.write(body)
+        elif path == "/throughput.html" or path == "/throughput":
+            try:
+                body = (STATIC_DIR / "throughput.html").read_bytes()
+            except OSError as e:
+                self.send_json({"error": "throughput.html missing", "detail": str(e)}, 500)
+                return
+            body, enc = self._maybe_gzip(body, "text/html; charset=utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            if enc:
+                self.send_header("Content-Encoding", enc)
+                self.send_header("Vary", "Accept-Encoding")
+            self.end_headers()
+            self.wfile.write(body)
         elif path == "/group-chat-live.html":
             # Standalone group-chat live view. Keep this as a narrow route
             # instead of allowing arbitrary /static/*.html files.
