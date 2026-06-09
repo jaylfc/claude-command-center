@@ -2985,6 +2985,9 @@
   }
   .tool-result-output.is-error { border-left-color: var(--red); color: var(--red); }
   .tool-result-output.is-error::before { color: var(--red); }
+  /* CCC-46: relayed answer confirmation — a success, shown green not red. */
+  .tool-result-output.is-answer-confirm { border-left-color: var(--green); color: var(--green); }
+  .tool-result-output.is-answer-confirm::before { color: var(--green); }
   .tool-result-code-preview {
     margin: 6px 0 4px 18px;
     max-width: min(100%, 980px);

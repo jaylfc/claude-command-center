@@ -24435,21 +24435,28 @@
             // CSS ::before never renders. Plain outputs bake the prefix into
             // their <pre>; structured code previews rely on the group stamp.
             const _toolTs = eventStamp(ev.ts) || nowStamp();
-            const commandSucceeded = !ev.is_error && isSuccessfulCommandToolResult(last, text);
+            // CCC-46: a relayed AskUserQuestion answer comes back through a
+            // PreToolUse `deny` reason ("User answered the question…"), which
+            // Claude Code records as an is_error tool_result. It's a SUCCESS,
+            // not an error — don't paint it red / "Tool error".
+            const _answerConfirm = /^User answered the question/.test(text);
+            const _isErr = !!ev.is_error && !_answerConfirm;
+            const commandSucceeded = !_isErr && isSuccessfulCommandToolResult(last, text);
             if (commandSucceeded) last.classList.add('tool-call-ok');
-            if (!ev.is_error && isRoutineSuccessfulToolResult(last, text)) {
+            if (!_isErr && isRoutineSuccessfulToolResult(last, text)) {
               last.classList.add('tool-call-ok');
               stampCurrentToolGroup(_toolTs);
               updateToolGroupLabel(_currentToolGroup);
               continue;
             }
-            const codePreview = ev.is_error ? null : renderToolCodePreview(last, text);
+            const codePreview = (_isErr || _answerConfirm) ? null : renderToolCodePreview(last, text);
             const out = codePreview || document.createElement('pre');
             if (codePreview) {
               out.dataset.renderTs = _toolTs;
             } else {
-              out.className = 'tool-result-output' + (ev.is_error ? ' is-error' : '');
-              out.dataset.resultLabel = toolResultOutputLabel(last, ev.is_error);
+              out.className = 'tool-result-output' + (_isErr ? ' is-error' : '')
+                + (_answerConfirm ? ' is-answer-confirm' : '');
+              out.dataset.resultLabel = _answerConfirm ? 'Answer sent' : toolResultOutputLabel(last, _isErr);
               out.dataset.renderTs = _toolTs;
               // textContent for safety, then if the text has URLs swap to
               // an escaped+linkified innerHTML so they're one-click. The
