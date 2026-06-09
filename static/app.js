@@ -648,7 +648,14 @@
   // Back to the foreground → refresh the paused background pollers once rather
   // than waiting up to a full interval for fresh data. The heavy sessions/
   // issues pollers catch up on their own next tick.
-  document.addEventListener('visibilitychange', () => {
+  // CCC-46: bind window 'focus' and 'pageshow' too, not just visibilitychange.
+  // While the CCC dashboard is occluded/unfocused the liveStatus poll is paused
+  // (document.hidden) — so a relayed question that arrives while you're in the
+  // terminal doesn't surface until you return. visibilitychange alone proved
+  // unreliable for window-level focus in the WKWebView app, leaving the card
+  // "stuck" until an unrelated interaction woke a poll. These extra triggers
+  // make returning to the dashboard (by any means) immediately re-poll + mount.
+  function _resumeForegroundPollers() {
     if (document.hidden) return;
     // Instantly correct the (now-stale) "checked ago" label on return, before
     // the async refreshLiveStatus fetch lands — so the user never sees a frozen
@@ -661,7 +668,10 @@
     try { if (typeof pollVercelDeploy === 'function') pollVercelDeploy(); } catch (_) {}
     try { if (typeof pollLocalhost === 'function') pollLocalhost(); } catch (_) {}
     try { if (typeof refreshWorktreesBadge === 'function') refreshWorktreesBadge(); } catch (_) {}
-  });
+  }
+  document.addEventListener('visibilitychange', _resumeForegroundPollers);
+  window.addEventListener('focus', _resumeForegroundPollers);
+  window.addEventListener('pageshow', _resumeForegroundPollers);
   window.cccPollers = {
     names: ['liveStatus','liveToolStrip','gcReader','pkoodTail','codexLog','worktreesBadge','hiStatus','issues','archiveProgress','gcActive','peer','sessionsList','vercelDeploy','localhost'],
     off(n) { window.__pollersOff[n] = true; return this.list(); },
