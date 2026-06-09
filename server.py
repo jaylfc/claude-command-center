@@ -9350,9 +9350,13 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
     # headless is now a stale fallback. Retire it right here so CCC won't route
     # to it after the terminal closes. Claude-only and never a busy headless.
     if not is_non_claude_engine:
-        retired = _retire_idle_headless_for_session(session_id, reason="launch-terminal")
+        retired = _retire_idle_headless_for_session(
+            session_id, reason="launch-terminal", defer_if_busy=True)
         if retired.get("retired"):
             result["retired_headless_pid"] = retired.get("pid")
+        elif retired.get("deferred"):
+            # Busy mid-turn — the watcher retires it the moment it goes idle.
+            result["headless_retire_deferred"] = True
     return result
 
 
@@ -24621,7 +24625,7 @@ def _headless_spawn_is_stale(entry, session_id=None):
     return True
 
 
-def _retire_idle_headless_for_session(session_id, *, reason=""):
+def _retire_idle_headless_for_session(session_id, *, reason="", defer_if_busy=False):
     """Retire a CCC-spawned IDLE Claude headless for `session_id` (GH #71).
 
     Used when a terminal takes over a session (mechanism 2 on launch, and
@@ -24630,7 +24634,12 @@ def _retire_idle_headless_for_session(session_id, *, reason=""):
     leave it alone (killing real work is worse than a transient stale read,
     which the use-time check (4) will catch on the next inject anyway).
 
-    Returns a dict {retired: bool, pid?, reason?}.
+    CCC-53: when the user explicitly launches a terminal and the headless is
+    busy, `defer_if_busy` records intent to retire it as soon as it goes idle
+    (honored by the staleness watcher) — so "spawn a terminal" reliably kills
+    the headless once its current turn finishes, instead of leaving it running.
+
+    Returns a dict {retired: bool, pid?, reason?, deferred?}.
     """
     if not session_id:
         return {"retired": False}
@@ -24641,8 +24650,12 @@ def _retire_idle_headless_for_session(session_id, *, reason=""):
         return {"retired": False}
     # Never retire a busy headless (mid-turn / running a tool).
     if _spawn_entry_active_tool_child(spawn):
+        if defer_if_busy:
+            spawn["retire_when_idle"] = True
+            return {"retired": False, "reason": "busy", "deferred": True}
         return {"retired": False, "reason": "busy"}
     pid = spawn.get("pid")
+    spawn.pop("retire_when_idle", None)
     _retire_unresponsive_spawn_entry(spawn, terminate=True)
     return {"retired": True, "pid": pid, "reason": reason or "terminal-takeover"}
 
@@ -24716,6 +24729,16 @@ def _start_headless_staleness_watcher() -> None:
                         continue  # already exited
                     sid = _spawn_entry_session_id(entry)
                     if not sid:
+                        continue
+                    # CCC-53: a terminal launch already recorded intent to retire
+                    # this headless once it stops being busy. Honor that the
+                    # moment it's idle — the user explicitly took the session
+                    # over with a terminal, so we don't re-require TTY detection.
+                    if entry.get("retire_when_idle"):
+                        if _spawn_entry_active_tool_child(entry):
+                            continue  # still mid-turn; wait for it to finish
+                        _retire_idle_headless_for_session(
+                            sid, reason="deferred-terminal-takeover")
                         continue
                     if not _session_has_live_terminal(sid, exclude_pid=entry.get("pid")):
                         continue
