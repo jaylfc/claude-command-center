@@ -2306,16 +2306,29 @@
       }
       return;
     }
-    // Already showing the card for this session — leave it be; the user
-    // is mid-answer and we don't want to clobber their selections.
-    if (_relayedQuestionState.sessionId === sid && _relayedQuestionInlineEl()) return;
+    // CCC-46: do NOT blanket-skip when a card is already up for this session.
+    // The old `sessionId === sid && cardEl` early-return never checked the
+    // nonce, so when a NEW question arrived on the same session the poll never
+    // re-fetched and the card kept showing the PREVIOUS question ("we were not
+    // seeing the last question"). We always re-fetch; showRelayedQuestionInline
+    // rebuilds only when the nonce changed, so an in-progress answer to the
+    // SAME question is never clobbered.
     // Avoid stacking fetches.
     if (_relayedQuestionState.fetching) return;
     _relayedQuestionState.fetching = true;
     const fetchedFor = sid;
-    fetch('/api/question?' + new URLSearchParams({ session_id: sid }).toString())
+    // CCC-46: hard-timeout the fetch. A hung /api/question (server busy, lost
+    // connection) used to leave `fetching` stuck true forever, so this poll
+    // stopped mounting the card until something else reset the flag — the
+    // intermittent "question card doesn't appear until I click" symptom. Abort
+    // after 4s so the flag always clears and the next 5s tick retries.
+    var _ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+    var _to = setTimeout(function () { try { if (_ctrl) _ctrl.abort(); } catch (_) {} }, 4000);
+    fetch('/api/question?' + new URLSearchParams({ session_id: sid }).toString(),
+      _ctrl ? { signal: _ctrl.signal } : undefined)
       .then(function (res) { return res.json().catch(function () { return {}; }); })
       .then(function (data) {
+        clearTimeout(_to);
         _relayedQuestionState.fetching = false;
         // Open session changed out from under us while fetching — bail.
         if (!currentSession || currentSession.id !== fetchedFor) return;
@@ -2328,7 +2341,7 @@
         if (!questions.length) return;
         showRelayedQuestionInline(fetchedFor, data.nonce || null, questions);
       })
-      .catch(function () { _relayedQuestionState.fetching = false; });
+      .catch(function () { clearTimeout(_to); _relayedQuestionState.fetching = false; });
   }
 
   function showRelayedQuestionInline(sessionId, nonce, questions) {
