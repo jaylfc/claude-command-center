@@ -1,1 +1,0 @@
-- Settings menu: new "Refresh conversations data" action that forces an immediate rescan of all conversations and a rebuild of the search index, instead of waiting for the periodic background refresh.
