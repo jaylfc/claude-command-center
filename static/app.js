@@ -16991,6 +16991,13 @@
         if (!_byObject.has(grp.node)) _byObject.set(grp.node, { title: grp.title, cards: [] });
         _byObject.get(grp.node).cards.push(c);
       }
+      // Every custom object gets a group row even with zero sessions
+      // (CCC-92) — a fresh "+ object" target must be visible to drag into.
+      for (const obj of (flowCustomObjects || [])) {
+        if (!obj || !obj.id) continue;
+        const node = flowNodeKey('object', obj.id);
+        if (!_byObject.has(node)) _byObject.set(node, { title: obj.title || 'Object', cards: [] });
+      }
       // User-pinned manual order (drag a group header above/below another).
       // Purely cosmetic; nodes without a saved rank sort by the default
       // rule (custom objects first, then freshest) below the ranked ones.
@@ -17015,9 +17022,12 @@
         const hue = Math.abs(hash) % 360;
         const collapsed = _isFolderGroupCollapsed('inprogress', nodeId);
         const attrs = ' data-object-drop="' + escapeAttr(nodeId) + '"';
+        const body = cards.length
+          ? cards.map(c => _renderRow(c, { suppressFolderChip: !_ipRowChipsOn })).join('')
+          : '<div class="conv-object-empty-hint">Empty — drag sessions here.</div>';
         return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
           + _folderGroupHeaderHtml('inprogress', title, cards.length, hue, '', nodeId, attrs)
-          + cards.map(c => _renderRow(c, { suppressFolderChip: !_ipRowChipsOn })).join('')
+          + body
           + '</div>';
       };
       let _objGroupsHtml = _objEntries.map(([nodeId, group]) =>
@@ -17158,18 +17168,17 @@
             + '<span class="grouping-opt' + (_ipGrouping === 'objects' ? ' is-active' : '') + '" data-grouping="objects" title="Group by the Flow object each session is attached to on the Flow board">by objects</span>'
           + '</span>'
         : '';
-      // Chips knob: show/hide the per-row folder chips. Sits left of the
-      // window toggle. Defaults off in by-objects mode (group headers
-      // already name the container).
-      const _ipChipsKnob = _hasFolderChips
-        ? '<span class="conv-grouping-toggle conv-chips-knob" data-role="row-chips-toggle"'
-          + ' title="Show or hide the per-row repo chips">'
-          + '<span class="grouping-opt' + (_ipRowChipsOn ? ' is-active' : '') + '" data-chips="'
-          + (_ipRowChipsOn ? 'hide' : 'show') + '">chips</span>'
+      // "+ object" (CCC-92): create a new (possibly empty) Flow object that
+      // immediately appears as a group row in by-objects mode. Replaced the
+      // chips knob — chips stay on the auto default (hidden in by-objects).
+      const _ipAddObjectBtn = (_hasFolderChips && _shouldGroupByObjects)
+        ? '<span class="conv-grouping-toggle conv-add-object" data-role="ip-add-object"'
+          + ' title="Create a new Flow object — appears as an empty group you can drag sessions into">'
+          + '<span class="grouping-opt">+ object</span>'
           + '</span>'
         : '';
-      const _ipTools = (_ipWindowToggle || _ipGroupingToggle || _ipChipsKnob)
-        ? '<span class="conv-inprogress-tools">' + _ipChipsKnob + _ipWindowToggle + _ipGroupingToggle + '</span>'
+      const _ipTools = (_ipWindowToggle || _ipGroupingToggle || _ipAddObjectBtn)
+        ? '<span class="conv-inprogress-tools">' + _ipAddObjectBtn + _ipWindowToggle + _ipGroupingToggle + '</span>'
         : '';
       // Count display: sessions in window + active group chats. Title
       // attribute spells both out so a hover explains the headline number.
@@ -17909,7 +17918,7 @@
       $inProgressToggle.addEventListener('click', (ev) => {
         // The grouping toggle (project / time) lives inside this header
         // button — its own listener stops propagation, but be defensive.
-        if (ev.target.closest('[data-role="grouping-toggle"], [data-role="window-toggle"], [data-role="row-chips-toggle"]')) return;
+        if (ev.target.closest('[data-role="grouping-toggle"], [data-role="window-toggle"], [data-role="ip-add-object"]')) return;
         ev.stopPropagation();
         const section = $inProgressToggle.closest('[data-role="inprogress-section"]');
         if (!section) return;
@@ -17936,14 +17945,17 @@
         renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
-    // Chips knob: flips the per-row chip visibility and re-renders.
-    const $chipsKnob = $convList.querySelector('[data-role="row-chips-toggle"]');
-    if ($chipsKnob) {
-      $chipsKnob.addEventListener('click', (ev) => {
+    // "+ object" (CCC-92): create an empty Flow object inline.
+    const $ipAddObject = $convList.querySelector('[data-role="ip-add-object"]');
+    if ($ipAddObject) {
+      $ipAddObject.addEventListener('click', async (ev) => {
         ev.stopPropagation();
-        const opt = ev.target.closest('[data-chips]');
-        if (!opt) return;
-        try { localStorage.setItem('ccc-inprogress-row-chips', opt.getAttribute('data-chips')); } catch (_) {}
+        const title = ((await promptModal('Object name', 'New object')) || '').trim();
+        if (!title) return;
+        const now = Date.now();
+        const id = 'obj-' + now.toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+        flowCustomObjects.unshift({ id, title, created_at: now, updated_at: now });
+        persistFlowCustomObjects();
         renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
