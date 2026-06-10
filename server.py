@@ -37419,6 +37419,38 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             # Real errors (macOS-only restriction, timeout) also get 200 with
             # {ok:false,error:...} so the UI has a single response shape.
             return
+        if path == "/api/project/create":
+            # Create a brand-new project folder and register it as a known
+            # repo (CCC-82 "Start a new project" flow). Clamped to $HOME so
+            # a stray payload can't mkdir anywhere on disk.
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, ValueError):
+                body = {}
+            target = (body.get("path") or "").strip()
+            if not target:
+                self.send_json({"ok": False, "error": "missing 'path'"}, 400)
+                return
+            try:
+                p = Path(target).expanduser()
+                # Resolve the nearest existing ancestor to defeat ../ tricks
+                # while still allowing a not-yet-existing leaf.
+                resolved = p.parent.resolve() / p.name
+                home = Path.home().resolve()
+                if not str(resolved).startswith(str(home) + os.sep):
+                    self.send_json({"ok": False, "error": "path must be inside your home directory"}, 400)
+                    return
+                if resolved.exists():
+                    self.send_json({"ok": False, "error": f"already exists: {resolved}"}, 409)
+                    return
+                resolved.mkdir(parents=True)
+                registered = _append_custom_repo(str(resolved))
+            except (OSError, ValueError) as e:
+                self.send_json({"ok": False, "error": str(e)}, 400)
+                return
+            self.send_json({"ok": True, "path": registered, "repos": load_known_repos()})
+            return
         if path == "/api/repo/add":
             # Persist a user-picked repo path so it appears in the picker and
             # can be used by repo-scoped APIs. Intended for folders outside

@@ -33586,6 +33586,74 @@
     return normalizeSpawnCwdPath(sel && sel.value);
   }
 
+  // CCC-82: wire the front-and-center new-session chooser. Repo chips set
+  // the spawn CWD in place; the New-project card mkdirs via
+  // /api/project/create, registers the repo, points the CWD at it, and
+  // drops the user into the prompt ("what is this about?").
+  function _wireNewSessionChooser($view, paneId) {
+    if (!$view) return;
+    $view.querySelectorAll('[data-ns-repo]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setSpawnCwdInputValue(btn.getAttribute('data-ns-repo') || '');
+        $view.querySelectorAll('.ns-repo-chip.is-current').forEach(b => b.classList.remove('is-current'));
+        btn.classList.add('is-current');
+        const input = composerInputForPane(paneId) || $convInput;
+        if (input) input.focus();
+      });
+    });
+    const nameEl = $view.querySelector('#nsNewProjectName');
+    const pathEl = $view.querySelector('#nsNewProjectPath');
+    const createBtn = $view.querySelector('#nsNewProjectCreate');
+    const hintEl = $view.querySelector('#nsNewProjectHint');
+    if (!nameEl || !pathEl || !createBtn) return;
+    let pathTouched = false;
+    const slugify = s => String(s || '').trim().toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    nameEl.addEventListener('input', () => {
+      const slug = slugify(nameEl.value);
+      if (!pathTouched) pathEl.value = slug ? ('~/dev/' + slug) : '';
+      createBtn.disabled = !slug;
+    });
+    pathEl.addEventListener('input', () => {
+      pathTouched = !!pathEl.value.trim();
+      createBtn.disabled = !(pathEl.value.trim() || slugify(nameEl.value));
+    });
+    const submit = async () => {
+      const target = pathEl.value.trim() || ('~/dev/' + slugify(nameEl.value));
+      if (!target || createBtn.disabled) return;
+      createBtn.disabled = true;
+      createBtn.textContent = 'Creating…';
+      try {
+        const res = await fetch('/api/project/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: target }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+        if (Array.isArray(data.repos)) repoListState.repos = data.repos;
+        populateSpawnCwdPicker();
+        setSpawnCwdInputValue(data.path);
+        showOpToast('Project folder created: ' + data.path, 'success');
+        if (hintEl) hintEl.textContent = '✓ Folder ready. Describe the project below and press Enter to start.';
+        const input = composerInputForPane(paneId) || $convInput;
+        if (input) {
+          input.placeholder = 'What is this project about? Describe it to start the first session…';
+          input.focus();
+        }
+      } catch (err) {
+        showOpToast('Could not create project: ' + ((err && err.message) || 'unknown'), 'error');
+        createBtn.disabled = false;
+      } finally {
+        createBtn.textContent = 'Create folder & start';
+      }
+    };
+    createBtn.addEventListener('click', submit);
+    [nameEl, pathEl].forEach(el => el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); submit(); }
+    }));
+  }
+
   function enterNewSessionMode() {
     const initialPrompt = typeof arguments[0] === 'string' ? arguments[0] : null;
     const paneId = activePaneId();
@@ -33626,11 +33694,37 @@
       const newSessionHelp = spawnEngine === 'antigravity'
         ? 'Type a prompt below and press Enter to spawn a headless Antigravity run with AGY print mode.'
         : 'Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.';
-      $view.innerHTML = '<div class="empty-state" style="height:auto;padding:48px 32px;flex-direction:column;gap:10px;text-align:center;">'
+      // Front-and-center folder choice (CCC-82): two explicit paths —
+      // existing folder/repo chips, or a brand-new project (name → suggested
+      // ~/dev/<slug> folder → create + start). The bottom-bar picker still
+      // works; this is the primary affordance.
+      const knownRepos = (repoListState && Array.isArray(repoListState.repos)) ? repoListState.repos.slice(0, 12) : [];
+      const repoChipsHtml = knownRepos.map(r => {
+        const p = (typeof r === 'string') ? r : (r.path || '');
+        if (!p) return '';
+        const label = (typeof r === 'object' && r.label) || _pathLeaf(p) || p;
+        const active = normalizeSpawnCwdPath(p) === spawnCwd ? ' is-current' : '';
+        return '<button type="button" class="ns-repo-chip' + active + '" data-ns-repo="' + escapeAttr(p) + '" title="' + escapeAttr(p) + '">' + escapeHtml(label) + '</button>';
+      }).join('');
+      $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px 32px;flex-direction:column;gap:10px;text-align:center;">'
         + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
         + '<div style="font-size:12px;color:var(--text-muted);">CWD: <span id="newSessionCwdNotice" style="color:var(--text);" title="' + escapeAttr(spawnCwd) + '">' + escapeHtml(repoLabel) + '</span></div>'
+        + '<div class="ns-choice-grid">'
+        +   '<div class="ns-choice-card">'
+        +     '<div class="ns-choice-title">1 · Existing folder / repo</div>'
+        +     '<div class="ns-repo-chips">' + (repoChipsHtml || '<span class="ns-muted">No known repos yet — use the CWD picker below.</span>') + '</div>'
+        +   '</div>'
+        +   '<div class="ns-choice-card">'
+        +     '<div class="ns-choice-title">2 · New project</div>'
+        +     '<input type="text" id="nsNewProjectName" class="ns-input" placeholder="Project name…" autocomplete="off" spellcheck="false">'
+        +     '<input type="text" id="nsNewProjectPath" class="ns-input" placeholder="~/dev/<name>" autocomplete="off" spellcheck="false">'
+        +     '<button type="button" id="nsNewProjectCreate" class="ns-create-btn" disabled>Create folder &amp; start</button>'
+        +     '<div class="ns-muted" id="nsNewProjectHint">We create the folder, then you describe the project below.</div>'
+        +   '</div>'
+        + '</div>'
         + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">' + escapeHtml(newSessionHelp) + '</div>'
         + '</div>';
+      _wireNewSessionChooser($view, paneId);
     }
     if (typeof syncSpawnEngineDependentUi === 'function') syncSpawnEngineDependentUi();
     updateInputBar();
