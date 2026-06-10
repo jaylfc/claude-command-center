@@ -17948,6 +17948,126 @@ def _start_resume_queue_watcher() -> None:
     threading.Thread(target=_watcher, daemon=True, name="resume-queue-watcher").start()
 
 
+# ── UX-fixes queue worker nudge (CCC-100) ───────────────────────────────────
+# Periodically nudges idle queue-worker sessions with "continue" while their
+# project still has open tickets. Flood safety, in order of authority:
+#   1. Never nudge a session that is live AND busy (mid-turn, tool running,
+#      transcript recently written, or an AskUserQuestion pending).
+#   2. One ping per progress level: we remember the worker's highest closed
+#      ticket seq at ping time; if that number has not advanced since the
+#      last ping, no second ping is sent — a stuck or dead worker gets
+#      exactly one nudge, not a drumbeat.
+#   3. A minimum 10-minute gap between pings to the same session, even
+#      across progress levels.
+_UXQ_NUDGE_STATE_FILE = Path.home() / ".claude" / "command-center" / "uxq-nudge-state.json"
+_UXQ_NUDGE_INTERVAL_S = 120
+_UXQ_NUDGE_MIN_GAP_S = 600
+_UXQ_NUDGE_TEXT = "continue"
+_UXQ_NUDGE_LOOKBACK_S = 48 * 3600
+_UXQ_SESSION_ID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _uxq_nudge_load_state():
+    try:
+        with open(_UXQ_NUDGE_STATE_FILE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _uxq_nudge_save_state(state):
+    try:
+        _UXQ_NUDGE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(_UXQ_NUDGE_STATE_FILE) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, _UXQ_NUDGE_STATE_FILE)
+    except OSError:
+        pass
+
+
+def _uxq_parse_ts(value):
+    try:
+        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return 0
+
+
+def _uxq_nudge_tick():
+    items = ux_fixes_queue.list_items()
+    now = time.time()
+    open_by_project = {}
+    workers = {}  # sid(lower) → {project, progress, last_ts}
+    for it in items:
+        proj = str(it.get("project") or "?")
+        if it.get("status") == "open":
+            open_by_project[proj] = open_by_project.get(proj, 0) + 1
+        sid = str(it.get("claimed_by") or "")
+        if not _UXQ_SESSION_ID_RE.match(sid):
+            continue
+        ts = _uxq_parse_ts(it.get("updated_at") or it.get("claimed_at"))
+        if not ts or (now - ts) > _UXQ_NUDGE_LOOKBACK_S:
+            continue
+        key = sid.lower()
+        w = workers.setdefault(key, {"project": proj, "progress": 0, "last_ts": 0})
+        if it.get("status") == "closed":
+            w["progress"] = max(w["progress"], int(it.get("seq") or 0))
+        if ts > w["last_ts"]:
+            w["last_ts"] = ts
+            w["project"] = proj
+    if not workers:
+        return
+    state = _uxq_nudge_load_state()
+    changed = False
+    for sid, w in workers.items():
+        if open_by_project.get(w["project"], 0) <= 0:
+            continue  # queue drained for this worker's project
+        st = state.get(sid) or {}
+        if st.get("pinged_at_progress") == w["progress"]:
+            continue  # no progress since the last ping — never re-ping (rule 2)
+        if st.get("pinged_at") and (now - float(st["pinged_at"])) < _UXQ_NUDGE_MIN_GAP_S:
+            continue  # rule 3
+        try:
+            status = session_live_status(sid, find_session_cwd(sid)) or {}
+        except Exception:
+            continue
+        if _pending_ask_user_question_for_session(sid):
+            continue
+        if status.get("live") and (
+            _session_status_is_busy(status)
+            or status.get("recently_written")
+            or (status.get("sidecar_status") == "active" and status.get("sidecar_in_flight"))
+        ):
+            continue  # working — leave it alone (rule 1)
+        try:
+            _inject_text_into_session(sid, _UXQ_NUDGE_TEXT)
+        except Exception:
+            continue
+        state[sid] = {
+            "pinged_at_progress": w["progress"],
+            "pinged_at": now,
+            "project": w["project"],
+        }
+        changed = True
+    if changed:
+        _uxq_nudge_save_state(state)
+
+
+def start_uxq_nudge_watcher():
+    def _watcher():
+        time.sleep(90)  # let the server finish booting before the first scan
+        while True:
+            try:
+                _uxq_nudge_tick()
+            except Exception:
+                pass
+            time.sleep(_UXQ_NUDGE_INTERVAL_S)
+    threading.Thread(target=_watcher, daemon=True, name="uxq-nudge-watcher").start()
+
+
 def _queue_codex_resume(session_id, text, pid=None):
     with _pending_resume_lock:
         _pending_resume_queue.setdefault(session_id, []).append(text)
@@ -41759,6 +41879,7 @@ def main():
     _load_conv_meta_cache()
     _load_cwd_relocation_cache()
     _load_stats_file_cache()
+    start_uxq_nudge_watcher()
     try:
         _SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
     except OSError:
