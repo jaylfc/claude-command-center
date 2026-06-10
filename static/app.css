@@ -12199,3 +12199,44 @@ body:has(.gc-reader) .pwa-install-banner {
   white-space: nowrap;
 }
 .gc-join-link-btn:hover { color: var(--accent, #58a6ff); border-color: var(--accent, #58a6ff); }
+
+/* ── Add-participant picker (CCC-97) ─────────────────────────────────── */
+.gc-addpart-modal {
+  position: fixed; inset: 0; z-index: 10010;
+  background: rgba(0,0,0,0.45);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 14vh;
+}
+.gc-addpart-card {
+  width: min(480px, 92vw);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.gc-addpart-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.gc-addpart-search {
+  width: 100%; padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--accent, #58a6ff); background: var(--bg);
+  color: var(--text); font-size: 13px; outline: none;
+}
+.gc-addpart-list { max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.gc-addpart-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 9px; border-radius: 6px; cursor: pointer;
+  font-size: 12.5px; color: var(--text);
+}
+.gc-addpart-row:hover { background: var(--surface-2); }
+.gc-addpart-row.is-selected { background: rgba(88,166,255,0.14); outline: 1px solid rgba(88,166,255,0.4); }
+.gc-addpart-emoji { flex: 0 0 auto; }
+.gc-addpart-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gc-addpart-repo {
+  flex: 0 0 auto; font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  background: rgba(139,148,158,0.15); color: var(--text-muted);
+}
+.gc-addpart-when { flex: 0 0 auto; font-size: 11px; color: var(--text-muted); }
+.gc-addpart-empty { padding: 14px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.conv-ingroupchat-addpart-btn {
+  border: 0; background: transparent; cursor: pointer;
+  font-size: 13px; color: var(--text-muted); padding: 0 4px; line-height: 1;
+}
+.conv-ingroupchat-addpart-btn:hover { color: var(--accent, #58a6ff); }

@@ -13075,6 +13075,94 @@
     return html;
   }
 
+  // ── Add-participant picker (CCC-97) ──────────────────────────────────
+  // One shared, keyboard-first picker for every "add a session to this
+  // chat" surface: sidebar chat rows, the reader header, group chat panes.
+  // Shows the 10 most recently active sessions up front (name, repo, when);
+  // typing filters; ↑/↓ + Enter or click adds via /api/group-chat/add.
+  function openGcParticipantPicker(chatRef) {
+    if (!chatRef || (!chatRef.chat_id && !chatRef.chat_path)) return;
+    const existing = document.getElementById('gcAddPartModal');
+    if (existing) existing.remove();
+    const candidates = (conversationsData || [])
+      .filter(c => c && (c.session_id || c.id)
+        && c.source !== 'backlog' && c.source !== 'github_pr' && !c.archived)
+      .sort((a, b) => (b.modified || 0) - (a.modified || 0));
+    const engineEmoji = (c) => (
+      c.source === 'codex' ? '🟦' : c.source === 'antigravity' || c.source === 'gemini' ? '✨'
+      : c.source === 'cursor' ? '🖱️' : '🤖');
+    const rowTitle = (c) => (c.display_name || c.ai_title
+      || firstSentenceOf(cleanIssuePrompt(c.first_message || '') || '', 48) || '(untitled)');
+    const modal = document.createElement('div');
+    modal.id = 'gcAddPartModal';
+    modal.className = 'gc-addpart-modal';
+    modal.innerHTML =
+      '<div class="gc-addpart-card">'
+      + '<div class="gc-addpart-title">Add participant</div>'
+      + '<input type="text" class="gc-addpart-search" placeholder="Search sessions… (↑↓ + Enter)" autocomplete="off" spellcheck="false">'
+      + '<div class="gc-addpart-list"></div>'
+      + '</div>';
+    document.body.appendChild(modal);
+    const input = modal.querySelector('.gc-addpart-search');
+    const list = modal.querySelector('.gc-addpart-list');
+    let filtered = [];
+    let sel = 0;
+    const close = () => { modal.remove(); document.removeEventListener('keydown', onKey, true); };
+    const paint = () => {
+      const q = (input.value || '').trim().toLowerCase();
+      filtered = (q
+        ? candidates.filter(c => (rowTitle(c) + ' ' + (c.folder_label_chip || '') + ' ' + (c.session_id || '')).toLowerCase().indexOf(q) !== -1)
+        : candidates).slice(0, q ? 25 : 10);
+      sel = Math.max(0, Math.min(sel, filtered.length - 1));
+      list.innerHTML = filtered.map((c, i) =>
+        '<div class="gc-addpart-row' + (i === sel ? ' is-selected' : '') + '" data-idx="' + i + '">'
+        + '<span class="gc-addpart-emoji">' + engineEmoji(c) + '</span>'
+        + '<span class="gc-addpart-name">' + escapeHtml(rowTitle(c)) + '</span>'
+        + (c.folder_label_chip ? '<span class="gc-addpart-repo">' + escapeHtml(c.folder_label_chip) + '</span>' : '')
+        + '<span class="gc-addpart-when">' + escapeHtml(c.modified ? timeAgo(c.modified * 1000) : '') + '</span>'
+        + '</div>'
+      ).join('') || '<div class="gc-addpart-empty">No matching sessions.</div>';
+    };
+    const add = async (c) => {
+      if (!c) return;
+      const sid = c.session_id || c.id;
+      close();
+      try {
+        const body = Object.assign({ session_id: sid }, chatRef);
+        const res = await fetch('/api/group-chat/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          showOpToast('🎉 ' + rowTitle(c).slice(0, 40) + ' joined the chat', 'success');
+          _gcLastMtime = null;  // force the reader (if open) to repaint
+          if (typeof refreshConversationList === 'function') refreshConversationList();
+        } else {
+          showOpToast('Add failed: ' + ((data && data.error) || ('HTTP ' + res.status)), 'error');
+        }
+      } catch (err) {
+        showOpToast('Add failed: ' + ((err && err.message) || 'network'), 'error');
+      }
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); sel++; paint(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); sel--; paint(); }
+      else if (e.key === 'Enter') { e.preventDefault(); add(filtered[sel]); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    list.addEventListener('click', (e) => {
+      const row = e.target.closest('[data-idx]');
+      if (row) add(filtered[Number(row.dataset.idx)]);
+    });
+    input.addEventListener('input', () => { sel = 0; paint(); });
+    paint();
+    input.focus();
+  }
+
   function openGroupChatReader(chatPath, topic, mode, includeHuman, chatId) {
     if (_flowInspectorState) {
       try { stopFlowNodeInspector(); } catch (_) {}
@@ -13136,6 +13224,9 @@
       + '<div class="gc-reader-header">'
         + '<span class="gc-topic" title="' + topicSafe + '">' + topicSafe + '</span>'
         + '<span class="gc-mode-badge">' + modeSafe + '</span>'
+        + '<button type="button" class="gc-join-link-btn" id="gcAddPartBtn"'
+        + ' title="Add a participant — search recent sessions, Enter to add">'
+        + '＋ Add participant</button>'
         + '<button type="button" class="gc-join-link-btn" id="gcJoinLinkBtn"'
         + ' title="Copy a join link — paste it into any session\'s composer in CCC and that session joins this chat">'
         + '🔗 Join link</button>'
@@ -13209,6 +13300,12 @@
     // Join link (CCC-98): copies a token any session's composer accepts.
     // Sending `ccc:join-gc:<id>` from a session joins that session to this
     // chat (intercepted in the composer send path).
+    const gcAddPartBtn = document.getElementById('gcAddPartBtn');
+    if (gcAddPartBtn) {
+      gcAddPartBtn.addEventListener('click', () => {
+        openGcParticipantPicker(_gcReaderId ? { chat_id: _gcReaderId } : { chat_path: _gcReaderPath });
+      });
+    }
     const gcJoinBtn = document.getElementById('gcJoinLinkBtn');
     if (gcJoinBtn) {
       gcJoinBtn.addEventListener('click', async () => {
@@ -16980,6 +17077,11 @@
                   ? 'Enable orchestration — resume nudging participants'
                   : 'Disable orchestration — stop nudges and token use for this chat') + '">'
           +     (isPaused ? '▶' : '⏸') + '</button>'
+          +   '<button type="button" class="conv-ingroupchat-addpart-btn"'
+          +     ' data-role="ingroupchat-add-participant"'
+          +     ' data-gc-id="' + escapeHtml(chatId) + '"'
+          +     ' data-gc-path="' + escapeHtml(chat.path_tilde) + '"'
+          +     ' title="Add a participant — search sessions and press Enter">＋</button>'
           +   '<button type="button" class="conv-ingroupchat-rename-btn"'
           +     ' data-role="ingroupchat-rename"'
           +     ' data-gc-id="' + escapeHtml(chatId) + '"'
@@ -17782,6 +17884,7 @@
         if (ev.target.closest('[data-role="ingroupchat-rename"]')) return;
         if (ev.target.closest('[data-role="ingroupchat-clear"]')) return;
         if (ev.target.closest('[data-role="ingroupchat-pause"]')) return;
+        if (ev.target.closest('[data-role="ingroupchat-add-participant"]')) return;
         const path = row.dataset.gcPath;
         const chatId = row.dataset.gcId || null;
         const topic = row.dataset.gcTopic || '';
@@ -17816,6 +17919,16 @@
         const chatId = btn.dataset.gcId || null;
         const currentTopic = btn.dataset.gcTopic || '';
         if (path || chatId) renameGroupChat(path, currentTopic, chatId);
+      });
+    });
+    // ＋ participant on the chat row (CCC-97) — opens the shared picker.
+    $convList.querySelectorAll('[data-role="ingroupchat-add-participant"]').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const chatId = btn.dataset.gcId || null;
+        const path = btn.dataset.gcPath || null;
+        if (chatId || path) openGcParticipantPicker(chatId ? { chat_id: chatId } : { chat_path: path });
       });
     });
     $convList.querySelectorAll('[data-role="ingroupchat-clear"]').forEach(btn => {
