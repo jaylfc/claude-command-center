@@ -685,10 +685,19 @@
             <div class="files-header">
               <span class="files-title-label">Files</span>
               <span class="files-count" id="filesCount"></span>
+              <!-- Files ⇄ Queue switch — only visible when the selected
+                   session is a UX-fixes-queue worker (same detection as the
+                   x/y progress chip). Queue lists every ticket: ref, first
+                   chars of the note, status. Wired in app.js. -->
+              <span class="files-view-toggle" id="filesViewToggle" style="display:none;" role="group" aria-label="Files panel view">
+                <button type="button" data-fv="files" title="Show files referenced by this session">Files</button>
+                <button type="button" data-fv="queue" title="Show the UX-fixes queue tickets">Queue</button>
+              </span>
               <input type="text" id="filesSearchInput" class="files-search-input" placeholder="Search..." aria-label="Search files">
               <button class="files-toggle" id="filesToggle" title="Collapse / expand" aria-label="Toggle Files panel">&#9662;</button>
             </div>
             <div class="files-list" id="sidebarFilesList"></div>
+            <div class="files-queue-list" id="sidebarQueueList" style="display:none;"></div>
           </div>
           <!-- Subagents panel — surfaces Claude Code Task tool spawns for
                the currently selected session. Populated by

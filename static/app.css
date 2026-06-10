@@ -12108,3 +12108,42 @@ body:has(.gc-reader) .pwa-install-banner {
 }
 .ns-dice-btn:hover { border-color: var(--accent, #58a6ff); transform: rotate(-20deg) scale(1.1); }
 .ns-dice-btn:active { transform: rotate(340deg) scale(0.95); }
+
+/* ── Files panel ⇄ UX-fixes queue view ──────────────────────────────── */
+.files-view-toggle {
+  display: inline-flex; gap: 0; margin-left: 6px; flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 5px; overflow: hidden;
+}
+.files-view-toggle button {
+  padding: 2px 8px; border: 0; background: var(--bg);
+  color: var(--text-muted); font-size: 10.5px; cursor: pointer;
+  line-height: 1.5;
+}
+.files-view-toggle button + button { border-left: 1px solid var(--border); }
+.files-view-toggle button.is-active {
+  background: rgba(88,166,255,0.15); color: var(--accent, #58a6ff);
+  font-weight: 600;
+}
+.files-queue-list {
+  overflow-y: auto; min-height: 0;
+  display: flex; flex-direction: column;
+}
+.fq-row {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 10px; font-size: 11.5px;
+  border-bottom: 1px solid rgba(139,148,158,0.08);
+}
+.fq-ref {
+  font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;
+  font-size: 10.5px; color: var(--text-muted); flex-shrink: 0; min-width: 52px;
+}
+.fq-note { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fq-status {
+  flex-shrink: 0; font-size: 9.5px; font-weight: 600; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px;
+}
+.fq-row.is-open .fq-status { background: rgba(63,185,80,0.15); color: var(--green, #3fb950); }
+.fq-row.is-in_progress .fq-status { background: rgba(210,153,34,0.15); color: var(--orange, #d29922); }
+.fq-row.is-closed .fq-status { background: rgba(139,148,158,0.12); color: var(--text-muted); }
+.fq-row.is-closed .fq-note { color: var(--text-muted); }
+.fq-empty { padding: 10px; font-size: 11.5px; color: var(--text-muted); }

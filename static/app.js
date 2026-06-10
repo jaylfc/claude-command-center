@@ -20959,21 +20959,118 @@
     ffcUpdateSidebar(data);
   }
 
+  // ── Files panel ⇄ UX-fixes queue view ────────────────────────────────
+  // When the selected session is a UX-fixes-queue worker (same detection
+  // as the x/y progress chip), the Files container can flip to a Queue
+  // view listing every ticket: ref, first 30 chars of the note, status.
+  // Queue is the DEFAULT for those sessions; the header toggle flips back.
+  let _filesViewChoice = '';       // '' auto | 'files' | 'queue'
+  let _filesViewChoiceConv = null; // conv the explicit choice belongs to
+  let _uxqItemsCache = { ts: 0, items: [] };
+  let _ffcLastSidebarData = null;
+  function _isUxqWorkerSession() {
+    try {
+      const row = (conversationsData || []).find(x => x.id === currentConversation);
+      return !!(row && typeof _uxFixesQueueProgressForRow === 'function'
+        && _uxFixesQueueProgressForRow(row));
+    } catch (_) { return false; }
+  }
+  function _filesViewEffective() {
+    // An explicit pick only sticks for the conversation it was made in.
+    if (_filesViewChoice && _filesViewChoiceConv === currentConversation) return _filesViewChoice;
+    return _isUxqWorkerSession() ? 'queue' : 'files';
+  }
+  async function _fetchUxqItems() {
+    if (Date.now() - _uxqItemsCache.ts < 15000) return _uxqItemsCache.items;
+    try {
+      const res = await fetch('/api/ux-fixes/list', { cache: 'no-store' });
+      const data = await res.json().catch(() => ({}));
+      const items = Array.isArray(data && data.items) ? data.items : [];
+      _uxqItemsCache = { ts: Date.now(), items };
+    } catch (_) { /* keep stale cache */ }
+    return _uxqItemsCache.items;
+  }
+  function _renderQueueListInFilesPanel() {
+    const $queue = document.getElementById('sidebarQueueList');
+    if (!$queue) return;
+    _fetchUxqItems().then(items => {
+      if (_filesViewEffective() !== 'queue') return;  // flipped while fetching
+      const rows = items.slice().reverse();  // newest first
+      $queue.innerHTML = rows.map(it => {
+        const noteFull = String(it.note || '');
+        const note = noteFull.length > 30 ? noteFull.slice(0, 30) + '…' : noteFull;
+        const status = it.status || 'open';
+        return '<div class="fq-row is-' + escapeAttr(status) + '" title="' + escapeAttr(noteFull) + '">'
+          + '<span class="fq-ref">' + escapeHtml(it.ref || ('#' + (it.number || '?'))) + '</span>'
+          + '<span class="fq-note">' + escapeHtml(note) + '</span>'
+          + '<span class="fq-status">' + escapeHtml(status) + '</span>'
+          + '</div>';
+      }).join('') || '<div class="fq-empty">Queue is empty.</div>';
+      const $count = document.getElementById('filesCount');
+      if ($count && _filesViewEffective() === 'queue') $count.textContent = rows.length;
+    });
+  }
+  // Sync panel chrome to the effective mode. Returns true when the panel is
+  // in queue mode (caller then keeps the panel visible even with 0 files).
+  function _applyFilesViewMode() {
+    const $panel = document.getElementById('filesPanel');
+    const $files = document.getElementById('sidebarFilesList');
+    const $queue = document.getElementById('sidebarQueueList');
+    const $toggle = document.getElementById('filesViewToggle');
+    const $search = document.getElementById('filesSearchInput');
+    const $label = $panel && $panel.querySelector('.files-title-label');
+    if (!$panel || !$files || !$queue) return false;
+    const uxq = _isUxqWorkerSession();
+    const mode = uxq ? _filesViewEffective() : 'files';
+    if ($toggle) {
+      $toggle.style.display = uxq ? '' : 'none';
+      $toggle.querySelectorAll('[data-fv]').forEach(b =>
+        b.classList.toggle('is-active', b.getAttribute('data-fv') === mode));
+    }
+    const queueMode = mode === 'queue';
+    $files.style.display = queueMode ? 'none' : '';
+    $queue.style.display = queueMode ? '' : 'none';
+    if ($search) $search.style.display = queueMode ? 'none' : '';
+    if ($label) $label.textContent = queueMode ? 'Queue' : 'Files';
+    if (queueMode) {
+      $panel.style.display = '';
+      _renderQueueListInFilesPanel();
+    }
+    return queueMode;
+  }
+  {
+    const $fvToggle = document.getElementById('filesViewToggle');
+    if ($fvToggle) {
+      $fvToggle.addEventListener('click', (ev) => {
+        const b = ev.target.closest('[data-fv]');
+        if (!b) return;
+        _filesViewChoice = b.getAttribute('data-fv');
+        _filesViewChoiceConv = currentConversation;
+        _uxqItemsCache.ts = 0;  // fresh fetch on flip
+        ffcUpdateSidebar(_ffcLastSidebarData);
+      });
+    }
+  }
+
   function ffcUpdateSidebar(data) {
+    _ffcLastSidebarData = data;
     const $panel = document.getElementById('filesPanel');
     const $count = document.getElementById('filesCount');
     const $list = document.getElementById('sidebarFilesList');
     if (!$panel || !$count || !$list) return;
+    const _queueMode = _applyFilesViewMode();
 
     if (!data || !data.count) {
-      $panel.style.display = 'none';
+      if (!_queueMode) {
+        $panel.style.display = 'none';
+        $count.textContent = '';
+      }
       $list.innerHTML = '';
-      $count.textContent = '';
       return;
     }
 
     $panel.style.display = '';
-    $count.textContent = data.count;
+    if (!_queueMode) $count.textContent = data.count;
     $list.innerHTML = '';
 
     // Flatten all categories
