@@ -1,0 +1,2 @@
+- Fixed token metrics for Codex sessions by forward-mapping token counts from result events to assistant events.
+- Fixed token metrics for Antigravity sessions when the TUI app is offline by reading directly from the local SQLite conversation databases.

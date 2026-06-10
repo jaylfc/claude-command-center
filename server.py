@@ -23018,6 +23018,212 @@ def _antigravity_step_usage(usage):
     return out
 
 
+def _proto_bytes_to_str(val):
+    if isinstance(val, bytes):
+        try:
+            return val.decode("utf-8", "ignore")
+        except Exception:
+            return ""
+    if isinstance(val, str):
+        return val
+    return ""
+
+
+def _parse_proto(data):
+    fields = {}
+    pos = 0
+    while pos < len(data):
+        try:
+            # Decode varint for key
+            val = 0
+            shift = 0
+            while True:
+                b = data[pos]
+                val |= (b & 0x7f) << shift
+                pos += 1
+                shift += 7
+                if not (b & 0x80):
+                    break
+            key = val
+        except IndexError:
+            break
+        wire_type = key & 0x7
+        field_num = key >> 3
+        
+        if wire_type == 0:  # Varint
+            try:
+                val = 0
+                shift = 0
+                while True:
+                    b = data[pos]
+                    val |= (b & 0x7f) << shift
+                    pos += 1
+                    shift += 7
+                    if not (b & 0x80):
+                        break
+                fields.setdefault(field_num, []).append(val)
+            except IndexError:
+                break
+        elif wire_type == 1:  # 64-bit
+            if pos + 8 > len(data):
+                break
+            val = data[pos:pos+8]
+            pos += 8
+            fields.setdefault(field_num, []).append(val)
+        elif wire_type == 2:  # Length-delimited
+            try:
+                val = 0
+                shift = 0
+                while True:
+                    b = data[pos]
+                    val |= (b & 0x7f) << shift
+                    pos += 1
+                    shift += 7
+                    if not (b & 0x80):
+                        break
+                length = val
+            except IndexError:
+                break
+            if pos + length > len(data):
+                break
+            val = data[pos:pos+length]
+            pos += length
+            
+            sub = None
+            if len(val) > 0:
+                try:
+                    sub = _parse_proto(val)
+                except Exception:
+                    pass
+            if sub and len(sub) > 0 and max(sub.keys()) < 1000:
+                fields.setdefault(field_num, []).append(sub)
+            else:
+                fields.setdefault(field_num, []).append(val)
+        elif wire_type == 5:  # 32-bit
+            if pos + 4 > len(data):
+                break
+            val = data[pos:pos+4]
+            pos += 4
+            fields.setdefault(field_num, []).append(val)
+        else:
+            break
+    return fields
+
+
+def _antigravity_db_path(session_id):
+    if not session_id:
+        return None
+    sid = str(session_id).strip()
+    if not _SESSION_UUID_RE.match(sid):
+        return None
+    for folder in (ANTIGRAVITY_CLI_CONVERSATIONS, ANTIGRAVITY_CONVERSATIONS):
+        candidate = folder / f"{sid}.db"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _antigravity_db_trajectory_steps(session_id):
+    db_path = _antigravity_db_path(session_id)
+    if not db_path:
+        return []
+    
+    steps = []
+    conn = None
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        cursor = conn.cursor()
+        
+        # 1. Load gen_metadata mapping
+        cursor.execute("SELECT idx, data FROM gen_metadata;")
+        gen_map = {}
+        for gen_idx, gen_data in cursor.fetchall():
+            if gen_data:
+                try:
+                    gen_map[gen_idx] = _parse_proto(gen_data)
+                except Exception:
+                    pass
+                    
+        # 2. Walk through steps table
+        cursor.execute("SELECT idx, metadata FROM steps;")
+        for idx, metadata_blob in cursor.fetchall():
+            if not metadata_blob:
+                continue
+            try:
+                parsed_step_meta = _parse_proto(metadata_blob)
+            except Exception:
+                continue
+                
+            model_usage = None
+            
+            # Look up field 20 -> field 3 (gen_metadata index)
+            field_20 = parsed_step_meta.get(20)
+            if field_20 and isinstance(field_20, list) and isinstance(field_20[0], dict):
+                sub_20 = field_20[0]
+                gen_idx_list = sub_20.get(3)
+                if gen_idx_list:
+                    gen_idx = gen_idx_list[0]
+                    if gen_idx in gen_map:
+                        gen_data = gen_map[gen_idx]
+                        
+                        # Extract model name
+                        model_name = ""
+                        for fnum in (21, 19):
+                            m_list = gen_data.get(fnum)
+                            if m_list:
+                                model_name = _proto_bytes_to_str(m_list[0])
+                                if model_name:
+                                    break
+                                    
+                        # Extract token counts
+                        tokens_in = 0
+                        tokens_out = 0
+                        tokens_thinking = 0
+                        cache_read = 0
+                        cache_create = 0
+                        
+                        field_1 = gen_data.get(1)
+                        if field_1 and isinstance(field_1, list) and isinstance(field_1[0], dict):
+                            sub_1 = field_1[0]
+                            field_4 = sub_1.get(4)
+                            if field_4 and isinstance(field_4, list) and isinstance(field_4[0], dict):
+                                usage = field_4[0]
+                                tokens_in = usage.get(2, [0])[0]
+                                tokens_out = usage.get(3, [0])[0]
+                                tokens_thinking = usage.get(10, [0])[0]
+                                cache_read = usage.get(5, [0])[0]
+                                cache_create = usage.get(9, [0])[0]
+                                
+                        model_usage = {
+                            "model": model_name,
+                            "inputTokens": tokens_in,
+                            "outputTokens": tokens_out,
+                            "thinkingTokens": tokens_thinking,
+                            "cacheReadTokens": cache_read,
+                            "cacheCreationTokens": cache_create,
+                        }
+            
+            step_entry = {
+                "stepIndex": idx,
+                "metadata": {}
+            }
+            if model_usage:
+                step_entry["metadata"]["modelUsage"] = model_usage
+            steps.append(step_entry)
+            
+    except Exception:
+        pass
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+                
+    return steps
+
+
 def _antigravity_trajectory_steps(session_id):
     """Fetch GetCascadeTrajectory and return its raw `steps` list (or [])."""
     result = _antigravity_app_rpc(
@@ -23026,7 +23232,7 @@ def _antigravity_trajectory_steps(session_id):
         timeout=5,
     )
     if not result.get("ok"):
-        return []
+        return _antigravity_db_trajectory_steps(session_id)
     trajectory = (result.get("response") or {}).get("trajectory") or {}
     steps = trajectory.get("steps") or []
     return steps if isinstance(steps, list) else []
@@ -35363,6 +35569,27 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": f"Failed to parse conversation: {str(e)}"}, 500)
                 return
             events = conv.get("events") or []
+            # Pre-process events to map Codex token_usage from "result" events to the last "assistant" event
+            for i in range(len(events)):
+                if events[i].get("type") == "assistant":
+                    if not events[i].get("tokens_in") and not events[i].get("tokens_out"):
+                        has_later_assistant = False
+                        result_ev = None
+                        for k in range(i + 1, len(events)):
+                            nxt = events[k]
+                            if nxt.get("type") == "user_text":
+                                break
+                            if nxt.get("type") == "assistant":
+                                has_later_assistant = True
+                                break
+                            if nxt.get("type") == "result":
+                                result_ev = nxt
+                                break
+                        if result_ev and not has_later_assistant:
+                            usage = result_ev.get("token_usage")
+                            if usage and isinstance(usage, dict):
+                                events[i]["tokens_in"] = usage.get("input_tokens") or 0
+                                events[i]["tokens_out"] = usage.get("output_tokens") or 0
             turns = []
             for i, ev in enumerate(events):
                 if ev.get("type") == "assistant":
