@@ -9362,6 +9362,13 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
             return "ok"
             '''
         else:
+            command_sequence = slash_sequence(
+                "Terminal",
+                'tell application "Terminal"\n'
+                '          activate\n'
+                '          set frontmost of (first window whose id is winId) to true\n'
+                '        end tell',
+            )
             script = f'''
         set winId to 0
         tell application "Terminal"
@@ -9370,13 +9377,7 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
           set winId to id of window 1
         end tell
         delay 2.0
-        {slash_sequence(
-            "Terminal",
-            'tell application "Terminal"\n'
-            '          activate\n'
-            '          set frontmost of (first window whose id is winId) to true\n'
-            '        end tell',
-        )}
+        {command_sequence}
         return "ok"
         '''
 
