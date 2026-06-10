@@ -249,6 +249,18 @@ babysitter) that should survive past the current turn and show up on the
 kanban, not for one-shot internal subtasks (the built-in `Task` tool is
 better for those).
 
+## Cookbook
+
+Recipes for wiring **your own app** into CCC — each with a copy-paste prompt
+you can hand to Claude Code so it implements the integration for you:
+
+- [Annotate → UX-fixes queue](cookbook/annotate-to-ux-fixes-queue.md) — click
+  an element in your running app, type a note, and it becomes a numbered work
+  item a Claude session claims and fixes.
+- [In-app bug report widget → GitHub issue](cookbook/bug-report-widget-github-issues.md)
+  — a floating "Report an issue" button that screenshots the page and opens a
+  fully-contextualized GitHub issue.
+
 ## Architecture
 
 Two files: a single Python file (stdlib-only HTTP server) and a single HTML
