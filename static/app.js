@@ -3039,14 +3039,24 @@
   // common idle path where no session is live.
   let _liveStripShown = false;
   let _liveStripLastLiveTime = 0;
+  // Last keystroke in a text-editing control. The strip ticker pauses only
+  // while the user is ACTIVELY typing — pausing on mere focus starved the
+  // indicator forever for users who park their cursor in the composer
+  // while watching the transcript ("never see Working between tools").
+  let _liveStripLastKeyTs = 0;
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (t && (t.tagName === 'TEXTAREA'
+      || (t.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(t.type || 'text'))
+      || t.isContentEditable)) {
+      _liveStripLastKeyTs = Date.now();
+    }
+  }, true);
   function updateLiveToolStrip() {
-    // Skip while the user is typing into a textarea / text input. This
-    // runs on a 1s ticker; each pass does a document.querySelectorAll
-    // plus an innerHTML write that can stall typing by tens of ms on
-    // a deep conv view. The strip catches up on the next tick.
-    const _ae = document.activeElement;
-    if (_ae && (_ae.tagName === 'TEXTAREA'
-      || (_ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/i.test(_ae.type || 'text')))) {
+    // Skip only while the user is actively typing (keystroke in the last
+    // 1.5s). The per-tick querySelectorAll + innerHTML write can stall
+    // keystrokes on a deep conv view; the strip catches up next tick.
+    if (Date.now() - _liveStripLastKeyTs < 1500) {
       return;
     }
     const $view = (typeof getConvView === 'function') ? getConvView() : null;
