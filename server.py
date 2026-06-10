@@ -35591,7 +35591,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
 
             if session_id == "all_7_days":
                 try:
-                    all_c = find_all_conversations(repo_path=repo_path, include_old=True)
+                    all_c = find_all_conversations()
                 except Exception as e:
                     self.send_json({"error": f"Failed to list conversations: {str(e)}"}, 500)
                     return
@@ -35599,8 +35599,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 cutoff = time.time() - 7 * 86400
                 recent_sids = []
                 for c in all_c:
-                    t = c.get("last_interacted") or c.get("modified") or 0
+                    t = c.get("last_interacted") or c.get("modified") or c.get("mtime") or 0
                     if t >= cutoff:
+                        if repo_path:
+                            try:
+                                if Path(c.get("folder_path") or "").resolve(strict=False) != Path(repo_path).resolve(strict=False):
+                                    continue
+                            except Exception:
+                                continue
                         recent_sids.append((c.get("session_id"), c.get("display_name") or c.get("name") or "Untitled"))
                 
                 all_events = []
