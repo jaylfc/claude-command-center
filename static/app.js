@@ -22665,12 +22665,21 @@
       return;
     }
     banner.addEventListener('click', loadEarlier);
-    // Auto-load once the banner scrolls into view (scroll up → history fills in).
+    // Auto-load once the banner scrolls into view — but ARM the observer
+    // only after a real scroll gesture. On open, a short tail (or the
+    // pre-scroll-to-bottom paint) leaves the banner visible immediately,
+    // which used to fire a full-history load on every conversation click.
     if ('IntersectionObserver' in window) {
       const io = new IntersectionObserver((entries) => {
         if (entries.some((e) => e.isIntersecting)) { io.disconnect(); loadEarlier(); }
       }, { root: $view, threshold: 0.05 });
-      io.observe(banner);
+      const arm = () => {
+        $view.removeEventListener('wheel', arm);
+        $view.removeEventListener('touchmove', arm);
+        io.observe(banner);
+      };
+      $view.addEventListener('wheel', arm, { passive: true, once: true });
+      $view.addEventListener('touchmove', arm, { passive: true, once: true });
     }
     $view.insertBefore(banner, $view.firstChild);
   }
