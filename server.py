@@ -35603,7 +35603,16 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
 
             if session_id == "all_7_days":
                 try:
-                    all_c = find_all_conversations()
+                    # The 7-day filter only needs each conversation's mtime +
+                    # session_id + name. Skip the expensive resolve passes
+                    # (gh pr view per PR, git status per worktree, effective-
+                    # branch) that default to True — they were ~5s of pure
+                    # waste on this endpoint.
+                    all_c = find_all_conversations(
+                        resolve_pr_states=False,
+                        resolve_effective=False,
+                        resolve_worktree_dirty=False,
+                    )
                 except Exception as e:
                     self.send_json({"error": f"Failed to list conversations: {str(e)}"}, 500)
                     return
