@@ -3370,7 +3370,28 @@
           cwd: currentSession.cwd,
         }),
       });
-      const data = await res.json();
+      let data = await res.json();
+      // CCC-96: a live headless process owns this session. Launching a
+      // terminal resume now would fork the history. Offer to stop it first.
+      if (!data.ok && data.headless_live) {
+        const go = confirm(
+          'A headless process (pid ' + data.headless_pid + ') is still running this session.\n\n'
+          + 'Launching a terminal now would fork the conversation history.\n\n'
+          + 'Stop the headless process and then launch in the terminal?'
+        );
+        if (go) {
+          const res2 = await fetch('/api/launch-terminal', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              session_id: currentSession.id,
+              cwd: currentSession.cwd,
+              stop_headless: true,
+            }),
+          });
+          data = await res2.json();
+        }
+      }
       if (data.ok) {
         setActionButtonText(btn, 'Launched!');
         setTimeout(() => {

@@ -9211,14 +9211,21 @@ def open_session_in_codex_desktop(session_id, cwd=None):
     return {"ok": True, "url": url}
 
 
-def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_slash_commands=None):
+def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_slash_commands=None,
+                                stop_headless=False):
     """Open a new terminal window and run the resume command for this session.
 
     Idempotent: if a live claude process with a TTY already exists for this
     session, bring that terminal to the front instead of opening a new one.
     Prevents the "I clicked Launch and got two terminals" race.
 
-    Returns {ok, terminal_app, command, error?, existing?}.
+    Headless guard (CCC-96): if a live HEADLESS process owns this session
+    (live, no tty), refuse — resuming the same transcript in a terminal
+    while the headless process keeps appending forks the history ("amnesia"
+    when one of them is closed). The caller can retry with
+    stop_headless=True to SIGTERM the headless process first.
+
+    Returns {ok, terminal_app, command, error?, existing?, headless_live?}.
     """
     if not session_id:
         return {"ok": False, "error": "missing session_id"}
@@ -9230,6 +9237,41 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
     # Pre-check: is there already a live claude --resume on this session with a tty?
     try:
         existing = session_live_status(session_id, cwd) or {}
+        # Headless guard — live process, no terminal to focus. Launching a
+        # terminal resume now would give the transcript two writers.
+        if existing.get("live") and not existing.get("tty") and existing.get("pid"):
+            hpid = int(existing.get("pid"))
+            if not stop_headless:
+                return {
+                    "ok": False,
+                    "headless_live": True,
+                    "headless_pid": hpid,
+                    "error": (
+                        "A headless process (pid %d) is still running this session. "
+                        "Launching a terminal resume now would fork the conversation "
+                        "history. Stop the headless process first." % hpid
+                    ),
+                }
+            try:
+                os.kill(hpid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            # Wait briefly for it to exit so the resume sees the final
+            # transcript state, not a mid-write snapshot.
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                try:
+                    os.kill(hpid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.2)
+            else:
+                return {
+                    "ok": False,
+                    "headless_live": True,
+                    "headless_pid": hpid,
+                    "error": "Headless process (pid %d) did not exit within 5s — not launching." % hpid,
+                }
         if existing.get("live") and existing.get("tty"):
             tty = existing.get("tty")
             term_app = existing.get("terminal_app") or _preferred_terminal_app()
@@ -39676,7 +39718,11 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 for c in (payload.get("post_slash_commands") or [])
                 if str(c or "").strip().startswith("/")
             ]
-            self.send_json(launch_terminal_for_session(sid, cwd, term_app, post_slash_commands=post_cmds or None))
+            self.send_json(launch_terminal_for_session(
+                sid, cwd, term_app,
+                post_slash_commands=post_cmds or None,
+                stop_headless=bool(payload.get("stop_headless")),
+            ))
         elif path == "/api/jump-terminal":
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length) if length > 0 else b""
