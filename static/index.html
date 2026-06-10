@@ -547,11 +547,14 @@
         <span class="live-badge-dot"></span>
         <span class="live-badge-label">live</span>
       </span>
-      <span class="status" id="convStatus"></span>
       <!-- Active-pane breadcrumb lifted from the in-pane header so the
            sticky "original ask" panel can take its slot below. Populated
-           by updatePaneHeader whenever the active pane's row changes. -->
+           by updatePaneHeader whenever the active pane's row changes.
+           Ordered BEFORE the status detail: after the action buttons the
+           first thing the eye lands on is the session NAME, then the
+           engine/process noise (CCC-84). -->
       <div class="ccc-breadcrumb" id="cccBreadcrumb" hidden></div>
+      <span class="status" id="convStatus"></span>
       <!-- Global controls (formerly the standalone .ccc-topbar row above —
            merged into the main toolbar to recover ~33px of vertical space). -->
       <div class="ccc-topbar" id="cccTopbar" style="margin-left:auto;">
