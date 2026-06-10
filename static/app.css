@@ -12173,3 +12173,12 @@ body:has(.gc-reader) .pwa-install-banner {
   opacity: 0.7;
 }
 .conv-add-object .grouping-opt { color: var(--accent, #58a6ff); }
+
+/* Chooser emphasis (CCC-94): the active path is bright, the other dimmed. */
+.ns-choice-card { transition: opacity 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; }
+.ns-choice-card.is-primary {
+  border-color: var(--accent, #58a6ff);
+  box-shadow: 0 0 0 3px rgba(88,166,255,0.10);
+}
+.ns-choice-card.is-dimmed { opacity: 0.55; }
+.ns-choice-card.is-dimmed:hover { opacity: 0.85; }

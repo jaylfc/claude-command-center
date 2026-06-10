@@ -34085,11 +34085,33 @@
   // drops the user into the prompt ("what is this about?").
   function _wireNewSessionChooser($view, paneId) {
     if (!$view) return;
+    // Emphasis flip (CCC-94): the existing-folder card is the de-facto
+    // default (the CWD already points at a repo), so it starts highlighted
+    // and the new-project card dimmed. Interacting with either card flips
+    // the emphasis so the active choice is always the bright one.
+    const cardExisting = $view.querySelector('#nsCardExisting');
+    const cardNew = $view.querySelector('#nsCardNewProject');
+    const emphasize = (which) => {
+      if (!cardExisting || !cardNew) return;
+      cardExisting.classList.toggle('is-primary', which === 'existing');
+      cardExisting.classList.toggle('is-dimmed', which !== 'existing');
+      cardNew.classList.toggle('is-primary', which === 'new');
+      cardNew.classList.toggle('is-dimmed', which !== 'new');
+    };
+    if (cardNew) {
+      cardNew.addEventListener('focusin', () => emphasize('new'));
+      cardNew.addEventListener('click', () => emphasize('new'));
+    }
+    if (cardExisting) {
+      cardExisting.addEventListener('focusin', () => emphasize('existing'));
+      cardExisting.addEventListener('click', () => emphasize('existing'));
+    }
     $view.querySelectorAll('[data-ns-repo]').forEach(btn => {
       btn.addEventListener('click', () => {
         setSpawnCwdInputValue(btn.getAttribute('data-ns-repo') || '');
         $view.querySelectorAll('.ns-repo-chip.is-current').forEach(b => b.classList.remove('is-current'));
         btn.classList.add('is-current');
+        emphasize('existing');
         const input = composerInputForPane(paneId) || $convInput;
         if (input) input.focus();
       });
@@ -34294,12 +34316,12 @@
         + '<div class="ns-hero-title">🚀 Start a new session</div>'
         + '<div style="font-size:12px;color:var(--text-muted);">CWD: <span id="newSessionCwdNotice" style="color:var(--text);" title="' + escapeAttr(spawnCwd) + '">' + escapeHtml(repoLabel) + '</span></div>'
         + '<div class="ns-choice-grid">'
-        +   '<div class="ns-choice-card">'
+        +   '<div class="ns-choice-card is-primary" id="nsCardExisting">'
         +     '<div class="ns-choice-title">1 · Existing folder / repo</div>'
         +     '<div class="ns-repo-chips">' + (repoChipsHtml || '<span class="ns-muted">No folders yet — browse with 📁 below.</span>') + '</div>'
         +     '<div class="ns-cwd-slot" id="nsCwdSlot"></div>'
         +   '</div>'
-        +   '<div class="ns-choice-card">'
+        +   '<div class="ns-choice-card is-dimmed" id="nsCardNewProject">'
         +     '<div class="ns-choice-title">2 · New project</div>'
         +     '<span class="ns-name-row">'
         +       '<input type="text" id="nsNewProjectName" class="ns-input" placeholder="Project name…" autocomplete="off" spellcheck="false">'
