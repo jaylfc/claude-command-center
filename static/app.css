@@ -3279,7 +3279,10 @@
   }
   .conv-item .conv-row-actions {
     position: absolute;
-    top: 50%; right: 0;
+    /* Anchor left of the engine icon (which now rides at the far right of
+       .conv-row-end, past the elapsed time) so hover actions replace the
+       TIME but never cover the engine identity. */
+    top: 50%; right: calc(var(--conv-dot-col, 16px) + 9px);
     transform: translateY(-50%);
     display: inline-flex;
     align-items: center;
@@ -12159,3 +12162,6 @@ body:has(.gc-reader) .pwa-install-banner {
   outline-offset: -1.5px;
   background: rgba(88,166,255,0.08);
 }
+
+/* Engine icon at the far right of each row (experimental — was leftmost). */
+.conv-item .conv-row-end > .conv-session-icon { margin-left: 5px; }
