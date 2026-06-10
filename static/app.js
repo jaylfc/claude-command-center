@@ -12129,7 +12129,11 @@
     if ($flow) $flow.style.display = 'none';
     if ($convList) $convList.style.display = '';
     const $search = document.getElementById('convSearch');
-    try { renderArchiveList($search ? $search.value : ''); } catch (_) {}
+    // Thread opts through — renderArchiveList re-checks the typing-pause
+    // guard, and without `force` a user-initiated render (e.g. the rename
+    // commit, which runs while the rename input still holds focus) is
+    // silently suppressed, leaving the title stuck in edit mode (CCC-72).
+    try { renderArchiveList($search ? $search.value : '', opts); } catch (_) {}
   }
 
   // Coalesce poller-driven sidebar re-renders. liveStatus (5s), sessionsList
@@ -18978,6 +18982,13 @@
           setTimeout(() => toast.remove(), 3500);
         } catch (err) { /* swallow */ }
       }
+      // Swap the title element back in place BEFORE asking for a render.
+      // The re-render below repaints the whole list anyway, but if it gets
+      // suppressed for any reason the row must not be left stuck in edit
+      // mode (CCC-72). Optimistically show the saved name.
+      if (save && input.value.trim()) titleEl.textContent = input.value.trim();
+      if (input.parentNode) input.replaceWith(titleEl);
+      if (editBtn) editBtn.style.display = '';
       // Re-render with force: the rename input itself is a text input,
       // and on blur focus may have moved to the search box (also a text
       // input). Either case trips shouldPauseSidebarRender, which would
@@ -28970,12 +28981,12 @@
     });
   }
 
-  function renderArchiveList(filter) {
+  function renderArchiveList(filter, opts) {
     const $list = document.getElementById('convList');
     if (!$list) return;
     if (_renameInProgress) return;
     if (deferSidebarRenderIfDragging()) return;
-    if (shouldPauseSidebarRender()) return;
+    if (!(opts && opts.force) && shouldPauseSidebarRender()) return;
     const q = (filter || '').trim().toLowerCase();
     const scrollState = _captureArchiveListScroll(q, $list);
     const _finishArchiveRender = () => {
