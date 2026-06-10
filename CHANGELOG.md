@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.1] - 2026-06-10
+
+### Added
+- Added an aggregated "Total (Last 7 Days)" view in the Token Throughput Analyzer to inspect combined token throughput trends and metrics across all sessions active in the last 7 days.
+- Fixed an issue where stale conversation parsing cache entries would show zero token counts before the server reload.
+
+### Changed
+- Improved mobile tap target sizes and spacing for conversation list rows, and added instant tap/click feedback animations.
+- Conversation search now keeps its index fresh automatically: every search quietly triggers a throttled incremental re-index in the background (only transcripts that changed are re-read), so search results track live conversations without any manual re-index step.
+
+### Removed
+- Removed the horizontal-drag gesture from the conversation pane that triggered the conversation collapse feature.
+
+### Fixed
+- Fixed the backend arguments passed to find_all_conversations in the 7 days throughput aggregation view API.
+- Fixed token metrics for Codex sessions by forward-mapping token counts from result events to assistant events.
+- Fixed token metrics for Antigravity sessions when the TUI app is offline by reading directly from the local SQLite conversation databases.
+- Server failed to start on Python 3.10/3.11 (`SyntaxError: f-string expression part cannot include a backslash` at import) — introduced 2026-06-05, shipped in v5.0.0. The Terminal.app jump-to-session script now builds its AppleScript outside the f-string.
+
 ## [5.0.0] - 2026-06-09
 
 ### Added
@@ -1634,7 +1653,8 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.0.1...HEAD
+[5.0.1]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.0.1
 [5.0.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.0.0
 [4.11.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.11.0
 [4.10.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v4.10.0

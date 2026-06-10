@@ -1,1 +1,0 @@
-- Server failed to start on Python 3.10/3.11 (`SyntaxError: f-string expression part cannot include a backslash` at import) — introduced 2026-06-05, shipped in v5.0.0. The Terminal.app jump-to-session script now builds its AppleScript outside the f-string.

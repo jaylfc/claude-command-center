@@ -1,1 +1,0 @@
-- Fixed the backend arguments passed to find_all_conversations in the 7 days throughput aggregation view API.

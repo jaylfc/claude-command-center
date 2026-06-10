@@ -1,1 +1,0 @@
-- Conversation search now keeps its index fresh automatically: every search quietly triggers a throttled incremental re-index in the background (only transcripts that changed are re-read), so search results track live conversations without any manual re-index step.
