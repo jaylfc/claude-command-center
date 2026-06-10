@@ -12073,3 +12073,22 @@ body:has(.gc-reader) .pwa-install-banner {
 /* Section headers double as collapse toggles; inside a tab the section
    label is redundant with the tab itself but harmless — keep for tools
    (1d/7d, grouping) that live in the header. */
+
+/* ── Centered composer in the new-session stage (CCC-87 follow-up) ────
+   #convInputBar is adopted into #nsComposerSlot while new-session mode
+   is active; restore puts it back above the status rail. */
+.ns-composer-slot { width: 100%; max-width: 720px; margin-top: 4px; }
+.ns-composer-slot .conv-input-bar.is-centered-stage {
+  position: static;
+  width: 100%;
+  border-top: none;
+  background: transparent;
+  padding: 0;
+}
+.ns-composer-slot .conv-input-bar.is-centered-stage textarea {
+  border: 1px solid var(--accent, #58a6ff);
+  border-radius: 10px;
+  box-shadow: 0 0 0 3px rgba(88,166,255,0.10);
+  min-height: 64px;
+  font-size: 14px;
+}
