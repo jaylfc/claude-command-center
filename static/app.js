@@ -16563,6 +16563,11 @@
       catch (_) { return 'project'; }
     })();
     const _shouldGroupByFolder = _hasFolderChips && _ipGrouping === 'project';
+    // "By objects" (CCC-83): group In Progress rows under the Flow object
+    // each session is parented to on the Flow board (nearest object
+    // ancestor via flowNodeParents). Sessions not attached to any object
+    // fall into a trailing flat list.
+    const _shouldGroupByObjects = _ipGrouping === 'objects';
     const _pinRankValue = (c) => {
       const rank = Number(c && c.pin_rank);
       return Number.isFinite(rank) ? rank : 0;
@@ -16903,7 +16908,53 @@
         };
       });
     let _activeRowsHtml;
-    if (_shouldGroupByFolder) {
+    if (_shouldGroupByObjects) {
+      // Nearest Flow-object ancestor for a session row (walks the
+      // flowNodeParents chain; bounded hops guard against cycles).
+      const _objectForSession = (c) => {
+        let node = flowNodeKey('session', c.session_id || c.id);
+        for (let hop = 0; hop < 6; hop++) {
+          const parent = flowNodeParents[node];
+          if (!parent) return null;
+          if (parent.indexOf('object:') === 0) {
+            const oid = parent.slice(7);
+            const obj = (flowCustomObjects || []).find(o => o && o.id === oid);
+            return { id: oid, title: (obj && obj.title) || 'Object' };
+          }
+          node = parent;
+        }
+        return null;
+      };
+      const _byObject = new Map();
+      const _unparented = [];
+      for (const c of _visibleSessionConvs) {
+        const obj = _objectForSession(c);
+        if (!obj) { _unparented.push(c); continue; }
+        if (!_byObject.has(obj.id)) _byObject.set(obj.id, { title: obj.title, cards: [] });
+        _byObject.get(obj.id).cards.push(c);
+      }
+      const _objEntries = Array.from(_byObject.entries()).sort((a, b) => {
+        const aMax = a[1].cards.reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        const bMax = b[1].cards.reduce((m, c) => Math.max(m, c.modified || 0), 0);
+        return bMax - aMax;
+      });
+      const _objGroupsHtml = _objEntries.map(([oid, group]) => {
+        // Stable per-object hue so each group keeps its color across renders.
+        let hash = 0;
+        for (let i = 0; i < oid.length; i++) hash = ((hash << 5) - hash + oid.charCodeAt(i)) | 0;
+        const hue = Math.abs(hash) % 360;
+        const collapseKey = 'object:' + oid;
+        const collapsed = _isFolderGroupCollapsed('inprogress', collapseKey);
+        return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
+          + _folderGroupHeaderHtml('inprogress', group.title, group.cards.length, hue, '', collapseKey)
+          + group.cards.map(c => _renderRow(c)).join('')
+          + '</div>';
+      }).join('');
+      const _restHtml = _unparented.length
+        ? _flatItemsWithSeparators(_unparented, _gcItems)
+        : (_gcItems || []).map(it => it.html).join('');
+      _activeRowsHtml = _objGroupsHtml + _restHtml;
+    } else if (_shouldGroupByFolder) {
       // Group cards by folder; preserve folder order by the most
       // recent card in each group (freshest folder appears first).
       const _byFolder = new Map();
@@ -17032,6 +17083,7 @@
         ? '<span class="conv-grouping-toggle" data-role="grouping-toggle">'
             + '<span class="grouping-opt' + (_ipGrouping === 'project' ? ' is-active' : '') + '" data-grouping="project">by project</span>'
             + '<span class="grouping-opt' + (_ipGrouping === 'time' ? ' is-active' : '') + '" data-grouping="time">by time</span>'
+            + '<span class="grouping-opt' + (_ipGrouping === 'objects' ? ' is-active' : '') + '" data-grouping="objects" title="Group by the Flow object each session is attached to on the Flow board">by objects</span>'
           + '</span>'
         : '';
       const _ipTools = (_ipWindowToggle || _ipGroupingToggle)
