@@ -1141,7 +1141,7 @@
    * thinking` line Antigravity prints in its own UI. Quiet by design so it
    * doesn't compete with the message text. */
   .event-token-chips {
-    margin: 4px 0 0;
+    margin: 1px 0 0;
     font-size: 10px;
     color: var(--text-muted);
     opacity: 0.65;
@@ -1806,17 +1806,17 @@
   .conv-sticky-header.is-expanded .csh-row {
     height: 50vh;
   }
-  .conversations-view .event { margin-bottom: 8px; padding: 10px 14px; border-radius: 6px; border-left: 3px solid transparent; }
+  .conversations-view .event { margin-bottom: 4px; padding: 6px 12px; border-radius: 6px; border-left: 3px solid transparent; }
   /* Assistant rows — Claude-Desktop-style clean prose. No background fill,
      no left border, subtle metadata so the eye lands on the prose itself. */
-  .conversations-view .event.assistant { background: transparent; border: none; padding: 6px 0; }
+  .conversations-view .event.assistant { background: transparent; border: none; padding: 2px 0; }
   .conversations-view .event.assistant .line-num,
   .conversations-view .event.assistant .msg-ts { opacity: 0.35; font-size: 10px; }
   .conversations-view .event.assistant .assistant-text,
   .conversations-view .stream-bubble .assistant-text {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
     font-size: 16px;
-    line-height: 1.6;
+    line-height: 1.45;
     font-weight: 400;
   }
   /* User bubble — Claude-Desktop-style chat bubble. No label, no left
@@ -1825,7 +1825,7 @@
     background: rgba(88, 166, 255, 0.10);
     border: none;
     border-radius: 12px;
-    padding: 10px 16px;
+    padding: 7px 12px;
     max-width: 85%;
   }
   .conversations-view .event.user_text .label { display: none; }
@@ -1902,7 +1902,7 @@
   .conversations-view .event.tool_result { display: none; }
   /* Tool-call group — fused "Ran N commands ▾" container. */
   .conversations-view .tool-call-group {
-    margin: 4px 0 8px;
+    margin: 2px 0 4px;
     padding: 0;
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1917,7 +1917,7 @@
   }
   .conversations-view .tool-call-group-header {
     cursor: pointer; user-select: none;
-    padding: 8px 12px;
+    padding: 4px 10px;
     font-size: 13px; color: var(--text-muted);
     display: flex; align-items: center; gap: 8px;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
@@ -1928,7 +1928,7 @@
   }
   .conversations-view .tool-call-group:not(.collapsed) .tool-call-group-header .tcg-arrow { transform: rotate(90deg); }
   .conversations-view .tool-call-group.collapsed .tool-call-group-body { display: none; }
-  .conversations-view .tool-call-group-body { padding: 4px 12px 10px; border-top: 1px solid var(--border); }
+  .conversations-view .tool-call-group-body { padding: 3px 10px 6px; border-top: 1px solid var(--border); }
   /* Sticky-header unified panel — Ask | Activity inside a single bordered
      box. Fixed height; each column scrolls independently if its content
      overflows. Saves the inner padding/border that two side-by-side
