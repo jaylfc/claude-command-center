@@ -16581,6 +16581,15 @@
     // ancestor via flowNodeParents). Sessions not attached to any object
     // fall into a trailing flat list.
     const _shouldGroupByObjects = _ipGrouping === 'objects';
+    // Per-row folder chips knob. '' = auto (hidden in by-objects mode where
+    // the group header already names the container, shown elsewhere);
+    // 'show'/'hide' = explicit user choice via the header knob.
+    const _ipRowChipsPref = (() => {
+      try { return localStorage.getItem('ccc-inprogress-row-chips') || ''; }
+      catch (_) { return ''; }
+    })();
+    const _ipRowChipsOn = _ipRowChipsPref === 'show'
+      || (_ipRowChipsPref === '' && !_shouldGroupByObjects);
     const _pinRankValue = (c) => {
       const rank = Number(c && c.pin_rank);
       return Number.isFinite(rank) ? rank : 0;
@@ -16976,7 +16985,7 @@
         const attrs = ' data-object-drop="' + escapeAttr(nodeId) + '"';
         return '<div class="conv-folder-group' + (collapsed ? ' collapsed' : '') + '">'
           + _folderGroupHeaderHtml('inprogress', title, cards.length, hue, '', nodeId, attrs)
-          + cards.map(c => _renderRow(c)).join('')
+          + cards.map(c => _renderRow(c, { suppressFolderChip: !_ipRowChipsOn })).join('')
           + '</div>';
       };
       let _objGroupsHtml = _objEntries.map(([nodeId, group]) =>
@@ -17117,8 +17126,18 @@
             + '<span class="grouping-opt' + (_ipGrouping === 'objects' ? ' is-active' : '') + '" data-grouping="objects" title="Group by the Flow object each session is attached to on the Flow board">by objects</span>'
           + '</span>'
         : '';
-      const _ipTools = (_ipWindowToggle || _ipGroupingToggle)
-        ? '<span class="conv-inprogress-tools">' + _ipWindowToggle + _ipGroupingToggle + '</span>'
+      // Chips knob: show/hide the per-row folder chips. Sits left of the
+      // window toggle. Defaults off in by-objects mode (group headers
+      // already name the container).
+      const _ipChipsKnob = _hasFolderChips
+        ? '<span class="conv-grouping-toggle conv-chips-knob" data-role="row-chips-toggle"'
+          + ' title="Show or hide the per-row repo chips">'
+          + '<span class="grouping-opt' + (_ipRowChipsOn ? ' is-active' : '') + '" data-chips="'
+          + (_ipRowChipsOn ? 'hide' : 'show') + '">chips</span>'
+          + '</span>'
+        : '';
+      const _ipTools = (_ipWindowToggle || _ipGroupingToggle || _ipChipsKnob)
+        ? '<span class="conv-inprogress-tools">' + _ipChipsKnob + _ipWindowToggle + _ipGroupingToggle + '</span>'
         : '';
       // Count display: sessions in window + active group chats. Title
       // attribute spells both out so a hover explains the headline number.
@@ -17858,7 +17877,7 @@
       $inProgressToggle.addEventListener('click', (ev) => {
         // The grouping toggle (project / time) lives inside this header
         // button — its own listener stops propagation, but be defensive.
-        if (ev.target.closest('[data-role="grouping-toggle"], [data-role="window-toggle"]')) return;
+        if (ev.target.closest('[data-role="grouping-toggle"], [data-role="window-toggle"], [data-role="row-chips-toggle"]')) return;
         ev.stopPropagation();
         const section = $inProgressToggle.closest('[data-role="inprogress-section"]');
         if (!section) return;
@@ -17882,6 +17901,17 @@
         if (!opt) return;
         const value = opt.getAttribute('data-grouping');
         try { localStorage.setItem('ccc-inprogress-grouping', value); } catch (_) {}
+        renderArchiveList(document.getElementById('convSearch')?.value || '');
+      });
+    }
+    // Chips knob: flips the per-row chip visibility and re-renders.
+    const $chipsKnob = $convList.querySelector('[data-role="row-chips-toggle"]');
+    if ($chipsKnob) {
+      $chipsKnob.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const opt = ev.target.closest('[data-chips]');
+        if (!opt) return;
+        try { localStorage.setItem('ccc-inprogress-row-chips', opt.getAttribute('data-chips')); } catch (_) {}
         renderArchiveList(document.getElementById('convSearch')?.value || '');
       });
     }
@@ -33808,6 +33838,32 @@
     _adoptedComposerHome = null;
   }
 
+  // Fun default project names for the New-project card. A random one is
+  // prefilled on entry; the 🎲 button rolls again. Slugify turns the
+  // pick into the ~/dev/<slug> folder suggestion.
+  const NS_FUN_PROJECT_NAMES = [
+    'turbo-walrus', 'quantum-falafel', 'midnight-mango', 'electric-hummus', 'rocket-pita',
+    'neon-cactus', 'disco-octopus', 'cosmic-bagel', 'turbo-pickle', 'laser-llama',
+    'funky-matzah', 'atomic-tahini', 'groovy-gecko', 'plasma-penguin', 'ninja-noodle',
+    'bionic-burrito', 'stealth-sabra', 'mega-meerkat', 'hyper-hoopoe', 'pixel-pomegranate',
+    'sneaky-shakshuka', 'dancing-dolphin', 'flying-falcon', 'silent-sphinx', 'rapid-raccoon',
+    'golden-golem', 'witty-wombat', 'zesty-zebra', 'cunning-camel', 'brave-burekas',
+    'lucky-lemur', 'magic-malabi', 'swift-swallow', 'bold-baklava', 'clever-couscous',
+    'mighty-mole', 'jolly-jackal', 'shiny-shekel', 'happy-halva', 'dapper-dingo',
+    'frozen-falcon', 'crimson-koala', 'velvet-viper', 'amber-antelope', 'cobalt-cricket',
+    'scarlet-sloth', 'indigo-ibex', 'emerald-emu', 'turquoise-tapir', 'magenta-mongoose',
+    'iron-dome-jr', 'startup-nation', 'desert-bloom', 'dead-sea-surfer', 'negev-ninja',
+    'galilee-glider', 'carmel-comet', 'jaffa-jet', 'eilat-eagle', 'masada-mainframe',
+    'silicon-shuk', 'hummus-engine', 'krembo-cloud', 'bamba-bot', 'bisli-blaster',
+    'sufganiyah-server', 'arak-attack', 'tahini-tornado', 'zaatar-zeppelin', 'labneh-launcher',
+    'moonshot-mule', 'gravity-goose', 'orbit-otter', 'comet-cobra', 'nebula-newt',
+    'stellar-stork', 'lunar-lobster', 'solar-salmon', 'astro-armadillo', 'galaxy-gibbon',
+    'warp-weasel', 'photon-phoenix', 'quark-quail', 'tensor-toucan', 'vector-vole',
+    'binary-bison', 'kernel-kiwi', 'syntax-squid', 'cache-cheetah', 'lambda-leopard',
+    'docker-duck', 'regex-rhino', 'pixel-panther', 'crypto-crab', 'neural-narwhal',
+    'fusion-ferret', 'matrix-marmot', 'cyber-seagull', 'data-dromedary', 'logic-lynx',
+  ];
+
   // CCC-82: wire the front-and-center new-session chooser. Repo chips set
   // the spawn CWD in place; the New-project card mkdirs via
   // /api/project/create, registers the repo, points the CWD at it, and
@@ -33836,6 +33892,17 @@
       if (!pathTouched) pathEl.value = slug ? ('~/dev/' + slug) : '';
       createBtn.disabled = !slug;
     });
+    // Prefill a fun random name (and folder) so the card is one click from
+    // working; the dice rolls a fresh one.
+    const rollName = () => {
+      const pick = NS_FUN_PROJECT_NAMES[Math.floor(Math.random() * NS_FUN_PROJECT_NAMES.length)];
+      nameEl.value = pick;
+      pathTouched = false;
+      nameEl.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const diceBtn = $view.querySelector('#nsNewProjectDice');
+    if (diceBtn) diceBtn.addEventListener('click', () => { rollName(); nameEl.focus(); });
+    if (!nameEl.value) rollName();
     pathEl.addEventListener('input', () => {
       pathTouched = !!pathEl.value.trim();
       createBtn.disabled = !(pathEl.value.trim() || slugify(nameEl.value));
@@ -34019,7 +34086,10 @@
         +   '</div>'
         +   '<div class="ns-choice-card">'
         +     '<div class="ns-choice-title">2 · New project</div>'
-        +     '<input type="text" id="nsNewProjectName" class="ns-input" placeholder="Project name…" autocomplete="off" spellcheck="false">'
+        +     '<span class="ns-name-row">'
+        +       '<input type="text" id="nsNewProjectName" class="ns-input" placeholder="Project name…" autocomplete="off" spellcheck="false">'
+        +       '<button type="button" id="nsNewProjectDice" class="ns-dice-btn" title="Roll another name">&#127922;</button>'
+        +     '</span>'
         +     '<input type="text" id="nsNewProjectPath" class="ns-input" placeholder="~/dev/<name>" autocomplete="off" spellcheck="false">'
         +     '<button type="button" id="nsNewProjectCreate" class="ns-create-btn" disabled>Create folder &amp; start</button>'
         +     '<div class="ns-muted" id="nsNewProjectHint">We create the folder, then you describe the project below.</div>'

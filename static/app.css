@@ -12089,6 +12089,22 @@ body:has(.gc-reader) .pwa-install-banner {
   border: 1px solid var(--accent, #58a6ff);
   border-radius: 10px;
   box-shadow: 0 0 0 3px rgba(88,166,255,0.10);
-  min-height: 64px;
+  /* Several lines of room — invite people to actually express the idea,
+     not compress it into one line. */
+  min-height: 140px;
   font-size: 14px;
+  line-height: 1.5;
 }
+
+/* New-project name row + dice (random fun name) */
+.ns-name-row { display: flex; gap: 6px; align-items: center; }
+.ns-name-row .ns-input { flex: 1; }
+.ns-dice-btn {
+  width: 30px; height: 30px; flex-shrink: 0;
+  border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); cursor: pointer; font-size: 15px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: transform 0.12s, border-color 0.15s;
+}
+.ns-dice-btn:hover { border-color: var(--accent, #58a6ff); transform: rotate(-20deg) scale(1.1); }
+.ns-dice-btn:active { transform: rotate(340deg) scale(0.95); }
