@@ -1820,9 +1820,24 @@
   .conversations-view .event { margin-bottom: 4px; padding: 6px 12px; border-radius: 6px; border-left: 3px solid transparent; }
   /* Assistant rows — Claude-Desktop-style clean prose. No background fill,
      no left border, subtle metadata so the eye lands on the prose itself. */
-  .conversations-view .event.assistant { background: transparent; border: none; padding: 2px 0; }
+  .conversations-view .event.assistant { background: transparent; border: none; padding: 4px 0; margin-bottom: 8px; position: relative; }
+  /* Meta (line number + timestamp) used to float:right, eating the first
+     line's width so the paragraph wrapped short. Lift it out of the text
+     flow entirely — overlaid top-right, only visible on hover — so prose
+     gets the full column width. */
   .conversations-view .event.assistant .line-num,
-  .conversations-view .event.assistant .msg-ts { opacity: 0.35; font-size: 10px; }
+  .conversations-view .event.assistant .msg-ts {
+    opacity: 0; font-size: 10px; float: none;
+    position: absolute; top: 4px;
+    transition: opacity 0.12s;
+    background: var(--bg);
+    padding: 0 3px; border-radius: 3px;
+    pointer-events: none;
+  }
+  .conversations-view .event.assistant .msg-ts { right: 0; }
+  .conversations-view .event.assistant .line-num { right: 76px; }
+  .conversations-view .event.assistant:hover .line-num,
+  .conversations-view .event.assistant:hover .msg-ts { opacity: 0.45; }
   .conversations-view .event.assistant .assistant-text,
   .conversations-view .stream-bubble .assistant-text {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
