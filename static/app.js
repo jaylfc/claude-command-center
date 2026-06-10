@@ -8620,7 +8620,9 @@
     const savedObjects = JSON.parse(localStorage.getItem('ccc-flow-custom-objects') || '[]');
     if (Array.isArray(savedObjects)) flowCustomObjects = savedObjects;
   } catch (_) {}
-  const FLOW_ZOOM_MIN = 0.45;
+  // 0.15 floor lets a large board fit on screen; below that nodes are
+  // illegible and hit-targets break down (CCC-73 asked for deeper zoom-out).
+  const FLOW_ZOOM_MIN = 0.15;
   const FLOW_ZOOM_MAX = 2.25;
   const FLOW_CANVAS_PAD_RATIO = 0.30;
   const FLOW_CANVAS_PAD_MIN_PX = 260;
@@ -9095,6 +9097,9 @@
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="expand-all">Expand all</button>'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="organize" title="Keep all objects in place, line up session children below each parent — most recent leftmost.">Organize</button>'
       +   '<button type="button" class="flow-toolbar-btn" data-flow-action="organize-plus" title="Run Organize, then apply your recorded Flow layout preferences.">Organize+</button>'
+      +   (_flowOrganizeUndoSnapshot
+            ? '<button type="button" class="flow-toolbar-btn" data-flow-action="undo-organize" title="Restore every node to where it was before the last Organize.">Undo organize</button>'
+            : '')
       +   '<button type="button" class="flow-toolbar-btn' + recordActive + '" data-flow-action="record-organize" aria-pressed="' + recordPressed + '" title="' + escapeAttr(recordTitle) + '">' + escapeHtml(recordLabel) + '</button>'
       + '</div>'
       + '<div class="flow-toolbar-divider"></div>'
@@ -9600,6 +9605,14 @@
     if (c.source === 'backlog' || c.source === 'github_pr') return false;
     const pinnedInFlow = isFlowPinned(c);
     if (c.archived && !flowIncludeArchived && !pinnedInFlow) return false;
+    // The 1d/7d toolbar window must bite on the flow board too. The list
+    // filter exempts every list-pinned row from recency, and a curated
+    // flow board is mostly pinned rows — so the filter looked dead
+    // (CCC-74). Here only an explicit flow-pin keeps an old row visible.
+    if (showRecentOnly && !pinnedInFlow) {
+      const cutoff = recencyCutoffSec();
+      if (cutoff && flowRowTime(c) < cutoff) return false;
+    }
     const col = classifyKanbanColumn(c);
     if (col === 'backlog') return false;
     if (col === 'archived' && !flowIncludeArchived && !pinnedInFlow) return false;
@@ -9775,12 +9788,34 @@
   //     dragged them — fixed by treating each cluster as its own
   //     placement unit instead of a derived offset of its chain root.
   // ──────────────────────────────────────────────────────────────────
+  // Pre-Organize snapshot of every node position so the layout can be
+  // restored with one click (CCC-76). One level deep — a second Organize
+  // overwrites it with the newer "before".
+  let _flowOrganizeUndoSnapshot = null;
+  function undoFlowOrganize() {
+    if (!_flowOrganizeUndoSnapshot) return;
+    flowNodePositions = _flowOrganizeUndoSnapshot;
+    _flowOrganizeUndoSnapshot = null;
+    persistFlowNodePositions();
+    try {
+      const $s = document.getElementById('convSearch');
+      const convs = (typeof filterConversations === 'function')
+        ? filterConversations($s ? $s.value : '')
+        : (conversationsData || []);
+      if (typeof renderSidebar === 'function') renderSidebar(convs);
+    } catch (_) {}
+    if (typeof showOpToast === 'function') showOpToast('Organize undone — previous layout restored.', 'info');
+  }
+
   function organizeFlowSessions(targetEl, opts) {
     const board = targetEl || document.getElementById('flowBoard');
     if (!board) return;
     const world = board.querySelector('.flow-world') || board.querySelector('.flow-canvas');
     const canvas = board.querySelector('.flow-canvas');
     if (!world || !canvas) return;
+    try {
+      _flowOrganizeUndoSnapshot = JSON.parse(JSON.stringify(flowNodePositions || {}));
+    } catch (_) { _flowOrganizeUndoSnapshot = null; }
     const convsById = {};
     if (typeof conversationsData !== 'undefined' && Array.isArray(conversationsData)) {
       conversationsData.forEach(c => { if (c && c.id) convsById[c.id] = c; });
@@ -11313,8 +11348,14 @@
         accentSeed = (parentRec && parentRec.accentSeed) || accentSeed;
       }
       const accentStyle = accentSeed ? flowAccentStyle(accentSeed) : '';
+      // Archived nodes wear a green ✓ badge (CSS ::before — can't carry its
+      // own tooltip). Explain it on the node so hovering answers "what are
+      // these checkmarks?" (CCC-75).
+      const nodeTitle = (rec.className || '').indexOf('is-archived') !== -1
+        ? ' title="Archived (done) session — the ✓ marks it complete. Shown because ‘Include archived’ is on or it’s pinned to the board."'
+        : '';
       return '<div class="flow-node ' + escapeAttr(rec.className) + selectedClass + '" data-flow-kind="' + escapeAttr(rec.kind) + '"'
-        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath + dataGcPath + dataGcId + dataGcMode
+        + ' data-flow-node-id="' + escapeAttr(rec.id) + '"' + dataParent + dataRow + dataSession + dataObject + dataDraft + dataRepoPath + dataGcPath + dataGcId + dataGcMode + nodeTitle
         + ' style="left:' + Math.round(pos.x) + 'px;top:' + Math.round(pos.y) + 'px;' + accentStyle + '">'
         + deleteBtn
         + addBtn
@@ -11744,6 +11785,8 @@
     });
     const organizeBtn = targetEl && targetEl.querySelector('[data-flow-action="organize"]');
     if (organizeBtn) organizeBtn.addEventListener('click', () => organizeFlowSessions(targetEl));
+    const undoOrganizeBtn = targetEl && targetEl.querySelector('[data-flow-action="undo-organize"]');
+    if (undoOrganizeBtn) undoOrganizeBtn.addEventListener('click', () => undoFlowOrganize());
     const organizePlusBtn = targetEl && targetEl.querySelector('[data-flow-action="organize-plus"]');
     if (organizePlusBtn) organizePlusBtn.addEventListener('click', () => applyFlowOrganizePlus(targetEl));
     const recordOrganizeBtn = targetEl && targetEl.querySelector('[data-flow-action="record-organize"]');
@@ -12069,6 +12112,15 @@
             persistFlowNodePositions();
             redrawFlowLinks(targetEl);
             return;
+          }
+          // Flow popout: every click target below renders into the right-
+          // side reader pane (#conversationsView). With the reader toggled
+          // off that pane is CSS-hidden, so taps looked like they did
+          // nothing (CCC-77). Auto-open the reader on first use.
+          if (FLOW_POPOUT_MODE && !flowPopoutReaderEnabled()
+              && (node.dataset.flowKind === 'session' || node.dataset.flowKind === 'repo'
+                  || node.dataset.flowKind === 'object' || node.dataset.flowKind === 'group-chat')) {
+            setFlowPopoutReaderEnabled(true);
           }
           if (node.dataset.flowKind === 'session' && node.dataset.id) {
             targetEl.querySelectorAll('.flow-node-session.active').forEach(el => el.classList.remove('active'));
