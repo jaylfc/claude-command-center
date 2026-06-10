@@ -181,6 +181,11 @@ final class CCCWebWindow: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindow
             backing: .buffered,
             defer: false
         )
+        // Programmatic NSWindows default to isReleasedWhenClosed=true. We
+        // also hold a strong `window` reference, so the close button (or
+        // Cmd+W) over-released the popout window and crashed the whole app
+        // (CCC-71: "red X closes the app, then an error appears").
+        win.isReleasedWhenClosed = false
         if isMain {
             win.title = "Command Center for Claude, Codex, Antigravity — v\(CCC_BUNDLE_VERSION)"
             win.minSize = NSSize(width: 900, height: 600)
@@ -231,7 +236,12 @@ final class CCCWebWindow: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindow
         } else {
             loadingLabel = nil
             win.contentView!.addSubview(view)
-            if let url = url {
+            // Only load manually on the bridge path (configuration == nil).
+            // When this window is born from createWebViewWith (window.open),
+            // WebKit loads the request into the returned webview itself —
+            // a manual load here races that navigation and the page hangs
+            // on a permanent spinner (CCC-71: "pop-up loads forever").
+            if configuration == nil, let url = url {
                 view.load(URLRequest(url: url))
             }
             win.makeKeyAndOrderFront(nil)
