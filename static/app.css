@@ -11991,3 +11991,13 @@ body:has(.gc-reader) .pwa-install-banner {
 .ns-create-btn:disabled { opacity: 0.45; cursor: default; }
 .ns-create-btn:not(:disabled):hover { background: rgba(88,166,255,0.22); }
 .ns-muted { font-size: 11.5px; color: var(--text-muted); }
+
+/* UX-fixes worker badge in the toolbar breadcrumb (CCC-90). */
+.ccc-breadcrumb-ux {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; flex-shrink: 0;
+  border: 1px solid rgba(188,140,255,0.5);
+  background: rgba(188,140,255,0.12);
+  color: var(--purple, #bc8cff);
+  font-size: 11px; font-weight: 700; white-space: nowrap;
+}

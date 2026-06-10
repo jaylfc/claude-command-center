@@ -19243,8 +19243,23 @@
         // pushes the pills past the breadcrumb's overflow:hidden clip edge and
         // the terminal-vs-headless indication disappears (CCC-35). The title
         // ellipsizes instead; it's secondary and also shown in the pane.
+        // UX-fixes worker badge (CCC-90): when this row is one of the
+        // queue-worker sessions (same detection as the sidebar's x/y chip),
+        // put a designer-pen badge + progress right in the top bar.
+        let uxBadge = '';
+        try {
+          const prog = (typeof _uxFixesQueueProgressForRow === 'function' && row)
+            ? _uxFixesQueueProgressForRow(row) : null;
+          if (prog) {
+            const lbl = (prog.kind === 'done' ? '✓ ' : '') + '(' + prog.current + '/' + prog.total + ')';
+            uxBadge = '<span class="ccc-breadcrumb-ux" title="UX-fixes queue worker — '
+              + (prog.kind === 'done' ? 'last fixed' : 'working') + ' ' + escapeAttr(prog.ref || '') + '">'
+              + '✍️ UX ' + escapeHtml(lbl) + '</span>';
+          }
+        } catch (_) {}
         breadcrumbEl.innerHTML = ''
           + (category ? '<span class="ccc-breadcrumb-category">' + escapeHtml(category) + '</span>' : '')
+          + uxBadge
           + procSlot
           + (title ? '<span class="ccc-breadcrumb-title">' + escapeHtml(title) + '</span>' : '')
           + (sizeBytes > 0 ? '<span class="ccc-breadcrumb-size" title="' + sizeBytes.toLocaleString() + ' bytes">' + escapeHtml(formatSize(sizeBytes)) + '</span>' : '')
