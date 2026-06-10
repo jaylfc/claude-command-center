@@ -32057,6 +32057,9 @@
     annotationState.editor = editor;
     annPositionEditor(editor, annotationState.rect);
     const noteEl = editor.querySelector('.ann-editor-note');
+    // Cmd-V image paste in the note (CCC-89): same uploader as the composer
+    // — pasted screenshots land as a path token the worker can open.
+    try { if (typeof attachImagePaste === 'function') attachImagePaste(noteEl); } catch (_) {}
     const errEl = editor.querySelector('.ann-editor-error');
     const saveBtn = editor.querySelector('[data-ann-save]');
     const cancelBtn = editor.querySelector('[data-ann-cancel]');
@@ -32347,6 +32350,7 @@
     const previewImg = modal.querySelector('.ann-screen-preview');
     if (previewImg) previewImg.src = imgSrc;
     const noteEl = modal.querySelector('.ann-editor-note');
+    try { if (typeof attachImagePaste === 'function') attachImagePaste(noteEl); } catch (_) {}
     const errEl = modal.querySelector('.ann-editor-error');
     const saveBtn = modal.querySelector('[data-ann-screen-save]');
     const cancelBtn = modal.querySelector('[data-ann-screen-cancel]');
