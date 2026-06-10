@@ -33701,6 +33701,18 @@ _HISTORY_INDEX_PATH = Path.home() / ".claude-index" / "index.db"
 _history_conn = None
 _history_conn_lock = threading.Lock()       # guards connection open / reset
 
+# Self-freshening search: each /api/search-history request kicks a throttled
+# background incremental ingest so search content tracks live transcripts
+# without any manual re-index. The gap keeps search-as-you-type from
+# stampeding the indexer; the first search after server start always ingests.
+try:
+    _HISTORY_AUTO_INGEST_GAP_SEC = max(
+        30.0,
+        float(os.environ.get("CCC_HISTORY_AUTO_INGEST_SEC", "120")),
+    )
+except ValueError:
+    _HISTORY_AUTO_INGEST_GAP_SEC = 120.0
+
 # A single sqlite3.Connection cannot be used concurrently from multiple
 # threads. check_same_thread=False only silences Python's guard — it does NOT
 # serialise access, and overlapping .execute() on one shared handle raises
@@ -36666,6 +36678,18 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             if not q:
                 self.send_json({"results": []})
             else:
+                # Self-freshening index: every search kicks a throttled
+                # incremental ingest in the background (only re-reads
+                # transcripts that changed since the last pass). This query
+                # is served from the current index immediately; new content
+                # is searchable moments later without any manual action.
+                if _hi_indexer is not None:
+                    try:
+                        _hi_indexer.maybe_ingest(
+                            min_gap_sec=_HISTORY_AUTO_INGEST_GAP_SEC
+                        )
+                    except Exception:
+                        pass  # freshness is best-effort; never break search
                 cwd_like = (qs.get("cwd", [""])[0] or "").strip() or None
                 since = (qs.get("since", [""])[0] or "").strip() or None
                 limit_raw = (qs.get("limit", ["20"])[0] or "20").strip()
@@ -37046,54 +37070,6 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 "ok": True,
                 "started": started,
                 "already_running": not started,
-            })
-            return
-        if path == "/api/conversations/refresh":
-            # Settings → "Refresh conversations data": force-fresh everything
-            # the conversation list and search read from, without waiting for
-            # the TTLs. Marks every archive response-cache entry stale and
-            # kicks its background rebuild now, drops the sessions response
-            # cache, and re-runs the history search ingest. The UI keeps
-            # serving the old rows until each rebuild lands, so nothing
-            # blocks or flickers.
-            _load_archive_response_cache()
-            with _ARCHIVE_RESPONSE_CACHE_LOCK:
-                cached_keys = list(_ARCHIVE_RESPONSE_CACHE.keys())
-                for entry in _ARCHIVE_RESPONSE_CACHE.values():
-                    entry["cached_at"] = 0
-            if not cached_keys:
-                cached_keys = [_archive_response_cache_key()]
-            refreshing = 0
-            for key in cached_keys:
-                flags = {}
-                for part in key.split(";"):
-                    name, _, val = part.partition("=")
-                    flags[name] = val == "1"
-                options = {
-                    "include_prs": flags.get("include_prs", False),
-                    "resolve_pr_states": flags.get("resolve_prs", False),
-                    "resolve_effective": flags.get("resolve_effective", False),
-                    "resolve_worktree_dirty": flags.get("resolve_worktrees", False),
-                }
-                if _archive_refresh_response_cache_async(key, options):
-                    refreshing += 1
-            with _SESSIONS_SINGLEFLIGHT_LOCK:
-                _SESSIONS_RESPONSE_CACHE.clear()
-            history_started = False
-            if _hi_indexer is not None:
-                history_started = _hi_indexer.start_ingest(with_embed=True)
-                with _history_conn_lock:
-                    if _history_conn is not None:
-                        with _history_query_lock:
-                            try:
-                                _history_conn.close()
-                            except Exception:
-                                pass
-                            _history_conn = None
-            self.send_json({
-                "ok": True,
-                "archive_refreshing": refreshing,
-                "history_started": history_started,
             })
             return
         if path == "/api/restart":

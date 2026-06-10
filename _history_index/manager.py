@@ -99,6 +99,19 @@ class IndexerManager:
             out["status_error"] = str(e)
         return out
 
+    def maybe_ingest(self, *, min_gap_sec: float = 120.0, with_embed: bool = True) -> bool:
+        """Search-triggered freshness: kick a background ingest only when none
+        is running and the last one started more than min_gap_sec ago. The gap
+        check is in-memory, so this is cheap enough to call on every search
+        request."""
+        with self._lock:
+            if self._is_indexing or (self._thread and self._thread.is_alive()):
+                return False
+            ref = max(self._last_run_finished, self._last_run_started)
+            if ref and (time.time() - ref) < min_gap_sec:
+                return False
+        return self.start_ingest(with_embed=with_embed)
+
     def start_ingest(self, *, with_embed: bool = True) -> bool:
         """Kick a background ingest pass. Returns False if one is already running."""
         with self._lock:

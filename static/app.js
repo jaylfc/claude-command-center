@@ -19409,6 +19409,7 @@
       raf(restore);
     });
   }
+  window.__mark = 19412;
   ensureAllConversationEndAffordances();
 
   // Build a fresh `.conv-pane` element for paneId, cloning the chrome of
@@ -19722,6 +19723,7 @@
 
   // Click anywhere inside a pane to mark it active (drives composer
   // routing via the shim, and the sidebar `.active` highlight).
+  window.__mark = 19725;
   document.addEventListener('click', (ev) => {
     // Don't activate the pane on close-button clicks — the close handler
     // is about to destroy the pane anyway, and activating it first causes
@@ -19839,6 +19841,7 @@
     }
     saveSplitState();
   }
+  window.__mark = 19842;
   window.addEventListener('resize', handleViewportResize);
   window.addEventListener('resize', () => {
     restoreConversationBottomAnchors(captureConversationBottomAnchors());
@@ -19851,6 +19854,7 @@
   // `interactive-widget` hint), so we feed `visualViewport.height` into the
   // `--app-vh` custom property that `body` reads. Wired up only under a
   // coarse pointer — desktop keeps the plain `100vh` fallback untouched.
+  window.__mark = 19854;
   if (window.visualViewport && window.matchMedia('(pointer: coarse)').matches) {
     const vv = window.visualViewport;
     let _vvRaf = 0;
@@ -21058,6 +21062,7 @@
     if (backdrop) backdrop.addEventListener('click', closeFfcModal);
     if (close)    close.addEventListener('click', closeFfcModal);
   }
+  window.__mark = 21061;
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _ffcWireCloseHandlers);
   } else {
@@ -22688,6 +22693,7 @@
   }
   // Delegated click on the input-context strip — survives re-renders
   // of [data-workspace] without rebinding.
+  window.__mark = 22691;
   (function () {
     const slot = getInputContextSlot();
     if (!slot) return;
@@ -22698,12 +22704,14 @@
       openWorktreesModal();
     });
   })();
+  window.__mark = 22701;
   document.addEventListener('keydown', function (e) {
     const $modal = document.getElementById('worktreesModal');
     if (e.key === 'Escape' && $modal && $modal.classList.contains('open')) {
       closeWorktreesModal();
     }
   });
+  window.__mark = 22707;
   (function () {
     const $backdrop = document.getElementById('worktreesBackdrop');
     const $closeBtn = document.getElementById('worktreesCloseBtn');
@@ -22737,6 +22745,7 @@
         : baseTitle;
     } catch (_) { /* network blip — leave the badge state alone */ }
   }
+  window.__mark = 22740;
   if (!CONV_POPOUT_MODE) {
     refreshWorktreesBadge();
     setInterval(_gated('worktreesBadge', refreshWorktreesBadge), 60000);
@@ -22746,6 +22755,7 @@
   // Loads /api/stats and renders an Overview/Models view in a modal.
   // Cold first-load can take a few seconds for users with many transcripts;
   // every subsequent range switch is instant (server caches per-file aggs).
+  window.__mark = 22749;
   (function() {
     const $modal = document.getElementById('statsModal');
     const $body = document.getElementById('statsBody');
@@ -25603,6 +25613,7 @@
   //     freshness for the embedding stream
   // Click → kicks a manual /api/history/setup so the user can force a
   // refresh without waiting for the next scheduled pass.
+  window.__mark = 25606;
   window._historyIndexStatus = null;
   let _hiPollTimer = null;
   let _hiOobePromptDismissed = false;
@@ -31298,43 +31309,6 @@
   if ($restartServerBtn) {
     if (!CONV_POPOUT_MODE) restartServerRefreshPort();
     $restartServerBtn.addEventListener('click', restartServerRun);
-  }
-
-  // ── Settings → Refresh conversations data ─────────────────────
-  // Forces the server to rescan every conversation and rebuild the
-  // search index now, instead of waiting for the periodic refresh.
-  // The rebuild runs in the background; once the POST is accepted we
-  // pull the archive again (skipping the still-stale cache via the
-  // existing stale-retry machinery) and re-render the sidebar.
-  const $refreshDataBtn = document.getElementById('refreshDataBtn');
-  const $refreshDataLabel = document.getElementById('refreshDataLabel');
-  if ($refreshDataBtn) {
-    $refreshDataBtn.addEventListener('click', async () => {
-      if ($refreshDataBtn.disabled) return;
-      $refreshDataBtn.disabled = true;
-      if ($refreshDataLabel) $refreshDataLabel.textContent = 'Refreshing…';
-      try {
-        const r = await fetch('/api/conversations/refresh', { method: 'POST' });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok || !d.ok) throw new Error((d && d.error) || ('refresh failed (' + r.status + ')'));
-        showOpToast('Refreshing conversations data in the background…', 'info');
-        // Give the background rebuild a head start, then refetch; if the
-        // payload is still stale+refreshing, _scheduleArchiveStaleRetry
-        // keeps polling until the fresh rows land.
-        setTimeout(async () => {
-          try {
-            await refreshArchiveData();
-            _scheduleSidebarRender();
-          } catch (_) { /* next poller tick catches up */ }
-          if ($refreshDataLabel) $refreshDataLabel.textContent = 'Refresh conversations data';
-          $refreshDataBtn.disabled = false;
-        }, 3000);
-      } catch (e) {
-        if ($refreshDataLabel) $refreshDataLabel.textContent = 'Refresh conversations data';
-        $refreshDataBtn.disabled = false;
-        showOpToast('Refresh failed: ' + e.message, 'error');
-      }
-    });
   }
 
   // ── Sidebar refresh split-button ──────────────────────────────
