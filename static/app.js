@@ -3332,6 +3332,9 @@
     if (sid || currentConversation !== '__new__') {
       const _cic = document.getElementById('convInputContext');
       if (_cic) _cic.classList.remove('is-new-session');
+      // Return the CWD picker row + quick chips home if the new-session
+      // chooser borrowed them (see _adoptCwdControlsIntoChooser, CCC-86).
+      try { _restoreCwdControlsToInputBar(); } catch (_) {}
     }
     setCopyableSessionId($convSessionId, sid);
     updateConvOverflowButton();
@@ -20406,6 +20409,9 @@
     stopConvStream(paneId);
     stopSpawnStream();
     stopCodexLogPoller();
+    // Rescue the new-session chooser's adopted CWD controls before this
+    // selection wipes the conv view they were moved into (CCC-86).
+    try { _restoreCwdControlsToInputBar(); } catch (_) {}
     // If a group chat reader was active, tear it down so its 3s polling
     // stops and the standard input bar is restored. The reader was
     // rendered INTO #conversationsView so the surrounding pane structure
@@ -33713,6 +33719,33 @@
     return normalizeSpawnCwdPath(sel && sel.value);
   }
 
+  // CCC-86: adopt the REAL spawn-cwd controls (input + ▾ menu + 📁 browse,
+  // plus the worktree toggle) from the bottom input-context strip into the
+  // chooser's card 1. Moving the live DOM nodes keeps every existing
+  // handler (menu, browse, persistence) wired — one folder control, not
+  // two. _restoreCwdControlsToInputBar puts them back when a session opens.
+  function _adoptCwdControlsIntoChooser($view) {
+    const slot = $view && $view.querySelector('#nsCwdSlot');
+    const cic = document.getElementById('convInputContext');
+    if (!slot || !cic) return;
+    const row = cic.querySelector('.spawn-cwd-row');
+    const wt = cic.querySelector('.spawn-worktree-row');
+    if (row) slot.appendChild(row);
+    if (wt) slot.appendChild(wt);
+    cic.classList.add('cwd-controls-adopted');
+  }
+  function _restoreCwdControlsToInputBar() {
+    const cic = document.getElementById('convInputContext');
+    if (!cic || !cic.classList.contains('cwd-controls-adopted')) return;
+    const slot = document.getElementById('nsCwdSlot');
+    const row = slot && slot.querySelector('.spawn-cwd-row');
+    const wt = slot && slot.querySelector('.spawn-worktree-row');
+    const usage = cic.querySelector('.wp-usage');
+    if (row) cic.insertBefore(row, usage || null);
+    if (wt) cic.insertBefore(wt, usage || null);
+    cic.classList.remove('cwd-controls-adopted');
+  }
+
   // CCC-82: wire the front-and-center new-session chooser. Repo chips set
   // the spawn CWD in place; the New-project card mkdirs via
   // /api/project/create, registers the repo, points the CWD at it, and
@@ -33784,6 +33817,9 @@
   function enterNewSessionMode() {
     const initialPrompt = typeof arguments[0] === 'string' ? arguments[0] : null;
     const paneId = activePaneId();
+    // Rescue the adopted CWD controls before the innerHTML rebuild below
+    // destroys the slot they live in (re-entering new-session mode).
+    try { _restoreCwdControlsToInputBar(); } catch (_) {}
     rememberComposerDraftForPane(paneId);
     if (_gcReaderInterval || _gcReaderPath || _gcReaderHiddenInputBar) {
       try { stopGroupChatReader({ rerenderSidebar: true }); } catch (_) {}
@@ -33821,25 +33857,31 @@
       const newSessionHelp = spawnEngine === 'antigravity'
         ? 'Type a prompt below and press Enter to spawn a headless Antigravity run with AGY print mode.'
         : 'Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.';
-      // Front-and-center folder choice (CCC-82): two explicit paths —
-      // existing folder/repo chips, or a brand-new project (name → suggested
-      // ~/dev/<slug> folder → create + start). The bottom-bar picker still
-      // works; this is the primary affordance.
-      const knownRepos = (repoListState && Array.isArray(repoListState.repos)) ? repoListState.repos.slice(0, 12) : [];
-      const repoChipsHtml = knownRepos.map(r => {
-        const p = (typeof r === 'string') ? r : (r.path || '');
-        if (!p) return '';
-        const label = (typeof r === 'object' && r.label) || _pathLeaf(p) || p;
-        const active = normalizeSpawnCwdPath(p) === spawnCwd ? ' is-current' : '';
-        return '<button type="button" class="ns-repo-chip' + active + '" data-ns-repo="' + escapeAttr(p) + '" title="' + escapeAttr(p) + '">' + escapeHtml(label) + '</button>';
+      // Front-and-center folder choice (CCC-82/86/87): two explicit paths —
+      // existing folder/repo, or a brand-new project (name → suggested
+      // ~/dev/<slug> folder → create + start). Chips come from the same
+      // source as the bottom bar (recent spawn cwds, then known repos) so
+      // they're never falsely empty, and the real CWD picker row is
+      // ADOPTED into card 1 so there's one folder control, not two.
+      const chipOpts = (typeof spawnCwdQuickChipOptions === 'function')
+        ? spawnCwdQuickChipOptions(spawnCwd)
+        : [];
+      const extraOpts = (Array.isArray(spawnCwdOptions) ? spawnCwdOptions : [])
+        .filter(o => o && o.value && !chipOpts.some(c => c.value === o.value))
+        .slice(0, Math.max(0, 12 - chipOpts.length));
+      const repoChipsHtml = chipOpts.concat(extraOpts).map(o => {
+        const active = o.value === spawnCwd ? ' is-current' : '';
+        return '<button type="button" class="ns-repo-chip' + active + '" data-ns-repo="' + escapeAttr(o.value) + '" title="' + escapeAttr(o.value) + '">' + escapeHtml(o.label || o.value) + '</button>';
       }).join('');
-      $view.innerHTML = '<div class="empty-state" style="height:auto;padding:40px 32px;flex-direction:column;gap:10px;text-align:center;">'
-        + '<div style="font-size:16px;color:var(--text);">Start a new session</div>'
+      $view.innerHTML = '<div class="ns-stage">'
+        + '<div class="empty-state ns-hero" style="height:auto;flex-direction:column;gap:10px;text-align:center;">'
+        + '<div class="ns-hero-title">🚀 Start a new session</div>'
         + '<div style="font-size:12px;color:var(--text-muted);">CWD: <span id="newSessionCwdNotice" style="color:var(--text);" title="' + escapeAttr(spawnCwd) + '">' + escapeHtml(repoLabel) + '</span></div>'
         + '<div class="ns-choice-grid">'
         +   '<div class="ns-choice-card">'
         +     '<div class="ns-choice-title">1 · Existing folder / repo</div>'
-        +     '<div class="ns-repo-chips">' + (repoChipsHtml || '<span class="ns-muted">No known repos yet — use the CWD picker below.</span>') + '</div>'
+        +     '<div class="ns-repo-chips">' + (repoChipsHtml || '<span class="ns-muted">No folders yet — browse with 📁 below.</span>') + '</div>'
+        +     '<div class="ns-cwd-slot" id="nsCwdSlot"></div>'
         +   '</div>'
         +   '<div class="ns-choice-card">'
         +     '<div class="ns-choice-title">2 · New project</div>'
@@ -33850,8 +33892,9 @@
         +   '</div>'
         + '</div>'
         + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">' + escapeHtml(newSessionHelp) + '</div>'
-        + '</div>';
+        + '</div></div>';
       _wireNewSessionChooser($view, paneId);
+      _adoptCwdControlsIntoChooser($view);
     }
     if (typeof syncSpawnEngineDependentUi === 'function') syncSpawnEngineDependentUi();
     updateInputBar();

@@ -12008,3 +12008,36 @@ body:has(.gc-reader) .pwa-install-banner {
   outline-offset: -2px;
   background: rgba(88,166,255,0.10);
 }
+
+/* ── New-session stage (CCC-87): center the chooser, make it inviting. ── */
+.ns-stage {
+  min-height: 70vh;
+  display: flex; align-items: center; justify-content: center;
+}
+.ns-hero { animation: nsHeroIn 0.25s ease-out; }
+@keyframes nsHeroIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.ns-hero-title {
+  font-size: 22px; font-weight: 700;
+  background: linear-gradient(90deg, var(--accent, #58a6ff), var(--purple, #bc8cff));
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+.ns-choice-card {
+  transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.ns-choice-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent, #58a6ff) 45%, var(--border) 55%);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+}
+/* Adopted CWD controls inside card 1 (CCC-86). */
+.ns-cwd-slot { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.ns-cwd-slot .spawn-cwd-row { display: flex; width: 100%; }
+.ns-cwd-slot .spawn-cwd-combo { flex: 1; }
+.ns-cwd-slot .spawn-cwd-picker { width: 100%; }
+/* While adopted, hide the strip's leftover quick chips (the card owns
+   folder choice now) — the strip keeps engine/model controls only. */
+#convInputContext.cwd-controls-adopted .spawn-cwd-quick-chips { display: none; }
