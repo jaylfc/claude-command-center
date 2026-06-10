@@ -34494,10 +34494,22 @@
       }
     }
 
+    // "4/22" current-match counter in the find bar. Empty when no query;
+    // "0/0" when the query has no matches.
+    function chatFindUpdateCount() {
+      const el = document.getElementById('chatFindCount');
+      if (!el) return;
+      if (!$chatFindInput.value) { el.textContent = ''; return; }
+      el.textContent = _chatFindRanges.length
+        ? (_chatFindMatchIndex + 1) + '/' + _chatFindRanges.length
+        : '0/0';
+    }
+
     function chatFindClear() {
       _chatFindRanges = [];
       _chatFindMatchIndex = 0;
       _chatFindLastBuiltQuery = '';
+      chatFindUpdateCount();
       try {
         if (window.CSS && CSS.highlights) {
           if (CSS.highlights.has('chat-find')) CSS.highlights.delete('chat-find');
@@ -34587,6 +34599,7 @@
         }
       }
       chatFindPaint();
+      chatFindUpdateCount();
     }
     refreshChatFind = chatFindStep;
 
