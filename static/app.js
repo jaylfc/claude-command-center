@@ -21100,12 +21100,25 @@
     } catch (_) { /* keep stale cache */ }
     return _uxqItemsCache.items;
   }
+  // Project this worker session serves (e.g. "BYM", "CCC") — from the same
+  // progress record that drives the x/y chip. Scopes the queue view so a
+  // BYM worker sees only BYM tickets (CCC-99).
+  function _uxqWorkerProject() {
+    try {
+      const row = (conversationsData || []).find(x => x.id === currentConversation);
+      const prog = row && typeof _uxFixesQueueProgressForRow === 'function'
+        ? _uxFixesQueueProgressForRow(row) : null;
+      return (prog && prog.project && prog.project !== '?') ? prog.project : '';
+    } catch (_) { return ''; }
+  }
   function _renderQueueListInFilesPanel() {
     const $queue = document.getElementById('sidebarQueueList');
     if (!$queue) return;
     _fetchUxqItems().then(items => {
       if (_filesViewEffective() !== 'queue') return;  // flipped while fetching
-      const rows = items.slice().reverse();  // newest first
+      const proj = _uxqWorkerProject();
+      const scoped = proj ? items.filter(it => (it.project || '') === proj) : items;
+      const rows = scoped.slice().reverse();  // newest first
       $queue.innerHTML = rows.map(it => {
         const noteFull = String(it.note || '');
         const note = noteFull.length > 30 ? noteFull.slice(0, 30) + '…' : noteFull;
