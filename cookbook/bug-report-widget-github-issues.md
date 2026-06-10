@@ -87,6 +87,63 @@ What the widget sends to your backend:
 `type` is `"problem" | "feature"` — same widget doubles as a feature-request
 box, and the server maps it to the `bug` / `enhancement` issue label.
 
+## Closing the loop: the in-app "Reported Issues" view
+
+Reports going *out* is half the feature. The other half is the customer seeing
+what happened to them — otherwise every report is a message in a bottle and
+users stop reporting. The reference implementation adds a **Reported Issues**
+page in the app with five tabs:
+
+| Tab | Meaning | Derived from |
+|---|---|---|
+| **Open** | Reported, not yet picked up | GitHub state `open`, none of the labels below |
+| **Needs Attention** | A human must respond (product team replied, or customer replied back) | label `needs-attention` |
+| **In progress** | Someone (or some agent) is on it | issue has an assignee, or label `agent-in-progress` |
+| **Icebox** | Deliberately parked — hidden from every other tab | label `icebox` (admin-only tab) |
+| **Closed** | Done | GitHub state `closed` |
+
+The key design decision: **there is no second database. GitHub is the single
+source of truth**, and every tab is *derived* from GitHub state + labels at
+read time. The app never stores issue status, so the view can never drift from
+reality — close an issue from the GitHub UI, the in-app view agrees on next
+load.
+
+How the pieces work:
+
+- **Read API** (`GET /api/v1/issues`): the backend lists the repo's recent
+  issues (`state=all&since=<7 days ago>`), filters out pull requests, and
+  keeps only issues belonging to this customer — see scoping below. For each
+  issue it fetches comments, strips the metadata Context table out of the
+  body for display, and returns a clean JSON shape the page renders.
+- **Multi-tenant scoping with zero schema**: when the bug-report route creates
+  the issue, the Context table already embeds the organization/tenant id in
+  the body. The read API simply filters `issue.body.includes(orgId)`. A
+  sentinel string like `ALL-ORGS` in a body broadcasts that issue to every
+  tenant's view — free announcement channel.
+- **Actions are thin GitHub mutations**, each its own endpoint:
+  - *Resolve* → comment with the resolution note, `PATCH state: closed,
+    state_reason: completed`, and **remove the `needs-attention` label** so it
+    doesn't reappear as needing attention if reopened.
+  - *Reopen* → comment with why, `PATCH state: open, state_reason: reopened`.
+  - *Icebox / un-icebox* → add/remove the `icebox` label (create the label on
+    first use).
+  - *Reply* → post a comment; when the **customer** replies, also add
+    `needs-attention` so the product team's queue lights up. The reply box on
+    the customer's view is literally labeled "Reply as product team (flags
+    Needs Attention)" on the admin side.
+- **Permissions split**: customers see Open / Needs Attention / In progress /
+  Closed and can reply. Admins additionally see Icebox and get the
+  Resolve / Icebox buttons. Same page, gated by role.
+- **Screenshot gotcha**: GitHub `user-attachments` URLs in issue bodies
+  require a browser session — they 404 for the public and for PAT-authenticated
+  fetches. Fetch comments with `Accept: application/vnd.github.full+json` to
+  get `body_html`, which contains short-lived *signed* CDN URLs, and rewrite
+  the raw-body attachment links to those before sending to the client.
+- **Agent integration**: the `agent-in-progress` label is how an automated
+  fixer (e.g. a Claude Code session watching the repo, or a CCC-managed
+  worker) signals "claimed" — the customer sees the issue move from Open to
+  In progress without any human touching it.
+
 ## Step-by-step deployment
 
 1. **Create a GitHub token** with `issues: write` on the target repo
@@ -99,8 +156,12 @@ box, and the server maps it to the `bug` / `enhancement` issue label.
    repo.
 4. **Smoke-test**: click the FAB, submit a test report, confirm the issue
    appears in GitHub with the screenshot rendering inline.
-5. **Optional**: point a Claude Code session (or a CCC-managed worker) at the
-   repo's issues to triage/fix incoming reports.
+5. **Add the Reported Issues view** (second half of the prompt below) and
+   create the three labels in the repo: `needs-attention`, `agent-in-progress`,
+   `icebox` (the icebox endpoint can also auto-create on first use).
+6. **Optional**: point a Claude Code session (or a CCC-managed worker) at the
+   repo's issues to triage/fix incoming reports — have it add
+   `agent-in-progress` when it claims one so customers see it move tabs.
 
 ## The prompt
 
@@ -108,8 +169,12 @@ Paste this into Claude Code inside **your app's repo** (fill in the
 ALL-CAPS placeholders):
 
 ```text
-Add an in-app "Report an issue" widget to this project: a floating button that
-screenshots the page, posts to our backend, and opens a GitHub issue.
+Add an in-app "Report an issue" feature to this project, in two parts:
+(A) a floating button that screenshots the page, posts to our backend, and
+opens a GitHub issue; (B) a "Reported Issues" page where the customer sees
+the status of their reports, derived live from GitHub.
+
+# Part A — capture and file
 
 ## Client widget
 
@@ -158,6 +223,62 @@ screenshots the page, posts to our backend, and opens a GitHub issue.
    them to the client. Respond with { sent: true, issueUrl }.
 5. Optional: also send a notification email to BUG_REPORT_NOTIFY_EMAIL with
    the same content and the screenshot attached.
+6. IMPORTANT for Part B: include this app's tenant/organization id as a row in
+   the issue body's Context table — the Reported Issues view filters on it.
+
+# Part B — the customer-facing "Reported Issues" view
+
+GitHub is the single source of truth. Do NOT add issue-status tables to our
+database; every status below is derived from GitHub state + labels at read
+time.
+
+## Read API — GET /api/v1/issues
+
+1. Require auth. Fetch the repo's issues from GitHub
+   (state=all, since=<7 days ago>, per_page=100), skip pull requests, and keep
+   only issues whose body contains this user's tenant/organization id OR the
+   literal sentinel "ALL-ORGS" (broadcast announcements).
+2. For issues with comments, fetch them with
+   Accept: application/vnd.github.full+json. GitHub user-attachments URLs in
+   bodies are NOT publicly fetchable; build a map from the signed
+   private-user-images.githubusercontent.com URLs found in body_html and
+   rewrite the raw-body attachment links to them.
+3. Return clean JSON per issue: number, title (strip the "[APP_NAME ...]"
+   prefix), state, stateReason, url, createdAt/updatedAt/closedAt, labels,
+   assignees, description (body with the "### Context" section and images
+   stripped), and comments.
+
+## The page — "Reported Issues"
+
+1. Five tabs with counts, classified from the read API:
+   - Open:            state open, none of the conditions below
+   - Needs Attention: state open + label "needs-attention"
+   - In progress:     state open, no needs-attention, and (has assignee OR
+                      label "agent-in-progress")
+   - Icebox:          state open + label "icebox" — admin-only tab; iceboxed
+                      issues are hidden from every other tab
+   - Closed:          state closed
+2. Each issue card: #number, status pill, title, description excerpt, comment
+   thread, and action buttons appropriate to the tab and role.
+3. A reply box ("Type your response…") on open-state tabs.
+
+## Action endpoints (thin GitHub mutations, all auth-gated)
+
+- POST /api/v1/issues/[number]/resolve — post a resolution comment, PATCH the
+  issue {state: "closed", state_reason: "completed"}, and DELETE the
+  "needs-attention" label.
+- POST /api/v1/issues/[number]/reopen — post a comment with the reason, PATCH
+  {state: "open", state_reason: "reopened"}.
+- POST /api/v1/issues/[number]/icebox — add the "icebox" label (create the
+  label in the repo on first use); DELETE removes it (un-icebox).
+- POST /api/v1/issues/[number]/comment — post the reply as a comment,
+  prefixed with who wrote it; when the reply comes from the customer side,
+  also add the "needs-attention" label so it surfaces in the team's queue.
+
+## Roles
+
+- Customers/staff: see Open, Needs Attention, In progress, Closed; can reply.
+- Admins: additionally see Icebox and get Resolve / Icebox / Reopen actions.
 
 ## Constraints
 - No new client-visible secrets. The browser only ever talks to our own route.
@@ -165,8 +286,10 @@ screenshots the page, posts to our backend, and opens a GitHub issue.
   helpers.
 - Keep html2canvas-pro out of the main bundle (dynamic import on first click).
 
-Verify end-to-end: run the app, submit a test report, and confirm a GitHub
-issue exists with the screenshot rendering inline and correct labels.
+Verify end-to-end: run the app, submit a test report, confirm a GitHub issue
+exists with the screenshot rendering inline and correct labels, then confirm
+it appears under Open in the Reported Issues page, moves to Needs Attention
+after a customer reply, and lands in Closed after Resolve.
 ```
 
 ## Hard-won details (from the reference implementation)

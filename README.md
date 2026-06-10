@@ -259,7 +259,8 @@ you can hand to Claude Code so it implements the integration for you:
   item a Claude session claims and fixes.
 - [In-app bug report widget → GitHub issue](cookbook/bug-report-widget-github-issues.md)
   — a floating "Report an issue" button that screenshots the page and opens a
-  fully-contextualized GitHub issue.
+  fully-contextualized GitHub issue, plus a customer-facing status view
+  derived live from GitHub labels.
 
 ## Architecture
 
