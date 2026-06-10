@@ -1,0 +1,1 @@
+- Files panel flips to a Queue view for UX-fixes worker sessions, and the server auto-nudges idle queue workers (CCC-100)
