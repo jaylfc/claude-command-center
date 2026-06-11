@@ -41412,20 +41412,23 @@ def write_port_file(bind_host):
     return url
 
 
-def _install_skill(name: str):
-    """Install (or refresh) a bundled skill into ~/.claude/skills/<name>/SKILL.md.
-    Idempotent — only writes when the source differs from the destination."""
+def _install_skill(name: str, skills_root: Path = None):
+    """Install (or refresh) a bundled skill into <skills_root>/<name>/SKILL.md
+    (default ~/.claude/skills). Idempotent — only writes when the source
+    differs from the destination."""
     import shutil
     src = CCC_ROOT / "skills" / f"{name}.md"
     if not src.exists():
         print(f"  [skill] source not found at {src}; skipping")
         return
-    dst_dir = Path.home() / ".claude" / "skills" / name
+    if skills_root is None:
+        skills_root = Path.home() / ".claude" / "skills"
+    dst_dir = skills_root / name
     dst = dst_dir / "SKILL.md"
     try:
         dst_dir.mkdir(parents=True, exist_ok=True)
         if dst.exists() and dst.read_bytes() == src.read_bytes():
-            print(f"  [skill] {name} already up to date")
+            print(f"  [skill] {name} already up to date ({skills_root})")
             return
         shutil.copy2(src, dst)
         print(f"  [skill] installed {name} -> {dst}")
@@ -41433,13 +41436,29 @@ def _install_skill(name: str):
         print(f"  [skill] could not install {name} ({e})")
 
 
+def _skill_install_roots():
+    """Skill destinations: always ~/.claude/skills; also ~/.codex/skills when
+    Codex is present (its home dir exists or its CLI resolves). Codex reads
+    the same agent-skills SKILL.md layout and ignores Claude-only frontmatter."""
+    roots = [Path.home() / ".claude" / "skills"]
+    codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    try:
+        codex_present = codex_home.is_dir() or _resolve_codex_bin().get("available")
+    except Exception:
+        codex_present = False
+    if codex_present:
+        roots.append(codex_home / "skills")
+    return roots
+
+
 def install_orchestration_skill():
     """Install all bundled CCC skills. Skipped when CCC_SKIP_SKILL_INSTALL=1."""
     if os.environ.get("CCC_SKIP_SKILL_INSTALL", "").strip().lower() in ("1", "true", "yes", "on"):
         print("  [skill] install skipped (CCC_SKIP_SKILL_INSTALL=1)")
         return
-    _install_skill("ccc-orchestration")
-    _install_skill("group-chat-checkin")
+    for root in _skill_install_roots():
+        _install_skill("ccc-orchestration", root)
+        _install_skill("group-chat-checkin", root)
 
 
 def _raise_open_file_limit(min_soft=2048):
