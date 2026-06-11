@@ -22563,7 +22563,7 @@
   // If earlier history exists, a "Load earlier" banner loads the whole thing on
   // demand. Live `after=` polling is unaffected (tail returns the real
   // last_line, so streamed events keep appending from there).
-  const CONV_TAIL_LINES = 150;
+  const CONV_TAIL_LINES = 400;
 
   function _ensureLoadEarlierStyle() {
     if (document.getElementById('__convLoadEarlierStyle')) return;
@@ -22675,10 +22675,13 @@
     // to actually overflow the pane — a short tail never auto-loads (the
     // banner stays clickable for that).
     if ('IntersectionObserver' in window) {
+      // rootMargin extends the trigger zone ~2 screens above the visible top,
+      // so history prefetches while the user is still scrolling up — by the
+      // time they reach the top, it's already there.
       const io = new IntersectionObserver((entries) => {
         const overflows = $view.scrollHeight > $view.clientHeight + 40;
         if (overflows && entries.some((e) => e.isIntersecting)) { io.disconnect(); loadEarlier(); }
-      }, { root: $view, threshold: 0.05 });
+      }, { root: $view, rootMargin: '1600px 0px 0px 0px', threshold: 0 });
       let armed = false;
       const armIfUpward = (ev) => {
         if (armed) return;
