@@ -9241,6 +9241,20 @@ def launch_terminal_for_session(session_id, cwd=None, terminal_app=None, post_sl
         # terminal resume now would give the transcript two writers.
         if existing.get("live") and not existing.get("tty") and existing.get("pid"):
             hpid = int(existing.get("pid"))
+            # bg-pty daemon process (registry kind "bg"): not a headless —
+            # it's attached to an open terminal pane. SIGTERM here would
+            # close the user's window mid-session. Refuse, even when the
+            # caller asked to stop a headless (CCC-104).
+            if existing.get("kind") == "bg":
+                return {
+                    "ok": False,
+                    "bg_live": True,
+                    "error": (
+                        "This session is open in a Claude Code background "
+                        "terminal (pid %d). Use that window — resuming from "
+                        "CCC would fork the conversation." % hpid
+                    ),
+                }
             if not stop_headless:
                 return {
                     "ok": False,
@@ -25672,6 +25686,39 @@ def _session_has_live_terminal(session_id, exclude_pid=None):
     return False
 
 
+def _bg_pty_entry_for_session(session_id):
+    """Registry entry for a live Claude bg-pty-daemon process on `session_id`.
+
+    Claude Code's background pty host (registry `kind: "bg"`) runs the REPL
+    with no controlling tty, but the session IS attached to an open terminal
+    pane. Returns {pid, kind, status, ...} or None. Distinct from both a CCC
+    headless spawn and a tty terminal — callers must never SIGTERM these (it
+    would close the user's open window).
+    """
+    if not session_id or not SESSIONS_REGISTRY.is_dir():
+        return None
+    try:
+        session_files = list(SESSIONS_REGISTRY.iterdir())
+    except OSError:
+        return None
+    for f in session_files:
+        if not f.name.endswith(".json") or not f.is_file():
+            continue
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("sessionId") != session_id or data.get("kind") != "bg":
+            continue
+        try:
+            pid = int(data.get("pid"))
+        except (TypeError, ValueError):
+            continue
+        if _pid_is_engine_process(pid, "claude"):
+            return data
+    return None
+
+
 def _start_headless_staleness_watcher() -> None:
     """GH #71 (mechanism 5) — always-on server-side reaper.
 
@@ -26112,6 +26159,11 @@ def _pid_is_engine_process(pid, engine):
         return False
     first = parts[0].rsplit("/", 1)[-1]
     if first == engine:
+        return True
+    # Native Claude builds run as the versioned binary
+    # (~/.local/share/claude/versions/2.1.173) — basename never equals
+    # "claude", which made bg-pty daemon sessions invisible (CCC-104).
+    if engine == "claude" and _process_comm_is_claude(parts[0]):
         return True
     if engine == "cursor" and first == "cursor-agent":
         return True
@@ -36377,6 +36429,15 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                     status["terminal_present"] = bool(
                         _session_has_live_terminal(sid, exclude_pid=status.get("headless_pid"))
                     )
+                    # Claude Code's bg-pty daemon (registry kind "bg") hosts the
+                    # REPL with NO controlling tty, yet the session is attached
+                    # to an open terminal pane — without this it read as
+                    # "no headless/terminal process" and dormant (CCC-104).
+                    if not status["terminal_present"] and not status["headless_present"]:
+                        _bg = _bg_pty_entry_for_session(sid)
+                        if _bg:
+                            status["bg_present"] = True
+                            status["bg_pid"] = _bg.get("pid")
                 except Exception:
                     pass
             self.send_json(status)

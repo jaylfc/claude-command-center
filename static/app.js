@@ -2137,6 +2137,8 @@
         headlessPid: data.headless_pid || null,
         headlessStale: !!data.headless_stale,
         terminalPresent: !!data.terminal_present,
+        bgPresent: !!data.bg_present,
+        bgPid: data.bg_pid || null,
       };
       // Timestamp of this successful status read — drives the "checked Xs ago"
       // freshness label on the conversation top-bar process indicator.
@@ -15644,7 +15646,11 @@
     }
     const headOn = !!ls.headlessPresent;
     const stale = headOn && !!ls.headlessStale;
-    const termOn = !!ls.terminalPresent;
+    // bg-pty daemon (Claude Code background terminal): no controlling tty,
+    // but the session IS attached to an open terminal pane — light the
+    // terminal pill instead of reporting "no process" (CCC-104).
+    const bgOn = !!ls.bgPresent;
+    const termOn = !!ls.terminalPresent || bgOn;
     const pill = (on, warn, label, title) =>
       '<span class="ccc-proc-pill ' + (on ? (warn ? 'is-stale' : 'is-on') : 'is-off') + '"'
       + ' title="' + escapeHtml(title) + '">'
@@ -15654,9 +15660,11 @@
           ? 'A CCC-spawned headless agent is running but STALE — another writer advanced the transcript; it will be auto-retired'
           : 'A CCC-spawned headless agent is running (pid ' + (ls.headlessPid || '?') + ')')
       : 'No CCC-spawned headless agent for this session';
-    const termTitle = termOn
-      ? 'A live terminal (TTY) is attached to this session'
-      : 'No live terminal attached to this session';
+    const termTitle = bgOn
+      ? 'This session is open in a Claude Code background terminal (pid ' + (ls.bgPid || '?') + ') — use that window to interact'
+      : (termOn
+          ? 'A live terminal (TTY) is attached to this session'
+          : 'No live terminal attached to this session');
     const ago = _procCheckedAgoLabel(_lastStatusCheckedAt);
     const clock = _procCheckedClock(_lastStatusCheckedAt);
     const checkedTitle = clock
@@ -15678,7 +15686,7 @@
       + ' title="' + escapeHtml(headPillTitle) + '">'
       + '<span class="ccc-proc-dot"></span>' + escapeHtml(headLabel) + '</span>';
     el.innerHTML = headPill
-      + pill(termOn, false, 'terminal', termTitle)
+      + pill(termOn, false, bgOn ? 'terminal · bg' : 'terminal', termTitle)
       + (ago ? '<span class="ccc-proc-checked" title="' + escapeHtml(checkedTitle) + '">checked ' + escapeHtml(ago) + (clock ? ' · ' + escapeHtml(clock) : '') + '</span>' : '')
       + '<button type="button" class="ccc-proc-refresh" title="Refresh this session\'s headless / terminal state now" aria-label="Refresh state">↻</button>';
   }
@@ -32383,6 +32391,8 @@
       headless_pid: _ls.headlessPid || null,
       headless_stale: !!_ls.headlessStale,
       terminal_present: !!_ls.terminalPresent,
+      bg_present: !!_ls.bgPresent,
+      bg_pid: _ls.bgPid || null,
       tty: _ls.tty || null,
     };
     const payload = {
@@ -33063,7 +33073,8 @@
       bits.push(ls.live ? 'live' : 'not-live');
       if (ls.headless_present) bits.push('headless' + (ls.headless_pid ? ' pid ' + ls.headless_pid : '') + (ls.headless_stale ? ' (STALE)' : ''));
       if (ls.terminal_present) bits.push('terminal' + (ls.tty ? ' ' + ls.tty : ''));
-      if (!ls.headless_present && !ls.terminal_present) bits.push('no headless/terminal process');
+      if (ls.bg_present) bits.push('bg terminal' + (ls.bg_pid ? ' pid ' + ls.bg_pid : ''));
+      if (!ls.headless_present && !ls.terminal_present && !ls.bg_present) bits.push('no headless/terminal process');
       anchors.push('Session state: ' + bits.join(' · '));
     }
     if (ann.screenshot_path) anchors.push('Screenshot: ' + ann.screenshot_path);
