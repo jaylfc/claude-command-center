@@ -256,6 +256,13 @@
     height: 0 !important;
     overflow: hidden;
   }
+  /* Subagent transcripts are read-only: no composer, no input chrome
+     (CCC-113 — embedded task lanes showed a second input box). */
+  body.subagent-readonly .conv-input-bar,
+  body.subagent-readonly .conv-input-context,
+  body.subagent-readonly .conv-input-hint {
+    display: none !important;
+  }
   body.conversation-popout .sidebar,
   body.conversation-popout #sidebarResizer,
   body.conversation-popout #kanbanLayout,

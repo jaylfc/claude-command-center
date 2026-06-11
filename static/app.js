@@ -999,6 +999,12 @@
   const CONV_POPOUT_REPO_PATH = (_bootUrlParams.get('repo_path') || '').trim();
   if (CONV_POPOUT_MODE && document.body) {
     document.body.classList.add('conversation-popout');
+    // Subagent transcripts (composite <parent>:agent-<id> ids) are read-only
+    // — there is no process to send to, and when embedded as a per-Task tab
+    // lane the host pane already has a composer (CCC-113: "double input box").
+    if (CONV_POPOUT_TARGET.includes(':agent-')) {
+      document.body.classList.add('subagent-readonly');
+    }
   }
   // Flow popout: same shape, different surface — when set, the page boots
   // straight into the Flow view and CSS hides every other piece of chrome.
