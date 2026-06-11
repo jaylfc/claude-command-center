@@ -63,6 +63,28 @@ func runAppleScript(_ source: String) {
     script.executeAndReturnError(&error)
 }
 
+func python3Works() -> Bool {
+    let proc = Process()
+    proc.launchPath = "/bin/bash"
+    proc.arguments = ["-c", "python3 -c pass"]
+    var env = ProcessInfo.processInfo.environment
+    env["PATH"] = augmentedPath()
+    proc.environment = env
+    proc.standardOutput = FileHandle.nullDevice
+    proc.standardError = FileHandle.nullDevice
+    do { try proc.run() } catch { return false }
+    proc.waitUntilExit()
+    return proc.terminationStatus == 0
+}
+
+func logTail(_ path: String, lines: Int = 12) -> String {
+    guard let data = FileManager.default.contents(atPath: path),
+          let text = String(data: data, encoding: .utf8) else { return "" }
+    let rows = text.split(separator: "\n", omittingEmptySubsequences: false)
+    return rows.suffix(lines).joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 func isLocalDashboardURL(_ url: URL) -> Bool {
     let scheme = (url.scheme ?? "").lowercased()
     if scheme == "about" || scheme == "data" || scheme == "blob" { return true }
@@ -799,6 +821,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Preflight: on a fresh Mac /usr/bin/python3 is a Command Line Tools
+        // stub that exits without serving anything — the #1 cause of "port
+        // never bound" on machines that never installed dev tools. Fail with
+        // the actual remedy instead of a 60s timeout.
+        if !python3Works() {
+            showFatal("Python 3 is not installed",
+                      "CCC needs python3, which ships with Apple's Command Line Tools.\n\n"
+                      + "Open Terminal, run:\n\n    xcode-select --install\n\n"
+                      + "finish that install, then reopen CCC.")
+            return
+        }
+
         loadingLabel.stringValue = "Starting CCC server…"
 
         let proc = Process()
@@ -849,8 +883,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if Date().timeIntervalSince(start) > timeout {
                 timer.invalidate()
                 self.pollTimer = nil
-                self.showFatal("Server didn't start in \(Int(timeout))s",
-                               "Port \(CCC_PORT) never bound. Check ~/.claude/command-center/logs/app-server.log")
+                let logPath = NSString(string: "~/.claude/command-center/logs/app-server.log").expandingTildeInPath
+                let tail = logTail(logPath)
+                let detail = tail.isEmpty
+                    ? "Port \(CCC_PORT) never bound. Check ~/.claude/command-center/logs/app-server.log"
+                    : "Port \(CCC_PORT) never bound. Last lines of app-server.log:\n\n\(tail)"
+                self.showFatal("Server didn't start in \(Int(timeout))s", detail)
             }
         }
     }
