@@ -1382,10 +1382,13 @@ class TestRepoContextHelpers(unittest.TestCase):
             thread = threading.Thread(target=accept_frames)
             thread.start()
             try:
-                result = self.server._inject_bg_agent_via_pty_socket(
-                    {"pid": 123, "sessionId": "sid", "ptySock": str(sock_path)},
-                    "hi\x1b\nthere",
-                )
+                # Delivery confirmation polls a real transcript (CCC-113);
+                # this test asserts the wire framing only.
+                with mock.patch.object(self.server, "_transcript_gains_text", return_value=True):
+                    result = self.server._inject_bg_agent_via_pty_socket(
+                        {"pid": 123, "sessionId": "sid", "ptySock": str(sock_path)},
+                        "hi\x1b\nthere",
+                    )
                 thread.join(timeout=2)
             finally:
                 server_sock.close()
@@ -1765,7 +1768,7 @@ class TestRepoContextHelpers(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["via"], "bg-agent-pty")
         find_worker.assert_called_once_with(sid)
-        inject.assert_called_once_with(worker, "follow up")
+        inject.assert_called_once_with(worker, "follow up", session_id=sid)
         resume.assert_not_called()
 
     def test_live_background_agent_queues_until_prompt_ready(self):

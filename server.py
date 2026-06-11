@@ -17843,7 +17843,7 @@ def _clean_pty_prompt_text(text):
     )
 
 
-def _inject_bg_agent_via_pty_socket(worker, text):
+def _inject_bg_agent_via_pty_socket(worker, text, session_id=None):
     """Send text to a live `claude agents` background session.
 
     The daemon PTY socket uses framed messages:
@@ -17897,12 +17897,71 @@ def _inject_bg_agent_via_pty_socket(worker, text):
             sock.close()
         except OSError:
             pass
+    # A successful socket write is NOT delivery (CCC-113): app-managed
+    # bg-pty daemons accept the connection and silently discard the input
+    # frames, so "ok" here used to mean "vanished without a trace". Confirm
+    # the text actually lands in the transcript before claiming success.
+    sid = session_id or worker.get("sessionId") or ""
+    if sid and not _transcript_gains_text(sid, clean_text):
+        _bg_pty_inject_failures[sid] = time.time()
+        return {
+            "ok": False,
+            "via": "bg-agent-pty",
+            "delivery_unconfirmed": True,
+            "pid": worker.get("pid"),
+            "error": (
+                "The input was written to the session's pty socket but never "
+                "appeared in its transcript — this app-managed terminal "
+                "ignores socket input. Type in its window instead."
+            ),
+        }
     return {
         "ok": True,
         "via": "bg-agent-pty",
         "pid": worker.get("pid"),
         "session_id": worker.get("sessionId"),
     }
+
+
+# sid → epoch of the last pty inject whose delivery could not be confirmed.
+# The queue watcher backs off such sessions so parked messages don't churn
+# through a known-broken channel every tick.
+_bg_pty_inject_failures: dict = {}
+
+
+def _transcript_gains_text(session_id, text, timeout_s=6.0):
+    """True once `text`'s first line shows up in the session transcript tail.
+
+    Polls the last 128KB of the JSONL for up to `timeout_s`. Callers queue
+    ahead of this when the session is busy, so a working channel lands the
+    text within a second or two of an idle inject.
+    """
+    needle = ""
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if line:
+            needle = line[:60]
+            break
+    if not needle:
+        return True
+    # JSONL stores the message JSON-encoded; escape so multi-byte and
+    # quote-bearing needles match the on-disk form.
+    needle_json = json.dumps(needle, ensure_ascii=False)[1:-1]
+    path = _resolve_conversation_path(session_id)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 131072))
+                tail = fh.read().decode("utf-8", "replace")
+            if needle_json in tail:
+                return True
+        except OSError:
+            pass
+        time.sleep(1.0)
+    return False
 
 
 def _start_resume_queue_watcher() -> None:
@@ -17966,6 +18025,11 @@ def _start_resume_queue_watcher() -> None:
                         continue
                     if status.get("live") and status.get("kind") == "bg":
                         if not _bg_agent_ready_for_input(sid, status):
+                            continue
+                        # Channel recently proven broken (pty inject wrote ok
+                        # but nothing landed) — hold instead of churning the
+                        # queue through it every tick.
+                        if time.time() - _bg_pty_inject_failures.get(sid, 0) < 600:
                             continue
                     if status.get("live") and not status.get("tty"):
                         spawn = _find_live_spawn_entry_for_session(sid)
@@ -28368,7 +28432,24 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
                 queued_status["status"] = queued_status.get("status") or "busy"
                 return _queue_terminal_input(session_id, text, queued_status)
         worker = _find_live_bg_agent_entry_for_session(session_id)
-        return _inject_bg_agent_via_pty_socket(worker, text)
+        result = _inject_bg_agent_via_pty_socket(worker, text, session_id=session_id)
+        # Unconfirmed delivery (app-managed terminal that eats socket input):
+        # park the message instead of dropping it — it drains when the bg
+        # process exits (resume path) or a working channel appears.
+        if isinstance(result, dict) and result.get("delivery_unconfirmed"):
+            queued_status = dict(status or {})
+            queued_status["status"] = "bg-undeliverable"
+            queued = _queue_terminal_input(session_id, text, queued_status)
+            queued["ok"] = True
+            queued["delivery_unconfirmed"] = True
+            queued["original_error"] = result.get("error")
+            queued["note"] = (
+                "CCC can't reach this Claude-app terminal — your message is "
+                "parked and sends when the app session closes. To act on it "
+                "now, type it in the Claude app window."
+            )
+            return queued
+        return result
     if is_codex:
         return resume_session_codex(session_id, text)
     if _is_gemini_session(session_id):
