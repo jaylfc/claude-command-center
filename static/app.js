@@ -918,15 +918,28 @@
   // Pause periodic sidebar/poller work while the user is in a text field or
   // the Cmd+F find bar is open (find steals focus into the transcript when
   // pollers re-render the list mid-search).
+  // Typing recency for the periodic-work pause. The old guard paused on
+  // FOCUS — any cursor parked in a textarea froze every interval-driven
+  // poller indefinitely (the group-chat reader never refreshed while the
+  // user's cursor sat in its composer, CCC-110). Pause only while the user
+  // is ACTIVELY typing: within 1.5s of a real keystroke in a text control.
+  let _lastTextKeyTs = 0;
+  document.addEventListener('keydown', (ev) => {
+    const t = ev.target;
+    if (!t || !t.tagName) return;
+    const isText = t.tagName === 'TEXTAREA'
+      || (t.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/.test((t.type || 'text').toLowerCase()));
+    if (isText) _lastTextKeyTs = Date.now();
+  }, true);
   function shouldPausePeriodicUiWork() {
     const findModal = document.getElementById('chatFindModal');
     if (findModal && findModal.style.display !== 'none') return true;
     const ae = document.activeElement;
     if (!ae) return false;
-    if (ae.tagName === 'TEXTAREA') return true;
-    if (ae.tagName !== 'INPUT') return false;
-    const t = (ae.type || 'text').toLowerCase();
-    return /^(text|search|email|url|tel|password)$/.test(t);
+    const isTextControl = ae.tagName === 'TEXTAREA'
+      || (ae.tagName === 'INPUT' && /^(text|search|email|url|tel|password)$/.test((ae.type || 'text').toLowerCase()));
+    if (!isTextControl) return false;
+    return Date.now() - _lastTextKeyTs < 1500;
   }
   // Sidebar list renders must still run while #convSearch is focused —
   // otherwise the debounced filter never paints until blur/Enter (the
@@ -13893,6 +13906,31 @@
     return `<span class="gco-time" title="${escapeAttr(String(s))}">${escapeHtml(rel)}</span>`;
   }
 
+  // "↓ New posts" pill — shown when fresh content lands while the reader is
+  // scrolled up (CCC-110). The content IS already refreshed; this is the
+  // affordance that says so. Click scrolls to bottom; reaching the bottom
+  // by hand removes it too.
+  function _gcShowNewPostsPill(body) {
+    const host = body.parentElement || body;
+    if (host.querySelector('.gc-new-posts-pill')) return;
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'gc-new-posts-pill';
+    pill.textContent = '↓ New posts';
+    pill.addEventListener('click', () => {
+      body.scrollTop = body.scrollHeight;
+      pill.remove();
+    });
+    const onScroll = () => {
+      if (body.scrollHeight - body.scrollTop <= body.clientHeight + 40) {
+        pill.remove();
+        body.removeEventListener('scroll', onScroll);
+      }
+    };
+    body.addEventListener('scroll', onScroll);
+    host.appendChild(pill);
+  }
+
   async function pollGroupChatReader() {
     if (!_gcReaderPath && !_gcReaderId) return;
     const body = document.getElementById('gcReaderBody');
@@ -13921,6 +13959,7 @@
         updateOrchestratorPanel(data, data.content);
 
         if (atBottom) body.scrollTop = body.scrollHeight;
+        else if (!isFirstLoad) _gcShowNewPostsPill(body);
         
         // Trigger scroll listener to update Viewing Poster immediately
         body.dispatchEvent(new CustomEvent('scroll'));

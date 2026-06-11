@@ -8793,7 +8793,7 @@
 .coord-modal .modal-start { padding:6px 14px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight:500; }
 .coord-modal .modal-error { font-size:12px; color:var(--red); display:none; }
 .coord-modal .modal-error.visible { display:block; }
-.gc-reader { display:flex; flex-direction:column; height:100%; overflow:hidden; }
+.gc-reader { display:flex; flex-direction:column; height:100%; overflow:hidden; position:relative; }
 .gc-reader-header { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
 .gc-reader-header .gc-topic { font-weight:600; font-size:13px; color:var(--text); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .gc-reader-header .gc-mode-badge { font-size:11px; padding:2px 6px; border-radius:10px; background:var(--surface-2); color:var(--text-muted); flex-shrink:0; }
@@ -9255,6 +9255,17 @@
   cursor: default; white-space: nowrap;
 }
 .gc-alert-chip strong { color: var(--text); font-weight: 600; }
+
+/* "↓ New posts" pill — fresh content landed while scrolled up (CCC-110). */
+.gc-new-posts-pill {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: 86px; z-index: 30;
+  background: var(--accent, #58a6ff); color: #fff;
+  border: none; border-radius: 999px;
+  font: 600 12px inherit; padding: 6px 14px;
+  cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+}
+.gc-new-posts-pill:hover { filter: brightness(1.1); }
 
 /* Empty section: collapse the bottom padding so the lone header reads
    as a single bar rather than a half-empty container. */
