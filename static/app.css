@@ -1834,8 +1834,12 @@
     padding: 0 3px; border-radius: 3px;
     pointer-events: none;
   }
-  .conversations-view .event.assistant .msg-ts { right: 0; }
-  .conversations-view .event.assistant .line-num { right: 76px; }
+  /* line-num is width-bounded ("L" + ≤5 digits ≈ 42px) so it anchors the
+     right edge; the timestamp sits left of it. The old layout reversed
+     them with a fixed 76px gap, and any stamp wider than that ("84
+     minutes ago", "Yesterday · 14:30") overlapped the L badge (CCC-106). */
+  .conversations-view .event.assistant .line-num { right: 0; }
+  .conversations-view .event.assistant .msg-ts { right: 58px; }
   .conversations-view .event.assistant:hover .line-num,
   .conversations-view .event.assistant:hover .msg-ts { opacity: 0.7; }
   .conversations-view .event.assistant .assistant-text,
