@@ -288,6 +288,13 @@ final class CCCWebWindow: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindow
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         loadingLabel?.isHidden = true
         stampMacAppFlag(on: webView)
+        // A reused named popout (window.open with an existing target name)
+        // re-navigates without passing through createWebViewWith, so nothing
+        // raises it — bring it to the front whenever it finishes a page load.
+        if !isMain {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     // MARK: WKUIDelegate

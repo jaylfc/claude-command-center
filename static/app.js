@@ -33776,6 +33776,15 @@
     // reuse the existing tab/window; keeping the handle lets us focus it.
     let _gcLiveWindow = null;
     $sidebarGroupChatLiveBtn.addEventListener('click', () => {
+      // Mac app shell (WKWebView): window.open('', name) surfaces as an
+      // about:blank/empty navigation that older shells hand to NSWorkspace —
+      // Finder then shows "The application can't be opened. -50". Use the
+      // plain named open there; the shell raises the popout on navigation.
+      if (window.__CCC_MAC_APP__) {
+        _gcLiveWindow = window.open('/group-chat-live.html', 'ccc-gc-live');
+        try { if (_gcLiveWindow) _gcLiveWindow.focus(); } catch (_) {}
+        return;
+      }
       // Re-acquire the named window with an EMPTY url: window.open('', name)
       // returns the existing window without navigating it. Opening with the
       // real URL re-navigates (reloads) the live page, and the browser won't
