@@ -26610,7 +26610,19 @@ def _group_chat_inject_text(chat_path: str, topic: str, mode: str, sid: str) -> 
     the chat file for actual content.
     """
     safe_topic = (topic or "").replace('"', '\\"')
-    text = f'/group-chat-checkin chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}"'
+    # No leading "/" (CCC-108): the slash form only dispatches in a live
+    # Claude TUI. Codex and headless Claude receive it as literal text —
+    # Codex's router used to bounce it outright, and headless models read
+    # it as a malformed command rather than an instruction. Both engines
+    # have the group-chat-checkin skill installed (~/.claude/skills and
+    # ~/.codex/skills), so an explicit invoke-the-skill instruction works
+    # on every transport, TUI included.
+    text = (
+        "Group-chat check-in: invoke your group-chat-checkin skill with "
+        f'chat="{chat_path}" topic="{safe_topic}" mode={mode} sid="{sid}". '
+        "If you cannot invoke skills, read the chat file at that path and "
+        "follow its instructions."
+    )
     snapshot = _group_chat_latest_message_snapshot(chat_path)
     if snapshot:
         # Keep just the first line — the `## <ts> — <author>` heading —

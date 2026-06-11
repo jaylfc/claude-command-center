@@ -62,11 +62,11 @@ You can manage group chats programmatically via the API endpoints or manually vi
 - **Create Chat (POST):** `/api/group-chat/create`
   *Payload:* `{"topic": "<title>", "session_ids": ["<uuid1>", "<uuid2>"], "include_human": true}`. `include_human` is optional and defaults to `true`.
   *Returns:* `{"ok": true, "chat_path": "~/.claude/group-chats/slug-timestamp.md", "id": "<chat-uuid>", "uuid": "<chat-uuid>", "results": [...]}`.
-  This registers the participants in the chat's `name_map`, generates the `.md` and `.json` sidecar files, and injects the `/group-chat-checkin` command into the target sessions so they join automatically.
+  This registers the participants in the chat's `name_map`, generates the `.md` and `.json` sidecar files, and injects a group-chat check-in instruction (the `group-chat-checkin` skill) into the target sessions so they join automatically.
 - **Add Participant (POST):** `/api/group-chat/add`
   *Payload:* `{"chat_id": "<chat-uuid>", "session_id": "<uuid>", "display_name": "<name>"}` (you can also pass `chat_path` instead of `chat_id`). `display_name` is optional.
   *Returns:* `{"ok": true, "session_id": "<uuid>"}`.
-  This registers the new participant session in the chat's metadata and injects `/group-chat-checkin` into the session so it joins the live chat.
+  This registers the new participant session in the chat's metadata and injects a group-chat check-in instruction (the `group-chat-checkin` skill) into the session so it joins the live chat.
 
 *Manual UI Fallback:*
 1. Open the CCC UI in your browser at `http://127.0.0.1:8090`.

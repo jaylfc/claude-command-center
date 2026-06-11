@@ -5594,7 +5594,11 @@ class TestGroupChatSidecarHelpers(unittest.TestCase):
             text = server._group_chat_inject_text(
                 md, 'topic with "quotes"', "topic", "abc12345-session"
             )
-            self.assertIn(f'/group-chat-checkin chat="{md}"', text)
+            # CCC-108: no leading "/" — slash-form only dispatches in a live
+            # Claude TUI; Codex / headless Claude need an instruction.
+            self.assertFalse(text.startswith("/"))
+            self.assertIn("group-chat-checkin skill", text)
+            self.assertIn(f'chat="{md}"', text)
             self.assertIn('topic="topic with \\"quotes\\""', text)
             self.assertIn('sid="abc12345-session"', text)
             self.assertIn("CCC pointer: a new post just landed", text)
