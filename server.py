@@ -17946,6 +17946,11 @@ def _start_resume_queue_watcher() -> None:
                         spawn = _find_live_spawn_entry_for_session(sid)
                         if spawn is not None and _spawn_entry_active_tool_child(spawn):
                             continue
+                        # Foreign live writer (not ours, no channel): hold the
+                        # queue until that process exits — injecting now would
+                        # spawn a parallel resume and fork the transcript.
+                        if spawn is None and status.get("kind") != "bg" and status.get("pid"):
+                            continue
                     with _pending_terminal_input_lock:
                         queue = _pending_terminal_input_queue.get(sid, [])
                         if not queue:
@@ -28386,6 +28391,28 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
                 "via": "spawn-fifo",
                 "error": "session input pipe is busy",
             }
+        # Fork guard: a live claude we did NOT spawn and cannot drive (no
+        # tty to keystroke, no FIFO, not the bg-pty shape handled above —
+        # e.g. a daemon-hosted interactive session). Spawning a parallel
+        # `claude --resume` here puts TWO writers on one JSONL and forks
+        # the transcript — the root cause of the post-/compact amnesia
+        # (resume/compact then follow the stale leaf). Queue instead; the
+        # queue drains once the process exits or becomes reachable.
+        if status.get("live") and status.get("pid") and not has_tty:
+            queued_status = dict(status or {})
+            queued_status["status"] = queued_status.get("status") or "foreign-live-writer"
+            queued = _queue_terminal_input(session_id, text, queued_status)
+            queued["foreign_live_writer"] = True
+            queued["original_error"] = (
+                "A live claude process (pid %s) already owns this session but "
+                "CCC has no channel to it." % status.get("pid")
+            )
+            queued["note"] = (
+                "Queued — another process is running this session. Your "
+                "message sends when it finishes (resuming in parallel would "
+                "fork the conversation history)."
+            )
+            return queued
         return _maybe_queue_on_invalid_cwd(
             session_id, text, status, resume_session_headless(session_id, text),
         )
