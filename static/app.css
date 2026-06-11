@@ -1916,8 +1916,18 @@
     padding-left: 0; border-left: 0; font-size: 11.5px;
   }
   .event.user_text.task-notification-event .task-notification-card .tn-event::before { content: "· "; }
-  /* Task id is noise for a one-line ping — keep it in the data-raw-text/title, not on screen. */
+  /* Task id is noise for a one-line ping — keep it in the data-raw-text/title,
+     not on screen. The "↗ agent transcript" button surfaces on row hover so
+     the subagent's full transcript stays one click away (CCC-112). */
   .event.user_text.task-notification-event .task-notification-card .tn-meta { display: none; }
+  .event.user_text.task-notification-event:hover .task-notification-card .tn-meta { display: block; }
+  .event.user_text.task-notification-event:hover .task-notification-card .tn-meta > span { display: none; }
+  .tn-view-transcript {
+    background: none; border: 1px solid var(--border); border-radius: 999px;
+    color: var(--accent); font-size: 10.5px; padding: 1px 8px; cursor: pointer;
+    margin-left: 6px;
+  }
+  .tn-view-transcript:hover { background: rgba(88,166,255,0.12); }
   /* The first user message is pinned in the sticky header as "Original ask".
      Hide its in-conversation chat bubble so the same text isn't shown twice
      (sticky + bubble) when no scrolling has occurred yet. */

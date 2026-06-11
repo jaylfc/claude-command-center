@@ -13000,6 +13000,25 @@ def _resolve_conversation_path(conversation_id, repo_path=None):
       2. Global walk of ~/.claude/projects/*/ for session-derived calls.
       3. A canonical repo path when supplied, otherwise a harmless missing path.
     """
+    # Subagent transcripts (CCC-112 follow-up): newer Claude Code writes
+    # Task/Agent activity to <parent-sid>/subagents/agent-<taskid>.jsonl
+    # instead of inlining sidechain events in the parent JSONL. A composite
+    # id "<parent-sid>:agent-<taskid>" opens that file through the normal
+    # conversation pipeline (same event shape, same parser).
+    _sub = re.match(r"^([0-9a-fA-F-]{8,}):(agent-[0-9a-fA-F]+)$", str(conversation_id or ""))
+    if _sub:
+        parent, agent_name = _sub.group(1), _sub.group(2) + ".jsonl"
+        dirs = list(_conversation_dirs(repo_path)) if repo_path else []
+        if PROJECTS_ROOT.is_dir():
+            try:
+                dirs += [p for p in PROJECTS_ROOT.iterdir() if p.is_dir()]
+            except OSError:
+                pass
+        for d in dirs:
+            cand = d / parent / "subagents" / agent_name
+            if cand.is_file():
+                return cand
+        return PROJECTS_ROOT / "_missing" / agent_name
     name = conversation_id + ".jsonl"
     if repo_path:
         for d in _conversation_dirs(repo_path):
@@ -36498,7 +36517,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
             conv_id = path.split("/")[-2]
             payload = _extract_files_from_conversation(conv_id)
             self.send_json(payload)
-        elif re.match(r"^/api/conversations/(?:[a-f0-9-]+|ses_[A-Za-z0-9]+)/stream$", path):
+        elif re.match(r"^/api/conversations/(?:[a-f0-9-]+(?::agent-[a-f0-9]+)?|ses_[A-Za-z0-9]+)/stream$", path):
             conv_id = path.split("/")[-2]
             qs = urllib.parse.parse_qs(parsed.query)
             after_line = int(qs.get("after", ["0"])[0])
@@ -36521,7 +36540,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
         elif re.match(r"^/api/session/[a-f0-9-]+/spawn-stream$", path):
             sid = path.split("/")[-2]
             self._stream_spawn_deltas(sid)
-        elif re.match(r"^/api/conversations/(?:[a-f0-9-]+|ses_[A-Za-z0-9]+)$", path):
+        elif re.match(r"^/api/conversations/(?:[a-f0-9-]+(?::agent-[a-f0-9]+)?|ses_[A-Za-z0-9]+)$", path):
             conv_id = path.split("/")[-1]
             qs = urllib.parse.parse_qs(parsed.query)
             after_line = int(qs.get("after", ["0"])[0])

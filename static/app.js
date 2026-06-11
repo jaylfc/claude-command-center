@@ -6249,11 +6249,27 @@
       html += '<div class="tn-event">' + renderInline(n.event) + '</div>';
     }
     if (n.taskId) {
-      html += '<div class="tn-meta"><span>Task <code>' + escapeHtml(n.taskId) + '</code></span></div>';
+      // Subagent transcripts live in <parent>/subagents/agent-<taskid>.jsonl;
+      // the composite conv id "<parent>:agent-<taskid>" opens one read-only
+      // in a popout through the normal conversation pipeline (CCC-112).
+      html += '<div class="tn-meta"><span>Task <code>' + escapeHtml(n.taskId) + '</code></span>'
+        + '<button type="button" class="tn-view-transcript" data-task-id="' + escapeAttr(n.taskId) + '"'
+        + ' title="Open this agent\'s full transcript in a popout">↗ agent transcript</button></div>';
     }
     html += '</div>';
     return html;
   }
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest && ev.target.closest('.tn-view-transcript');
+    if (!btn) return;
+    ev.stopPropagation();
+    const sid = (typeof currentConversation === 'string' && currentConversation) || '';
+    const taskId = btn.getAttribute('data-task-id') || '';
+    if (!sid || !taskId) return;
+    const conv = sid + ':agent-' + taskId;
+    window.open('/?ccc_popout=conversation&conv=' + encodeURIComponent(conv), '_blank',
+      'width=900,height=800');
+  });
 
   function renderMarkdown(text) {
     const lines = text.split('\n');
