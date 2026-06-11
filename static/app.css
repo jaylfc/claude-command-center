@@ -9243,6 +9243,19 @@
   background: rgba(139,148,158,0.18); color: var(--text-muted); opacity: 0.5;
 }
 
+/* Per-message alert line — CCC-109: who was pinged after this message, when. */
+.gc-message-alerts {
+  display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;
+}
+.gc-alert-chip {
+  font-size: 11px; color: var(--text-muted);
+  background: rgba(88,166,255,0.08);
+  border: 1px solid rgba(88,166,255,0.22);
+  border-radius: 999px; padding: 1px 8px;
+  cursor: default; white-space: nowrap;
+}
+.gc-alert-chip strong { color: var(--text); font-weight: 600; }
+
 /* Empty section: collapse the bottom padding so the lone header reads
    as a single bar rather than a half-empty container. */
 #convList .conv-ingroupchat-section.is-empty { padding-bottom: 0; }

@@ -12969,6 +12969,33 @@
         + '</div>';
     };
 
+    // CCC-109: explicit "who was alerted and when" per message. The
+    // orchestrator appends `> _<ts> — system: pinged \`NAME\` (8hex)_`
+    // blockquotes into the segment of the message that triggered them, so
+    // parsing the raw segment body attributes each alert to its message.
+    const _gcAlertsHtml = (rawBody) => {
+      const out = [];
+      const re = /^>\s*_(.+?)\s+—\s+system:\s*pinged\s+(.+?)_?\s*$/gm;
+      let m;
+      while ((m = re.exec(rawBody))) {
+        const ts = (m[1] || '').trim();
+        const tm = (ts.match(/\b(\d{2}:\d{2}(?::\d{2})?)\b/) || [])[1] || ts;
+        const names = (m[2] || '')
+          .replace(/\s*\([0-9a-fA-F]{8}\)/g, '')
+          .replace(/`/g, '')
+          .replace(/_+\s*$/, '')
+          .trim();
+        if (names) out.push({ ts, tm, names });
+      }
+      if (!out.length) return '';
+      return '<div class="gc-message-alerts">'
+        + out.map(a =>
+            '<span class="gc-alert-chip" title="' + escapeAttr('Alerted at ' + a.ts) + '">'
+            + '📨 alerted <strong>' + escapeHtml(a.names) + '</strong> · ' + escapeHtml(a.tm)
+            + '</span>').join('')
+        + '</div>';
+    };
+
     let firstSpeaker = '';
     let lastSpeaker = '';
 
@@ -13057,6 +13084,7 @@
         + '<div class="gc-message-body assistant-text">'
           + (body ? markSystemBlockquotes(renderMarkdown(body)) : '<em class="gc-message-empty">(no text)</em>')
         + '</div>'
+        + (isSystem ? '' : _gcAlertsHtml(rawBody))
         + (isSystem ? '' : _gcReceiptHtml(i, speaker))
       + '</article>';
     }
