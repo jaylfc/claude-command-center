@@ -1269,6 +1269,12 @@ _CODEX_FALLBACK_SLASH_COMMANDS = (
     {"name": "/vim", "description": "Toggle Vim mode"},
 )
 
+# Names only — for the input router's "is this actually a Codex TUI
+# command?" check. Anything slash-shaped but NOT in this set is foreign
+# text (e.g. a Claude skill invocation like /group-chat-checkin sent to a
+# Codex group-chat participant) and is delivered as a plain prompt.
+_CODEX_SLASH_NAME_SET = frozenset(c["name"] for c in _CODEX_FALLBACK_SLASH_COMMANDS)
+
 
 def _clean_slash_command_name(value):
     name = str(value or "").strip()
@@ -28241,6 +28247,14 @@ def _inject_text_into_session(session_id, text, *, _from_terminal_queue=False, m
     term_app = status.get("terminal_app")
     has_tty = bool(tty) and tty != "??"
     is_cursor = _is_cursor_session(session_id)
+    # Codex: only its OWN TUI commands need a live interactive terminal.
+    # Slash-shaped text that isn't one (e.g. /group-chat-checkin from the
+    # group-chat flow) is just prompt text — route it through the normal
+    # resume path instead of bouncing "requires live TUI" (CCC-107).
+    if is_codex and slash_command:
+        _first_tok = text.strip().split(None, 1)[0]
+        if _first_tok not in _CODEX_SLASH_NAME_SET:
+            slash_command = False
     if is_codex and slash_command:
         if status.get("live") and has_tty:
             if not _from_terminal_queue and _terminal_input_queue_has_pending(session_id):
