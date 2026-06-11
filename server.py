@@ -28036,8 +28036,13 @@ def compact_session_context(session_id, *, terminal_app=None, _from_terminal_que
     # mid-turn run isn't abandoned.
     def _launch_terminal_compact(note):
         backup_path = _backup_jsonl_before_compact(sid)
+        # stop_headless: this path only runs when the headless is IDLE, and
+        # the whole point is to retire it in favor of the terminal — kill it
+        # cleanly instead of tripping the CCC-96 fork guard ("/compact
+        # failed: headless still running").
         launched = launch_terminal_for_session(
             sid, cwd, term_app, post_slash_commands=["/compact"],
+            stop_headless=True,
         )
         if launched.get("ok"):
             launched["via"] = "terminal-launch-headless"
@@ -28137,6 +28142,7 @@ def compact_session_context(session_id, *, terminal_app=None, _from_terminal_que
         cwd,
         terminal_app,
         post_slash_commands=["/compact"],
+        stop_headless=True,
     )
     if launched.get("ok"):
         launched["via"] = "terminal-launch"
