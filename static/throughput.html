@@ -223,6 +223,10 @@
   /* Right panel: Dashboard & Detail */
   .workspace {
     flex: 1;
+    /* min-width:0 lets the panel shrink below its content's intrinsic
+       width — without it a wide chart (thousands of aggregated turns)
+       blows the flex layout and squeezes the whole page. */
+    min-width: 0;
     overflow-y: auto;
     padding: 24px;
     background: radial-gradient(circle at top right, rgba(57, 210, 192, 0.03), transparent 40%), var(--bg);
@@ -295,6 +299,8 @@
     padding: 16px 20px;
     backdrop-filter: blur(8px);
     transition: all 0.2s;
+    min-width: 0;
+    overflow: hidden;
   }
   
   .metric-card:hover {
@@ -956,11 +962,18 @@
       linePath.setAttribute('stroke-width', '2.5');
       svg.appendChild(linePath);
       
-      // Draw Points
-      data.forEach(d => {
+      // Draw Points — downsampled. The aggregated 7-day view can hold
+      // thousands of turns; a circle (with listeners) per turn froze the
+      // tab and an x-label per turn forced a huge intrinsic SVG width
+      // that crushed the flex layout. Cap markers and labels;
+      // the line path itself still plots every turn.
+      const MAX_POINTS = 120;
+      const pointStride = Math.max(1, Math.ceil(data.length / MAX_POINTS));
+      const sampledPoints = data.filter((_, i) => i % pointStride === 0);
+      sampledPoints.forEach(d => {
         const x = xScale(d.index);
         const y = yScale(d.tpm);
-        
+
         const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
         circle.setAttribute('cx', x);
         circle.setAttribute('cy', y);
@@ -986,8 +999,9 @@
         svg.appendChild(circle);
       });
       
-      // Render X labels
-      data.forEach(d => {
+      // Render X labels — at most ~16, evenly spaced (see MAX_POINTS note).
+      const labelStride = Math.max(1, Math.ceil(data.length / 16));
+      data.filter((_, i) => i % labelStride === 0).forEach(d => {
         const x = xScale(d.index);
         const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         text.setAttribute('x', x);
@@ -1028,13 +1042,26 @@
         listEl.innerHTML = `<div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;">No details available</div>`;
         return;
       }
-      
-      turns.forEach(t => {
+
+      // Cap the rendered cards — the aggregated view can hold thousands of
+      // turns and a DOM card each froze the tab. Latest first
+      // matters most; the chart above still covers every turn.
+      const MAX_TURN_CARDS = 200;
+      let shown = turns;
+      if (turns.length > MAX_TURN_CARDS) {
+        shown = turns.slice(-MAX_TURN_CARDS);
+        const note = document.createElement('div');
+        note.style.cssText = 'padding: 10px 14px; color: var(--text-muted); font-size: 12px;';
+        note.textContent = `Showing the latest ${MAX_TURN_CARDS} of ${turns.length.toLocaleString()} turns (chart covers all).`;
+        listEl.appendChild(note);
+      }
+
+      shown.forEach(t => {
         const card = document.createElement('div');
         card.className = 'turn-card';
-        
+
         const previewText = t.trigger_preview || 'Empty prompt';
-        
+
         card.innerHTML = `
           <div class="turn-header" onclick="toggleTurnExpanded(${t.turn_index})">
             <div class="turn-info-left">
