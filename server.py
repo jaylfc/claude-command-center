@@ -7461,12 +7461,57 @@ def _save_conversation_order(order):
     return order
 
 
+_archive_auto_sweep_last = 0.0
+_archive_grace: dict = {}  # sid → epoch of manual archive; sweep skips these for 10 min
+
+
+def _auto_unarchive_live_sessions(archived):
+    """Drop archived sids showing fresh activity (CCC-117).
+
+    A session that's actively writing its transcript doesn't belong in the
+    Archived bucket — auto-unarchive it. Perf gates: runs at most every 30s,
+    and only stats transcripts for archived sids that intersect the cheap
+    live-candidate set (never the whole archive). The grace map keeps a
+    just-archived-by-the-user session from bouncing straight back (its
+    transcript mtime is fresh from the kill/final writes).
+    """
+    global _archive_auto_sweep_last
+    now = time.time()
+    if not archived or now - _archive_auto_sweep_last < 30:
+        return archived
+    _archive_auto_sweep_last = now
+    try:
+        live = _discover_live_session_ids()
+    except Exception:
+        return archived
+    keep = []
+    changed = False
+    for sid in archived:
+        fresh = False
+        if sid in live and now - _archive_grace.get(sid, 0) > 600:
+            try:
+                path, _parser = _resolve_conversation_reader(sid)
+                fresh = path and path.is_file() and now - path.stat().st_mtime < 300
+            except (OSError, Exception):
+                fresh = False
+        if fresh:
+            changed = True
+            continue
+        keep.append(sid)
+    if changed:
+        try:
+            _save_archived_conversations(keep)
+        except Exception:
+            return archived
+    return keep
+
+
 def _load_archived_conversations():
     """Load list of archived session_ids from the side-car file."""
     try:
         data = json.loads(ARCHIVED_CONVERSATIONS_FILE.read_text())
         if isinstance(data, list):
-            return [s for s in data if isinstance(s, str)]
+            return _auto_unarchive_live_sessions([s for s in data if isinstance(s, str)])
     except (OSError, json.JSONDecodeError):
         pass
     return []
@@ -39133,9 +39178,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 if sid in archived:
                     archived.remove(sid)
                     now_archived = False
+                    _archive_grace.pop(sid, None)
                 else:
                     archived.append(sid)
                     now_archived = True
+                    # Shield this deliberate archive from the auto-unarchive
+                    # sweep (CCC-117) — the kill below freshens the transcript
+                    # mtime, which would otherwise bounce it right back.
+                    _archive_grace[sid] = time.time()
                 _save_archived_conversations(archived)
                 # Archiving retires the session — drop any stale Notification-hook
                 # marker so the dashboard doesn't keep classifying it as Waiting
