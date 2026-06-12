@@ -25957,7 +25957,9 @@
             // at one. Pushed as a separate part AFTER lastToolPartIdx so the
             // per-turn token chip still merges into the tool-call line, not the
             // image.
-            if (isFileToolName(b.name)) {
+            // CCC-122: Codex views images through its own `view_image` tool
+            // (and antigravity reads them via view_file) — same inline render.
+            if (isFileToolName(b.name) || /^view_(?:image|file)$/i.test(String(b.name || ''))) {
               const imgHtml = inlineToolImageHtml(detail);
               if (imgHtml) blockParts.push(imgHtml);
             }
