@@ -212,7 +212,6 @@ def test_inject_busy_headless_never_retired_even_if_tail_moved(server_mod, tmp_p
          mock.patch.object(server_mod, "_is_gemini_session", return_value=False), \
          mock.patch.object(server_mod, "_is_antigravity_session", return_value=False), \
          mock.patch.object(server_mod, "_is_kilo_session", return_value=False), \
-         mock.patch.object(server_mod, "_is_grok_session", return_value=False), \
          mock.patch.object(server_mod, "_find_live_spawn_entry_for_session", return_value=entry), \
          mock.patch.object(server_mod, "_terminal_input_queue_has_pending", return_value=False), \
          mock.patch.object(server_mod, "_spawn_entry_active_tool_child",
