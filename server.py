@@ -550,10 +550,14 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
     # file in the directory we were really working in"). Authorization is
     # unchanged: the resolved path still passes the sandbox checks below — a
     # session-referenced file already satisfies _session_referenced_open_path.
-    # Restricted to slashless bare names so genuine relative paths keep their
-    # explicit root-relative meaning.
-    if not resolved and session_id and target and "/" not in target and not target.startswith("~"):
+    # Bare names match on basename. Multi-segment relative paths (CCC-121:
+    # `deliverables/.../shots/x.png` rendered by a session whose cwd is
+    # elsewhere) match when a session-referenced absolute path ENDS with the
+    # full relative path — the transcript knows where the work really
+    # happened even when the session cwd doesn't.
+    if not resolved and session_id and target and not target.startswith("~") and not os.path.isabs(target):
         want = os.path.basename(target)
+        rel_tail = "/" + target.strip().strip("/")
         try:
             referenced_paths, _cd_targets = _scan_session_tool_paths(session_id, max_events=2000)
         except Exception:
@@ -570,7 +574,10 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
                 cand = Path(normalized).expanduser()
             except (OSError, ValueError, RuntimeError):
                 continue
-            if cand.name != want:
+            if "/" in target:
+                if not str(cand).endswith(rel_tail):
+                    continue
+            elif cand.name != want:
                 continue
             tried.append(str(cand))
             if cand.exists():
@@ -579,6 +586,42 @@ def _resolve_open_target(target, *, session_id=None, cwd=None, repo_path=None):
                 except (OSError, RuntimeError):
                     resolved = cand
                 break
+        # Second pass (CCC-121): tool-path scanning loses spaces, so the
+        # referenced path can be a truncated cousin of the real one. Join
+        # the relative target onto ancestor directories of everywhere the
+        # session demonstrably worked (cd targets + referenced-path parents)
+        # and take the first that exists. `..` segments are rejected so a
+        # crafted link can't climb out of those roots.
+        if not resolved and "/" in target and ".." not in target.split("/"):
+            roots = []
+
+            def _add_root(d):
+                d = str(d or "").rstrip("/")
+                if d and d != "/" and d not in roots:
+                    roots.append(d)
+
+            for raw in reversed(_cd_targets or []):
+                if isinstance(raw, str):
+                    _add_root(raw)
+            for raw in reversed(referenced_paths or []):
+                if not isinstance(raw, str):
+                    continue
+                parent = os.path.dirname(raw)
+                for _ in range(6):
+                    if not parent or parent == "/":
+                        break
+                    _add_root(parent)
+                    parent = os.path.dirname(parent)
+            rel = target.strip().strip("/")
+            for root in roots:
+                cand = Path(root).expanduser() / rel
+                tried.append(str(cand))
+                if cand.exists():
+                    try:
+                        resolved = cand.resolve(strict=False)
+                    except (OSError, RuntimeError):
+                        resolved = cand
+                    break
 
     if not resolved:
         return {"ok": False, "error": "not found", "tried": tried, "status": 404}
