@@ -2810,12 +2810,12 @@
   // never resurrects one already cleared by the response landing (state:
   // sending → thinking → done). Cleared by clearOptimisticAgentIndicator when
   // the real response/activity arrives.
-  function setOptimisticAgentThinking($view) {
+  function setOptimisticAgentThinking($view, label) {
     const el = ($view || document).querySelector('.conv-live-tool-inline.optimistic');
     if (!el) return;
     el.classList.add('is-thinking');
     const tool = el.querySelector('.cl-tool');
-    if (tool) tool.innerHTML = '🧠 Thinking&hellip;';
+    if (tool) tool.innerHTML = label || '🧠 Thinking&hellip;';
     // CCC-57: now that we're actually thinking, give it room — a long think
     // (>60s) should keep showing "Thinking…", not vanish. Real activity still
     // clears it sooner via clearOptimisticAgentIndicator.
@@ -4335,7 +4335,7 @@
   // cancel the not-acknowledged timer (delivery is confirmed, so it can't be
   // "lost"). The normal JSONL dedupe removes the echo once the durable event
   // renders (state 3).
-  function markPendingSendDelivered(pending) {
+  function markPendingSendDelivered(pending, data) {
     if (!pending || !pending.entry) return;
     if (pending.entry.timer) { clearTimeout(pending.entry.timer); pending.entry.timer = null; }
     const div = pending.element;
@@ -4350,10 +4350,16 @@
       note.className = 'send-delivered-note';
       div.appendChild(note);
     }
-    note.textContent = '✓ Delivered — waiting for Claude to pick it up.';
+    // Fresh headless boot (resumed without reused, CCC-119): the agent isn't
+    // merely "picking it up" — a new process is loading the whole transcript
+    // first, which can take a while on big sessions. Say so.
+    const waking = !!(data && data.resumed && !data.reused);
+    note.textContent = waking
+      ? '⏻ Waking the headless agent — it reloads the conversation first, so the reply can take a minute.'
+      : '✓ Delivered — waiting for Claude to pick it up.';
     // Tier 2: the agent now has the message — advance the live turn status from
-    // "Sending…" to "🧠 Thinking…". Clears when the response lands.
-    setOptimisticAgentThinking(div.parentNode);
+    // "Sending…" to "🧠 Thinking…" (or "Waking up…"). Clears when the response lands.
+    setOptimisticAgentThinking(div.parentNode, waking ? '⏻ Waking up headless&hellip;' : null);
   }
 
   function isCursorUsageLimitFailure(data, reason) {
@@ -4813,7 +4819,7 @@
           // did nothing, leaving the echo stuck in the ambiguous italic
           // "sending…" state until transcript dedup happened to match it (or
           // never did). Confirm it now: "delivered, awaiting Claude".
-          markPendingSendDelivered(pendingSend);
+          markPendingSendDelivered(pendingSend, data);
         }
       } else {
         const reason = formatInjectFailure(data, res.status);
