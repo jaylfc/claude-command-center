@@ -212,6 +212,7 @@ def test_inject_busy_headless_never_retired_even_if_tail_moved(server_mod, tmp_p
          mock.patch.object(server_mod, "_is_gemini_session", return_value=False), \
          mock.patch.object(server_mod, "_is_antigravity_session", return_value=False), \
          mock.patch.object(server_mod, "_is_kilo_session", return_value=False), \
+         mock.patch.object(server_mod, "_is_grok_session", return_value=False), \
          mock.patch.object(server_mod, "_find_live_spawn_entry_for_session", return_value=entry), \
          mock.patch.object(server_mod, "_terminal_input_queue_has_pending", return_value=False), \
          mock.patch.object(server_mod, "_spawn_entry_active_tool_child",
@@ -224,9 +225,5 @@ def test_inject_busy_headless_never_retired_even_if_tail_moved(server_mod, tmp_p
         res = server_mod._inject_text_into_session(sid, "hello")
     retire.assert_not_called()
     respawn.assert_not_called()
-    # Current behavior for active tool child: we do not proactively queue for a merely-busy
-    # turn (the stream-json path accepts mid-turn input). We either succeed the write or
-    # return the "pipe is busy" error. The key safety is "never retired".
-    assert res.get("ok") is False or "busy" in str(res.get("error", "")).lower() or res.get("queued") is True
-    # q may or may not be called depending on exact write outcome; the old "always queue on busy"
-    # contract was intentionally relaxed.
+    q.assert_called_once()
+    assert res.get("queued") is True
