@@ -6606,7 +6606,7 @@
     );
   }
 
-  const INLINE_CODE_PATH_RE = /^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh))$/;
+  const INLINE_CODE_PATH_RE = /^(https?:\/\/\S+|~\/[\w./@#:\-+]*|\/[\w./@#:\-+]*|[\w./@#:\-+]+\.(md|ts|tsx|js|jsx|py|json|yaml|yml|css|html|sql|prisma|sh|png|jpe?g|gif|webp|svg|bmp|pdf|txt|csv|log|toml|xml|swift|rb|go|rs|java|c|h|cpp|mp4|mov|webm))$/;
   function _isPlaceholderPathToken(token) {
     return String(token || '').indexOf('...') !== -1;
   }
