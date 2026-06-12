@@ -25089,6 +25089,17 @@
     let raw = String(command || '').replace(/\s+/g, ' ').trim();
     if (!raw) return '';
     raw = raw.replace(/^Shell command:\s*/i, '').trim();
+    // Skip no-information wrapper segments — `cd X && real-cmd` should
+    // summarize as the real command, not "Completed cd" (CCC-120). Strip
+    // leading cd/pushd/export/source/set/unset segments up to the next
+    // && or ; as long as something runs after them.
+    for (let guard = 0; guard < 6; guard++) {
+      const m = raw.match(/^(?:cd|pushd|export|source|set|unset)\b[^&;|]*(?:&&|;)\s*/);
+      if (!m) break;
+      const rest = raw.slice(m[0].length).trim();
+      if (!rest) break;
+      raw = rest;
+    }
     const words = splitShellWords(raw);
     if (!words.length) return raw.length > 40 ? raw.slice(0, 39) + '…' : raw;
     const cmd = _pathBase(words[0]);
