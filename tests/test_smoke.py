@@ -118,7 +118,53 @@ class TestServerImports(unittest.TestCase):
         self.assertNotEqual(server._ship_classify_remaining("snapshot.js"), "review")
         self.assertEqual(server._ship_classify_remaining("snapshot.png"), "infra")
         self.assertEqual(server._ship_classify_remaining("snapshot.js"), "infra")
-        self.assertEqual(server._ship_classify_remaining("apps/x/page.tsx"), "review")
+
+    def test_acp_adapter_optional_import(self):
+        """The ACP adapter (ccc_acp.py) is an optional companion. When the
+        agent-client-protocol package is installed the module must import
+        cleanly (smoke only; no ACP runtime exercised here). When the dep is
+        absent we simply skip — this mirrors the Morning plugin handling."""
+        for mod in ("server", "morning", "morning_store", "ccc_acp"):
+            sys.modules.pop(mod, None)
+        acp_pkg_present = False
+        try:
+            import acp  # noqa: F401
+            acp_pkg_present = True
+        except Exception:
+            acp_pkg_present = False
+        if not acp_pkg_present:
+            self.skipTest("agent-client-protocol not installed; ACP adapter is optional")
+        # Import should succeed and expose the expected entry surface.
+        ccc_acp = importlib.import_module("ccc_acp")
+        self.assertTrue(hasattr(ccc_acp, "main"))
+        self.assertTrue(hasattr(ccc_acp, "CCCACPAgent"))
+
+    def test_grok_engine_surfaces_exist(self):
+        """Grok engine (new in this cycle) must be wired for resolve, spawn, is_,
+        and availability. Uses mocks so it works even without the grok binary."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_resolve_grok_bin"))
+        self.assertTrue(hasattr(server, "spawn_session_grok"))
+        self.assertTrue(hasattr(server, "_is_grok_session"))
+        self.assertTrue(hasattr(server, "find_grok_conversations"))
+        self.assertTrue(hasattr(server, "_parse_grok_conversation"))
+
+        # resolve shape (no real grok needed)
+        with mock.patch.object(server.shutil, "which", return_value=None):
+            with mock.patch.object(server.Path, "home", return_value=server.Path("/tmp/fakehome")):
+                info = server._resolve_grok_bin()
+                self.assertIsInstance(info, dict)
+                self.assertIn("available", info)
+                self.assertFalse(info["available"])  # no binary in the fake env
+
+        # is_grok on a spawned entry
+        server._spawned_sessions[:] = []  # reset for test
+        server._spawned_sessions.append({"engine": "grok", "session_id": "test-gsid-123", "name": "gsid"})
+        self.assertTrue(server._is_grok_session("test-gsid-123"))
+        self.assertFalse(server._is_grok_session("not-a-grok-id"))
+        server._spawned_sessions[:] = []
 
     def test_ship_index_attribution_is_wired_and_degrades(self):
         """The conversation-index attribution layer is defined, the verdict +

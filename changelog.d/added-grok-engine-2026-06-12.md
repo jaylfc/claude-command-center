@@ -1,0 +1,2 @@
+- Grok Build TUI as a first-class engine: spawn headless (`grok -p --output-format streaming-json --yolo`), read-only ingestion of sessions (summary.json + updates.jsonl under ~/.grok/sessions/), live status via active_sessions.json, full UI wiring (dropdowns, availability, model picker via CCC_GROK_MODEL / CCC_GROK_BIN), worktree support, and classification. 
+- ACP adapter polish (fast-follow from #73): cwd clamped to $HOME by default with opt-out env (CCC_ACP_ALLOW_OUTSIDE_HOME), version bump, and conditional smoke import test for the optional adapter.
