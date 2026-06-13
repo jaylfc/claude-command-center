@@ -16359,6 +16359,8 @@
       const isGeminiRow = c.source === 'gemini' || c.engine === 'gemini';
       const isCursorRow = c.source === 'cursor' || c.engine === 'cursor';
       const isAntigravityRow = c.source === 'antigravity' || c.engine === 'antigravity';
+      const isFable5Row = !isCodexRow && !isGeminiRow && !isCursorRow && !isAntigravityRow
+        && !!c.model && /fable-5/i.test(c.model);
       let sourceBadge = '';
       if (c.source === 'pkood') sourceBadge = '<span class="source-badge pkood">pkood</span>';
       else if (isCodexRow) sourceBadge = '<span class="source-badge codex">codex</span>';
@@ -16428,7 +16430,7 @@
       const stateClass = isLive ? 'is-live' : 'is-dead';
       const liveTitle = isLive ? 'live — actively polled' : 'offline';
       const iconTitle = iconTitleType + ' session (' + liveTitle + ')';
-      const sessionIconHtml = '<span class="conv-session-icon ' + iconType + ' ' + stateClass + '" title="' + escapeAttr(iconTitle) + '" aria-hidden="true">'
+      const sessionIconHtml = '<span class="conv-session-icon ' + iconType + (isFable5Row ? ' is-fable5' : '') + ' ' + stateClass + '" title="' + escapeAttr(iconTitle) + '" aria-hidden="true">'
           + svgMarkup
           + '</span>';
       // Row time should reflect ANY activity on the session: user UI

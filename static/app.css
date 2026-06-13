@@ -3847,6 +3847,22 @@
     color: #e28767;
     --icon-shadow-color: rgba(226, 135, 103, 0.45);
   }
+  .conv-session-icon.claude.is-fable5 {
+    color: #f5c842;
+    --icon-shadow-color: rgba(245, 200, 66, 0.55);
+    position: relative;
+  }
+  .conv-session-icon.claude.is-fable5::after {
+    content: '$';
+    position: absolute;
+    bottom: -3px;
+    right: -4px;
+    font-size: 7px;
+    font-weight: 800;
+    color: #f5c842;
+    line-height: 1;
+    font-family: monospace;
+  }
   .conv-session-icon.codex {
     color: #3dd68c;
     --icon-shadow-color: rgba(61, 214, 140, 0.45);
