@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-06-12
+
+### Added
+- Throughput bar shows cache-adjusted token burn rate so cached prompts don't inflate the displayed speed.
+- Gold icon + `$` badge on Fable-5 sessions in the conversation list so they stand out at a glance.
+- "Waking up headless…" indicator shown when sending a message boots a fresh headless resume, so the wait is never silent.
+
+### Changed
+- New-session stage: repo chips, CWD picker, and worktree toggle moved from the center of the screen to just above the input bar for a cleaner hero and more natural workflow.
+- Show cache-adjusted token throughput with per-model breakdowns on the throughput dashboard.
+
+### Fixed
+- 1d / 7d / All window toggle now always visible on the Archived tab (was hidden due to a stale flag).
+- Group chats now sorted by most-recent message date, consistent with the conversation list.
+- Inline-code paths to images, documents, and media files are now rendered as clickable open links.
+- Model and token bar now renders correctly in the second split pane, not just the primary one.
+
 ## [5.1.0] - 2026-06-10
 
 ### Added
@@ -1668,7 +1685,8 @@ Initial public release.
 - `/api/repo/switch` validates targets against the picker allow-list.
 - See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
-[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.1.0...HEAD
+[Unreleased]: https://github.com/amirfish1/claude-command-center/compare/v5.2.0...HEAD
+[5.2.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.2.0
 [5.1.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.1.0
 [5.0.1]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.0.1
 [5.0.0]: https://github.com/amirfish1/claude-command-center/releases/tag/v5.0.0
