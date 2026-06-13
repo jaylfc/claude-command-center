@@ -30017,6 +30017,8 @@
           pinned_repo: !!c.pinned_repo,
           pinned: !!c.pinned,
           pin_rank: Number.isFinite(Number(c.pin_rank)) ? Number(c.pin_rank) : null,
+          model: c.model || '',
+          engine: c.engine || c.source || '',
         });
       }
       const folderOrphan = (c.folder_path === c.slug);
@@ -30105,6 +30107,8 @@
         pinned_repo: !!c.pinned_repo,
         pinned: !!c.pinned,
         pin_rank: Number.isFinite(Number(c.pin_rank)) ? Number(c.pin_rank) : null,
+        model: c.model || '',
+        engine: c.engine || c.source || '',
       });
     }).map(_applyLiveOverlayToRow);
 
