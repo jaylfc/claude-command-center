@@ -5837,9 +5837,9 @@ class TestSessionUsageDedup(unittest.TestCase):
         self.assertEqual(result["total_cache_read_tokens"], 15_000)
         self.assertEqual(result["total_output_tokens"], 300)
 
-        # Opus rates from server._MODEL_RATES: 15 / 18.75 / 1.50 / 75 per Mtok.
-        expected = (150 * 15 + 1_500 * 18.75
-                    + 15_000 * 1.50 + 300 * 75) / 1_000_000
+        # Current Opus 4.7 rates: 5 / 6.25 / 0.50 / 25 per Mtok.
+        expected = (150 * 5 + 1_500 * 6.25
+                    + 15_000 * 0.50 + 300 * 25) / 1_000_000
         self.assertAlmostEqual(result["cost_usd"], round(expected, 4), places=4)
 
     def test_events_without_message_id_still_summed(self):
@@ -5970,7 +5970,167 @@ class TestThroughputCacheAdjusted(unittest.TestCase):
         self.assertEqual(usage["fresh_input_tokens"], 200)
         self.assertEqual(usage["cache_read_tokens"], 800)
         self.assertEqual(usage["effective_input_tokens"], 280)
-        self.assertFalse(usage["cost_available"])
+        self.assertTrue(usage["cost_available"])
+        self.assertGreater(usage["cost_usd"], 0)
+
+    def test_claude_cache_creation_duration_changes_effective_burn(self):
+        usage = self.server._throughput_normalize_usage(
+            {
+                "input_tokens": 100,
+                "cache_creation_input_tokens": 300,
+                "cache_creation_5m_input_tokens": 100,
+                "cache_creation_1h_input_tokens": 200,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0,
+            },
+            engine="claude",
+            model="claude-sonnet-4-6",
+        )
+
+        self.assertEqual(usage["cache_write_tokens"], 300)
+        self.assertEqual(usage["cache_write_5m_tokens"], 100)
+        self.assertEqual(usage["cache_write_1h_tokens"], 200)
+        # 5m cache writes use 1.25x input; 1h cache writes use 2.0x input.
+        self.assertEqual(usage["effective_input_tokens"], 625)
+        expected_cost = (100 * 3 + 100 * 3.75 + 200 * 6) / 1_000_000
+        self.assertAlmostEqual(usage["cost_usd"], expected_cost)
+
+    def test_codex_throughput_uses_each_token_count_event(self):
+        sid = "codex-throughput-session"
+        path = pathlib.Path(self.tmp) / "rollout-codex.jsonl"
+        events = [
+            {
+                "type": "turn_context",
+                "timestamp": "2026-06-12T17:00:00.000Z",
+                "payload": {"model": "gpt-5.5"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-06-12T17:00:01.000Z",
+                "payload": {"type": "user_message", "message": "measure codex"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-06-12T17:00:11.000Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 1_000,
+                            "cached_input_tokens": 800,
+                            "output_tokens": 50,
+                            "reasoning_output_tokens": 10,
+                            "total_tokens": 1_050,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 1_000,
+                            "cached_input_tokens": 800,
+                            "output_tokens": 50,
+                            "reasoning_output_tokens": 10,
+                            "total_tokens": 1_050,
+                        },
+                    },
+                },
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-06-12T17:00:21.000Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 2_000,
+                            "cached_input_tokens": 1_900,
+                            "output_tokens": 100,
+                            "reasoning_output_tokens": 0,
+                            "total_tokens": 2_100,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 3_000,
+                            "cached_input_tokens": 2_700,
+                            "output_tokens": 150,
+                            "reasoning_output_tokens": 10,
+                            "total_tokens": 3_150,
+                        },
+                    },
+                },
+            },
+        ]
+        with path.open("w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+
+        with mock.patch.object(self.server, "_resolve_codex_rollout_path", return_value=path):
+            turns = self.server._throughput_codex_turns_from_file(sid, model_hint="gpt-5.5")
+
+        self.assertEqual(len(turns), 2)
+        summary = self.server._throughput_summary(turns)
+        self.assertEqual(summary["total_raw_context_tokens"], 3_000)
+        self.assertEqual(summary["total_fresh_input_tokens"], 300)
+        self.assertEqual(summary["total_cache_read_tokens"], 2_700)
+        self.assertEqual(summary["total_output_tokens"], 160)
+        self.assertEqual(summary["total_effective_input_tokens"], 570)
+        self.assertGreater(summary["cost_usd"], 0)
+
+    def test_claude_throughput_dedupes_message_snapshots(self):
+        sid = "00000000-0000-4000-8000-000000000abf"
+        usage = {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 1_000,
+            "output_tokens": 50,
+        }
+        events = [
+            {
+                "type": "user",
+                "timestamp": "2026-06-12T17:00:00.000Z",
+                "sessionId": sid,
+                "message": {"role": "user", "content": "fan out"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-12T17:00:05.000Z",
+                "sessionId": sid,
+                "requestId": "req-throughput-1",
+                "message": {
+                    "id": "msg-throughput-dup",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "thinking"}],
+                    "usage": usage,
+                },
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-12T17:00:20.000Z",
+                "sessionId": sid,
+                "requestId": "req-throughput-1",
+                "message": {
+                    "id": "msg-throughput-dup",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "README.md"}}],
+                    "usage": usage,
+                },
+            },
+        ]
+        self._write_session(sid, events)
+
+        with mock.patch.object(self.server, "_is_codex_session", return_value=False), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "_is_cursor_session", return_value=False), \
+             mock.patch.object(self.server, "_is_antigravity_session", return_value=False), \
+             mock.patch.object(self.server, "_is_kilo_session", return_value=False), \
+             mock.patch.object(self.server, "_load_desktop_app_metadata", return_value={}):
+            payload, status = self.server._throughput_payload(sid)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["turns"]), 1)
+        self.assertEqual(payload["turns"][0]["message_id"], "msg-throughput-dup")
+        self.assertEqual(payload["turns"][0]["request_id"], "req-throughput-1")
+        self.assertEqual(payload["turns"][0]["dur_sec"], 20)
+        self.assertEqual(payload["summary"]["total_raw_context_tokens"], 1_120)
+        self.assertEqual(payload["summary"]["total_output_tokens"], 50)
 
 
 class TestCodexEsc(unittest.TestCase):

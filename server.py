@@ -14668,6 +14668,8 @@ def _parse_conversation_event(ev, line_num):
                 "ts": ts,
                 "type": "assistant",
                 "message_id": msg.get("id", ""),
+                "request_id": ev.get("requestId") or ev.get("request_id") or "",
+                "is_sidechain": bool(ev.get("isSidechain")),
                 "blocks": blocks,
             }
             if msg.get("model"):
@@ -14692,6 +14694,14 @@ def _parse_conversation_event(ev, line_num):
                         "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
                         "output_tokens": tout,
                     }
+                    cache_creation = usage.get("cache_creation")
+                    if isinstance(cache_creation, dict):
+                        out_ev["token_usage"]["cache_creation_5m_input_tokens"] = int(
+                            cache_creation.get("ephemeral_5m_input_tokens") or 0
+                        )
+                        out_ev["token_usage"]["cache_creation_1h_input_tokens"] = int(
+                            cache_creation.get("ephemeral_1h_input_tokens") or 0
+                        )
             return out_ev
 
     if ev_type == "result":
@@ -17472,6 +17482,58 @@ def _codex_token_usage_from_event(ev):
         "reasoning_output_tokens": _codex_int(usage.get("reasoning_output_tokens")),
         "total_tokens": _codex_int(usage.get("total_tokens")),
     }
+
+
+def _codex_usage_delta_from_event(ev, previous_totals=None):
+    payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+    if payload.get("type") != "token_count":
+        return None, previous_totals
+    info = payload.get("info") or {}
+    if not isinstance(info, dict):
+        return None, previous_totals
+    last_usage = info.get("last_token_usage")
+    total_usage = info.get("total_token_usage")
+    if isinstance(last_usage, dict) and last_usage:
+        usage = last_usage
+    elif isinstance(total_usage, dict) and total_usage:
+        prev = previous_totals if isinstance(previous_totals, dict) else {}
+        usage = {
+            "input_tokens": max(
+                _codex_int(total_usage.get("input_tokens"))
+                - _codex_int(prev.get("input_tokens")),
+                0,
+            ),
+            "cached_input_tokens": max(
+                _codex_int(total_usage.get("cached_input_tokens"))
+                - _codex_int(prev.get("cached_input_tokens")),
+                0,
+            ),
+            "output_tokens": max(
+                _codex_int(total_usage.get("output_tokens"))
+                - _codex_int(prev.get("output_tokens")),
+                0,
+            ),
+            "reasoning_output_tokens": max(
+                _codex_int(total_usage.get("reasoning_output_tokens"))
+                - _codex_int(prev.get("reasoning_output_tokens")),
+                0,
+            ),
+            "total_tokens": max(
+                _codex_int(total_usage.get("total_tokens"))
+                - _codex_int(prev.get("total_tokens")),
+                0,
+            ),
+        }
+    else:
+        return None, previous_totals
+    next_totals = total_usage if isinstance(total_usage, dict) else previous_totals
+    return {
+        "input_tokens": _codex_int(usage.get("input_tokens")),
+        "cached_input_tokens": _codex_int(usage.get("cached_input_tokens")),
+        "output_tokens": _codex_int(usage.get("output_tokens")),
+        "reasoning_output_tokens": _codex_int(usage.get("reasoning_output_tokens")),
+        "total_tokens": _codex_int(usage.get("total_tokens")),
+    }, next_totals
 
 
 def _parse_codex_event(ev, line_num, token_usage=None):
@@ -33826,28 +33888,64 @@ def extract_session_timeline(session_id):
 # expensive is this session" — same units for everyone, comparable across
 # models. UI surfaces this as "API list-price equivalent".
 #
-# Sources: anthropic.com/pricing as of 2026-04. If rates change, edit here;
-# the model match is substring-based so claude-opus-4-7 / -4-7[1m] / future
-# minor bumps fall through to the same family rate.
-_MODEL_RATES = [
-    # (substring_match, input_per_mtok, cache_write, cache_read, output_per_mtok)
-    ("opus-4",   15.00, 18.75,  1.50, 75.00),
-    ("sonnet-4",  3.00,  3.75,  0.30, 15.00),
-    ("haiku-4",   1.00,  1.25,  0.10,  5.00),
+# Sources: Anthropic/OpenAI list pricing and AgentsView fallback pricing, last
+# checked 2026-06. If rates change, edit here. Rates are
+# (input_per_mtok, cache_write, cache_read, output_per_mtok).
+_MODEL_RATES = {
+    "claude-fable-5": (10.00, 12.50, 1.00, 50.00),
+    "claude-opus-4-8": (5.00, 6.25, 0.50, 25.00),
+    "claude-opus-4-7": (5.00, 6.25, 0.50, 25.00),
+    "claude-opus-4-6": (5.00, 6.25, 0.50, 25.00),
+    "claude-sonnet-4-6": (3.00, 3.75, 0.30, 15.00),
+    "claude-sonnet-4-5-20250514": (3.00, 3.75, 0.30, 15.00),
+    "claude-sonnet-4-20250514": (3.00, 3.75, 0.30, 15.00),
+    "claude-haiku-4-5-20251001": (1.00, 1.25, 0.10, 5.00),
+    "gpt-5.5": (5.00, 0.00, 0.50, 30.00),
+    "gpt-5.4": (2.50, 0.00, 0.00, 15.00),
+    "gpt-5.3-codex": (1.75, 0.00, 0.00, 14.00),
+    "gpt-5.2-codex": (1.75, 0.00, 0.00, 14.00),
+    "gpt-5.1-codex-max": (1.25, 0.00, 0.00, 10.00),
+    "gpt-5.4-mini": (0.75, 0.00, 0.00, 4.50),
+    "gpt-5.4-nano": (0.20, 0.00, 0.00, 1.25),
     # Older families kept for archival sessions.
-    ("opus-3",   15.00, 18.75,  1.50, 75.00),
-    ("sonnet-3",  3.00,  3.75,  0.30, 15.00),
-    ("haiku-3",  0.25,  0.30,  0.03,  1.25),
-]
+    "claude-opus-4-20250514": (15.00, 18.75, 1.50, 75.00),
+    "claude-opus-3": (15.00, 18.75, 1.50, 75.00),
+    "claude-sonnet-3": (3.00, 3.75, 0.30, 15.00),
+    "claude-haiku-3-5-20241022": (0.80, 1.00, 0.08, 4.00),
+    "claude-haiku-3": (0.25, 0.30, 0.03, 1.25),
+}
 _FALLBACK_RATES = (3.00, 3.75, 0.30, 15.00)  # Sonnet — sane middle ground.
 
 
-def _rates_for_model(model):
+def _canonical_model_name(model):
     m = (model or "").lower()
-    for substr, *rates in _MODEL_RATES:
-        if substr in m:
-            return rates
-    return list(_FALLBACK_RATES)
+    if "/" in m:
+        m = m.rsplit("/", 1)[-1]
+    m = m.strip().replace(".", "-")
+    m = re.sub(r"\s*[\[(].*?[\])]\s*$", "", m).strip()
+    m = re.sub(r"-\d{8}$", "", m)
+    return m
+
+
+def _rates_for_model_known(model):
+    m = _canonical_model_name(model)
+    if m in _MODEL_RATES:
+        return list(_MODEL_RATES[m]), True
+    for key, rates in _MODEL_RATES.items():
+        canonical_key = _canonical_model_name(key)
+        if canonical_key == m:
+            return list(rates), True
+        if (
+            canonical_key.startswith("claude-")
+            and m.startswith(canonical_key + "-")
+        ):
+            return list(rates), True
+    return list(_FALLBACK_RATES), False
+
+
+def _rates_for_model(model):
+    rates, _known = _rates_for_model_known(model)
+    return rates
 
 
 def _diagnostic_context_tokens(diagnostics):
@@ -35003,11 +35101,7 @@ def compute_global_stats(days=None):
 
 
 def _model_rates_known(model):
-    m = (model or "").lower()
-    for substr, *rates in _MODEL_RATES:
-        if substr in m:
-            return list(rates), True
-    return list(_FALLBACK_RATES), False
+    return _rates_for_model_known(model)
 
 
 def _throughput_scope(session_id, range_key=None):
@@ -35065,9 +35159,11 @@ def _throughput_usage_weights(model, engine=""):
     rate_in, rate_cw, rate_cr, rate_out = rates
     if rate_in <= 0:
         cache_write_weight = 1.25
+        cache_write_1h_weight = 2.0
         cache_read_weight = 0.10
     else:
         cache_write_weight = rate_cw / rate_in
+        cache_write_1h_weight = 2.0
         cache_read_weight = rate_cr / rate_in
     engine_l = (engine or "").lower()
     can_price = known or engine_l == "claude"
@@ -35083,9 +35179,11 @@ def _throughput_usage_weights(model, engine=""):
         rate_in = rate_cw = rate_cr = rate_out = 0.0
     return {
         "cache_write_weight": cache_write_weight,
+        "cache_write_1h_weight": cache_write_1h_weight,
         "cache_read_weight": cache_read_weight,
         "rate_in": rate_in,
         "rate_cache_write": rate_cw,
+        "rate_cache_write_1h": rate_in * cache_write_1h_weight,
         "rate_cache_read": rate_cr,
         "rate_out": rate_out,
         "cost_basis": cost_basis,
@@ -35134,6 +35232,25 @@ def _throughput_normalize_usage(usage, *, engine="", model=""):
         "cache_write_tokens",
         "cache_create",
     )
+    cache_write_5m = _throughput_usage_int(
+        usage,
+        "cache_creation_5m_input_tokens",
+        "cache_create_5m_tokens",
+        "ephemeral_5m_input_tokens",
+    )
+    cache_write_1h = _throughput_usage_int(
+        usage,
+        "cache_creation_1h_input_tokens",
+        "cache_create_1h_tokens",
+        "ephemeral_1h_input_tokens",
+    )
+    cache_write_split = cache_write_5m + cache_write_1h
+    cache_write_unspecified = 0
+    if cache_write_split:
+        cache_write_unspecified = max(cache_write - cache_write_split, 0)
+        cache_write = cache_write_split + cache_write_unspecified
+    else:
+        cache_write_unspecified = cache_write
     output = _throughput_usage_int(usage, "output_tokens", "output", "out")
     reasoning = _throughput_usage_int(
         usage,
@@ -35160,12 +35277,14 @@ def _throughput_normalize_usage(usage, *, engine="", model=""):
     weights = _throughput_usage_weights(model, engine=engine)
     effective_input = (
         fresh_input
-        + cache_write * weights["cache_write_weight"]
+        + (cache_write_5m + cache_write_unspecified) * weights["cache_write_weight"]
+        + cache_write_1h * weights["cache_write_1h_weight"]
         + cache_read * weights["cache_read_weight"]
     )
     cost_usd = (
         fresh_input * weights["rate_in"]
-        + cache_write * weights["rate_cache_write"]
+        + (cache_write_5m + cache_write_unspecified) * weights["rate_cache_write"]
+        + cache_write_1h * weights["rate_cache_write_1h"]
         + cache_read * weights["rate_cache_read"]
         + output_total * weights["rate_out"]
     ) / 1_000_000
@@ -35176,6 +35295,8 @@ def _throughput_normalize_usage(usage, *, engine="", model=""):
         "fresh_input_tokens": fresh_input,
         "cache_read_tokens": cache_read,
         "cache_write_tokens": cache_write,
+        "cache_write_5m_tokens": cache_write_5m,
+        "cache_write_1h_tokens": cache_write_1h,
         "raw_context_tokens": raw_context,
         "output_tokens": output,
         "reasoning_output_tokens": reasoning,
@@ -35184,6 +35305,7 @@ def _throughput_normalize_usage(usage, *, engine="", model=""):
         "effective_input_tokens": effective_input,
         "effective_total_tokens": effective_input + output_total,
         "cache_write_weight": weights["cache_write_weight"],
+        "cache_write_1h_weight": weights["cache_write_1h_weight"],
         "cache_read_weight": weights["cache_read_weight"],
         "cost_usd": cost_usd,
         "cost_available": weights["cost_available"],
@@ -35207,6 +35329,83 @@ def _throughput_event_usage(ev, *, engine="", model_hint=""):
             "reasoning_output_tokens": ev.get("tokens_thinking") or 0,
         }
     return _throughput_normalize_usage(usage or {}, engine=engine, model=model)
+
+
+def _throughput_is_claude_turn(turn):
+    engine = (turn.get("engine") or "").lower()
+    model = (turn.get("model") or "").lower()
+    mid = turn.get("message_id") or ""
+    return engine == "claude" or model.startswith("claude-") or str(mid).startswith("msg_")
+
+
+def _throughput_turn_usage_total(turn):
+    return (
+        (turn.get("raw_context_tokens") or turn.get("tokens_in") or 0)
+        + (turn.get("tokens_out") or 0)
+    )
+
+
+def _throughput_should_replace_duplicate(candidate, existing):
+    candidate_sidechain = bool(candidate.get("is_sidechain"))
+    existing_sidechain = bool(existing.get("is_sidechain"))
+    if candidate_sidechain != existing_sidechain:
+        return existing_sidechain
+
+    candidate_total = _throughput_turn_usage_total(candidate)
+    existing_total = _throughput_turn_usage_total(existing)
+    if candidate_total != existing_total:
+        return candidate_total > existing_total
+
+    candidate_end = _stats_parse_ts(candidate.get("t_end"))
+    existing_end = _stats_parse_ts(existing.get("t_end"))
+    if candidate_end and existing_end and candidate_end != existing_end:
+        return candidate_end > existing_end
+    return False
+
+
+def _throughput_duplicate_match(turn, existing):
+    if not _throughput_is_claude_turn(turn) or not _throughput_is_claude_turn(existing):
+        return False
+    message_id = turn.get("message_id") or ""
+    if not message_id or existing.get("message_id") != message_id:
+        return False
+    request_id = turn.get("request_id") or ""
+    existing_request_id = existing.get("request_id") or ""
+    if request_id == existing_request_id:
+        return True
+    if not request_id or not existing_request_id:
+        return True
+    return bool(turn.get("is_sidechain") or existing.get("is_sidechain"))
+
+
+def _throughput_dedupe_turns(turns):
+    deduped = []
+    by_message = {}
+    for turn in turns:
+        message_id = turn.get("message_id") or ""
+        if not message_id or not _throughput_is_claude_turn(turn):
+            deduped.append(turn)
+            continue
+
+        request_id = turn.get("request_id") or ""
+        match_index = None
+        for index in by_message.get(message_id, []):
+            if _throughput_duplicate_match(turn, deduped[index]):
+                match_index = index
+                break
+
+        if match_index is not None:
+            if _throughput_should_replace_duplicate(turn, deduped[match_index]):
+                deduped[match_index] = turn
+            continue
+
+        by_message.setdefault(message_id, []).append(len(deduped))
+        deduped.append(turn)
+
+    deduped.sort(key=lambda t: t.get("t_start") or "")
+    for idx, turn in enumerate(deduped, 1):
+        turn["turn_index"] = idx
+    return deduped
 
 
 def _throughput_attach_result_usage(events, *, engine="", model_hint=""):
@@ -35288,6 +35487,9 @@ def _throughput_turns_from_events(
             "session_name": session_name,
             "engine": engine or usage["engine"],
             "model": usage["model"] or model_hint or "",
+            "message_id": ev.get("message_id") or "",
+            "request_id": ev.get("request_id") or "",
+            "is_sidechain": bool(ev.get("is_sidechain") or ev.get("isSidechain")),
             "trigger_type": trigger_ev.get("type"),
             "trigger_preview": _throughput_trigger_preview(trigger_ev),
             "assistant_preview": _throughput_assistant_preview(ev),
@@ -35307,6 +35509,8 @@ def _throughput_turns_from_events(
             "fresh_input_tokens": usage["fresh_input_tokens"],
             "cache_read_tokens": usage["cache_read_tokens"],
             "cache_write_tokens": usage["cache_write_tokens"],
+            "cache_write_5m_tokens": usage["cache_write_5m_tokens"],
+            "cache_write_1h_tokens": usage["cache_write_1h_tokens"],
             "raw_context_tokens": tokens_in,
             "effective_input_tokens": round(effective_input, 2),
             "effective_total_tokens": round(effective_total, 2),
@@ -35320,9 +35524,150 @@ def _throughput_turns_from_events(
             "cost_available": usage["cost_available"],
             "cost_basis": usage["cost_basis"],
             "cache_write_weight": usage["cache_write_weight"],
+            "cache_write_1h_weight": usage["cache_write_1h_weight"],
             "cache_read_weight": usage["cache_read_weight"],
         }
         turns.append(turn)
+    return turns
+
+
+def _throughput_codex_payload_model(payload):
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("model", "model_name"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        value = metadata.get("model")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _throughput_iso(dt):
+    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _throughput_codex_turns_from_file(
+    session_id,
+    *,
+    session_name="",
+    model_hint="",
+    cutoff_epoch=None,
+):
+    path = _resolve_codex_rollout_path(session_id)
+    if not path:
+        return []
+    turns = []
+    current_model = model_hint or ""
+    previous_totals = None
+    last_boundary_ts = None
+    line_num = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line_num += 1
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = _codex_event_timestamp(ev)
+                payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+                if ev.get("type") == "turn_context":
+                    current_model = _throughput_codex_payload_model(payload) or current_model
+                    if ts and last_boundary_ts is None:
+                        last_boundary_ts = ts
+                    continue
+                if ev.get("type") == "event_msg" and payload.get("type") == "user_message":
+                    if ts:
+                        last_boundary_ts = ts
+                    continue
+
+                usage_raw, previous_totals = _codex_usage_delta_from_event(ev, previous_totals)
+                if not usage_raw:
+                    continue
+                t_end = _stats_parse_ts(ts)
+                if not t_end:
+                    continue
+                if cutoff_epoch is not None and t_end.timestamp() < cutoff_epoch:
+                    last_boundary_ts = ts or last_boundary_ts
+                    continue
+                t_start = _stats_parse_ts(last_boundary_ts) if last_boundary_ts else None
+                if not t_start or t_start > t_end:
+                    t_start = t_end - timedelta(seconds=1)
+                dur_sec = max((t_end - t_start).total_seconds(), 1.0)
+
+                info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                model = (
+                    _throughput_codex_payload_model(info)
+                    or _throughput_codex_payload_model(payload)
+                    or current_model
+                    or model_hint
+                    or ""
+                )
+                usage = _throughput_normalize_usage(
+                    usage_raw,
+                    engine="codex",
+                    model=model,
+                )
+                tokens_in = usage["raw_context_tokens"]
+                tokens_out = usage["output_total_tokens"]
+                effective_input = usage["effective_input_tokens"]
+                effective_total = usage["effective_total_tokens"]
+                in_tps = tokens_in / dur_sec if dur_sec > 0 else 0.0
+                out_tps = tokens_out / dur_sec if dur_sec > 0 else 0.0
+                total_tps = (tokens_in + tokens_out) / dur_sec if dur_sec > 0 else 0.0
+                effective_input_tps = effective_input / dur_sec if dur_sec > 0 else 0.0
+                effective_total_tps = effective_total / dur_sec if dur_sec > 0 else 0.0
+                turns.append({
+                    "turn_index": len(turns) + 1,
+                    "session_id": session_id,
+                    "session_name": session_name,
+                    "engine": "codex",
+                    "model": usage["model"] or model,
+                    "message_id": f"codex-token-{line_num}",
+                    "request_id": "",
+                    "is_sidechain": False,
+                    "trigger_type": "token_count",
+                    "trigger_preview": "Codex model call",
+                    "assistant_preview": "Codex token usage event",
+                    "t_start": _throughput_iso(t_start),
+                    "t_end": ts,
+                    "dur_sec": round(dur_sec, 2),
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "in_tps": round(in_tps, 2),
+                    "out_tps": round(out_tps, 2),
+                    "total_tps": round(total_tps, 2),
+                    "in_tpm": round(in_tps * 60.0, 2),
+                    "out_tpm": round(out_tps * 60.0, 2),
+                    "total_tpm": round(total_tps * 60.0, 2),
+                    "fresh_input_tokens": usage["fresh_input_tokens"],
+                    "cache_read_tokens": usage["cache_read_tokens"],
+                    "cache_write_tokens": usage["cache_write_tokens"],
+                    "cache_write_5m_tokens": usage["cache_write_5m_tokens"],
+                    "cache_write_1h_tokens": usage["cache_write_1h_tokens"],
+                    "raw_context_tokens": tokens_in,
+                    "effective_input_tokens": round(effective_input, 2),
+                    "effective_total_tokens": round(effective_total, 2),
+                    "effective_input_tps": round(effective_input_tps, 2),
+                    "effective_input_tpm": round(effective_input_tps * 60.0, 2),
+                    "cache_adjusted_total_tps": round(effective_total_tps, 2),
+                    "cache_adjusted_total_tpm": round(effective_total_tps * 60.0, 2),
+                    "reasoning_output_tokens": usage["reasoning_output_tokens"],
+                    "tool_tokens": usage["tool_tokens"],
+                    "cost_usd": round(usage["cost_usd"], 6),
+                    "cost_available": usage["cost_available"],
+                    "cost_basis": usage["cost_basis"],
+                    "cache_write_weight": usage["cache_write_weight"],
+                    "cache_write_1h_weight": usage["cache_write_1h_weight"],
+                    "cache_read_weight": usage["cache_read_weight"],
+                })
+                last_boundary_ts = ts
+    except OSError:
+        return []
     return turns
 
 
@@ -35508,37 +35853,60 @@ def _throughput_payload(session_id, repo_path=None, range_key=None):
             engine = conv_row.get("engine") or conv_row.get("source") or ""
             model_hint = conv_row.get("model") or ""
             try:
-                parsed = parse_conversation(sid, repo_path=repo_path)
+                is_codex = engine == "codex" or _is_codex_session(sid)
             except Exception:
                 continue
-            turns.extend(
-                _throughput_turns_from_events(
-                    parsed.get("events") or [],
-                    session_id=sid,
-                    session_name=name,
-                    engine=engine,
-                    model_hint=model_hint,
-                    cutoff_epoch=cutoff_epoch,
+            if is_codex:
+                turns.extend(
+                    _throughput_codex_turns_from_file(
+                        sid,
+                        session_name=name,
+                        model_hint=model_hint,
+                        cutoff_epoch=cutoff_epoch,
+                    )
                 )
-            )
+            else:
+                try:
+                    parsed = parse_conversation(sid, repo_path=repo_path)
+                except Exception:
+                    continue
+                turns.extend(
+                    _throughput_turns_from_events(
+                        parsed.get("events") or [],
+                        session_id=sid,
+                        session_name=name,
+                        engine=engine,
+                        model_hint=model_hint,
+                        cutoff_epoch=cutoff_epoch,
+                    )
+                )
         turns.sort(key=lambda t: t.get("t_start") or "")
         for idx, turn in enumerate(turns, 1):
             turn["turn_index"] = idx
     else:
         engine, model_hint = _throughput_session_hints(session_id)
-        try:
-            parsed = parse_conversation(session_id, repo_path=repo_path)
-        except Exception as e:
-            return {"error": f"Failed to parse conversation: {str(e)}"}, 500
-        turns = _throughput_turns_from_events(
-            parsed.get("events") or [],
-            session_id=session_id,
-            session_name="",
-            engine=engine,
-            model_hint=model_hint,
-            cutoff_epoch=cutoff_epoch,
-        )
+        if engine == "codex" or _is_codex_session(session_id):
+            turns = _throughput_codex_turns_from_file(
+                session_id,
+                session_name="",
+                model_hint=model_hint,
+                cutoff_epoch=cutoff_epoch,
+            )
+        else:
+            try:
+                parsed = parse_conversation(session_id, repo_path=repo_path)
+            except Exception as e:
+                return {"error": f"Failed to parse conversation: {str(e)}"}, 500
+            turns = _throughput_turns_from_events(
+                parsed.get("events") or [],
+                session_id=session_id,
+                session_name="",
+                engine=engine,
+                model_hint=model_hint,
+                cutoff_epoch=cutoff_epoch,
+            )
 
+    turns = _throughput_dedupe_turns(turns)
     return {
         "ok": True,
         "session_id": session_id,
