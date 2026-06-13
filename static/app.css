@@ -2474,8 +2474,27 @@
   .conv-input-context.is-new-session .spawn-cwd-row {
     display: inline-flex;
     grid-area: cwd;
-    justify-self: start;
+    justify-self: stretch;
     overflow: visible;
+    width: 100%;
+  }
+  .conv-input-context.is-new-session .spawn-cwd-row .spawn-cwd-combo {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .conv-input-context.is-new-session .spawn-cwd-row .spawn-cwd-picker {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    padding: 9px 12px;
+    font-size: 14px;
+  }
+  .conv-input-context.is-new-session .spawn-cwd-row .spawn-cwd-menu-btn,
+  .conv-input-context.is-new-session .spawn-cwd-row .spawn-cwd-browse-btn {
+    width: 36px;
+    height: 100%;
+    font-size: 14px;
   }
   .conv-input-context .spawn-cwd-quick-chips {
     display: none;
