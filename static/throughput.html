@@ -417,6 +417,51 @@
     align-items: center;
     gap: 8px;
   }
+
+  .model-breakdown {
+    margin-bottom: 24px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow-x: auto;
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .model-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1.3fr) repeat(6, minmax(90px, 1fr));
+    gap: 12px;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    min-width: 760px;
+  }
+
+  .model-row:last-child { border-bottom: 0; }
+
+  .model-row.header {
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .model-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .model-cell {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    text-align: right;
+  }
   
   .turn-list {
     display: flex;
@@ -625,12 +670,12 @@
             <div class="metric-subtext" id="val-total-duration">Total session time: 0s</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">🔢 Total Tokens</div>
+            <div class="metric-label">🔢 Raw Context Tokens</div>
             <div class="metric-value" id="val-total-tokens">0</div>
             <div class="metric-subtext" id="val-token-split">In: 0 | Out: 0</div>
           </div>
           <div class="metric-card">
-            <div class="metric-label">🚀 Input Throughput</div>
+            <div class="metric-label">🚀 Cache-Adjusted Input</div>
             <div class="metric-value" id="val-in-throughput">0 TPM</div>
             <div class="metric-subtext" id="val-in-tps">0.0 tokens / sec</div>
           </div>
@@ -645,12 +690,12 @@
         <div class="chart-card">
           <div class="chart-card-header">
             <div class="chart-title">
-              <span>📈</span> Token Throughput per Turn
+              <span>📈</span> Cache-Adjusted Throughput per Turn
             </div>
             <div class="chart-legend">
               <div class="legend-item">
                 <span class="legend-color" style="background: var(--accent);"></span>
-                <span>Total TPM</span>
+                <span>Adjusted TPM</span>
               </div>
             </div>
           </div>
@@ -660,6 +705,13 @@
           </div>
         </div>
         
+        <div class="section-title">
+          <span>🧭</span> Model Breakdown
+        </div>
+        <div class="model-breakdown" id="model-breakdown">
+          <!-- Model rows populated by JS -->
+        </div>
+
         <!-- Turns Detail Timeline -->
         <div class="section-title">
           <span>🗒️</span> Active LLM Turns
@@ -689,6 +741,17 @@
       if (hrs < 24) return `${hrs}h ago`;
       const days = Math.floor(hrs / 24);
       return `${days}d ago`;
+    }
+
+    function fmtNum(value, maximumFractionDigits = 0) {
+      const n = Number(value || 0);
+      return n.toLocaleString(undefined, { maximumFractionDigits });
+    }
+
+    function fmtCost(value) {
+      const n = Number(value || 0);
+      if (!n) return '$0.00';
+      return n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
     }
 
     // Refresh status indicator helper
@@ -728,25 +791,32 @@
       
       const searchVal = document.getElementById('search-input').value.toLowerCase();
       
-      // Add special aggregated "Total (Last 7 Days)" item at the top of the sidebar
-      if (!searchVal || 'total'.includes(searchVal) || 'last 7 days'.includes(searchVal) || 'all'.includes(searchVal)) {
+      // Add aggregate scopes at the top of the sidebar.
+      const aggregateItems = [
+        { id: 'all_1_hour', title: 'Total (Last Hour)', meta: '1h window' },
+        { id: 'all_today', title: 'Total (Today)', meta: 'today' },
+        { id: 'all_7_days', title: 'Total (Last 7 Days)', meta: '7d window' },
+      ];
+      aggregateItems
+        .filter(a => !searchVal || a.title.toLowerCase().includes(searchVal) || 'total all aggregate'.includes(searchVal))
+        .forEach(a => {
         const item = document.createElement('div');
-        item.className = `session-item ${activeSessionId === 'all_7_days' ? 'active' : ''}`;
+        item.className = `session-item ${activeSessionId === a.id ? 'active' : ''}`;
         item.style.borderLeft = '3px solid var(--accent)';
-        item.onclick = () => selectSession({ session_id: 'all_7_days', display_name: 'Total (Last 7 Days)', engine: 'aggregated' });
+        item.onclick = () => selectSession({ session_id: a.id, display_name: a.title, engine: 'aggregated' });
         
         item.innerHTML = `
           <div class="session-item-header">
-            <span class="session-title" style="font-weight: 600; color: var(--accent);">📊 Total (Last 7 Days)</span>
+            <span class="session-title" style="font-weight: 600; color: var(--accent);">📊 ${a.title}</span>
             <span class="badge-engine" style="font-size: 9px; padding: 1px 5px; background: rgba(57, 210, 192, 0.2);">ALL</span>
           </div>
           <div class="session-meta">
             <span>Aggregated metrics</span>
-            <span>7d window</span>
+            <span>${a.meta}</span>
           </div>
         `;
         listEl.appendChild(item);
-      }
+      });
 
       const filtered = allSessions.filter(s => {
         const title = (s.display_name || s.name || s.title || s.session_id || '').toLowerCase();
@@ -801,7 +871,7 @@
       setStatus(`Loading throughput data for ${s.session_id.substring(0, 8)}...`, true);
       
       try {
-        const res = await fetch(`/api/throughput?session_id=${s.session_id}`);
+        const res = await fetch(`/api/throughput?session_id=${encodeURIComponent(s.session_id)}`);
         if (!res.ok) throw new Error('API failed');
         const data = await res.json();
         
@@ -834,20 +904,63 @@
       document.getElementById('val-active-duration').textContent = `${activeMin}m ${activeSec}s`;
       document.getElementById('val-total-duration').textContent = `Turns with usage info: ${summary.turns_with_tokens} / ${summary.total_turns}`;
       
-      document.getElementById('val-total-tokens').textContent = summary.total_tokens.toLocaleString();
-      document.getElementById('val-token-split').textContent = `In: ${summary.total_input_tokens.toLocaleString()} | Out: ${summary.total_output_tokens.toLocaleString()}`;
+      document.getElementById('val-total-tokens').textContent = fmtNum(summary.total_raw_context_tokens ?? summary.total_input_tokens);
+      const costText = summary.cost_usd ? ` | Cost: ${fmtCost(summary.cost_usd)}` : '';
+      document.getElementById('val-token-split').textContent =
+        `Fresh: ${fmtNum(summary.total_fresh_input_tokens)} | Cache: ${fmtNum((summary.total_cache_read_tokens || 0) + (summary.total_cache_write_tokens || 0))} | Out: ${fmtNum(summary.total_output_tokens)}${costText}`;
       
-      document.getElementById('val-in-throughput').textContent = `${Math.round(summary.avg_input_tpm).toLocaleString()} TPM`;
-      document.getElementById('val-in-tps').textContent = `${summary.avg_input_tps.toFixed(1)} tokens / sec`;
+      document.getElementById('val-in-throughput').textContent = `${fmtNum(summary.avg_effective_input_tpm ?? summary.avg_input_tpm)} TPM`;
+      document.getElementById('val-in-tps').textContent =
+        `${Number(summary.avg_effective_input_tps || 0).toFixed(1)} effective tokens / sec · raw ${fmtNum(summary.avg_input_tpm)} TPM`;
       
       document.getElementById('val-out-throughput').textContent = `${Math.round(summary.avg_output_tpm).toLocaleString()} TPM`;
-      document.getElementById('val-out-tps').textContent = `${summary.avg_output_tps.toFixed(1)} tokens / sec`;
+      document.getElementById('val-out-tps').textContent =
+        `${summary.avg_output_tps.toFixed(1)} tokens / sec · cache hit ${Math.round((summary.cache_hit_ratio || 0) * 100)}%`;
       
       // Draw Line Chart
       drawChart(data.turns);
+
+      // Model comparison table
+      renderModelBreakdown(summary.per_model || []);
       
       // Render turns list
       renderTurnsList(data.turns);
+    }
+
+    function renderModelBreakdown(models) {
+      const el = document.getElementById('model-breakdown');
+      if (!el) return;
+      if (!models.length) {
+        el.innerHTML = `<div style="padding: 12px 14px; color: var(--text-muted); font-size: 12px;">No model usage recorded</div>`;
+        return;
+      }
+      const rows = models.map(m => {
+        const label = m.model || m.engine || 'unknown';
+        const cost = m.cost_usd ? fmtCost(m.cost_usd) : (m.unpriced_turns ? 'n/a' : '$0.00');
+        return `
+          <div class="model-row">
+            <div class="model-name" title="${label}">${label}</div>
+            <div class="model-cell">${fmtNum(m.turns)}</div>
+            <div class="model-cell">${fmtNum(m.active_duration_sec, 1)}s</div>
+            <div class="model-cell">${fmtNum(m.avg_effective_input_tpm)}</div>
+            <div class="model-cell">${fmtNum(m.avg_raw_context_tpm)}</div>
+            <div class="model-cell">${Math.round((m.cache_hit_ratio || 0) * 100)}%</div>
+            <div class="model-cell">${cost}</div>
+          </div>
+        `;
+      }).join('');
+      el.innerHTML = `
+        <div class="model-row header">
+          <div>Model</div>
+          <div class="model-cell">Turns</div>
+          <div class="model-cell">Active</div>
+          <div class="model-cell">Adj TPM</div>
+          <div class="model-cell">Raw TPM</div>
+          <div class="model-cell">Cache</div>
+          <div class="model-cell">Cost</div>
+        </div>
+        ${rows}
+      `;
     }
 
     // Dynamic SVG Line chart drawer
@@ -864,9 +977,10 @@
       // Extract data
       const data = turns.map(t => ({
         index: t.turn_index,
-        tpm: t.total_tpm,
-        in_tpm: t.in_tpm,
+        tpm: t.cache_adjusted_total_tpm ?? t.total_tpm,
+        in_tpm: t.effective_input_tpm ?? t.in_tpm,
         out_tpm: t.out_tpm,
+        raw_tpm: t.in_tpm,
         dur: t.dur_sec,
       }));
       
@@ -987,7 +1101,7 @@
         circle.addEventListener('mouseover', (e) => {
           circle.setAttribute('r', '7');
           circle.setAttribute('fill', 'var(--accent)');
-          showTooltip(e, `Turn #${d.index}<br>Throughput: <strong>${Math.round(d.tpm).toLocaleString()} TPM</strong><br>Duration: ${d.dur}s`);
+          showTooltip(e, `Turn #${d.index}<br>Adjusted: <strong>${Math.round(d.tpm).toLocaleString()} TPM</strong><br>Raw input: ${Math.round(d.raw_tpm || 0).toLocaleString()} TPM<br>Duration: ${d.dur}s`);
         });
         
         circle.addEventListener('mouseout', () => {
@@ -1076,12 +1190,12 @@
                 <span>duration</span>
               </div>
               <div class="turn-stat-item">
-                <span class="turn-stat-value">${Math.round(t.total_tpm).toLocaleString()}</span>
-                <span>TPM</span>
+                <span class="turn-stat-value">${fmtNum(t.cache_adjusted_total_tpm ?? t.total_tpm)}</span>
+                <span>adj TPM</span>
               </div>
               <div class="turn-stat-item">
-                <span class="turn-stat-value">${(t.tokens_in + t.tokens_out).toLocaleString()}</span>
-                <span>tokens</span>
+                <span class="turn-stat-value">${fmtNum(t.effective_input_tokens ?? t.tokens_in)}</span>
+                <span>eff input</span>
               </div>
               <span class="chevron" id="chevron-${t.turn_index}">▼</span>
             </div>
@@ -1097,11 +1211,13 @@
                 <div class="preview-content response">${t.assistant_preview || '[Empty Response]'}</div>
               </div>
             </div>
-            <div style="display: flex; gap: 24px; margin-top: 8px; font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 12px;">
+            <div style="display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 8px; font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 12px;">
               <div>🕒 Start: <strong>${new Date(t.t_start).toLocaleString()}</strong></div>
               <div>🕒 End: <strong>${new Date(t.t_end).toLocaleString()}</strong></div>
-              <div>📥 Input: <strong>${t.tokens_in.toLocaleString()}</strong> tokens (${Math.round(t.in_tpm).toLocaleString()} TPM)</div>
-              <div>📤 Output: <strong>${t.tokens_out.toLocaleString()}</strong> tokens (${Math.round(t.out_tpm).toLocaleString()} TPM)</div>
+              <div>📥 Raw input: <strong>${fmtNum(t.tokens_in)}</strong> (${fmtNum(t.in_tpm)} TPM)</div>
+              <div>🧮 Adjusted input: <strong>${fmtNum(t.effective_input_tokens)}</strong> (${fmtNum(t.effective_input_tpm)} TPM)</div>
+              <div>🗂️ Cache: read <strong>${fmtNum(t.cache_read_tokens)}</strong> · write <strong>${fmtNum(t.cache_write_tokens)}</strong></div>
+              <div>📤 Output: <strong>${fmtNum(t.tokens_out)}</strong> (${fmtNum(t.out_tpm)} TPM)</div>
             </div>
           </div>
         `;

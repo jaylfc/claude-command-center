@@ -5875,6 +5875,104 @@ class TestSessionUsageDedup(unittest.TestCase):
         self.assertEqual(result["total_output_tokens"], 60)
 
 
+class TestThroughputCacheAdjusted(unittest.TestCase):
+    def setUp(self):
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        self.server = importlib.import_module("server")
+        self.tmp = tempfile.mkdtemp(prefix="ccc-throughput-")
+        self.prev_root = self.server.PROJECTS_ROOT
+        self.server.PROJECTS_ROOT = pathlib.Path(self.tmp)
+        self.server._ENGINE_DETECT_CACHE.clear()
+
+    def tearDown(self):
+        self.server.PROJECTS_ROOT = self.prev_root
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_session(self, sid, events):
+        proj = pathlib.Path(self.tmp) / "-throughput-project"
+        proj.mkdir(parents=True, exist_ok=True)
+        path = proj / f"{sid}.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+        return path
+
+    def test_claude_throughput_uses_cache_adjusted_input(self):
+        sid = "00000000-0000-4000-8000-000000000abe"
+        events = [
+            {
+                "type": "user",
+                "timestamp": "2026-06-12T17:00:00.000Z",
+                "sessionId": sid,
+                "message": {"role": "user", "content": "measure this"},
+            },
+            {
+                "type": "assistant",
+                "timestamp": "2026-06-12T17:00:30.000Z",
+                "sessionId": sid,
+                "message": {
+                    "id": "msg-throughput-1",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "done"}],
+                    "usage": {
+                        "input_tokens": 1_000,
+                        "cache_creation_input_tokens": 200,
+                        "cache_read_input_tokens": 5_000,
+                        "output_tokens": 300,
+                    },
+                },
+            },
+        ]
+        self._write_session(sid, events)
+
+        with mock.patch.object(self.server, "_is_codex_session", return_value=False), \
+             mock.patch.object(self.server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(self.server, "_is_cursor_session", return_value=False), \
+             mock.patch.object(self.server, "_is_antigravity_session", return_value=False), \
+             mock.patch.object(self.server, "_is_kilo_session", return_value=False), \
+             mock.patch.object(self.server, "_load_desktop_app_metadata", return_value={}):
+            payload, status = self.server._throughput_payload(sid)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(len(payload["turns"]), 1)
+        turn = payload["turns"][0]
+        self.assertEqual(turn["tokens_in"], 6_200)
+        self.assertEqual(turn["fresh_input_tokens"], 1_000)
+        self.assertEqual(turn["cache_write_tokens"], 200)
+        self.assertEqual(turn["cache_read_tokens"], 5_000)
+        # Sonnet cache math: 1000 + 200*1.25 + 5000*0.10.
+        self.assertEqual(turn["effective_input_tokens"], 1_750)
+        self.assertEqual(turn["effective_input_tpm"], 3_500)
+
+        summary = payload["summary"]
+        self.assertEqual(summary["total_raw_context_tokens"], 6_200)
+        self.assertEqual(summary["total_effective_input_tokens"], 1_750)
+        self.assertEqual(summary["avg_input_tpm"], 12_400)
+        self.assertEqual(summary["avg_effective_input_tpm"], 3_500)
+        self.assertAlmostEqual(summary["cache_hit_ratio"], 5_000 / 6_200, places=4)
+        self.assertGreater(summary["cost_usd"], 0)
+
+    def test_codex_cached_input_is_subset_of_input_tokens(self):
+        usage = self.server._throughput_normalize_usage(
+            {
+                "input_tokens": 1_000,
+                "cached_input_tokens": 800,
+                "output_tokens": 50,
+            },
+            engine="codex",
+            model="gpt-5.5",
+        )
+
+        self.assertEqual(usage["raw_context_tokens"], 1_000)
+        self.assertEqual(usage["fresh_input_tokens"], 200)
+        self.assertEqual(usage["cache_read_tokens"], 800)
+        self.assertEqual(usage["effective_input_tokens"], 280)
+        self.assertFalse(usage["cost_available"])
+
+
 class TestCodexEsc(unittest.TestCase):
     def setUp(self):
         for mod in ("server", "morning", "morning_store"):

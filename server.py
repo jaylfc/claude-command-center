@@ -14670,6 +14670,8 @@ def _parse_conversation_event(ev, line_num):
                 "message_id": msg.get("id", ""),
                 "blocks": blocks,
             }
+            if msg.get("model"):
+                out_ev["model"] = msg.get("model")
             # Per-turn token usage: surface a "X in | Y out" chip at the end of
             # every assistant turn (interactive transcripts have no `result`
             # event, so without this they show no token count at all). tokens_in
@@ -14684,6 +14686,12 @@ def _parse_conversation_event(ev, line_num):
                 if tin or tout:
                     out_ev["tokens_in"] = tin
                     out_ev["tokens_out"] = tout
+                    out_ev["token_usage"] = {
+                        "input_tokens": int(usage.get("input_tokens") or 0),
+                        "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                        "output_tokens": tout,
+                    }
             return out_ev
 
     if ev_type == "result":
@@ -19869,6 +19877,7 @@ def _parse_gemini_conversation(session_id, after_line=0):
                     "ts": ts,
                     "type": "assistant",
                     "message_id": msg.get("id") or f"gemini-{line_num}",
+                    "model": msg.get("model") or "",
                     "blocks": [{"kind": "text", "text": text}],
                 })
         for call in msg.get("toolCalls") or []:
@@ -19884,6 +19893,7 @@ def _parse_gemini_conversation(session_id, after_line=0):
                     "ts": call.get("timestamp") or ts,
                     "type": "assistant",
                     "message_id": f"gemini-tool-{line_num}",
+                    "model": msg.get("model") or "",
                     "blocks": [{
                         "kind": "tool_use",
                         "name": _gemini_tool_name(call),
@@ -23276,6 +23286,14 @@ def _parse_antigravity_event(ev, line_num, usage_map=None):
                     out["tokens_in"] = usage.get("in", 0)
                     out["tokens_out"] = usage.get("out", 0)
                     out["tokens_thinking"] = usage.get("thinking", 0)
+                    out["model"] = usage.get("model") or ""
+                    out["token_usage"] = {
+                        "input_tokens": usage.get("in", 0),
+                        "cache_read_input_tokens": usage.get("cache_read", 0),
+                        "cache_creation_input_tokens": usage.get("cache_create", 0),
+                        "output_tokens": usage.get("out", 0),
+                        "reasoning_output_tokens": usage.get("thinking", 0),
+                    }
             return out
         return None
     if ev_type in ("CONVERSATION_HISTORY", "SYSTEM_MESSAGE", "EPHEMERAL_MESSAGE", "CHECKPOINT"):
@@ -34984,6 +35002,556 @@ def compute_global_stats(days=None):
     return out
 
 
+def _model_rates_known(model):
+    m = (model or "").lower()
+    for substr, *rates in _MODEL_RATES:
+        if substr in m:
+            return list(rates), True
+    return list(_FALLBACK_RATES), False
+
+
+def _throughput_scope(session_id, range_key=None):
+    """Resolve throughput scope.
+
+    Returns (is_aggregate, cutoff_epoch, label). A cutoff of None means all
+    available turns for the selected session/scope.
+    """
+    sid = str(session_id or "").strip()
+    rk = str(range_key or "").strip().lower()
+    now = time.time()
+    is_all = sid in ("all", "all_time") or sid.startswith("all_")
+    if sid == "all_1_hour" or rk in ("1h", "hour", "last_hour"):
+        return is_all, now - 3600, "Last hour"
+    if sid == "all_today" or rk in ("today", "day"):
+        local_midnight = datetime.now().astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return is_all, local_midnight.timestamp(), "Today"
+    if sid == "all_7_days" or rk in ("7d", "week", "last_7_days"):
+        return is_all, now - 7 * 86400, "Last 7 days"
+    if sid in ("all", "all_time"):
+        return True, None, "All time"
+    return False, None, "Session"
+
+
+def _throughput_trigger_preview(tev):
+    text = tev.get("text") or ""
+    if tev.get("type") == "tool_result":
+        use_id = tev.get("tool_use_id") or ""
+        prefix = f"Tool Result ({use_id}): " if use_id else "Tool Result: "
+        return prefix + text[:300] + ("..." if len(text) > 300 else "")
+    return text[:300] + ("..." if len(text) > 300 else "")
+
+
+def _throughput_assistant_preview(aev):
+    blocks = aev.get("blocks") or []
+    parts = []
+    for block in blocks:
+        kind = block.get("kind") or ""
+        if kind == "text":
+            parts.append(block.get("text") or "")
+        elif kind == "thinking":
+            parts.append(f"[Thinking: {block.get('text') or ''}]")
+        elif kind == "tool_use":
+            parts.append(
+                f"[Tool Use: {block.get('name') or ''}({block.get('detail') or ''})]"
+            )
+    full_text = "\n".join(parts)
+    return full_text[:4000] + ("..." if len(full_text) > 4000 else "")
+
+
+def _throughput_usage_weights(model, engine=""):
+    rates, known = _model_rates_known(model)
+    rate_in, rate_cw, rate_cr, rate_out = rates
+    if rate_in <= 0:
+        cache_write_weight = 1.25
+        cache_read_weight = 0.10
+    else:
+        cache_write_weight = rate_cw / rate_in
+        cache_read_weight = rate_cr / rate_in
+    engine_l = (engine or "").lower()
+    can_price = known or engine_l == "claude"
+    if known:
+        cost_basis = "api_list_price"
+    elif can_price:
+        cost_basis = "fallback_sonnet"
+    else:
+        cost_basis = "unpriced"
+    if not can_price:
+        # Keep cache-adjusted token math available for all engines, but avoid
+        # pretending Claude list prices are Codex/Gemini prices.
+        rate_in = rate_cw = rate_cr = rate_out = 0.0
+    return {
+        "cache_write_weight": cache_write_weight,
+        "cache_read_weight": cache_read_weight,
+        "rate_in": rate_in,
+        "rate_cache_write": rate_cw,
+        "rate_cache_read": rate_cr,
+        "rate_out": rate_out,
+        "cost_basis": cost_basis,
+        "cost_available": can_price,
+    }
+
+
+def _throughput_usage_int(usage, *keys):
+    if not isinstance(usage, dict):
+        return 0
+    for key in keys:
+        if key in usage:
+            return _codex_int(usage.get(key))
+    return 0
+
+
+def _throughput_normalize_usage(usage, *, engine="", model=""):
+    """Normalize per-turn usage across Claude/Codex/Gemini/Antigravity.
+
+    Claude/Anthropic and Antigravity expose cache reads/writes as separate
+    buckets in addition to uncached input. Codex/OpenAI and Gemini expose
+    cached input as a subset of input_tokens/candidate input. This function
+    produces both raw context-size tokens and cache-adjusted input-equivalent
+    tokens so the UI can show throughput and financial burn separately.
+    """
+    if not isinstance(usage, dict):
+        usage = {}
+    engine_l = (engine or "").lower()
+    raw_context = _throughput_usage_int(
+        usage, "raw_context_tokens", "context_tokens", "tokens_in"
+    )
+    input_tokens = _throughput_usage_int(usage, "input_tokens", "input", "in")
+    cache_read = _throughput_usage_int(
+        usage,
+        "cache_read_input_tokens",
+        "cached_input_tokens",
+        "cache_read_tokens",
+        "cached_tokens",
+        "cached",
+    )
+    cache_write = _throughput_usage_int(
+        usage,
+        "cache_creation_input_tokens",
+        "cache_write_input_tokens",
+        "cache_creation_tokens",
+        "cache_write_tokens",
+        "cache_create",
+    )
+    output = _throughput_usage_int(usage, "output_tokens", "output", "out")
+    reasoning = _throughput_usage_int(
+        usage,
+        "reasoning_output_tokens",
+        "thinking_tokens",
+        "thinking",
+        "thoughts",
+    )
+    tool_tokens = _throughput_usage_int(usage, "tool_tokens", "tool")
+    output_total = output + reasoning + tool_tokens
+
+    has_subset_cached = any(
+        key in usage for key in ("cached_input_tokens", "cached_tokens", "cached")
+    )
+    if raw_context:
+        fresh_input = max(raw_context - cache_read - cache_write, 0)
+    elif has_subset_cached or engine_l in ("codex", "gemini", "cursor", "kilo"):
+        raw_context = input_tokens
+        fresh_input = max(input_tokens - cache_read - cache_write, 0)
+    else:
+        fresh_input = input_tokens
+        raw_context = input_tokens + cache_read + cache_write
+
+    weights = _throughput_usage_weights(model, engine=engine)
+    effective_input = (
+        fresh_input
+        + cache_write * weights["cache_write_weight"]
+        + cache_read * weights["cache_read_weight"]
+    )
+    cost_usd = (
+        fresh_input * weights["rate_in"]
+        + cache_write * weights["rate_cache_write"]
+        + cache_read * weights["rate_cache_read"]
+        + output_total * weights["rate_out"]
+    ) / 1_000_000
+
+    return {
+        "model": model or "",
+        "engine": engine or "",
+        "fresh_input_tokens": fresh_input,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "raw_context_tokens": raw_context,
+        "output_tokens": output,
+        "reasoning_output_tokens": reasoning,
+        "tool_tokens": tool_tokens,
+        "output_total_tokens": output_total,
+        "effective_input_tokens": effective_input,
+        "effective_total_tokens": effective_input + output_total,
+        "cache_write_weight": weights["cache_write_weight"],
+        "cache_read_weight": weights["cache_read_weight"],
+        "cost_usd": cost_usd,
+        "cost_available": weights["cost_available"],
+        "cost_basis": weights["cost_basis"],
+    }
+
+
+def _throughput_event_usage(ev, *, engine="", model_hint=""):
+    model = ev.get("model") or model_hint or ""
+    usage = ev.get("token_usage")
+    if not isinstance(usage, dict):
+        usage = None
+    if usage is None and (
+        ev.get("tokens_in")
+        or ev.get("tokens_out")
+        or ev.get("tokens_thinking")
+    ):
+        usage = {
+            "raw_context_tokens": ev.get("tokens_in") or 0,
+            "output_tokens": ev.get("tokens_out") or 0,
+            "reasoning_output_tokens": ev.get("tokens_thinking") or 0,
+        }
+    return _throughput_normalize_usage(usage or {}, engine=engine, model=model)
+
+
+def _throughput_attach_result_usage(events, *, engine="", model_hint=""):
+    """Attach result token_usage to the preceding assistant event.
+
+    Codex/Gemini expose per-turn usage on a synthetic result event. Throughput
+    is rendered by assistant turns, so mirror that usage onto the last
+    assistant before the result unless another assistant/user turn intervenes.
+    """
+    for i, ev in enumerate(events):
+        if ev.get("type") != "assistant" or isinstance(ev.get("token_usage"), dict):
+            continue
+        result_ev = None
+        has_later_assistant = False
+        for nxt in events[i + 1:]:
+            if nxt.get("type") == "user_text":
+                break
+            if nxt.get("type") == "assistant":
+                has_later_assistant = True
+                break
+            if nxt.get("type") == "result":
+                result_ev = nxt
+                break
+        usage = result_ev.get("token_usage") if result_ev and not has_later_assistant else None
+        if not isinstance(usage, dict):
+            continue
+        ev["token_usage"] = dict(usage)
+        norm = _throughput_event_usage(ev, engine=engine, model_hint=model_hint)
+        if not ev.get("tokens_in"):
+            ev["tokens_in"] = norm["raw_context_tokens"]
+        if not ev.get("tokens_out"):
+            ev["tokens_out"] = norm["output_total_tokens"]
+
+
+def _throughput_turns_from_events(
+    events,
+    *,
+    session_id="",
+    session_name="",
+    engine="",
+    model_hint="",
+    cutoff_epoch=None,
+):
+    events = [dict(ev) for ev in (events or []) if isinstance(ev, dict)]
+    _throughput_attach_result_usage(events, engine=engine, model_hint=model_hint)
+    turns = []
+    for i, ev in enumerate(events):
+        if ev.get("type") != "assistant":
+            continue
+        trigger_ev = None
+        for prev in reversed(events[:i]):
+            if prev.get("type") in ("user_text", "tool_result"):
+                trigger_ev = prev
+                break
+        if not trigger_ev:
+            continue
+        t_start = _stats_parse_ts(trigger_ev.get("ts"))
+        t_end = _stats_parse_ts(ev.get("ts"))
+        if not t_start or not t_end:
+            continue
+        if cutoff_epoch is not None and t_end.timestamp() < cutoff_epoch:
+            continue
+        dur_sec = (t_end - t_start).total_seconds()
+        if dur_sec < 1.0:
+            dur_sec = 1.0
+        usage = _throughput_event_usage(ev, engine=engine, model_hint=model_hint)
+        tokens_in = usage["raw_context_tokens"]
+        tokens_out = usage["output_total_tokens"]
+        effective_input = usage["effective_input_tokens"]
+        effective_total = usage["effective_total_tokens"]
+        in_tps = tokens_in / dur_sec if dur_sec > 0 else 0.0
+        out_tps = tokens_out / dur_sec if dur_sec > 0 else 0.0
+        total_tps = (tokens_in + tokens_out) / dur_sec if dur_sec > 0 else 0.0
+        effective_input_tps = effective_input / dur_sec if dur_sec > 0 else 0.0
+        effective_total_tps = effective_total / dur_sec if dur_sec > 0 else 0.0
+        turn = {
+            "turn_index": len(turns) + 1,
+            "session_id": session_id,
+            "session_name": session_name,
+            "engine": engine or usage["engine"],
+            "model": usage["model"] or model_hint or "",
+            "trigger_type": trigger_ev.get("type"),
+            "trigger_preview": _throughput_trigger_preview(trigger_ev),
+            "assistant_preview": _throughput_assistant_preview(ev),
+            "t_start": trigger_ev.get("ts"),
+            "t_end": ev.get("ts"),
+            "dur_sec": round(dur_sec, 2),
+            # Backward-compatible raw context/output fields.
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "in_tps": round(in_tps, 2),
+            "out_tps": round(out_tps, 2),
+            "total_tps": round(total_tps, 2),
+            "in_tpm": round(in_tps * 60.0, 2),
+            "out_tpm": round(out_tps * 60.0, 2),
+            "total_tpm": round(total_tps * 60.0, 2),
+            # Cache-aware fields.
+            "fresh_input_tokens": usage["fresh_input_tokens"],
+            "cache_read_tokens": usage["cache_read_tokens"],
+            "cache_write_tokens": usage["cache_write_tokens"],
+            "raw_context_tokens": tokens_in,
+            "effective_input_tokens": round(effective_input, 2),
+            "effective_total_tokens": round(effective_total, 2),
+            "effective_input_tps": round(effective_input_tps, 2),
+            "effective_input_tpm": round(effective_input_tps * 60.0, 2),
+            "cache_adjusted_total_tps": round(effective_total_tps, 2),
+            "cache_adjusted_total_tpm": round(effective_total_tps * 60.0, 2),
+            "reasoning_output_tokens": usage["reasoning_output_tokens"],
+            "tool_tokens": usage["tool_tokens"],
+            "cost_usd": round(usage["cost_usd"], 6),
+            "cost_available": usage["cost_available"],
+            "cost_basis": usage["cost_basis"],
+            "cache_write_weight": usage["cache_write_weight"],
+            "cache_read_weight": usage["cache_read_weight"],
+        }
+        turns.append(turn)
+    return turns
+
+
+def _throughput_empty_bucket():
+    return {
+        "turns": 0,
+        "active_duration_sec": 0.0,
+        "raw_context_tokens": 0,
+        "fresh_input_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "effective_input_tokens": 0.0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "unpriced_turns": 0,
+    }
+
+
+def _throughput_add_bucket(bucket, turn):
+    bucket["turns"] += 1
+    bucket["active_duration_sec"] += turn.get("dur_sec") or 0
+    bucket["raw_context_tokens"] += turn.get("raw_context_tokens") or turn.get("tokens_in") or 0
+    bucket["fresh_input_tokens"] += turn.get("fresh_input_tokens") or 0
+    bucket["cache_read_tokens"] += turn.get("cache_read_tokens") or 0
+    bucket["cache_write_tokens"] += turn.get("cache_write_tokens") or 0
+    bucket["effective_input_tokens"] += turn.get("effective_input_tokens") or 0
+    bucket["output_tokens"] += turn.get("tokens_out") or 0
+    bucket["total_tokens"] += (turn.get("tokens_in") or 0) + (turn.get("tokens_out") or 0)
+    bucket["cost_usd"] += turn.get("cost_usd") or 0.0
+    if not turn.get("cost_available"):
+        bucket["unpriced_turns"] += 1
+
+
+def _throughput_finalize_bucket(bucket):
+    dur = bucket.get("active_duration_sec") or 0.0
+    raw_context = bucket.get("raw_context_tokens") or 0
+    effective = bucket.get("effective_input_tokens") or 0.0
+    output = bucket.get("output_tokens") or 0
+    cache_tokens = (bucket.get("cache_read_tokens") or 0) + (bucket.get("cache_write_tokens") or 0)
+    out = dict(bucket)
+    out["active_duration_sec"] = round(dur, 2)
+    out["effective_input_tokens"] = round(effective, 2)
+    out["cost_usd"] = round(bucket.get("cost_usd") or 0.0, 6)
+    out["avg_raw_context_tpm"] = round((raw_context / dur) * 60.0, 2) if dur else 0.0
+    out["avg_effective_input_tpm"] = round((effective / dur) * 60.0, 2) if dur else 0.0
+    out["avg_output_tpm"] = round((output / dur) * 60.0, 2) if dur else 0.0
+    out["avg_cache_adjusted_total_tpm"] = (
+        round(((effective + output) / dur) * 60.0, 2) if dur else 0.0
+    )
+    out["cache_hit_ratio"] = round((bucket.get("cache_read_tokens") or 0) / raw_context, 4) if raw_context else 0.0
+    out["cache_token_ratio"] = round(cache_tokens / raw_context, 4) if raw_context else 0.0
+    return out
+
+
+def _throughput_summary(turns):
+    total_turns = len(turns)
+    turns_with_tokens = sum(
+        1 for t in turns if (t.get("tokens_in") or 0) > 0 or (t.get("tokens_out") or 0) > 0
+    )
+    total_bucket = _throughput_empty_bucket()
+    per_model = {}
+    hourly = {}
+    for t in turns:
+        _throughput_add_bucket(total_bucket, t)
+        model_key = t.get("model") or t.get("engine") or "unknown"
+        model_bucket = per_model.setdefault(model_key, _throughput_empty_bucket())
+        model_bucket["model"] = t.get("model") or ""
+        model_bucket["engine"] = t.get("engine") or ""
+        _throughput_add_bucket(model_bucket, t)
+        t_end = _stats_parse_ts(t.get("t_end"))
+        if t_end:
+            hour_key = t_end.strftime("%Y-%m-%d %H:00")
+            hour_bucket = hourly.setdefault(hour_key, _throughput_empty_bucket())
+            hour_bucket["hour"] = hour_key
+            _throughput_add_bucket(hour_bucket, t)
+
+    finalized_total = _throughput_finalize_bucket(total_bucket)
+    total_active_sec = finalized_total["active_duration_sec"]
+    total_in = finalized_total["raw_context_tokens"]
+    total_out = finalized_total["output_tokens"]
+    total_tok = total_in + total_out
+    avg_in_tps = total_in / total_active_sec if total_active_sec > 0 else 0.0
+    avg_out_tps = total_out / total_active_sec if total_active_sec > 0 else 0.0
+    avg_total_tps = total_tok / total_active_sec if total_active_sec > 0 else 0.0
+    out = {
+        "total_turns": total_turns,
+        "turns_with_tokens": turns_with_tokens,
+        "total_active_duration_sec": total_active_sec,
+        # Backward-compatible raw context/output totals.
+        "total_input_tokens": total_in,
+        "total_output_tokens": total_out,
+        "total_tokens": total_tok,
+        "avg_input_tps": round(avg_in_tps, 2),
+        "avg_output_tps": round(avg_out_tps, 2),
+        "avg_total_tps": round(avg_total_tps, 2),
+        "avg_input_tpm": round(avg_in_tps * 60.0, 2),
+        "avg_output_tpm": round(avg_out_tps * 60.0, 2),
+        "avg_total_tpm": round(avg_total_tps * 60.0, 2),
+        # Cache-aware totals.
+        "total_raw_context_tokens": finalized_total["raw_context_tokens"],
+        "total_fresh_input_tokens": finalized_total["fresh_input_tokens"],
+        "total_cache_read_tokens": finalized_total["cache_read_tokens"],
+        "total_cache_write_tokens": finalized_total["cache_write_tokens"],
+        "total_effective_input_tokens": finalized_total["effective_input_tokens"],
+        "avg_effective_input_tpm": finalized_total["avg_effective_input_tpm"],
+        "avg_effective_input_tps": round(
+            finalized_total["effective_input_tokens"] / total_active_sec, 2
+        ) if total_active_sec > 0 else 0.0,
+        "avg_cache_adjusted_total_tpm": finalized_total["avg_cache_adjusted_total_tpm"],
+        "cache_hit_ratio": finalized_total["cache_hit_ratio"],
+        "cache_token_ratio": finalized_total["cache_token_ratio"],
+        "cost_usd": finalized_total["cost_usd"],
+        "unpriced_turns": finalized_total["unpriced_turns"],
+        "per_model": sorted(
+            (_throughput_finalize_bucket(v) for v in per_model.values()),
+            key=lambda r: r.get("effective_input_tokens") or 0,
+            reverse=True,
+        ),
+        "hourly": [
+            _throughput_finalize_bucket(hourly[k])
+            for k in sorted(hourly)
+        ],
+    }
+    return out
+
+
+def _throughput_session_hints(session_id):
+    engine = ""
+    model = ""
+    try:
+        engine = _detect_session_engine(session_id) or ""
+    except Exception:
+        engine = ""
+    try:
+        usage = extract_session_usage(session_id)
+        model = usage.get("model") or ""
+        engine = usage.get("engine") or engine
+    except Exception:
+        pass
+    return engine, model
+
+
+def _throughput_payload(session_id, repo_path=None, range_key=None):
+    is_aggregate, cutoff_epoch, label = _throughput_scope(session_id, range_key)
+    turns = []
+    if is_aggregate:
+        try:
+            all_conversations = find_all_conversations(
+                resolve_pr_states=False,
+                resolve_effective=False,
+                resolve_worktree_dirty=False,
+            )
+        except Exception as e:
+            return {"error": f"Failed to list conversations: {str(e)}"}, 500
+        recent = []
+        for conv_row in all_conversations:
+            sid = conv_row.get("session_id")
+            if not sid:
+                continue
+            modified = (
+                conv_row.get("last_interacted")
+                or conv_row.get("modified")
+                or conv_row.get("mtime")
+                or 0
+            )
+            if cutoff_epoch is not None and modified < cutoff_epoch:
+                continue
+            if repo_path:
+                try:
+                    if (
+                        Path(conv_row.get("folder_path") or "").resolve(strict=False)
+                        != Path(repo_path).resolve(strict=False)
+                    ):
+                        continue
+                except Exception:
+                    continue
+            recent.append(conv_row)
+
+        for conv_row in recent:
+            sid = conv_row.get("session_id")
+            name = conv_row.get("display_name") or conv_row.get("name") or "Untitled"
+            engine = conv_row.get("engine") or conv_row.get("source") or ""
+            model_hint = conv_row.get("model") or ""
+            try:
+                parsed = parse_conversation(sid, repo_path=repo_path)
+            except Exception:
+                continue
+            turns.extend(
+                _throughput_turns_from_events(
+                    parsed.get("events") or [],
+                    session_id=sid,
+                    session_name=name,
+                    engine=engine,
+                    model_hint=model_hint,
+                    cutoff_epoch=cutoff_epoch,
+                )
+            )
+        turns.sort(key=lambda t: t.get("t_start") or "")
+        for idx, turn in enumerate(turns, 1):
+            turn["turn_index"] = idx
+    else:
+        engine, model_hint = _throughput_session_hints(session_id)
+        try:
+            parsed = parse_conversation(session_id, repo_path=repo_path)
+        except Exception as e:
+            return {"error": f"Failed to parse conversation: {str(e)}"}, 500
+        turns = _throughput_turns_from_events(
+            parsed.get("events") or [],
+            session_id=session_id,
+            session_name="",
+            engine=engine,
+            model_hint=model_hint,
+            cutoff_epoch=cutoff_epoch,
+        )
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "scope": {
+            "aggregate": is_aggregate,
+            "range": label,
+            "cutoff_epoch": cutoff_epoch,
+        },
+        "summary": _throughput_summary(turns),
+        "turns": turns,
+    }, 200
+
+
 _MORNING_BRAINDUMP_PROMPT = """You are analyzing the user's morning brain-dump.
 
 For each item in the dump, classify as exactly one of:
@@ -36106,260 +36674,14 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"error": "Missing session_id"}, 400)
                 return
             repo_path = (qs.get("repo_path", [""])[0] or "").strip() or None
-            
-            # Helper to preview text
-            def get_trig_prev(tev):
-                text = tev.get("text") or ""
-                if tev.get("type") == "tool_result":
-                    use_id = tev.get("tool_use_id") or ""
-                    prefix = f"Tool Result ({use_id}): " if use_id else "Tool Result: "
-                    return prefix + text[:300] + ("..." if len(text) > 300 else "")
-                return text[:300] + ("..." if len(text) > 300 else "")
-
-            def get_asst_prev(aev):
-                blocks = aev.get("blocks") or []
-                parts = []
-                for b in blocks:
-                    kind = b.get("kind") or ""
-                    if kind == "text":
-                        parts.append(b.get("text") or "")
-                    elif kind == "thinking":
-                        parts.append(f"[Thinking: {b.get('text') or ''}]")
-                    elif kind == "tool_use":
-                        parts.append(f"[Tool Use: {b.get('name') or ''}({b.get('detail') or ''})]")
-                full_text = "\n".join(parts)
-                return full_text[:4000] + ("..." if len(full_text) > 4000 else "")
-
-            turns = []
-
-            if session_id == "all_7_days":
-                try:
-                    # The 7-day filter only needs each conversation's mtime +
-                    # session_id + name. Skip the expensive resolve passes
-                    # (gh pr view per PR, git status per worktree, effective-
-                    # branch) that default to True — they were ~5s of pure
-                    # waste on this endpoint.
-                    all_c = find_all_conversations(
-                        resolve_pr_states=False,
-                        resolve_effective=False,
-                        resolve_worktree_dirty=False,
-                    )
-                except Exception as e:
-                    self.send_json({"error": f"Failed to list conversations: {str(e)}"}, 500)
-                    return
-                
-                cutoff = time.time() - 7 * 86400
-                recent_sids = []
-                for c in all_c:
-                    t = c.get("last_interacted") or c.get("modified") or c.get("mtime") or 0
-                    if t >= cutoff:
-                        if repo_path:
-                            try:
-                                if Path(c.get("folder_path") or "").resolve(strict=False) != Path(repo_path).resolve(strict=False):
-                                    continue
-                            except Exception:
-                                continue
-                        recent_sids.append((c.get("session_id"), c.get("display_name") or c.get("name") or "Untitled"))
-                
-                all_events = []
-                for sid, name in recent_sids:
-                    try:
-                        conv = parse_conversation(sid, repo_path=repo_path)
-                        events = conv.get("events") or []
-                        for i in range(len(events)):
-                            if events[i].get("type") == "assistant":
-                                if not events[i].get("tokens_in") and not events[i].get("tokens_out"):
-                                    has_later_assistant = False
-                                    result_ev = None
-                                    for k in range(i + 1, len(events)):
-                                        nxt = events[k]
-                                        if nxt.get("type") == "user_text":
-                                            break
-                                        if nxt.get("type") == "assistant":
-                                            has_later_assistant = True
-                                            break
-                                        if nxt.get("type") == "result":
-                                            result_ev = nxt
-                                            break
-                                    if result_ev and not has_later_assistant:
-                                        usage = result_ev.get("token_usage")
-                                        if usage and isinstance(usage, dict):
-                                            events[i]["tokens_in"] = usage.get("input_tokens") or 0
-                                            events[i]["tokens_out"] = usage.get("output_tokens") or 0
-                        for ev in events:
-                            ev["session_id"] = sid
-                            ev["session_name"] = name
-                        all_events.extend(events)
-                    except Exception:
-                        pass
-                
-                events_by_session = {}
-                for ev in all_events:
-                    sid = ev.get("session_id")
-                    if sid:
-                        events_by_session.setdefault(sid, []).append(ev)
-                
-                all_extracted_turns = []
-                for sid, evs in events_by_session.items():
-                    session_name = evs[0].get("session_name") or "Untitled"
-                    for i, ev in enumerate(evs):
-                        if ev.get("type") == "assistant":
-                            trigger_ev = None
-                            for j in range(i - 1, -1, -1):
-                                prev = evs[j]
-                                if prev.get("type") in ("user_text", "tool_result"):
-                                    trigger_ev = prev
-                                    break
-                            if trigger_ev:
-                                t_start = _stats_parse_ts(trigger_ev.get("ts"))
-                                t_end = _stats_parse_ts(ev.get("ts"))
-                                if t_start and t_end:
-                                    dur_sec = (t_end - t_start).total_seconds()
-                                    if dur_sec < 1.0:
-                                        dur_sec = 1.0
-                                    tokens_in = ev.get("tokens_in") or 0
-                                    tokens_out = ev.get("tokens_out") or 0
-                                    
-                                    in_tps = tokens_in / dur_sec if dur_sec > 0 else 0.0
-                                    out_tps = tokens_out / dur_sec if dur_sec > 0 else 0.0
-                                    total_tps = (tokens_in + tokens_out) / dur_sec if dur_sec > 0 else 0.0
-                                    
-                                    all_extracted_turns.append({
-                                        "session_id": sid,
-                                        "session_name": session_name,
-                                        "trigger_type": trigger_ev.get("type"),
-                                        "trigger_preview": get_trig_prev(trigger_ev),
-                                        "assistant_preview": get_asst_prev(ev),
-                                        "t_start": trigger_ev.get("ts"),
-                                        "t_end": ev.get("ts"),
-                                        "dur_sec": dur_sec,
-                                        "tokens_in": tokens_in,
-                                        "tokens_out": tokens_out,
-                                        "in_tps": in_tps,
-                                        "out_tps": out_tps,
-                                        "total_tps": total_tps,
-                                    })
-                
-                all_extracted_turns.sort(key=lambda t: t["t_start"] or "")
-                for idx, t in enumerate(all_extracted_turns):
-                    turns.append({
-                        "turn_index": idx + 1,
-                        "session_id": t["session_id"],
-                        "session_name": t["session_name"],
-                        "trigger_type": t["trigger_type"],
-                        "trigger_preview": t["trigger_preview"],
-                        "assistant_preview": t["assistant_preview"],
-                        "t_start": t["t_start"],
-                        "t_end": t["t_end"],
-                        "dur_sec": round(t["dur_sec"], 2),
-                        "tokens_in": t["tokens_in"],
-                        "tokens_out": t["tokens_out"],
-                        "in_tps": round(t["in_tps"], 2),
-                        "out_tps": round(t["out_tps"], 2),
-                        "total_tps": round(t["total_tps"], 2),
-                        "in_tpm": round(t["in_tps"] * 60.0, 2),
-                        "out_tpm": round(t["out_tps"] * 60.0, 2),
-                        "total_tpm": round(t["total_tps"] * 60.0, 2),
-                    })
-            else:
-                try:
-                    conv = parse_conversation(session_id, repo_path=repo_path)
-                except Exception as e:
-                    self.send_json({"error": f"Failed to parse conversation: {str(e)}"}, 500)
-                    return
-                events = conv.get("events") or []
-                # Pre-process events to map Codex token_usage from "result" events to the last "assistant" event
-                for i in range(len(events)):
-                    if events[i].get("type") == "assistant":
-                        if not events[i].get("tokens_in") and not events[i].get("tokens_out"):
-                            has_later_assistant = False
-                            result_ev = None
-                            for k in range(i + 1, len(events)):
-                                nxt = events[k]
-                                if nxt.get("type") == "user_text":
-                                    break
-                                if nxt.get("type") == "assistant":
-                                    has_later_assistant = True
-                                    break
-                                if nxt.get("type") == "result":
-                                    result_ev = nxt
-                                    break
-                            if result_ev and not has_later_assistant:
-                                usage = result_ev.get("token_usage")
-                                if usage and isinstance(usage, dict):
-                                    events[i]["tokens_in"] = usage.get("input_tokens") or 0
-                                    events[i]["tokens_out"] = usage.get("output_tokens") or 0
-                for i, ev in enumerate(events):
-                    if ev.get("type") == "assistant":
-                        trigger_ev = None
-                        for j in range(i - 1, -1, -1):
-                            prev = events[j]
-                            if prev.get("type") in ("user_text", "tool_result"):
-                                trigger_ev = prev
-                                break
-                        if trigger_ev:
-                            t_start = _stats_parse_ts(trigger_ev.get("ts"))
-                            t_end = _stats_parse_ts(ev.get("ts"))
-                            if t_start and t_end:
-                                dur_sec = (t_end - t_start).total_seconds()
-                                if dur_sec < 1.0:
-                                    dur_sec = 1.0
-                                tokens_in = ev.get("tokens_in") or 0
-                                tokens_out = ev.get("tokens_out") or 0
-                                
-                                # calculate speeds
-                                in_tps = tokens_in / dur_sec if dur_sec > 0 else 0.0
-                                out_tps = tokens_out / dur_sec if dur_sec > 0 else 0.0
-                                total_tps = (tokens_in + tokens_out) / dur_sec if dur_sec > 0 else 0.0
-                                
-                                turns.append({
-                                    "turn_index": len(turns) + 1,
-                                    "trigger_type": trigger_ev.get("type"),
-                                    "trigger_preview": get_trig_prev(trigger_ev),
-                                    "assistant_preview": get_asst_prev(ev),
-                                    "t_start": trigger_ev.get("ts"),
-                                    "t_end": ev.get("ts"),
-                                    "dur_sec": round(dur_sec, 2),
-                                    "tokens_in": tokens_in,
-                                    "tokens_out": tokens_out,
-                                    "in_tps": round(in_tps, 2),
-                                    "out_tps": round(out_tps, 2),
-                                    "total_tps": round(total_tps, 2),
-                                    "in_tpm": round(in_tps * 60.0, 2),
-                                    "out_tpm": round(out_tps * 60.0, 2),
-                                    "total_tpm": round(total_tps * 60.0, 2),
-                                })
-            
-            total_turns = len(turns)
-            turns_with_tokens = sum(1 for t in turns if t["tokens_in"] > 0 or t["tokens_out"] > 0)
-            total_active_sec = sum(t["dur_sec"] for t in turns)
-            total_in = sum(t["tokens_in"] for t in turns)
-            total_out = sum(t["tokens_out"] for t in turns)
-            total_tok = total_in + total_out
-            
-            avg_in_tps = total_in / total_active_sec if total_active_sec > 0 else 0.0
-            avg_out_tps = total_out / total_active_sec if total_active_sec > 0 else 0.0
-            avg_total_tps = total_tok / total_active_sec if total_active_sec > 0 else 0.0
-            
-            self.send_json({
-                "ok": True,
-                "session_id": session_id,
-                "summary": {
-                    "total_turns": total_turns,
-                    "turns_with_tokens": turns_with_tokens,
-                    "total_active_duration_sec": round(total_active_sec, 2),
-                    "total_input_tokens": total_in,
-                    "total_output_tokens": total_out,
-                    "total_tokens": total_tok,
-                    "avg_input_tps": round(avg_in_tps, 2),
-                    "avg_output_tps": round(avg_out_tps, 2),
-                    "avg_total_tps": round(avg_total_tps, 2),
-                    "avg_input_tpm": round(avg_in_tps * 60.0, 2),
-                    "avg_output_tpm": round(avg_out_tps * 60.0, 2),
-                    "avg_total_tpm": round(avg_total_tps * 60.0, 2),
-                },
-                "turns": turns,
-            })
+            range_key = (qs.get("range", [""])[0] or "").strip() or None
+            payload, status = _throughput_payload(
+                session_id,
+                repo_path=repo_path,
+                range_key=range_key,
+            )
+            self.send_json(payload, status)
+            return
         elif path == "/api/morning/sessions":
             # Morning-spawned sessions may live in ANY project slug under
             # ~/.claude/projects/ (spawn cwd determines the slug). Scan all
