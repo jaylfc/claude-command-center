@@ -690,12 +690,12 @@
         <div class="chart-card">
           <div class="chart-card-header">
             <div class="chart-title">
-              <span>📈</span> Cache-Adjusted Throughput per Turn
+              <span>📈</span> <span id="chart-title-label">Cache-Adjusted Throughput per Turn</span>
             </div>
             <div class="chart-legend">
               <div class="legend-item">
                 <span class="legend-color" style="background: var(--accent);"></span>
-                <span>Adjusted TPM</span>
+                <span id="chart-legend-label">Adjusted TPM</span>
               </div>
             </div>
           </div>
@@ -729,6 +729,11 @@
   <script>
     let allSessions = [];
     let activeSessionId = null;
+    const aggregateSessions = [
+      { session_id: 'all_1_hour', display_name: 'Total (Last Hour)', engine: 'aggregated', meta: '1h window' },
+      { session_id: 'all_today', display_name: 'Total (Today)', engine: 'aggregated', meta: 'today' },
+      { session_id: 'all_7_days', display_name: 'Total (Last 7 Days)', engine: 'aggregated', meta: '7d window' },
+    ];
 
     // Format relative time (mtime age)
     function formatTimeAge(ts) {
@@ -777,11 +782,23 @@
         const data = await res.json();
         allSessions = data.conversations || data.sessions || [];
         renderSessionList();
-        setStatus('Idle');
+        const defaultSession = activeSessionId
+          ? findSessionById(activeSessionId)
+          : aggregateSessions[0];
+        if (defaultSession) {
+          await selectSession(defaultSession);
+        } else {
+          setStatus('Idle');
+        }
       } catch (err) {
         console.error(err);
         setStatus('Error loading sessions');
       }
+    }
+
+    function findSessionById(sessionId) {
+      return aggregateSessions.find(s => s.session_id === sessionId)
+        || allSessions.find(s => s.session_id === sessionId);
     }
 
     // Render session items in sidebar
@@ -791,23 +808,20 @@
       
       const searchVal = document.getElementById('search-input').value.toLowerCase();
       
-      // Add aggregate scopes at the top of the sidebar.
-      const aggregateItems = [
-        { id: 'all_1_hour', title: 'Total (Last Hour)', meta: '1h window' },
-        { id: 'all_today', title: 'Total (Today)', meta: 'today' },
-        { id: 'all_7_days', title: 'Total (Last 7 Days)', meta: '7d window' },
-      ];
-      aggregateItems
-        .filter(a => !searchVal || a.title.toLowerCase().includes(searchVal) || 'total all aggregate'.includes(searchVal))
+      aggregateSessions
+        .filter(a => {
+          const title = (a.display_name || '').toLowerCase();
+          return !searchVal || title.includes(searchVal) || 'total all aggregate'.includes(searchVal);
+        })
         .forEach(a => {
         const item = document.createElement('div');
-        item.className = `session-item ${activeSessionId === a.id ? 'active' : ''}`;
+        item.className = `session-item ${activeSessionId === a.session_id ? 'active' : ''}`;
         item.style.borderLeft = '3px solid var(--accent)';
-        item.onclick = () => selectSession({ session_id: a.id, display_name: a.title, engine: 'aggregated' });
+        item.onclick = () => selectSession(a);
         
         item.innerHTML = `
           <div class="session-item-header">
-            <span class="session-title" style="font-weight: 600; color: var(--accent);">📊 ${a.title}</span>
+            <span class="session-title" style="font-weight: 600; color: var(--accent);">📊 ${a.display_name}</span>
             <span class="badge-engine" style="font-size: 9px; padding: 1px 5px; background: rgba(57, 210, 192, 0.2);">ALL</span>
           </div>
           <div class="session-meta">
@@ -897,12 +911,15 @@
       document.getElementById('session-id-label').textContent = session.session_id;
       
       const summary = data.summary;
+      const isAggregate = !!(data.scope && data.scope.aggregate);
       
       // Cards values
       const activeMin = Math.floor(summary.total_active_duration_sec / 60);
       const activeSec = Math.round(summary.total_active_duration_sec % 60);
       document.getElementById('val-active-duration').textContent = `${activeMin}m ${activeSec}s`;
-      document.getElementById('val-total-duration').textContent = `Turns with usage info: ${summary.turns_with_tokens} / ${summary.total_turns}`;
+      document.getElementById('val-total-duration').textContent = isAggregate
+        ? `${summary.total_turns.toLocaleString()} model calls across ${data.scope.range.toLowerCase()}`
+        : `Turns with usage info: ${summary.turns_with_tokens} / ${summary.total_turns}`;
       
       document.getElementById('val-total-tokens').textContent = fmtNum(summary.total_raw_context_tokens ?? summary.total_input_tokens);
       const costText = summary.cost_usd ? ` | Cost: ${fmtCost(summary.cost_usd)}` : '';
@@ -917,14 +934,15 @@
       document.getElementById('val-out-tps').textContent =
         `${summary.avg_output_tps.toFixed(1)} tokens / sec · cache hit ${Math.round((summary.cache_hit_ratio || 0) * 100)}%`;
       
-      // Draw Line Chart
-      drawChart(data.turns);
+      // Draw chart. Aggregate ranges use hourly buckets; individual sessions
+      // use per-turn points.
+      drawChart(data.turns, summary, isAggregate);
 
       // Model comparison table
       renderModelBreakdown(summary.per_model || []);
       
       // Render turns list
-      renderTurnsList(data.turns);
+      renderTurnsList(data.turns, isAggregate);
     }
 
     function renderModelBreakdown(models) {
@@ -964,28 +982,56 @@
     }
 
     // Dynamic SVG Line chart drawer
-    function drawChart(turns) {
+    function hourLabel(hour, index, total) {
+      if (!hour) return `H${index}`;
+      const date = new Date(hour.replace(' ', 'T') + ':00');
+      if (Number.isNaN(date.getTime())) return hour;
+      const time = date.toLocaleTimeString([], { hour: 'numeric' });
+      if (total <= 24) return time;
+      return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
+    }
+
+    function drawChart(turns, summary, isAggregate = false) {
       const svg = document.getElementById('throughput-chart');
       if (!svg) return;
       svg.innerHTML = '';
+      document.getElementById('chart-title-label').textContent = isAggregate
+        ? 'Hourly Cache-Adjusted Burn'
+        : 'Cache-Adjusted Throughput per Turn';
+      document.getElementById('chart-legend-label').textContent = isAggregate
+        ? 'Hourly adjusted TPM'
+        : 'Adjusted TPM';
       
       // Get container width
       const width = svg.clientWidth || 800;
       const height = svg.clientHeight || 300;
       const padding = { top: 20, right: 30, bottom: 40, left: 60 };
       
-      // Extract data
-      const data = turns.map(t => ({
-        index: t.turn_index,
-        tpm: t.cache_adjusted_total_tpm ?? t.total_tpm,
-        in_tpm: t.effective_input_tpm ?? t.in_tpm,
-        out_tpm: t.out_tpm,
-        raw_tpm: t.in_tpm,
-        dur: t.dur_sec,
-      }));
+      const hourly = (summary && summary.hourly) || [];
+      const sourceRows = isAggregate ? hourly : turns;
+      const data = sourceRows.map((row, idx) => {
+        const tpm = isAggregate
+          ? (row.avg_cache_adjusted_total_tpm ?? row.avg_effective_input_tpm ?? 0)
+          : (row.cache_adjusted_total_tpm ?? row.total_tpm);
+        return {
+          index: idx + 1,
+          label: isAggregate ? hourLabel(row.hour, idx + 1, sourceRows.length) : `T${row.turn_index}`,
+          tooltipTitle: isAggregate ? (row.hour || `Hour ${idx + 1}`) : `Turn #${row.turn_index}`,
+          tpm,
+          in_tpm: isAggregate ? row.avg_effective_input_tpm : (row.effective_input_tpm ?? row.in_tpm),
+          out_tpm: isAggregate ? row.avg_output_tpm : row.out_tpm,
+          raw_tpm: isAggregate ? row.avg_raw_context_tpm : row.in_tpm,
+          dur: isAggregate ? row.active_duration_sec : row.dur_sec,
+          cost: row.cost_usd || 0,
+          raw: isAggregate ? row.raw_context_tokens : row.tokens_in,
+          cache: isAggregate ? ((row.cache_read_tokens || 0) + (row.cache_write_tokens || 0)) : ((row.cache_read_tokens || 0) + (row.cache_write_tokens || 0)),
+          output: isAggregate ? row.output_tokens : row.tokens_out,
+          turns: isAggregate ? row.turns : 1,
+        };
+      });
       
       if (data.length === 0) {
-        svg.innerHTML = `<text x="${width/2}" y="${height/2}" fill="var(--text-muted)" text-anchor="middle" font-size="13px">No throughput turns recorded</text>`;
+        svg.innerHTML = `<text x="${width/2}" y="${height/2}" fill="var(--text-muted)" text-anchor="middle" font-size="13px">No throughput data recorded</text>`;
         return;
       }
       
@@ -1101,7 +1147,21 @@
         circle.addEventListener('mouseover', (e) => {
           circle.setAttribute('r', '7');
           circle.setAttribute('fill', 'var(--accent)');
-          showTooltip(e, `Turn #${d.index}<br>Adjusted: <strong>${Math.round(d.tpm).toLocaleString()} TPM</strong><br>Raw input: ${Math.round(d.raw_tpm || 0).toLocaleString()} TPM<br>Duration: ${d.dur}s`);
+          const lines = isAggregate
+            ? [
+                `${d.tooltipTitle}`,
+                `Adjusted: <strong>${Math.round(d.tpm).toLocaleString()} TPM</strong>`,
+                `Cost: <strong>${fmtCost(d.cost)}</strong>`,
+                `Calls: ${fmtNum(d.turns)} · Active: ${fmtNum(d.dur, 1)}s`,
+                `Raw: ${fmtNum(d.raw)} · Cache: ${fmtNum(d.cache)} · Out: ${fmtNum(d.output)}`,
+              ]
+            : [
+                d.tooltipTitle,
+                `Adjusted: <strong>${Math.round(d.tpm).toLocaleString()} TPM</strong>`,
+                `Raw input: ${Math.round(d.raw_tpm || 0).toLocaleString()} TPM`,
+                `Duration: ${d.dur}s`,
+              ];
+          showTooltip(e, lines.join('<br>'));
         });
         
         circle.addEventListener('mouseout', () => {
@@ -1124,7 +1184,7 @@
         text.setAttribute('font-size', '10px');
         text.setAttribute('text-anchor', 'middle');
         text.setAttribute('font-family', 'var(--font-mono)');
-        text.textContent = `T${d.index}`;
+        text.textContent = d.label;
         svg.appendChild(text);
       });
     }
@@ -1242,7 +1302,7 @@
     window.addEventListener('resize', () => {
       if (activeSessionId) {
         // Redraw active chart
-        const activeSession = allSessions.find(s => s.session_id === activeSessionId);
+        const activeSession = findSessionById(activeSessionId);
         if (activeSession) {
           selectSession(activeSession);
         }
