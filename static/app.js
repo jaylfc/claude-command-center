@@ -2668,7 +2668,8 @@
     const isGemini = sess && sess.source === 'gemini';
     const isCursor = sess && sess.source === 'cursor';
     const isAntigravity = sess && sess.source === 'antigravity';
-    if (!sid || isPkood || isCodex || isGemini || isCursor || isAntigravity) {
+    const isGrok = sess && sess.source === 'grok';
+    if (!sid || isPkood || isCodex || isGemini || isCursor || isAntigravity || isGrok) {
       $announceBtnConv.style.display = 'none';
       delete $announceBtnConv.dataset.sessionId;
       return;
@@ -41373,7 +41374,7 @@
   const $kptSearch = document.getElementById('kptSearch');
   const $kptRefreshBtn = document.getElementById('kptRefreshBtn');
   const $kptRecentBtn = document.getElementById('kptRecentBtn');
-  const SPAWN_DEFAULT_ENGINES = ['claude', 'codex', 'cursor', 'antigravity', 'kilo'];
+  const SPAWN_DEFAULT_ENGINES = ['claude', 'codex', 'cursor', 'antigravity', 'kilo', 'grok'];
   const SPAWN_DEFAULT_OTHER = '__other__';
   function normalizeSpawnDefaultEngine(v) {
     if (v === 'gemini') return 'antigravity';
@@ -41383,7 +41384,7 @@
     try { return normalizeSpawnDefaultEngine(localStorage.getItem('ccc.spawnEngine')); }
     catch (_) { return 'claude'; }
   }
-  let _defaultModelsByEngine = { claude: 'fable-5', codex: 'gpt-5.5', cursor: 'auto', antigravity: '', kilo: 'kilo/stepfun/step-3.7-flash:free' };
+  let _defaultModelsByEngine = { claude: 'fable-5', codex: 'gpt-5.5', cursor: 'auto', antigravity: '', kilo: 'kilo/stepfun/step-3.7-flash:free', grok: 'grok-build' };
   let _spawnDefaultsLoaded = false;
   let _spawnDefaultsSaveTimer = null;
   let _spawnDefaultsSaving = false;
@@ -41669,6 +41670,7 @@
       probe('cursor', '/api/sessions/spawn-cursor/availability', 'Cursor'),
       probe('antigravity', '/api/sessions/spawn-antigravity/availability', 'Antigravity'),
       probe('kilo', '/api/sessions/spawn-kilo/availability', 'Kilo'),
+      probe('grok', '/api/sessions/spawn-grok/availability', 'Grok'),
     ]);
     syncSpawnEngineDependentUi();
   }

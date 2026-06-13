@@ -44,6 +44,46 @@ class TestServerImports(unittest.TestCase):
         self.assertIsInstance(server.__version__, str)
         self.assertRegex(server.__version__, r"^\d+\.\d+\.\d+")
 
+    def test_grok_engine_surfaces_exist(self):
+        """Grok engine must be wired for resolve, spawn, is_, discovery and
+        parse. Uses mocks so it works even without the grok binary."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        self.assertTrue(hasattr(server, "_resolve_grok_bin"))
+        self.assertTrue(hasattr(server, "spawn_session_grok"))
+        self.assertTrue(hasattr(server, "_is_grok_session"))
+        self.assertTrue(hasattr(server, "find_grok_conversations"))
+        self.assertTrue(hasattr(server, "_parse_grok_conversation"))
+
+        # resolve shape (no real grok needed)
+        with mock.patch.object(server.shutil, "which", return_value=None):
+            with mock.patch.object(server.Path, "home", return_value=server.Path("/tmp/fakehome")):
+                info = server._resolve_grok_bin()
+                self.assertIsInstance(info, dict)
+                self.assertIn("available", info)
+                self.assertFalse(info["available"])  # no binary in the fake env
+
+    def test_grok_external_session_detected_as_grok(self):
+        """An externally-launched Grok session (not in _spawned_sessions or the
+        registry) must resolve to engine 'grok', not fall through to 'claude'
+        and render via the Claude parser. Regression: the uncached detector had
+        no grok fallback branch."""
+        for mod in ("server", "morning", "morning_store"):
+            sys.modules.pop(mod, None)
+        server = importlib.import_module("server")
+        sid = "grok-ext-9999"
+        server._spawned_sessions[:] = []
+        server._detect_session_engine.cache_clear() if hasattr(
+            getattr(server, "_detect_session_engine", None), "cache_clear") else None
+        with mock.patch.object(server, "_is_grok_session", return_value=True), \
+             mock.patch.object(server, "_is_codex_session", return_value=False), \
+             mock.patch.object(server, "_is_cursor_session", return_value=False), \
+             mock.patch.object(server, "_is_gemini_session", return_value=False), \
+             mock.patch.object(server, "_is_antigravity_session", return_value=False), \
+             mock.patch.object(server, "_is_kilo_session", return_value=False):
+            self.assertEqual(server._detect_session_engine_uncached(sid), "grok")
+
     def test_native_usage_snapshots_feed_weekly_usage(self):
         """Native plan-usage snapshots persist compact history and replace the
         legacy scraper cache for fresh weekly usage reads."""
