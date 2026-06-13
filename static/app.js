@@ -17741,13 +17741,11 @@
       // showing it there would be a dead control. Mirrors the In Progress
       // window toggle's markup/classes (grouping-opt + data-window).
       const _arcWindowCur = _archiveWindow();
-      const _arcWindowToggle = showArchived
-        ? '<span class="conv-grouping-toggle conv-window-toggle" data-role="archived-window-toggle" title="Limit archived rows by recent activity">'
-            + '<span class="grouping-opt' + (_arcWindowCur === '1d' ? ' is-active' : '') + '" data-window="1d">1d</span>'
-            + '<span class="grouping-opt' + (_arcWindowCur === '7d' ? ' is-active' : '') + '" data-window="7d">7d</span>'
-            + '<span class="grouping-opt' + (_arcWindowCur === 'all' ? ' is-active' : '') + '" data-window="all">All</span>'
-          + '</span>'
-        : '';
+      const _arcWindowToggle = '<span class="conv-grouping-toggle conv-window-toggle" data-role="archived-window-toggle" title="Limit archived rows by recent activity">'
+          + '<span class="grouping-opt' + (_arcWindowCur === '1d' ? ' is-active' : '') + '" data-window="1d">1d</span>'
+          + '<span class="grouping-opt' + (_arcWindowCur === '7d' ? ' is-active' : '') + '" data-window="7d">7d</span>'
+          + '<span class="grouping-opt' + (_arcWindowCur === 'all' ? ' is-active' : '') + '" data-window="all">All</span>'
+        + '</span>';
       const _arcTools = (_arcWindowToggle || _arcGroupingToggle || _arcExpandAllToggle)
         ? '<span class="conv-archived-tools">' + _arcWindowToggle + _arcGroupingToggle + _arcExpandAllToggle + '</span>'
         : '';
