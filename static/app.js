@@ -30678,6 +30678,7 @@
   let spawnDefaultsState = {
     engine: readLegacySpawnEnginePref(),
     models: Object.assign({}, _defaultModelsByEngine),
+    codex_context_1m: true,
   };
   // The "new session modal" was removed from index.html, but several call
   // sites below (openNewSessionModal, template-apply, engine-change handler,
@@ -30773,6 +30774,7 @@
         _defaultModelsByEngine[engine] = model;
       }
     });
+    if (typeof data.codex_context_1m === 'boolean') spawnDefaultsState.codex_context_1m = data.codex_context_1m;
     try { localStorage.setItem('ccc.spawnEngine', spawnDefaultsState.engine); } catch (_) {}
   }
 
@@ -30853,7 +30855,7 @@
     if (typeof $convInputModelSelect !== 'undefined' && $convInputModelSelect) {
       const defaultModel = _defaultModelsByEngine[engine] || '';
       const allModels = modelOptionsForSpawnEngine(engine, defaultModel, false);
-      
+
       $convInputModelSelect.innerHTML = '';
       const isNewSession = (typeof currentConversation !== 'undefined' && currentConversation === '__new__');
       if (!isNewSession || allModels.length === 0) {
@@ -30871,6 +30873,25 @@
         } else if (allModels.length > 0) {
           $convInputModelSelect.value = allModels[0].id;
         }
+      }
+    }
+    // Show a pre-spawn context-window badge in the [data-usage] slot so the
+    // user can confirm the right context is set before starting the session.
+    const _cicSlot = getInputContextSlot && getInputContextSlot();
+    const _uSlot = _cicSlot && _cicSlot.querySelector('[data-usage]');
+    const _isNewSession = (typeof currentConversation !== 'undefined' && currentConversation === '__new__');
+    if (_uSlot && _isNewSession) {
+      if (engine === 'codex') {
+        const ctx1m = spawnDefaultsState.codex_context_1m;
+        const ctxLabel = ctx1m ? '1M ctx' : 'default ctx';
+        const ctxTitle = ctx1m
+          ? 'Codex will start with model_context_window=1000000 (CCC_CODEX_CONTEXT_1M=1)\nSet CCC_CODEX_CONTEXT_1M=0 to disable.'
+          : 'Codex will use the model\'s default context window.\nSet CCC_CODEX_CONTEXT_1M=1 to opt into the 1M max.';
+        _uSlot.innerHTML = '<span class="wp-usage-pill wp-spawn-ctx-badge" title="' + ctxTitle + '">' + ctxLabel + '</span>';
+        if (_cicSlot) _cicSlot.classList.add('visible');
+      } else {
+        // Clear stale badge when switching away from codex in new-session mode.
+        if (_uSlot.querySelector('.wp-spawn-ctx-badge')) _uSlot.innerHTML = '';
       }
     }
   }

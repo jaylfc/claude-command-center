@@ -37312,6 +37312,7 @@ class CommandCenterHandler(http.server.BaseHTTPRequestHandler):
                 **defaults,
                 "stored": SPAWN_DEFAULTS_FILE.exists(),
                 "supported_engines": list(_ORCHESTRATION_SPAWN_ENGINES),
+                "codex_context_1m": os.environ.get("CCC_CODEX_CONTEXT_1M", "1").lower() not in ("0", "false", "no"),
             })
         elif path == "/api/repo/list":
             # List of repos the picker offers. There is no server-active repo.
