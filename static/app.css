@@ -1292,8 +1292,6 @@
   .conv-pane > .conv-input-hint    { order: 3; }
   .conv-pane > .conv-input-context.is-new-session {
     order: 0;
-    border-top: 0;
-    border-bottom: 1px solid var(--border);
   }
   .conv-pane.is-codex-session {
     box-shadow: inset 4px 0 0 rgba(88, 166, 255, 0.72);

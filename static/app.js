@@ -34850,26 +34850,9 @@
       const newSessionHelp = spawnEngine === 'antigravity'
         ? 'Type a prompt below and press Enter to spawn a headless Antigravity run with AGY print mode.'
         : 'Type a prompt below and press Enter to spawn a fresh ' + engineLabel + ' agent. The new session will appear in the sidebar.';
-      // Front-and-center folder choice (CCC-82/86/87): two explicit paths —
-      // existing folder/repo, or a brand-new project (name → suggested
-      // ~/dev/<slug> folder → create + start). Chips come from the same
-      // source as the bottom bar (recent spawn cwds, then known repos) so
-      // they're never falsely empty, and the real CWD picker row is
-      // ADOPTED into card 1 so there's one folder control, not two.
-      const chipOpts = (typeof spawnCwdQuickChipOptions === 'function')
-        ? spawnCwdQuickChipOptions(spawnCwd)
-        : [];
-      const extraOpts = (Array.isArray(spawnCwdOptions) ? spawnCwdOptions : [])
-        .filter(o => o && o.value && !chipOpts.some(c => c.value === o.value))
-        .slice(0, Math.max(0, 12 - chipOpts.length));
-      const repoChipsHtml = chipOpts.concat(extraOpts).map(o => {
-        const active = o.value === spawnCwd ? ' is-current' : '';
-        return '<button type="button" class="ns-repo-chip' + active + '" data-ns-repo="' + escapeAttr(o.value) + '" title="' + escapeAttr(o.value) + '">' + escapeHtml(o.label || o.value) + '</button>';
-      }).join('');
       $view.innerHTML = '<div class="ns-stage">'
         + '<div class="empty-state ns-hero" style="height:auto;flex-direction:column;gap:14px;text-align:center;">'
         + '<div class="ns-hero-title">🚀 Start a new session</div>'
-        // New project card only — existing folders appear as chips below the CWD row
         + '<div class="ns-choice-card" id="nsCardNewProject">'
         +   '<div class="ns-choice-title">New project</div>'
         +   '<span class="ns-name-row">'
@@ -34880,10 +34863,6 @@
         +   '<div class="ns-muted" id="nsNewProjectHint">Folder comes from the CWD field below — we create it, then you describe the project.</div>'
         + '</div>'
         + '<div style="font-size:13px;color:var(--text-muted);max-width:480px;line-height:1.5;">' + escapeHtml(newSessionHelp) + '</div>'
-        // CWD + worktree (adopted inline) with existing-folder chips directly below
-        + '<div class="ns-cwd-slot ns-cwd-unified" id="nsCwdSlot">'
-        +   '<div class="ns-chips-below">' + (repoChipsHtml || '') + '</div>'
-        + '</div>'
         // Integration recipes collapsed by default; revealed once templates load
         + '<details class="ns-recipes-details" id="nsExtensionsWrap" style="display:none;">'
         +   '<summary class="ns-recipes-summary">Extend CCC · integration recipes</summary>'
@@ -34891,7 +34870,6 @@
         + '</details>'
         + '</div></div>';
       _wireNewSessionChooser($view, paneId);
-      _adoptCwdControlsIntoChooser($view);
       _renderNsExtensions($view, paneId);
     }
     if (typeof syncSpawnEngineDependentUi === 'function') syncSpawnEngineDependentUi();
