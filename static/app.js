@@ -28582,7 +28582,7 @@
   // key is unchanged and no re-render fires.
   const _GC_ACTIVE_CACHE_KEY = 'ccc-gc-active-cache';
   let _gcActiveChats = (() => {
-    try { const v = JSON.parse(localStorage.getItem(_GC_ACTIVE_CACHE_KEY) || '[]'); return Array.isArray(v) ? v : []; }
+    try { const v = JSON.parse(localStorage.getItem(_GC_ACTIVE_CACHE_KEY) || '[]'); return Array.isArray(v) ? v.slice().sort((a, b) => (b.last_mtime || 0) - (a.last_mtime || 0)) : []; }
     catch (_) { return []; }
   })();
   let _gcLastLocalTrigger = null;
@@ -28793,7 +28793,7 @@
       // Compare a metadata key, not just length, so renames, participant
       // changes, and activity updates redraw the group-chat rows.
       const prevKey = _gcChatsKey(_gcActiveChats);
-      _gcActiveChats = (data.chats || []);
+      _gcActiveChats = (data.chats || []).slice().sort((a, b) => (b.last_mtime || 0) - (a.last_mtime || 0));
       // Persist so the next page load seeds the first render from this set and
       // avoids the empty→populated reshuffle.
       try { localStorage.setItem(_GC_ACTIVE_CACHE_KEY, JSON.stringify(_gcActiveChats)); } catch (_) {}
